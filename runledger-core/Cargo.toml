@@ -2,6 +2,7 @@
 name = "runledger-core"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "Core contracts and types for the Runledger durable job and workflow system"
 readme = "../README.md"
 repository = "https://github.com/featherenvy/runledger"
