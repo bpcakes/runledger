@@ -1,0 +1,26 @@
+# Rust build output
+/target/
+/.rustc_info.json
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Coverage and profiling artifacts
+/coverage/
+*.profraw
+*.profdata
+
+# Logs
+*.log
+
+# Editor settings
+/.idea/
+/.vscode/
+
+# OS metadata
+.DS_Store
+
+# Cargo local credentials
+/.cargo/credentials.toml

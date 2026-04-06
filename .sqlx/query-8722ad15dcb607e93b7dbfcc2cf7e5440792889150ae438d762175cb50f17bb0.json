@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ROLLBACK TO SAVEPOINT materialize_due_schedule",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8722ad15dcb607e93b7dbfcc2cf7e5440792889150ae438d762175cb50f17bb0"
+}

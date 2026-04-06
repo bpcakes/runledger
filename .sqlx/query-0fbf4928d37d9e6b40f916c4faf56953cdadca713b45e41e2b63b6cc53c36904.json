@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO seller_profile_research_runs (\n                profile_id,\n                organization_id,\n                workflow_run_id,\n                trigger,\n                status,\n                requested_by_user_id,\n                requested_at,\n                started_at,\n                finished_at,\n                metadata,\n                created_at,\n                updated_at\n            )\n            SELECT\n                $1,\n                $2,\n                NULL,\n                'seed-run-' || gs::text,\n                'SUCCEEDED'::seller_profile_research_run_status,\n                $3,\n                now() - make_interval(hours => gs::int),\n                now() - make_interval(hours => gs::int),\n                now() - make_interval(hours => gs::int),\n                jsonb_build_object('seed', gs),\n                now() - make_interval(hours => gs::int),\n                now() - make_interval(hours => gs::int)\n            FROM generate_series(1, 110) gs",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0fbf4928d37d9e6b40f916c4faf56953cdadca713b45e41e2b63b6cc53c36904"
+}

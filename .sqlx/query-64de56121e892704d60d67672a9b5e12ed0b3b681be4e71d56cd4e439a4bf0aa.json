@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            status::text AS \"status!\",\n            current_stage::text AS current_stage\n         FROM account_research_pipeline_runs\n         WHERE organization_id = $1\n           AND account_id = $2\n         ORDER BY created_at DESC, id DESC\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "current_stage",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "64de56121e892704d60d67672a9b5e12ed0b3b681be4e71d56cd4e439a4bf0aa"
+}

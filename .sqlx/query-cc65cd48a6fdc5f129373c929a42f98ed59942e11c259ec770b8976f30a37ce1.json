@@ -1,0 +1,69 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    signal.id AS \"signal_chunk_id!\",\n    signal.organization_id AS \"organization_id!\",\n    signal.account_id AS \"account_id!\",\n    a.name AS \"account_name!\",\n    a.website AS \"account_website?\",\n    signal.source_reference AS \"source_reference?\",\n    signal.content AS \"content!: JsonValue\",\n    signal.created_at AS \"created_at!\"\nFROM account_signal_feed_items feed\nINNER JOIN account_research_chunks signal\n    ON signal.id = feed.signal_chunk_id\n   AND signal.superseded_by IS NULL\nINNER JOIN accounts a\n    ON a.id = signal.account_id\nWHERE feed.organization_id = $1\n  AND feed.is_classified = TRUE\n  AND (\n        cardinality($2::text[]) = 0\n        OR feed.display_bucket = ANY($2::text[])\n      )\n  AND ($3::date IS NULL OR feed.published_at_date >= $3)\n  AND ($4::date IS NULL OR feed.published_at_date <= $4)\nORDER BY\n  feed.published_at_date DESC NULLS LAST,\n  feed.created_at DESC,\n  feed.signal_chunk_id DESC\nLIMIT $5\nOFFSET $6\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "signal_chunk_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "account_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "account_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "account_website?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "source_reference?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "content!: JsonValue",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Date",
+        "Date",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "cc65cd48a6fdc5f129373c929a42f98ed59942e11c259ec770b8976f30a37ce1"
+}

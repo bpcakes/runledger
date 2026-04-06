@@ -1,0 +1,2 @@
+pub(super) const ATTEMPT_CLAIM_ORIGIN_DIRECT: &str = "DIRECT";
+pub(super) const ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART: &str = "WORKER_PRESTART";

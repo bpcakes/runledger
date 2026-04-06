@@ -1,0 +1,113 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    r.id,\n    r.profile_id,\n    r.organization_id,\n    r.workflow_run_id,\n    wr.workflow_type AS \"workflow_type?\",\n    r.trigger,\n    r.status::text AS \"status!\",\n    r.requested_by_user_id,\n    r.requested_at,\n    r.started_at,\n    r.finished_at,\n    r.error_code,\n    r.error_message,\n    r.metadata AS \"metadata!: JsonValue\",\n    r.created_at,\n    r.updated_at\nFROM seller_profile_research_runs r\nLEFT JOIN workflow_runs wr ON wr.id = r.workflow_run_id\nWHERE r.profile_id = $1\nORDER BY r.created_at DESC, r.id DESC\nLIMIT $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "profile_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "workflow_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "workflow_type?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "trigger",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "requested_by_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "requested_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "error_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "metadata!: JsonValue",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 14,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      null,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "79dccf176927c747df2a402a3d3222518cd26f40ea8a5b365ad667c108c0f279"
+}

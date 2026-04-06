@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO account_narratives (\n                account_id,\n                organization_id,\n                user_id,\n                variant,\n                content\n             )\n             VALUES ($1, $2, NULL, ($3::text)::account_narrative_variant, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "96d31e7303b8a63dcc28de9c423f35e38cba0558d4ad552eeb733b3d516380c8"
+}

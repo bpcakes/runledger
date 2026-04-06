@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO content_feedback (\n            organization_id,\n            content_id,\n            content_type,\n            user_id,\n            reaction\n         )\n         VALUES ($1, $2, $3, $4, $5)\n         ON CONFLICT (organization_id, user_id, content_id, content_type)\n         DO UPDATE\n             SET reaction = EXCLUDED.reaction,\n                 updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3411fa9219197d6a8cc2b56a3709309dd6c7ade2a421d365c0727248e901c62f"
+}

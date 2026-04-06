@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_events (job_id, run_number, attempt, event_type, payload)\n         VALUES (\n            $1,\n            $2,\n            $3,\n            'DEAD_LETTERED',\n            jsonb_build_object('kind', $4::text, 'error_code', $5::text)\n         )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8918f3896d3aa952a6a4bd45ea8874ee43069efc88650f346f64ffc7fc24e309"
+}

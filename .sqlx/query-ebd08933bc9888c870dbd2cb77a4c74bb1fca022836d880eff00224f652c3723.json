@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO account_narratives (\n            account_id,\n            organization_id,\n            user_id,\n            variant,\n            content,\n            derived_from\n         )\n         VALUES ($1, $2, NULL, 'BRIEF', $3, $4)\n         ON CONFLICT (account_id, organization_id)\n             WHERE user_id IS NULL AND variant = 'BRIEF'\n         DO UPDATE\n             SET content = EXCLUDED.content,\n                 derived_from = EXCLUDED.derived_from,\n                 updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ebd08933bc9888c870dbd2cb77a4c74bb1fca022836d880eff00224f652c3723"
+}

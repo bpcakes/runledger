@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE oauth_accounts\n            SET provider_user_id = $2\n          WHERE user_id = $1\n            AND provider = 'MICROSOFT'::oauth_provider",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7175241b51fd24595332296578c514aa9bf464567cd25e0b23c0f892dc63c0c3"
+}

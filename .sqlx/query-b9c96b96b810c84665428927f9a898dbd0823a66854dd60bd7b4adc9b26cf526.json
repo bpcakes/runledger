@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    COUNT(*)::bigint AS \"all_count!\",\n    COUNT(*) FILTER (WHERE display_bucket = 'NEWS')::bigint AS \"news_count!\",\n    COUNT(*) FILTER (WHERE display_bucket = 'LINKEDIN_POSTS')::bigint AS \"linkedin_posts_count!\",\n    COUNT(*) FILTER (WHERE display_bucket = 'CHAMPION_TRACKING')::bigint AS \"champion_tracking_count!\",\n    COUNT(*) FILTER (WHERE display_bucket = 'COMPETITION')::bigint AS \"competition_count!\",\n    COUNT(*) FILTER (WHERE display_bucket = 'FINANCIALS')::bigint AS \"financials_count!\",\n    COUNT(*) FILTER (WHERE display_bucket = 'PEOPLE_UPDATES')::bigint AS \"people_updates_count!\"\nFROM account_signal_feed_items feed\nINNER JOIN account_research_chunks signal\n    ON signal.id = feed.signal_chunk_id\n   AND signal.superseded_by IS NULL\nINNER JOIN account_research_chunks card\n    ON card.id = feed.card_chunk_id\n   AND card.organization_id = feed.organization_id\n   AND card.account_id = feed.account_id\n   AND card.source_chunk_id = feed.signal_chunk_id\n   AND card.data_type = 'DERIVED_OUTPUT'::account_research_chunk_data_type\n   AND card.derived_output_key = 'signalCard'\n   AND card.superseded_by IS NULL\nWHERE feed.organization_id = $1\n  AND feed.account_id = $2\n  AND feed.is_ready_displayable = TRUE\n  AND ($3::text IS NULL OR feed.signal_type = $3)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "all_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "news_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "linkedin_posts_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "champion_tracking_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "competition_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "financials_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "people_updates_count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "b9c96b96b810c84665428927f9a898dbd0823a66854dd60bd7b4adc9b26cf526"
+}

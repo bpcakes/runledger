@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            ws.id,\n            ws.step_key,\n            ws.execution_kind::text AS \"execution_kind!\",\n            ws.organization_id,\n            ws.status::text AS \"status!\",\n            ws.job_id\n         FROM workflow_steps ws\n         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id\n         WHERE ws.workflow_run_id = $1\n           AND ($2::uuid IS NULL OR wr.organization_id = $2)\n           AND ws.status IN (\n               'BLOCKED'::workflow_step_status,\n               'ENQUEUED'::workflow_step_status,\n               'RUNNING'::workflow_step_status,\n               'WAITING_FOR_EXTERNAL'::workflow_step_status\n           )\n         ORDER BY ws.id ASC\n         FOR UPDATE OF ws",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "step_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "execution_kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "job_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true,
+      null,
+      true
+    ]
+  },
+  "hash": "8a7b4e563e89202e68adfcf3602221fb03469fd0efe394a0acdacfcfa6e157f8"
+}

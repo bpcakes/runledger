@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nDELETE FROM account_research_chunks\nWHERE organization_id = $1\n  AND account_id = $2\n  AND id = $3\nRETURNING true AS \"deleted!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "deleted!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b132c1f1a19816d2de87515453b7c1efe7c1ab0812178fce1d185c1d2e552e4c"
+}

@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH inserted AS (\n            INSERT INTO organization_seller_profiles (\n                organization_id,\n                content,\n                created_by_user_id,\n                updated_by_user_id\n            )\n            VALUES (\n                $1,\n                $2::jsonb,\n                $3,\n                $3\n            )\n            ON CONFLICT (organization_id) DO NOTHING\n            RETURNING id\n        )\n        SELECT id AS \"profile_id!: Uuid\", true AS \"created!\"\n        FROM inserted\n        UNION ALL\n        SELECT id AS \"profile_id!: Uuid\", false AS \"created!\"\n        FROM organization_seller_profiles\n        WHERE organization_id = $1\n          AND NOT EXISTS (SELECT 1 FROM inserted)\n        LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "profile_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "created!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "3fa3b2c8190d3d9fccbaa92aa2ff0516a77ee6372844649269b23dbe2c83da83"
+}

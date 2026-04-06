@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO accounts (\n            name, industry, employee_count, website, linkedin_url,\n            status, lifecycle_stage\n         )\n         VALUES (\n            $1, $2, $3, $4, $5,\n            $6::account_status, $7::account_lifecycle_stage\n         )\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4",
+        "Text",
+        "Text",
+        {
+          "Custom": {
+            "name": "account_status",
+            "kind": {
+              "Enum": [
+                "PROSPECT",
+                "CUSTOMER",
+                "CHURNED",
+                "INACTIVE"
+              ]
+            }
+          }
+        },
+        {
+          "Custom": {
+            "name": "account_lifecycle_stage",
+            "kind": {
+              "Enum": [
+                "PROSPECTING",
+                "QUALIFICATION",
+                "OPPORTUNITY",
+                "CUSTOMER",
+                "CHURNED",
+                "INACTIVE"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9518da3828473aa776bb2a14d63da67ac9d714268914b97716b69933e8503ed5"
+}

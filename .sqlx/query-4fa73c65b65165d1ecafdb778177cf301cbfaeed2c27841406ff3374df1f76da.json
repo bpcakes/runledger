@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT se.id AS \"id!\", se.source AS \"source!\"\nFROM signal_events se\nINNER JOIN organization_account_signal_links oasl\n    ON oasl.signal_id = se.id\nWHERE oasl.organization_id = $1\n  AND oasl.account_id = $2\n  AND se.status = 'ACTIVE'::signal_event_status\n  AND se.url = $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "source!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4fa73c65b65165d1ecafdb778177cf301cbfaeed2c27841406ff3374df1f76da"
+}

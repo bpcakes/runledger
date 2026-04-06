@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*)::bigint AS \"count!\"\n             FROM job_queue\n             WHERE job_type = 'crm.sync.accounts'\n               AND organization_id = $1\n               AND idempotency_key = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ff230c2a41db8c50e0a79be6f276b574d495c3598a7d70abff8e59fb4132f39d"
+}

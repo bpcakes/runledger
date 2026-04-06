@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    m.id,\n    m.session_id,\n    m.role AS \"role: ChatMessageRole\",\n    m.content,\n    m.metadata,\n    m.created_at\nFROM chat_messages m\nINNER JOIN chat_sessions s\n    ON s.id = m.session_id\nWHERE m.session_id = $1\n  AND s.organization_id = $2\n  AND s.user_id = $3\nORDER BY m.created_at ASC, m.id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "session_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "role: ChatMessageRole",
+        "type_info": {
+          "Custom": {
+            "name": "chat_message_role",
+            "kind": {
+              "Enum": [
+                "user",
+                "assistant",
+                "system"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "content",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "metadata",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "f11678a1314a76c646c37edf09431fc6edccf341a89806330d71a97d00ae1657"
+}

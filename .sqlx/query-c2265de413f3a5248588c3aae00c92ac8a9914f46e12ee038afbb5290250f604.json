@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO contact_positions (\n            organization_id, contact_id, company_name, title, is_current, sort_order\n         )\n         VALUES ($1, $2, $3, $4, true, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c2265de413f3a5248588c3aae00c92ac8a9914f46e12ee038afbb5290250f604"
+}

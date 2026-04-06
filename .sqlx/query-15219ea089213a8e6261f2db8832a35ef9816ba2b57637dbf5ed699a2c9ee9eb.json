@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO organization_accounts (\n            organization_id,\n            account_id,\n            status,\n            lifecycle_stage\n         )\n         VALUES (\n            $1,\n            $2,\n            ($3::text)::account_status,\n            ($4::text)::account_lifecycle_stage\n         )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "15219ea089213a8e6261f2db8832a35ef9816ba2b57637dbf5ed699a2c9ee9eb"
+}

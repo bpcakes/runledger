@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_logs (\n            job_id,\n            run_number,\n            attempt,\n            level,\n            message,\n            payload\n         )\n         VALUES ($1, $2, $3, $4, $5, $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e161b8921b26d1e417481f629cf9e0a46313929779a16094432c1ac5d20a17e5"
+}

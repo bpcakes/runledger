@@ -1,0 +1,61 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH target AS (\n            SELECT om.user_id, om.role, u.email\n            FROM organization_memberships om\n            JOIN users u ON u.id = om.user_id\n            WHERE om.organization_id = $1\n              AND om.user_id = $2\n              AND om.status = 'INACTIVE'\n              AND u.email IS NOT NULL\n            FOR UPDATE\n         )\n         INSERT INTO organization_invitations (\n            organization_id,\n            email,\n            invited_role,\n            invitation_type,\n            status,\n            token_hash,\n            invited_by_user_id,\n            target_user_id\n         )\n         SELECT\n            $1,\n            target.email,\n            target.role,\n            'REACTIVATION'::invitation_type,\n            'PENDING',\n            $3,\n            $4,\n            target.user_id\n         FROM target\n         RETURNING id,\n                   organization_id,\n                   COALESCE(email, '') AS \"email!\",\n                   invited_role::text AS \"invited_role!\",\n                   invitation_type::text AS \"invitation_type!\",\n                   target_user_id,\n                   expires_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "email!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "invited_role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "invitation_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "target_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      true,
+      false
+    ]
+  },
+  "hash": "a0e106dabb95a68a9a2eef69dbb0dd10e274276b325c20f9a7b7af8cc0a4a914"
+}

@@ -1,0 +1,161 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            ws.id,\n            ws.workflow_run_id,\n            ws.step_key,\n            ws.execution_kind::text AS \"execution_kind!\",\n            ws.job_type,\n            ws.organization_id,\n            ws.payload,\n            ws.priority,\n            ws.max_attempts,\n            ws.timeout_seconds,\n            ws.stage,\n            ws.status::text AS \"status!\",\n            ws.job_id,\n            ws.released_at,\n            ws.started_at,\n            ws.finished_at,\n            ws.dependency_count_total,\n            ws.dependency_count_pending,\n            ws.dependency_count_unsatisfied,\n            ws.status_reason,\n            ws.last_error_code,\n            ws.last_error_message,\n            ws.created_at,\n            ws.updated_at\n         FROM workflow_steps ws\n         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id\n         WHERE ws.workflow_run_id = $1\n           AND ($2::uuid IS NULL OR wr.organization_id = $2)\n         ORDER BY ws.created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "workflow_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "step_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "execution_kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 13,
+        "name": "released_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "dependency_count_total",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 17,
+        "name": "dependency_count_pending",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 18,
+        "name": "dependency_count_unsatisfied",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 19,
+        "name": "status_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 20,
+        "name": "last_error_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "last_error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 22,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 23,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      null,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "3d98f09805eb89ed62b80e202efa9196557b16515e502ed58b8eb298e2c5ff35"
+}

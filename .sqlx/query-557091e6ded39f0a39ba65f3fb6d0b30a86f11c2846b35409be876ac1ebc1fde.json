@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO account_research_chunks (\n            organization_id, account_id, data_type, source_type,\n            chunk_topic, confidence, content\n         )\n         VALUES (\n            $1, $2,\n            'FIRMOGRAPHIC'::account_research_chunk_data_type,\n            'AI_GENERATED'::account_research_chunk_source_type,\n            'company_overview', 0.9, $3::jsonb\n         )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "557091e6ded39f0a39ba65f3fb6d0b30a86f11c2846b35409be876ac1ebc1fde"
+}

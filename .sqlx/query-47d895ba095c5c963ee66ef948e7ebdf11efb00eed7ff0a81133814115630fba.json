@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_events (job_id, run_number, attempt, event_type, payload)\n         VALUES (\n            $1,\n            $2,\n            $3,\n            'FAILED',\n            jsonb_build_object(\n                'kind', 'LEASE_EXPIRED',\n                'error_code', 'job.lease_expired',\n                'error_message', 'Job lease expired before completion.',\n                'started_without_renewal_heartbeat', $4::bool\n            )\n         )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "47d895ba095c5c963ee66ef948e7ebdf11efb00eed7ff0a81133814115630fba"
+}

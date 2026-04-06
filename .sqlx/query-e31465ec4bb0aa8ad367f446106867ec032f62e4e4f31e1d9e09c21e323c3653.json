@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id\n                 FROM job_queue\n                 WHERE status = 'PENDING'\n                   AND next_run_at <= now()\n                   AND job_type = ANY($2::text[])\n                 ORDER BY priority DESC, next_run_at ASC, created_at ASC\n                 FOR UPDATE SKIP LOCKED\n                 LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e31465ec4bb0aa8ad367f446106867ec032f62e4e4f31e1d9e09c21e323c3653"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nUPDATE chat_sessions\nSET updated_at = now()\nWHERE id = $1\n  AND organization_id = $2\n  AND user_id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2d9b75937bc2e5e8329c1af517ba5de5dc1740e0038f265d42261cc95678aadc"
+}

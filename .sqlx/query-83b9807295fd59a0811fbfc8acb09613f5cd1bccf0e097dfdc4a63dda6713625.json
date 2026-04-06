@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE account_research_chunks\n         SET published_at_date = $4\n         WHERE organization_id = $1\n           AND account_id = $2\n           AND id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "83b9807295fd59a0811fbfc8acb09613f5cd1bccf0e097dfdc4a63dda6713625"
+}

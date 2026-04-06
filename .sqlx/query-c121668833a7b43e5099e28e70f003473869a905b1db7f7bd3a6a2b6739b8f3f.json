@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id\n         FROM seller_profile_research_runs\n         WHERE profile_id = $1\n           AND workflow_run_id IS NULL\n           AND status = 'RUNNING'::seller_profile_research_run_status\n         ORDER BY requested_at DESC, id DESC\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c121668833a7b43e5099e28e70f003473869a905b1db7f7bd3a6a2b6739b8f3f"
+}

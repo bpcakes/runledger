@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT published_at_date AS \"published_at_date!: chrono::NaiveDate\"\n         FROM account_research_chunks\n         WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "published_at_date!: chrono::NaiveDate",
+        "type_info": "Date"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ccc66242bbe2ecbc1d5d8bc1973a82b5ce82eb82bcc2f549158c8067d064ec97"
+}

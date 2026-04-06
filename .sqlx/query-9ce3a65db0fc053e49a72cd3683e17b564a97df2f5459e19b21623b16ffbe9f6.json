@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH applied AS (\n             SELECT set_seller_profile_field_with_source(\n                $1,\n                $2,\n                $3::jsonb,\n                $4::seller_profile_source_type,\n                $5,\n                $6::jsonb\n             )\n         )\n         SELECT 1 AS \"ok!\"\n         FROM applied",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ok!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Jsonb",
+        {
+          "Custom": {
+            "name": "seller_profile_source_type",
+            "kind": {
+              "Enum": [
+                "MANUAL",
+                "DOCUMENT_UPLOAD",
+                "CRM",
+                "WEB_RESEARCH",
+                "AI_INFERENCE"
+              ]
+            }
+          }
+        },
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9ce3a65db0fc053e49a72cd3683e17b564a97df2f5459e19b21623b16ffbe9f6"
+}

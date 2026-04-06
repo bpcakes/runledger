@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE organization_billing\n         SET plan_tier = 'TEAM'\n         WHERE organization_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d39418c9a7d098596b012c0273bd7e57fce93049b629d7b2212d749201916048"
+}

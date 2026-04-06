@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH usage AS (\n            SELECT\n                ob.organization_id AS organization_id,\n                o.name AS organization_name,\n                ob.researched_allowance AS researched_allowance,\n                (\n                    SELECT COUNT(*)::integer\n                    FROM organization_researched_accounts ora\n                    WHERE ora.organization_id = ob.organization_id\n                      AND ora.removed_at IS NULL\n                ) AS active_researched_count\n            FROM organization_billing ob\n            JOIN organizations o ON o.id = ob.organization_id\n            WHERE ob.researched_allowance > 0\n         )\n         SELECT\n            organization_id AS \"organization_id!: Uuid\",\n            organization_name AS \"organization_name!\",\n            researched_allowance AS \"researched_allowance!\",\n            active_researched_count AS \"active_researched_count!\",\n            (active_researched_count >= researched_allowance) AS \"at_cap!\"\n         FROM usage\n         WHERE active_researched_count >= CEIL(researched_allowance::numeric * 0.9)::integer\n         ORDER BY organization_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "organization_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "researched_allowance!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "active_researched_count!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "at_cap!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "ab4ba4100f1a7d4565af3ff1d75d1e5e8b13740fdad06a852d4b70ef5c049106"
+}

@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE organization_seller_profiles\n         SET status = $2::seller_profile_status,\n             updated_by_user_id = $3\n         WHERE organization_id = $1\n         RETURNING id AS \"id!: Uuid\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "seller_profile_status",
+            "kind": {
+              "Enum": [
+                "DRAFT",
+                "ACTIVE",
+                "ARCHIVED"
+              ]
+            }
+          }
+        },
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "62a435698ee3331f82944b386633c80feee568ffcc02c2d1f47d006aa5cc8e00"
+}

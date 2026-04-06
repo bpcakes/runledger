@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO seller_profile_research_runs (\n            profile_id,\n            organization_id,\n            workflow_run_id,\n            trigger,\n            status,\n            requested_by_user_id,\n            requested_at,\n            started_at,\n            finished_at,\n            metadata\n         )\n         VALUES (\n            $1,\n            $2,\n            $3,\n            $4,\n            ($5::text)::seller_profile_research_run_status,\n            $6,\n            to_timestamp((($7::bigint)::double precision) / 1000.0),\n            now(),\n            now(),\n            $8::jsonb\n         )\n         RETURNING id AS \"id!: Uuid\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Int8",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "759c3f2a1b6c0d037781c5230848f5204e5319eef0afd16bfd4b81282fb59a33"
+}

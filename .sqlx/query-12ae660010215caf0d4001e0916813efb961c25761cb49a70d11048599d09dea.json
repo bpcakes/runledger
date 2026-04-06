@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_attempts\n         SET finished_at = now(),\n             outcome = 'LEASE_EXPIRED',\n             error_code = 'job.lease_expired',\n             error_message = 'Job lease expired before completion.',\n             retry_delay_ms = $4\n         WHERE job_id = $1\n           AND run_number = $2\n           AND attempt = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "12ae660010215caf0d4001e0916813efb961c25761cb49a70d11048599d09dea"
+}

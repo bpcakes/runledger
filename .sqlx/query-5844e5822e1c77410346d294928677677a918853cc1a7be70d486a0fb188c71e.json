@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nDELETE FROM chat_messages m\nUSING chat_sessions s\nWHERE m.id = $1\n  AND m.session_id = s.id\n  AND s.organization_id = $2\n  AND s.user_id = $3\nRETURNING m.id AS \"id!: Uuid\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5844e5822e1c77410346d294928677677a918853cc1a7be70d486a0fb188c71e"
+}

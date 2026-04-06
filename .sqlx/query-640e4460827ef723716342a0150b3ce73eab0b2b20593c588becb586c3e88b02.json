@@ -1,0 +1,107 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    id,\n    profile_id,\n    field_path,\n    source_type AS \"source_type: SellerProfileSourceType\",\n    source_confidence AS \"source_confidence: SellerProfileSourceConfidence\",\n    created_by_user_id,\n    metadata AS \"metadata!: JsonValue\",\n    research_run_id,\n    component_key,\n    created_at,\n    updated_at\nFROM seller_profile_field_sources\nWHERE profile_id = $1\nORDER BY created_at DESC, id DESC\nLIMIT $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "profile_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "field_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "source_type: SellerProfileSourceType",
+        "type_info": {
+          "Custom": {
+            "name": "seller_profile_source_type",
+            "kind": {
+              "Enum": [
+                "MANUAL",
+                "DOCUMENT_UPLOAD",
+                "CRM",
+                "WEB_RESEARCH",
+                "AI_INFERENCE"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "source_confidence: SellerProfileSourceConfidence",
+        "type_info": {
+          "Custom": {
+            "name": "seller_profile_source_confidence",
+            "kind": {
+              "Enum": [
+                "HIGH",
+                "MEDIUM",
+                "LOW"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "created_by_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "metadata!: JsonValue",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "research_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "component_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "640e4460827ef723716342a0150b3ce73eab0b2b20593c588becb586c3e88b02"
+}

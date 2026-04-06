@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT derived_output_key\nFROM account_research_chunks\nWHERE organization_id = $1\n  AND account_id = $2\n  AND id = $3\n  AND data_type = 'DERIVED_OUTPUT'::account_research_chunk_data_type\nLIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "derived_output_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b81e9377368da215e8922040052112e1913059383776a55c044f488747cb524e"
+}

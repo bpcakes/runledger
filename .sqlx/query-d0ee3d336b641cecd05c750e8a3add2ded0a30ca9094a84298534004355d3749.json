@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_definitions\n         SET max_attempts = COALESCE($2, max_attempts),\n             default_timeout_seconds = COALESCE($3, default_timeout_seconds),\n             default_priority = COALESCE($4, default_priority),\n             is_enabled = COALESCE($5, is_enabled),\n             updated_at = now()\n         WHERE job_type = $1\n         RETURNING\n            job_type,\n            version,\n            max_attempts,\n            default_timeout_seconds,\n            default_priority,\n            is_enabled,\n            created_at,\n            updated_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "default_timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "default_priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d0ee3d336b641cecd05c750e8a3add2ded0a30ca9094a84298534004355d3749"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_definitions\n             SET is_enabled = false,\n                 updated_at = now()\n             WHERE job_type = 'crm.sync.accounts'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d5d8f1e96bf8981d30b78f8c60d42ed2e9e90edfab54f2f91c1b4f86528d5f9a"
+}

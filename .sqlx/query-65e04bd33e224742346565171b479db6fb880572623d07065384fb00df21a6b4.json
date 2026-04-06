@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT EXISTS (\n    SELECT 1\n    FROM signal_events se\n    INNER JOIN organization_account_signal_links oasl\n        ON oasl.signal_id = se.id\n    WHERE oasl.organization_id = $1\n      AND oasl.account_id = $2\n      AND se.status = 'ACTIVE'::signal_event_status\n      AND se.url = $3\n    LIMIT 1\n)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "65e04bd33e224742346565171b479db6fb880572623d07065384fb00df21a6b4"
+}

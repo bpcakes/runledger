@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT user_id\n         FROM organization_memberships\n         WHERE organization_id = $1\n           AND status = 'ACTIVE'\n           AND role = 'ADMIN'\n         ORDER BY created_at ASC, user_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9864fa99c4a1ea1d957ee9c7577f27311afd912966417157d3f662918caaf212"
+}

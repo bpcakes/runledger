@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nDELETE FROM organization_account_signal_links\nWHERE organization_id = $1\n  AND account_id = $2\n  AND signal_id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2c8732c4aba562f268d91b22aef03a33ab1e9ce61c215af94e3e8e4cf9edfea3"
+}

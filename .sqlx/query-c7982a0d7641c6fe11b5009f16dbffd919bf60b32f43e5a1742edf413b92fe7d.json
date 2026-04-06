@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO account_research_pipeline_runs (\n            organization_id,\n            account_id,\n            researched_account_id,\n            trigger,\n            status,\n            current_stage,\n            started_at\n         )\n         VALUES (\n            $1,\n            $2,\n            $3,\n            'MANUAL_START',\n            'WAITING_FOR_USER',\n            'ACCOUNT_IDENTITY_RESOLUTION',\n            now() - interval '5 minutes'\n         )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c7982a0d7641c6fe11b5009f16dbffd919bf60b32f43e5a1742edf413b92fe7d"
+}

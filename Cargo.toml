@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "runledger-core",
+    "runledger-postgres",
+    "runledger-runtime",
+    "runledger-test-support",
+]
+
+default-members = [
+    "runledger-core",
+    "runledger-postgres",
+    "runledger-runtime",
+]
+
+[workspace.dependencies]
+runledger-core = { path = "runledger-core" }
+runledger-postgres = { path = "runledger-postgres" }
+runledger-runtime = { path = "runledger-runtime" }
+runledger-test-support = { path = "runledger-test-support" }
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = { version = "0.1", features = ["std"] }

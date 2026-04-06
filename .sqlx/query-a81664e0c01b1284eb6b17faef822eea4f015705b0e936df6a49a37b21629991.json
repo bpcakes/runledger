@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            researched_account_id AS \"researched_account_id!\",\n            account_id AS \"account_id!\"\n         FROM batch_enroll_researched_accounts($1, $2::uuid[], $3::uuid[], $4)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "researched_account_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "account_id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "a81664e0c01b1284eb6b17faef822eea4f015705b0e936df6a49a37b21629991"
+}
