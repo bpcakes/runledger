@@ -2,6 +2,13 @@
 name = "runledger-postgres"
 version = "0.1.0"
 edition = "2024"
+description = "PostgreSQL persistence layer for the Runledger durable job and workflow system"
+readme = "../README.md"
+repository = "https://github.com/featherenvy/runledger"
+homepage = "https://github.com/featherenvy/runledger"
+documentation = "https://docs.rs/runledger-postgres"
+keywords = ["jobs", "workflows", "postgres", "queue"]
+categories = ["asynchronous", "database"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
