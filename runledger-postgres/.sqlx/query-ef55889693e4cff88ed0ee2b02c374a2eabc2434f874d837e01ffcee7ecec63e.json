@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH latest_removed AS (\n            SELECT DISTINCT ON (ora.account_id)\n                ora.account_id,\n                ora.removed_at\n            FROM organization_researched_accounts ora\n            WHERE ora.organization_id = $1\n              AND ora.removed_at IS NOT NULL\n            ORDER BY ora.account_id, ora.removed_at DESC\n         )\n         SELECT\n            oa.account_id AS \"account_id!\",\n            a.name AS \"account_name!\",\n            a.website,\n            a.country,\n            lr.removed_at AS latest_removed_at\n         FROM organization_accounts oa\n         INNER JOIN accounts a ON a.id = oa.account_id\n         LEFT JOIN latest_removed lr\n           ON lr.account_id = oa.account_id\n         WHERE oa.organization_id = $1\n           AND NOT EXISTS (\n                SELECT 1\n                FROM organization_researched_accounts active\n                WHERE active.organization_id = oa.organization_id\n                  AND active.account_id = oa.account_id\n                  AND active.removed_at IS NULL\n            )\n         ORDER BY lower(a.name) ASC, a.name ASC, oa.account_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "account_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "account_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "website",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "country",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "latest_removed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "ef55889693e4cff88ed0ee2b02c374a2eabc2434f874d837e01ffcee7ecec63e"
+}

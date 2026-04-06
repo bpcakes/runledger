@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            job_type,\n            version,\n            max_attempts,\n            default_timeout_seconds,\n            default_priority,\n            is_enabled,\n            created_at,\n            updated_at\n         FROM job_definitions\n         WHERE ($1::text IS NULL OR job_type ILIKE '%' || $1 || '%')\n         ORDER BY job_type ASC\n         LIMIT $2\n         OFFSET $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "default_timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "default_priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "766c486bb542a00ae30f442e309e4f715de18e74d58adbc7369ecc5d47b52291"
+}

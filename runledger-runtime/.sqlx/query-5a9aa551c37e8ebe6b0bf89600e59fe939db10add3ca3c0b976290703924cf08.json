@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nDELETE FROM account_research_chunks\nWHERE organization_id = $1\n  AND account_id = $2\n  AND data_type = 'DERIVED_OUTPUT'::account_research_chunk_data_type\n  AND derived_output_key = 'signalCard'\n  AND source_chunk_id = ANY($3::uuid[])\n  AND superseded_by IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5a9aa551c37e8ebe6b0bf89600e59fe939db10add3ca3c0b976290703924cf08"
+}

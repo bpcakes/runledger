@@ -1,0 +1,167 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    id,\n    organization_id,\n    account_id,\n    data_type AS \"data_type: AccountResearchChunkDataType\",\n    topic_tags AS \"topic_tags!: Vec<String>\",\n    source_type AS \"source_type: AccountResearchChunkSourceType\",\n    source_reference,\n    chunk_topic,\n    confidence,\n    content AS \"content!: JsonValue\",\n    version,\n    superseded_by,\n    input_chunk_ids AS \"input_chunk_ids?: Vec<Uuid>\",\n    prompt_id,\n    prompt_version,\n    retrieval_query AS \"retrieval_query: JsonValue\",\n    model_id,\n    generated_at,\n    created_at,\n    updated_at\nFROM account_research_chunks\nWHERE organization_id = $1\n  AND account_id = $2\n  AND id = $3\nLIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "account_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "data_type: AccountResearchChunkDataType",
+        "type_info": {
+          "Custom": {
+            "name": "account_research_chunk_data_type",
+            "kind": {
+              "Enum": [
+                "FIRMOGRAPHIC",
+                "SIGNAL",
+                "PERSON",
+                "STAKEHOLDER_PROFILE",
+                "DERIVED_OUTPUT",
+                "SELLER_PROFILE"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "topic_tags!: Vec<String>",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 5,
+        "name": "source_type: AccountResearchChunkSourceType",
+        "type_info": {
+          "Custom": {
+            "name": "account_research_chunk_source_type",
+            "kind": {
+              "Enum": [
+                "CRM",
+                "API",
+                "WEB",
+                "DOC_UPLOAD",
+                "MANUAL",
+                "INFERRED",
+                "AI_GENERATED"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "source_reference",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "chunk_topic",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "confidence",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "content!: JsonValue",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "superseded_by",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 12,
+        "name": "input_chunk_ids?: Vec<Uuid>",
+        "type_info": "UuidArray"
+      },
+      {
+        "ordinal": 13,
+        "name": "prompt_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "prompt_version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "retrieval_query: JsonValue",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 16,
+        "name": "model_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "generated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 19,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "ba086ce2d7dc090a86e37c6190c4593690288f3dfc5ed1e1e30b3cfa5a6c5e99"
+}

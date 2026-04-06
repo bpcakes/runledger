@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE account_research_pipeline_runs\n         SET status = 'BLOCKED'::account_research_pipeline_run_status\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7eed209bd795a740f5601b34c2bc4a9bdd3761bccf5778cb820b1ab50ca86929"
+}

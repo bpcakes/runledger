@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO chat_sessions (\n            organization_id,\n            user_id,\n            account_id,\n            outbound_draft_id,\n            type\n         )\n         VALUES (\n            $1,\n            $2,\n            $3,\n            NULL,\n            'ACCOUNT_CHAT'::chat_session_type\n         )\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "62ce14c30b273ec145941d41711816d0555d2e7a3e9099d0e46b86df5fca2dd4"
+}

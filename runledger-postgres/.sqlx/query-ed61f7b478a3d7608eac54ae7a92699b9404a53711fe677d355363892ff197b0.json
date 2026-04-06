@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n            SELECT 1\n            FROM organization_limit_notification_events\n            WHERE organization_id = $1\n              AND notification_type = ($2::text)::limit_notification_type\n              AND month_start_utc = (\n                    date_trunc('month', now() AT TIME ZONE 'UTC')\n                    AT TIME ZONE 'UTC'\n              )\n        ) AS \"exists!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!: bool",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ed61f7b478a3d7608eac54ae7a92699b9404a53711fe677d355363892ff197b0"
+}

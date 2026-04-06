@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    organization_id,\n    pipeline_run_id,\n    poll_job_id,\n    robot_id,\n    initial_person_chunk_ids,\n    created_at,\n    updated_at\nFROM account_research_people_discovery_polls\nWHERE organization_id = $1\n  AND pipeline_run_id = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "pipeline_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "poll_job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "robot_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "initial_person_chunk_ids",
+        "type_info": "UuidArray"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f4f4e9af35868a4a00c177ccb784b50f75d33fa142ec5c8bb509c23b14a49081"
+}

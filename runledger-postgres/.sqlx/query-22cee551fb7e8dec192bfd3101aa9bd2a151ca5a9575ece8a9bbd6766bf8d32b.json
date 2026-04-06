@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO organization_invitations (\n            organization_id,\n            email,\n            invited_role,\n            invitation_type,\n            status,\n            token_hash,\n            invited_by_user_id,\n            target_user_id\n         )\n         VALUES (\n            $1,\n            $2,\n            ($3::text)::user_role,\n            ($4::text)::invitation_type,\n            'PENDING',\n            $5,\n            $6,\n            $7\n         )\n         RETURNING id,\n                   organization_id,\n                   COALESCE(email, '') AS \"email!\",\n                   invited_role::text AS \"invited_role!\",\n                   invitation_type::text AS \"invitation_type!\",\n                   target_user_id,\n                   expires_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "email!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "invited_role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "invitation_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "target_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      true,
+      false
+    ]
+  },
+  "hash": "22cee551fb7e8dec192bfd3101aa9bd2a151ca5a9575ece8a9bbd6766bf8d32b"
+}

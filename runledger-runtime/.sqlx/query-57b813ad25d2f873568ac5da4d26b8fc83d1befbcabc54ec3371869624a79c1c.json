@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_queue\n         SET\n             payload = jsonb_set(\n                 payload,\n                 ARRAY[$4::text],\n                 to_jsonb($5::uuid[]),\n                 true\n             ),\n             updated_at = now()\n         WHERE id = $1\n           AND organization_id = $2\n           AND job_type = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "57b813ad25d2f873568ac5da4d26b8fc83d1befbcabc54ec3371869624a79c1c"
+}

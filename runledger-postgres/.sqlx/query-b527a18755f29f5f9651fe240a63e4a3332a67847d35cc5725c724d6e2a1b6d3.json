@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workflow_run_mutations (\n            workflow_run_id,\n            mutation_key,\n            metadata,\n            request\n         )\n         VALUES ($1, $2, $3::jsonb, $4::jsonb)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b527a18755f29f5f9651fe240a63e4a3332a67847d35cc5725c724d6e2a1b6d3"
+}

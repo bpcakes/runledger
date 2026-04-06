@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_terminate_backend(pid)\n         FROM pg_stat_activity\n         WHERE datname = $1\n           AND pid <> pg_backend_pid()",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pg_terminate_backend",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7b8e777f2c277acbdb76dabd67fd5b6c00fe344605aec243d2d82c10aa9e4035"
+}

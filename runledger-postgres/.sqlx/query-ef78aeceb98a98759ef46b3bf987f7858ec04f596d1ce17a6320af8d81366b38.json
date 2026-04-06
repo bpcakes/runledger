@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, payload_hash\n         FROM crm_raw_records\n         WHERE provider = $1::text::crm_provider\n           AND organization_id = $2\n           AND idempotency_key = $3\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "payload_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ef78aeceb98a98759ef46b3bf987f7858ec04f596d1ce17a6320af8d81366b38"
+}

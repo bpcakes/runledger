@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE organization_invitations\n         SET status = 'ACCEPTED',\n             accepted_user_id = $2,\n             accepted_at = COALESCE(accepted_at, now()),\n             updated_at = now()\n         WHERE id = $1\n           AND status = 'PENDING'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f9235742751ec5f0d1de417b50a0b525c0f7c509a6b0fc4fd1437b96688a3b9a"
+}

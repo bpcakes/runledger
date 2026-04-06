@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO referral_codes (\n            issuer_organization_id,\n            issuer_user_id,\n            code,\n            issued_at,\n            expires_at\n         )\n         VALUES (\n            $1,\n            $2,\n            $3,\n            now() - interval '2 months',\n            now() + interval '12 months'\n         )\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cc5e3dd2d47ceba63404355b59bb52402b326f69c0a9fc041cb4a3fd6573fe3c"
+}

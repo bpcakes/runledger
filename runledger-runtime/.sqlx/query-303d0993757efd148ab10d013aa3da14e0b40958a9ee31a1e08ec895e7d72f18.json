@@ -1,0 +1,204 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    c.id AS \"contact_id!\",\n    c.organization_id AS \"contact_organization_id!\",\n    c.account_id AS \"contact_account_id!\",\n    c.identity_kind::text AS \"contact_identity_kind!\",\n    c.external_identity AS contact_external_identity,\n    COALESCE(c.linkedin_url, '') AS \"contact_linkedin_url!\",\n    COALESCE(c.linkedin_handle, '') AS \"contact_linkedin_handle!\",\n    c.name AS \"contact_name!\",\n    c.headline AS contact_headline,\n    c.about AS contact_about,\n    c.photo_storage_key AS \"contact_photo_storage_key?\",\n    c.email AS contact_email,\n    c.phone AS contact_phone,\n    c.location AS contact_location,\n    c.country_code AS contact_country_code,\n    c.linkedin_last_checked_at AS contact_linkedin_last_checked_at,\n    c.created_at AS \"contact_created_at!\",\n    c.updated_at AS \"contact_updated_at!\",\n    cp.id AS \"position_id!\",\n    cp.organization_id AS \"position_organization_id!\",\n    cp.contact_id AS \"position_contact_id!\",\n    cp.company_name AS \"position_company_name!\",\n    cp.company_linkedin_url AS position_company_linkedin_url,\n    cp.title AS \"position_title!\",\n    cp.description AS position_description,\n    cp.start_date AS position_start_date,\n    cp.end_date AS position_end_date,\n    cp.is_current AS \"position_is_current!\",\n    cp.account_id AS position_account_id,\n    cp.created_at AS \"position_created_at!\",\n    cp.updated_at AS \"position_updated_at!\"\nFROM contact_positions cp\nINNER JOIN contacts c\n    ON c.organization_id = cp.organization_id\n   AND c.id = cp.contact_id\nWHERE cp.organization_id = $1\n  AND cp.account_id = $2\n  AND c.id = $3\n  AND cp.is_current = TRUE\nORDER BY cp.updated_at DESC, cp.id DESC\nLIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "contact_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "contact_organization_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "contact_account_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "contact_identity_kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "contact_external_identity",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "contact_linkedin_url!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "contact_linkedin_handle!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "contact_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "contact_headline",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "contact_about",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "contact_photo_storage_key?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "contact_email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "contact_phone",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "contact_location",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "contact_country_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "contact_linkedin_last_checked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "contact_created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "contact_updated_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "position_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 19,
+        "name": "position_organization_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 20,
+        "name": "position_contact_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 21,
+        "name": "position_company_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 22,
+        "name": "position_company_linkedin_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 23,
+        "name": "position_title!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 24,
+        "name": "position_description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 25,
+        "name": "position_start_date",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 26,
+        "name": "position_end_date",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 27,
+        "name": "position_is_current!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 28,
+        "name": "position_account_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 29,
+        "name": "position_created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 30,
+        "name": "position_updated_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      true,
+      null,
+      null,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "303d0993757efd148ab10d013aa3da14e0b40958a9ee31a1e08ec895e7d72f18"
+}

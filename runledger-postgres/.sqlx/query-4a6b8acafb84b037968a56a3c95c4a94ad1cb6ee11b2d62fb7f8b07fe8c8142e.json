@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    om.organization_id,\n    om.user_id,\n    COALESCE(u.email, '') AS \"email!\",\n    u.name,\n    om.role::text AS \"role!\",\n    om.status::text AS \"status!\",\n    om.deactivated_at,\n    om.created_at AS \"created_at!\",\n    om.updated_at AS \"updated_at!\"\nFROM organization_memberships om\nLEFT JOIN users u ON u.id = om.user_id\nWHERE om.organization_id = $1\nORDER BY om.created_at ASC, om.user_id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "email!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "deactivated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true,
+      null,
+      null,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "4a6b8acafb84b037968a56a3c95c4a94ad1cb6ee11b2d62fb7f8b07fe8c8142e"
+}

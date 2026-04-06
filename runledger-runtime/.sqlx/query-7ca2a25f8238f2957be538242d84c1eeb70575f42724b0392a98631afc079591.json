@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE organization_billing\n         SET base_researched_allowance = $2,\n             account_pack_allowance = $3\n         WHERE organization_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7ca2a25f8238f2957be538242d84c1eeb70575f42724b0392a98631afc079591"
+}

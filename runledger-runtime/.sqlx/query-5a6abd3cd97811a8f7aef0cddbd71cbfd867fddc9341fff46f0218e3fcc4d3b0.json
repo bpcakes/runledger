@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            COUNT(*) FILTER (\n                WHERE cache_type = 'WEB_PAGE'::seller_profile_research_cache_type\n            )::bigint AS \"web_page_count!\",\n            COUNT(*) FILTER (\n                WHERE cache_type = 'REVIEW_SITE_PAYLOAD'::seller_profile_research_cache_type\n            )::bigint AS \"review_payload_count!\"\n         FROM seller_profile_research_cache_entries\n         WHERE profile_id = $1\n           AND research_run_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "web_page_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "review_payload_count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "5a6abd3cd97811a8f7aef0cddbd71cbfd867fddc9341fff46f0218e3fcc4d3b0"
+}

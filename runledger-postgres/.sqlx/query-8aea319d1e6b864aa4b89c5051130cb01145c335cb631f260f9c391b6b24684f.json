@@ -1,0 +1,140 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    d.id, d.organization_id, d.thread_id, d.user_id,\n    d.account_id, d.signal_id, d.contact_id, d.lead_id,\n    d.subject, d.body, d.status AS \"status: crate::outbound_drafts::OutboundDraftStatus\", d.metadata,\n    d.generated_at, d.last_edited_at, d.created_at, d.updated_at,\n    t.prompt_id AS \"thread_prompt_id?\",\n    (SELECT COUNT(*)::int FROM outbound_draft_versions v WHERE v.draft_id = d.id)\n        AS \"version_count!\"\nFROM outbound_drafts d\nINNER JOIN email_threads t\n    ON t.id = d.thread_id\n   AND t.organization_id = d.organization_id\n   AND t.user_id = d.user_id\nWHERE d.organization_id = $1\n  AND d.user_id = $2\n  AND d.contact_id = $3\n  AND d.signal_id = $4\n  AND d.scenario = $5\n  AND d.status != 'ARCHIVED'::outbound_draft_status\nORDER BY d.updated_at DESC, d.id DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "thread_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "account_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "signal_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "contact_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "lead_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "subject",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "body",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "status: crate::outbound_drafts::OutboundDraftStatus",
+        "type_info": {
+          "Custom": {
+            "name": "outbound_draft_status",
+            "kind": {
+              "Enum": [
+                "DRAFT",
+                "APPROVED",
+                "SENT",
+                "ARCHIVED"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "metadata",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 12,
+        "name": "generated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "last_edited_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "thread_prompt_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 17,
+        "name": "version_count!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "8aea319d1e6b864aa4b89c5051130cb01145c335cb631f260f9c391b6b24684f"
+}

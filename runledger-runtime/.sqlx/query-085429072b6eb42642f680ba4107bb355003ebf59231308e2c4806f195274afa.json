@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO prompt_versions (\n            prompt_id,\n            version,\n            stage,\n            content,\n            metadata,\n            created_by\n         ) VALUES (\n            $1,\n            $2,\n            'PRODUCTION'::prompt_stage,\n            $3,\n            $4,\n            $5\n         )\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Jsonb",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "085429072b6eb42642f680ba4107bb355003ebf59231308e2c4806f195274afa"
+}

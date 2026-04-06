@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE seller_profile_documents\n         SET status = 'UPLOADED'::seller_profile_document_status\n         WHERE profile_id = $1\n           AND id = $2\n           AND status NOT IN (\n               'CLASSIFIED'::seller_profile_document_status,\n               'EXTRACTED'::seller_profile_document_status,\n               'FAILED'::seller_profile_document_status\n           )\n         RETURNING id AS \"id!: Uuid\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2e5542df5a0011d34692b2215d3ee8a9b42ac101fc55435af382ac82a795c453"
+}

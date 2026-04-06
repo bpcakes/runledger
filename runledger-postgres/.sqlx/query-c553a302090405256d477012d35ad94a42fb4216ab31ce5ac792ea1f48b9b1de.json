@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            id,\n            profile_id,\n            organization_id,\n            workflow_run_id,\n            trigger,\n            status::text AS \"status!\",\n            requested_by_user_id,\n            metadata\n         FROM seller_profile_research_runs\n         WHERE id = $1\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "profile_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "workflow_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "trigger",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "requested_by_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "metadata",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "c553a302090405256d477012d35ad94a42fb4216ab31ce5ac792ea1f48b9b1de"
+}

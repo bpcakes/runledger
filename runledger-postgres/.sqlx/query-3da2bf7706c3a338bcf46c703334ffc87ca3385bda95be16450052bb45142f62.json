@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT last_error_code, last_error_message\n         FROM crm_connections\n         WHERE id = $1\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_error_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "last_error_message",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "3da2bf7706c3a338bcf46c703334ffc87ca3385bda95be16450052bb45142f62"
+}

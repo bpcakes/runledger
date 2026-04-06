@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nUPDATE chat_messages m\nSET metadata = $4\nFROM chat_sessions s\nWHERE m.id = $1\n  AND m.session_id = s.id\n  AND s.organization_id = $2\n  AND s.user_id = $3\nRETURNING m.id AS \"id!: Uuid\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dd70571af3ff5c2b9dfee84c71165a07d1faa6d630344e2c5c2a2a6b283a4d2b"
+}

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT add_researched_account($1, $2, $3) AS \"researched_account_id!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "researched_account_id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a8e3616c1f29ae4c55c4c376ec8051cc572d1c98a9d3feaf8882a96914e4b930"
+}

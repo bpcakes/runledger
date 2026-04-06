@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT idempotency_key AS \"idempotency_key!: String\"\n             FROM job_queue\n             WHERE job_type = 'crm.sync.accounts'\n               AND organization_id = $1\n               AND payload->>'crm_connection_id' = $2\n               AND idempotency_key IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "idempotency_key!: String",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "c8d04e7b6bdb740d92b136eadf851fe0ae5718e2550957f3eec700de61826709"
+}

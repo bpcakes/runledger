@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            id,\n            step_key,\n            execution_kind::text AS \"execution_kind!\",\n            job_type,\n            payload\n         FROM workflow_steps\n         WHERE workflow_run_id = $1\n         ORDER BY created_at ASC, step_key ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "step_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "execution_kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "payload",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true,
+      false
+    ]
+  },
+  "hash": "a06fe6d17445dfee3db64be721e09f70bf45607809e59b5f7eff6864519ced29"
+}

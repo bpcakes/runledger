@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nINSERT INTO account_research_people_discovery_polls (\n    organization_id,\n    pipeline_run_id,\n    poll_job_id,\n    robot_id,\n    initial_person_chunk_ids\n)\nVALUES (\n    $1,\n    $2,\n    $3,\n    $4,\n    $5\n)\nON CONFLICT (organization_id, pipeline_run_id)\nDO UPDATE\nSET\n    poll_job_id = EXCLUDED.poll_job_id,\n    robot_id = COALESCE(EXCLUDED.robot_id, account_research_people_discovery_polls.robot_id),\n    initial_person_chunk_ids = EXCLUDED.initial_person_chunk_ids,\n    updated_at = now()\nRETURNING\n    organization_id,\n    pipeline_run_id,\n    poll_job_id,\n    robot_id,\n    initial_person_chunk_ids,\n    created_at,\n    updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "pipeline_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "poll_job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "robot_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "initial_person_chunk_ids",
+        "type_info": "UuidArray"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6e70ac870b25c33b49069678a1561a104bf79c5a6bbec138d539df6bc3f838f5"
+}

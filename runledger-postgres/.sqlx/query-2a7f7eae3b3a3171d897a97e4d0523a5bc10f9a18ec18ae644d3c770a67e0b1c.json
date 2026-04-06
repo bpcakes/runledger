@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT get_seller_profile_canonical_json($1) AS \"canonical_json: JsonValue\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "canonical_json: JsonValue",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2a7f7eae3b3a3171d897a97e4d0523a5bc10f9a18ec18ae644d3c770a67e0b1c"
+}

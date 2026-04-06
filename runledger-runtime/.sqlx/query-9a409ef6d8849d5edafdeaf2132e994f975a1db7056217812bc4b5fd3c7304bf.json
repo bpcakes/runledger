@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE accounts\n         SET status = 'INACTIVE',\n             synced_at = COALESCE($2, now()),\n             updated_at = now()\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9a409ef6d8849d5edafdeaf2132e994f975a1db7056217812bc4b5fd3c7304bf"
+}

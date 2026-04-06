@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            status::text AS \"status!\",\n            last_error_code,\n            last_error_message\n         FROM crm_connections\n         WHERE organization_id = $1\n           AND id = $2\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "last_error_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "last_error_message",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "354bfd641526d924112234d92ad1431c9be1bd7a8c882f4fec1c4dc9bfa74410"
+}

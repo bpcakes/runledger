@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM content_feedback\n         WHERE organization_id = $1\n           AND user_id = $2\n           AND content_id = $3\n           AND content_type = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "11568636c47644c32acb5c9ed2fae02a57332afe27a4d2b927af3983ae913f3a"
+}

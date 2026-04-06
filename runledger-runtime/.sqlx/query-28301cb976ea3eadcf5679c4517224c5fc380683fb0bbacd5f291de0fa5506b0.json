@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_attempts\n         SET finished_at = now()\n         WHERE job_id = $1\n           AND run_number = $2\n           AND attempt = $3\n           AND finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "28301cb976ea3eadcf5679c4517224c5fc380683fb0bbacd5f291de0fa5506b0"
+}

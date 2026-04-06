@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO crm_connections (organization_id, user_id, status)\n             VALUES ($1, $2, $3::crm_connection_status)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        {
+          "Custom": {
+            "name": "crm_connection_status",
+            "kind": {
+              "Enum": [
+                "CONNECTED",
+                "DISCONNECTED"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "63136bf80c66b29c7ff4a6c9d4dbccd1dd82369f8931d0f5459f917cc1c84632"
+}

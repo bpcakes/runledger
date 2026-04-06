@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_schedules\n         SET last_fired_at = $2,\n             next_fire_at = $3,\n             updated_at = now()\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "32fb80aa7d289622f7a9725756d2b085e74c4f33925b7c2131e38007b4bff4c1"
+}

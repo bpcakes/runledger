@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,\n                external_id,\n                name,\n                city,\n                country,\n                industry,\n                employee_count,\n                revenue::double precision AS \"revenue?: f64\",\n                linkedin_url,\n                website,\n                logo_storage_key\n         FROM accounts\n         WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "external_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "city",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "country",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "industry",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "employee_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "revenue?: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "linkedin_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "website",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "logo_storage_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      null,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "372ea8d2acd5b102d79bb54679c2b82e03e053a4a17179de47ce9b405210e962"
+}

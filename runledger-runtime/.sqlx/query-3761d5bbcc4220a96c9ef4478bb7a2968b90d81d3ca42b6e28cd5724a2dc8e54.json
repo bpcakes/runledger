@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH defaults AS (\n            SELECT\n                jd.default_priority,\n                jd.max_attempts,\n                jd.default_timeout_seconds\n            FROM job_definitions jd\n            WHERE jd.job_type = $1\n              AND jd.is_enabled = true\n         )\n         INSERT INTO job_queue (\n            job_type,\n            organization_id,\n            payload,\n            priority,\n            max_attempts,\n            timeout_seconds,\n            next_run_at,\n            idempotency_key,\n            stage\n         )\n         SELECT\n            $1,\n            $2,\n            $3::jsonb,\n            COALESCE($4, d.default_priority),\n            COALESCE($5, d.max_attempts),\n            COALESCE($6, d.default_timeout_seconds),\n            COALESCE($7, now()),\n            $8,\n            $9\n         FROM defaults d\n         RETURNING id, run_number",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "run_number",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Jsonb",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "3761d5bbcc4220a96c9ef4478bb7a2968b90d81d3ca42b6e28cd5724a2dc8e54"
+}

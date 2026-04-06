@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE prompt_versions\n         SET stage = 'PRODUCTION'::prompt_stage\n         WHERE prompt_id = $1\n           AND id = $2\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a721f92e60ff368babfed8263c14fd7c7f355a7a43c77015b254406e1ffa9e88"
+}

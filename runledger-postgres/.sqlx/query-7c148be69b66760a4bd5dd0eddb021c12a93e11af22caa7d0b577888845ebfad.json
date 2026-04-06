@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_dead_letters (\n            job_id,\n            job_type,\n            organization_id,\n            run_number,\n            attempt,\n            error_code,\n            error_message,\n            payload_snapshot,\n            checkpoint_snapshot,\n            failed_at\n         )\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, now())\n             ON CONFLICT (job_id)\n             DO UPDATE\n                SET run_number = EXCLUDED.run_number,\n                    attempt = EXCLUDED.attempt,\n                    error_code = EXCLUDED.error_code,\n                    error_message = EXCLUDED.error_message,\n                    payload_snapshot = EXCLUDED.payload_snapshot,\n                    checkpoint_snapshot = EXCLUDED.checkpoint_snapshot,\n                    failed_at = EXCLUDED.failed_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7c148be69b66760a4bd5dd0eddb021c12a93e11af22caa7d0b577888845ebfad"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE seller_profile_research_runs\n         SET status = 'RUNNING'::seller_profile_research_run_status,\n             trigger = $2,\n             requested_by_user_id = $3,\n             requested_at = to_timestamp(($4::double precision) / 1000.0),\n             started_at = COALESCE(started_at, now()),\n             finished_at = NULL,\n             error_code = NULL,\n             error_message = NULL,\n             metadata = COALESCE(metadata, '{}'::jsonb) || $5::jsonb\n         WHERE id = $1\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Float8",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d3ac03183f8ffc21022ede8b96cb2bc5ed44ffcdd8b7e8181f37d0e93c9ee9eb"
+}

@@ -1,0 +1,173 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            lt.id,\n            lt.job_id,\n            lt.run_number,\n            lt.attempt,\n            lt.organization_id,\n            lt.workflow_run_id,\n            lt.level,\n            lt.target,\n            lt.message,\n            lt.phase,\n            lt.llm_provider,\n            lt.llm_context,\n            lt.llm_attempt,\n            lt.max_output_tokens,\n            lt.will_retry AS \"will_retry!\",\n            lt.model,\n            lt.stop_reason,\n            lt.error_kind,\n            lt.error_message,\n            lt.request_json,\n            lt.response_json,\n            lt.output_json,\n            lt.raw_response_json,\n            lt.output_text,\n            lt.payload,\n            lt.occurred_at\n         FROM llm_traces lt\n         WHERE lt.id = $1\n           AND ($2::uuid IS NULL OR lt.organization_id = $2)\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "run_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "attempt",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "workflow_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "level",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "phase",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "llm_provider",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "llm_context",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "llm_attempt",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "max_output_tokens",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 14,
+        "name": "will_retry!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 15,
+        "name": "model",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
+        "name": "stop_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "error_kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 18,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 19,
+        "name": "request_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 20,
+        "name": "response_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 21,
+        "name": "output_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 22,
+        "name": "raw_response_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 23,
+        "name": "output_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 24,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 25,
+        "name": "occurred_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "41ae2bd895c8714d81bac65a46c88d509458aeff9ee891e14ef750e7e8da7d37"
+}

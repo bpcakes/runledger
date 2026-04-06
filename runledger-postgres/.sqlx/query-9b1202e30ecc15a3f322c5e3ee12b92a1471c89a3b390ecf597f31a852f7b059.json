@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            a.id AS \"id!\",\n            a.name AS \"name!\",\n            a.industry,\n            a.city,\n            a.country,\n            a.employee_count,\n            a.revenue::double precision AS \"revenue?: f64\",\n            a.linkedin_url,\n            a.website,\n            a.logo_storage_key\n         FROM organization_accounts oa\n         INNER JOIN accounts a ON a.id = oa.account_id\n         WHERE oa.organization_id = $1\n           AND oa.account_id = $2\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "industry",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "city",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "country",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "employee_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "revenue?: f64",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "linkedin_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "website",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "logo_storage_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      null,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "9b1202e30ecc15a3f322c5e3ee12b92a1471c89a3b390ecf597f31a852f7b059"
+}

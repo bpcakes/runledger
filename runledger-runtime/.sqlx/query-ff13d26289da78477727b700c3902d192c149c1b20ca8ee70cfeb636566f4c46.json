@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            job_type,\n            version,\n            max_attempts,\n            default_timeout_seconds,\n            default_priority,\n            is_enabled,\n            created_at,\n            updated_at\n         FROM job_definitions\n         WHERE job_type = $1\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "default_timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "default_priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ff13d26289da78477727b700c3902d192c149c1b20ca8ee70cfeb636566f4c46"
+}

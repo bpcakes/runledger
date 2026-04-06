@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "RELEASE SAVEPOINT materialize_due_schedule",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "33f9c5de23f037fc5ef5e11d883346af766599914469bfec4e580bf7348a7c46"
+}

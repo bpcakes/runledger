@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO seller_profile_documents (\n                id,\n                profile_id,\n                uploaded_by_user_id,\n                file_name,\n                mime_type,\n                storage_key,\n                status\n            )\n            VALUES (\n                $1,\n                $2,\n                $3,\n                'seller-profile-notes.pdf',\n                'application/pdf',\n                'documents/platform-debug/test.pdf',\n                'EXTRACTED'::seller_profile_document_status\n            )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "51b16d69f9258f9359cb02565051f594df35a3c121735391f0049b368815e7de"
+}

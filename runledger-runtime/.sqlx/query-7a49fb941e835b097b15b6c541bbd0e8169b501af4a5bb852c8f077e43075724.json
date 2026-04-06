@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT organization_id AS \"organization_id!: Uuid\"\n         FROM organization_accounts\n         WHERE account_id = $1\n         ORDER BY organization_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "organization_id!: Uuid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7a49fb941e835b097b15b6c541bbd0e8169b501af4a5bb852c8f077e43075724"
+}

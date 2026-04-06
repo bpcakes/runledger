@@ -1,0 +1,114 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH current_user_connections AS (\n            SELECT\n                conn.organization_id,\n                conn.provider,\n                conn.crm_tenant_id,\n                public.try_canonicalize_salesforce_id18(conn.crm_user_id) AS canonical_crm_user_id\n            FROM crm_connections conn\n            WHERE conn.organization_id = $1\n              AND conn.user_id = $2\n              AND conn.status = 'CONNECTED'\n              AND (\n                    public.try_canonicalize_salesforce_id18(conn.crm_user_id) IS NOT NULL\n                    OR EXISTS (\n                        SELECT 1\n                        FROM crm_user_mappings mapping\n                        WHERE mapping.organization_id = conn.organization_id\n                          AND mapping.user_id = conn.user_id\n                          AND mapping.provider = conn.provider\n                          AND mapping.crm_tenant_id = conn.crm_tenant_id\n                    )\n              )\n         ),\n         current_user_canonical_owner_ids AS (\n            SELECT DISTINCT\n                current_conn.organization_id,\n                current_conn.provider,\n                current_conn.crm_tenant_id,\n                current_conn.canonical_crm_user_id AS canonical_owner_id\n            FROM current_user_connections current_conn\n            WHERE current_conn.canonical_crm_user_id IS NOT NULL\n\n            UNION\n\n            SELECT DISTINCT\n                mapping.organization_id,\n                mapping.provider,\n                mapping.crm_tenant_id,\n                public.try_canonicalize_salesforce_id18(principal.external_principal_id)\n                    AS canonical_owner_id\n            FROM crm_user_mappings mapping\n            INNER JOIN current_user_connections current_conn\n               ON current_conn.organization_id = mapping.organization_id\n              AND current_conn.provider = mapping.provider\n              AND current_conn.crm_tenant_id = mapping.crm_tenant_id\n            INNER JOIN crm_principals principal\n               ON principal.organization_id = mapping.organization_id\n              AND principal.id = mapping.crm_principal_id\n            WHERE mapping.organization_id = $1\n              AND mapping.user_id = $2\n              AND principal.external_principal_id ~ '^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$'\n              AND public.try_canonicalize_salesforce_id18(principal.external_principal_id) IS NOT NULL\n         ),\n         owned_principals_for_user AS (\n            SELECT DISTINCT\n                mapping.organization_id,\n                mapping.provider,\n                mapping.crm_tenant_id,\n                mapping.crm_principal_id\n            FROM crm_user_mappings mapping\n            INNER JOIN current_user_connections current_conn\n               ON current_conn.organization_id = mapping.organization_id\n              AND current_conn.provider = mapping.provider\n              AND current_conn.crm_tenant_id = mapping.crm_tenant_id\n            INNER JOIN crm_principals principal\n               ON principal.organization_id = mapping.organization_id\n              AND principal.id = mapping.crm_principal_id\n            WHERE mapping.organization_id = $1\n              AND mapping.user_id = $2\n              AND principal.external_principal_id ~ '^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$'\n              AND public.try_canonicalize_salesforce_id18(principal.external_principal_id) IS NOT NULL\n\n            UNION\n\n            SELECT DISTINCT\n                principal.organization_id,\n                principal.provider,\n                principal.crm_tenant_id,\n                principal.id AS crm_principal_id\n            FROM current_user_connections current_conn\n            INNER JOIN crm_principals principal\n               ON principal.organization_id = current_conn.organization_id\n              AND principal.provider = current_conn.provider\n              AND principal.crm_tenant_id = current_conn.crm_tenant_id\n              AND (\n                    principal.external_principal_id = current_conn.canonical_crm_user_id\n                    OR (\n                        principal.external_principal_id ~ '^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$'\n                        AND public.try_canonicalize_salesforce_id18(principal.external_principal_id)\n                            = current_conn.canonical_crm_user_id\n                    )\n              )\n         ),\n         ambiguous_raw_owner_ids AS (\n            SELECT\n                mapping.organization_id,\n                mapping.provider,\n                mapping.crm_tenant_id,\n                public.try_canonicalize_salesforce_id18(principal.external_principal_id)\n                    AS canonical_owner_id\n            FROM crm_user_mappings mapping\n            INNER JOIN current_user_connections current_conn\n               ON current_conn.organization_id = mapping.organization_id\n              AND current_conn.provider = mapping.provider\n              AND current_conn.crm_tenant_id = mapping.crm_tenant_id\n            INNER JOIN crm_connections mapped_conn\n               ON mapped_conn.organization_id = mapping.organization_id\n              AND mapped_conn.user_id = mapping.user_id\n              AND mapped_conn.provider = mapping.provider\n              AND mapped_conn.crm_tenant_id = mapping.crm_tenant_id\n              AND mapped_conn.status = 'CONNECTED'\n            INNER JOIN crm_principals principal\n               ON principal.organization_id = mapping.organization_id\n              AND principal.id = mapping.crm_principal_id\n            WHERE mapping.organization_id = $1\n              AND principal.external_principal_id ~ '^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$'\n              AND public.try_canonicalize_salesforce_id18(principal.external_principal_id) IS NOT NULL\n            GROUP BY\n                mapping.organization_id,\n                mapping.provider,\n                mapping.crm_tenant_id,\n                public.try_canonicalize_salesforce_id18(principal.external_principal_id)\n            HAVING COUNT(DISTINCT mapping.user_id) > 1\n         ),\n         candidate_account_sources AS (\n            SELECT\n                src.organization_id,\n                src.account_id,\n                src.provider,\n                src.crm_tenant_id,\n                assignment.id AS assignment_id,\n                assignment.crm_principal_id AS assignment_crm_principal_id,\n                raw.id AS raw_record_id,\n                public.try_canonicalize_salesforce_id18(raw.payload ->> 'OwnerId')\n                    AS raw_owner_canonical_id\n            FROM account_sources src\n            LEFT JOIN crm_account_assignments assignment\n              ON assignment.organization_id = src.organization_id\n             AND assignment.account_source_id = src.id\n             AND assignment.role = 'PRIMARY_OWNER'\n            LEFT JOIN crm_raw_records raw\n              ON raw.organization_id = src.organization_id\n             AND raw.id = src.latest_raw_record_id\n            WHERE src.organization_id = $1\n              AND (\n                    src.latest_raw_record_id IS NULL\n                    OR COALESCE(raw.source_deleted, false) = false\n              )\n         ),\n         mine_account_ids AS (\n            SELECT DISTINCT\n                source.organization_id,\n                source.account_id\n            FROM candidate_account_sources source\n            LEFT JOIN owned_principals_for_user owned_principal\n              ON owned_principal.organization_id = source.organization_id\n             AND owned_principal.provider = source.provider\n             AND owned_principal.crm_tenant_id = source.crm_tenant_id\n             AND owned_principal.crm_principal_id = source.assignment_crm_principal_id\n            LEFT JOIN current_user_canonical_owner_ids owner_id\n              ON owner_id.organization_id = source.organization_id\n             AND owner_id.provider = source.provider\n             AND owner_id.crm_tenant_id = source.crm_tenant_id\n             AND owner_id.canonical_owner_id = source.raw_owner_canonical_id\n            LEFT JOIN ambiguous_raw_owner_ids ambiguous_owner\n              ON ambiguous_owner.organization_id = source.organization_id\n             AND ambiguous_owner.provider = source.provider\n             AND ambiguous_owner.crm_tenant_id = source.crm_tenant_id\n             AND ambiguous_owner.canonical_owner_id = source.raw_owner_canonical_id\n            WHERE (\n                    source.assignment_id IS NOT NULL\n                    AND owned_principal.crm_principal_id IS NOT NULL\n                  )\n               OR (\n                    source.assignment_id IS NULL\n                    AND source.raw_record_id IS NOT NULL\n                    AND source.raw_owner_canonical_id IS NOT NULL\n                    AND owner_id.canonical_owner_id IS NOT NULL\n                    AND ambiguous_owner.canonical_owner_id IS NULL\n               )\n         )\n         SELECT\n            a.id AS \"id!\",\n            a.name AS \"name!\",\n            COALESCE(oa.status::text, a.status::text) AS status,\n            COALESCE(oa.lifecycle_stage::text, a.lifecycle_stage::text) AS lifecycle_stage,\n            COALESCE(\n                a.industry,\n                NULLIF(btrim(brief_narrative.content #>> '{info_grid,industry}'), '')\n            ) AS industry,\n            a.city,\n            a.country,\n            COALESCE(\n                a.employee_count,\n                CASE\n                    WHEN NULLIF(replace(btrim(brief_narrative.content #>> '{info_grid,employees}'), ',', ''), '') ~ '^[0-9]+$'\n                     AND NULLIF(replace(btrim(brief_narrative.content #>> '{info_grid,employees}'), ',', ''), '')::numeric <= 2147483647::numeric THEN\n                        NULLIF(replace(btrim(brief_narrative.content #>> '{info_grid,employees}'), ',', ''), '')::integer\n                    ELSE NULL\n                END\n            ) AS \"employee_count?: i32\",\n            a.logo_storage_key,\n            a.website,\n            COALESCE(latest_run.status::text, 'PENDING') AS \"research_status!\",\n            latest_run.current_stage::text AS research_current_stage,\n            CASE\n                WHEN btrim(snapshot_narrative.content ->> 'fit_score') ~ '^-?[0-9]+(\\.[0-9]+)?$'\n                 AND btrim(snapshot_narrative.content ->> 'fit_score')::numeric BETWEEN -2147483648::numeric AND 2147483647::numeric THEN\n                    ROUND(btrim(snapshot_narrative.content ->> 'fit_score')::numeric)::integer\n                ELSE NULL\n            END AS \"fit_score?: i32\",\n            CASE\n                WHEN (\n                    btrim(snapshot_narrative.content ->> 'fit_score') ~ '^-?[0-9]+(\\.[0-9]+)?$'\n                    AND btrim(snapshot_narrative.content ->> 'fit_score')::numeric BETWEEN -2147483648::numeric AND 2147483647::numeric\n                ) THEN\n                    NULLIF(\n                        btrim(COALESCE(\n                            snapshot_narrative.content ->> 'fit_label',\n                            snapshot_narrative.content ->> 'fitLabel'\n                        )),\n                        ''\n                    )\n                ELSE\n                    NULLIF(\n                        btrim(COALESCE(\n                            snapshot_narrative.content ->> 'fit_label',\n                            snapshot_narrative.content ->> 'fitLabel'\n                        )),\n                        ''\n                    )\n            END AS fit_label,\n            (af.id IS NOT NULL) AS \"is_favorited!\",\n            GREATEST(ora.updated_at, oa.updated_at, a.updated_at) AS \"updated_at!\"\n         FROM organization_researched_accounts ora\n         INNER JOIN organization_accounts oa\n            ON oa.organization_id = ora.organization_id\n           AND oa.account_id = ora.account_id\n         INNER JOIN accounts a ON a.id = oa.account_id\n         LEFT JOIN account_narratives brief_narrative\n            ON brief_narrative.organization_id = ora.organization_id\n           AND brief_narrative.account_id = ora.account_id\n           AND brief_narrative.user_id IS NULL\n           AND brief_narrative.variant = 'BRIEF'::account_narrative_variant\n         LEFT JOIN LATERAL (\n            SELECT content\n            FROM account_narratives\n            WHERE organization_id = ora.organization_id\n              AND account_id = ora.account_id\n              AND user_id IS NULL\n              AND variant = 'SNAPSHOT'::account_narrative_variant\n            ORDER BY updated_at DESC, id DESC\n            LIMIT 1\n         ) snapshot_narrative ON TRUE\n         LEFT JOIN account_favorites af\n            ON af.organization_id = ora.organization_id\n           AND af.account_id = ora.account_id\n           AND af.user_id = $2\n         LEFT JOIN LATERAL (\n            SELECT\n                run.status,\n                run.current_stage\n            FROM account_research_pipeline_runs run\n            WHERE run.researched_account_id = ora.id\n            ORDER BY run.created_at DESC\n            LIMIT 1\n         ) latest_run ON TRUE\n         WHERE ora.organization_id = $1\n           AND ora.removed_at IS NULL\n           AND (\n                NOT $3\n                OR EXISTS (\n                    SELECT 1\n                    FROM mine_account_ids mine\n                    WHERE mine.organization_id = ora.organization_id\n                      AND mine.account_id = ora.account_id\n                )\n           )\n         ORDER BY lower(a.name) ASC, a.name ASC, a.id ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "lifecycle_stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "industry",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "city",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "country",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "employee_count?: i32",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "logo_storage_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "website",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "research_status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "research_current_stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "fit_score?: i32",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "fit_label",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "is_favorited!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 15,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      true,
+      true,
+      null,
+      true,
+      true,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "259db8c2258d252dd3ad6a39b67a5ce1db33885875781c22c38fab5efbe72e8d"
+}

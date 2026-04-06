@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT account_id\n         FROM account_sources\n         WHERE organization_id = $1\n           AND provider = $2::text::crm_provider\n           AND crm_tenant_id = $3\n           AND external_account_id = $4\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "account_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "07a2cae3102002558c179f2a23ac18f1cb46edd08f480af59415c9b3d1e6f9de"
+}

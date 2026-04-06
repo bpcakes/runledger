@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    total AS \"total!\",\n    rows_json AS \"rows_json!: JsonValue\"\nFROM get_admin_researched_accounts_rows_page_data($1, $2, $3, $4, $5, $6)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "rows_json!: JsonValue",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "457ddf9105151bb06eb500fc2e2042b34645d04294644297b4fb15b8dfa8779e"
+}

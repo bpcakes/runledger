@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO crm_account_assignments (\n            organization_id,\n            account_source_id,\n            crm_principal_id,\n            role,\n            latest_raw_record_id,\n            synced_at\n         )\n         VALUES ($1, $2, $3, 'PRIMARY_OWNER', $4, COALESCE($5, now()))\n         ON CONFLICT (organization_id, account_source_id, role)\n         DO UPDATE\n            SET crm_principal_id = EXCLUDED.crm_principal_id,\n                latest_raw_record_id = EXCLUDED.latest_raw_record_id,\n                synced_at = EXCLUDED.synced_at,\n                updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f05e817e4c2561e0f2fb69af12719b89c74c9ece326b78f5a2715bfa485203b6"
+}

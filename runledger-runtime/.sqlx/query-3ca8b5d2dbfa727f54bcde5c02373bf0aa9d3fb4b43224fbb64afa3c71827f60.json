@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_events (job_id, run_number, attempt, event_type, payload)\n         VALUES (\n            $1,\n            $2,\n            $3,\n            'FAILED',\n            jsonb_build_object('kind', $4::text, 'error_code', $5::text, 'error_message', $6::text)\n         )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3ca8b5d2dbfa727f54bcde5c02373bf0aa9d3fb4b43224fbb64afa3c71827f60"
+}

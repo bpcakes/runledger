@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            id,\n            organization_id,\n            user_id,\n            crm_tenant_id AS \"crm_tenant_id!\",\n            access_token AS \"access_token!\",\n            token_type AS \"token_type!\",\n            instance_url AS \"instance_url!\",\n            status::text AS \"status!\"\n         FROM crm_connections\n         WHERE organization_id = $1\n           AND id = $2\n           AND provider = 'SALESFORCE'\n           AND status = 'CONNECTED'\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "crm_tenant_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "access_token!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "token_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "instance_url!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "status!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "fbff5a9764fcd6729d8a4a4ff829fa10aebe240e7a3fb5c78f8b9dab57edca2a"
+}

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_events (\n            job_id,\n            run_number,\n            attempt,\n            event_type,\n            progress_done,\n            progress_total,\n            payload\n         )\n         VALUES ($1, $2, $3, 'PROGRESS', $4, $5, '{}'::jsonb)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "04980bcdb5fcac8c27e43fb91bbef570032571757b6364379814729fa9c32acd"
+}

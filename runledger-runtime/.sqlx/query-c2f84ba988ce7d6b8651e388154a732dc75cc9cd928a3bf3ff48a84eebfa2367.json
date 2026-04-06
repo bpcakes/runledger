@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nDELETE FROM account_research_chunks\nWHERE organization_id = $1\n  AND account_id = $2\n  AND data_type = 'SIGNAL'::account_research_chunk_data_type\n  AND source_url = $3\nRETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c2f84ba988ce7d6b8651e388154a732dc75cc9cd928a3bf3ff48a84eebfa2367"
+}

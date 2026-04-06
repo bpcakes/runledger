@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT signal_type\nFROM account_signal_feed_items\nWHERE signal_chunk_id = $1\nLIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "signal_type",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "38c008ebacc06ee12231318b0f11824ef24ce5d00834ac040598540315d96320"
+}

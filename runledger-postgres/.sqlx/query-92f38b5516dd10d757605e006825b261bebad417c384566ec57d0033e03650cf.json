@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nINSERT INTO organization_account_signal_links (\n    organization_id,\n    account_id,\n    signal_id,\n    relationship\n)\nVALUES (\n    $1,\n    $2,\n    $3,\n    'primary'\n)\nON CONFLICT (organization_id, account_id, signal_id) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "92f38b5516dd10d757605e006825b261bebad417c384566ec57d0033e03650cf"
+}

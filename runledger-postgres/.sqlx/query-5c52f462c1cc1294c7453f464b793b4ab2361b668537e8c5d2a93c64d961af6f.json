@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id,\n                COALESCE(u.email, '') AS \"email!\",\n                u.name,\n                u.platform_role::text AS \"platform_role!\"\n         FROM oauth_accounts oa\n         JOIN users u\n           ON u.id = oa.user_id\n         WHERE oa.provider = ($1::text)::oauth_provider\n           AND oa.provider_user_id = $2\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "platform_role!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      true,
+      null
+    ]
+  },
+  "hash": "5c52f462c1cc1294c7453f464b793b4ab2361b668537e8c5d2a93c64d961af6f"
+}

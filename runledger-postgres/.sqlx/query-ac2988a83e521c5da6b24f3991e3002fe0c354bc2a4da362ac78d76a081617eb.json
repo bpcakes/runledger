@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT provider_user_id,\n                provider_tenant_id,\n                provider_object_id,\n                email,\n                access_token,\n                refresh_token,\n                id_token\n         FROM oauth_accounts\n         WHERE user_id = $1\n           AND provider = 'MICROSOFT'::oauth_provider",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "provider_user_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "provider_tenant_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "provider_object_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "access_token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "refresh_token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "id_token",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "ac2988a83e521c5da6b24f3991e3002fe0c354bc2a4da362ac78d76a081617eb"
+}

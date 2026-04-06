@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO account_narratives (\n            account_id,\n            organization_id,\n            user_id,\n            variant,\n            content,\n            updated_at\n         )\n         VALUES\n         ($1, $2, NULL, 'SNAPSHOT', $3, now() - interval '2 minutes'),\n         ($1, $2, NULL, 'SNAPSHOT', $4, now() - interval '1 minute')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e24e16bb4fa1f5bfdb040dd1860aeddd474b4251627c7e794bfed5278c63a10e"
+}

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status::text AS \"status!\"\n         FROM workflow_runs\n         WHERE id = $1\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "241354484d6ffc63b8f548c9e4b230d6ca57484e1ad2137cb21b613e0d28fec4"
+}

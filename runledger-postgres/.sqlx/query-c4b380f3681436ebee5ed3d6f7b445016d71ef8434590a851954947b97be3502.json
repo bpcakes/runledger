@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            p.id AS \"prompt_id!\",\n            pv.version AS \"version!\",\n            pv.content AS \"content!\"\n         FROM prompts p\n         INNER JOIN prompt_versions pv ON pv.prompt_id = p.id\n         WHERE p.slug = $1\n           AND pv.stage = 'PRODUCTION'::prompt_stage\n         ORDER BY pv.version DESC\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "prompt_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "version!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "content!",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c4b380f3681436ebee5ed3d6f7b445016d71ef8434590a851954947b97be3502"
+}

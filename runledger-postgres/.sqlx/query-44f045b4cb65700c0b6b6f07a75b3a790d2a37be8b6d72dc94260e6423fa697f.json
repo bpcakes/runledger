@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,\n                organization_id,\n                COALESCE(email, '') AS \"email!\",\n                invited_role::text AS \"invited_role!\",\n                invitation_type::text AS \"invitation_type!\",\n                target_user_id\n         FROM organization_invitations\n         WHERE token_hash = $1\n           AND status = 'PENDING'\n           AND expires_at > now()\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "email!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "invited_role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "invitation_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "target_user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      true
+    ]
+  },
+  "hash": "44f045b4cb65700c0b6b6f07a75b3a790d2a37be8b6d72dc94260e6423fa697f"
+}

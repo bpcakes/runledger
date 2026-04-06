@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT dependent_step_id, release_mode::text AS \"release_mode!\"\n             FROM workflow_step_dependencies\n             WHERE prerequisite_step_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "dependent_step_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "release_mode!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "519facf429bd0023ab6a12dfa3cad753645c77862e93637131dae8a13f6cfdfe"
+}

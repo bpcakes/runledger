@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n    plan_tier::text AS \"plan_tier!\"\nFROM organization_billing\nWHERE organization_id = $1\nLIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "plan_tier!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fc930d5a08d0383f9b7b1049794008f46b61e0165da68d915e1daf892c203012"
+}

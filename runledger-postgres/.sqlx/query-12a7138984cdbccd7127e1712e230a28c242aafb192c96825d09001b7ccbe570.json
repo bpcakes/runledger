@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*)::bigint AS \"count!\"\n         FROM chat_sessions\n         WHERE type = 'ACCOUNT_CHAT'::chat_session_type",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "12a7138984cdbccd7127e1712e230a28c242aafb192c96825d09001b7ccbe570"
+}

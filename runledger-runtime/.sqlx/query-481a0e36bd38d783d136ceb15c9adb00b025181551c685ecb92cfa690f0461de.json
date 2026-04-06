@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO seller_profile_field_sources (\n                profile_id,\n                field_path,\n                source_type,\n                source_confidence,\n                created_by_user_id,\n                metadata,\n                created_at,\n                updated_at\n            )\n            SELECT\n                $1,\n                'icpNotes[' || gs::text || ']',\n                'MANUAL'::seller_profile_source_type,\n                'HIGH'::seller_profile_source_confidence,\n                $2,\n                jsonb_build_object('seed', gs),\n                now() - make_interval(mins => gs::int),\n                now() - make_interval(mins => gs::int)\n            FROM generate_series(1, 210) gs",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "481a0e36bd38d783d136ceb15c9adb00b025181551c685ecb92cfa690f0461de"
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM job_attempts\n         WHERE job_id = $1\n           AND run_number = $2\n           AND attempt = $3\n           AND claim_origin = $4\n           AND execution_started_persisted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2ea094b05eccded8c2d5d622ced5561a19e07837ac357143d6e7acd63db929d0"
+}

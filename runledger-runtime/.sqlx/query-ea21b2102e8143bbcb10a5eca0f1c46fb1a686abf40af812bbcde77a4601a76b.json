@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            jq.status::text AS \"status?\",\n            jq.worker_id\n         FROM job_queue jq\n         WHERE jq.id = $1\n           AND jq.run_number = $2\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "worker_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null,
+      true
+    ]
+  },
+  "hash": "ea21b2102e8143bbcb10a5eca0f1c46fb1a686abf40af812bbcde77a4601a76b"
+}

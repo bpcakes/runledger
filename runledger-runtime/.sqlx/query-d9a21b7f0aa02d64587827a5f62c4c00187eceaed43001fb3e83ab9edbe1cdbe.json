@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO contact_positions (\n            organization_id,\n            contact_id,\n            company_name,\n            title,\n            account_id\n         )\n         VALUES ($1, $2, $3, $4, $5)\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d9a21b7f0aa02d64587827a5f62c4c00187eceaed43001fb3e83ab9edbe1cdbe"
+}

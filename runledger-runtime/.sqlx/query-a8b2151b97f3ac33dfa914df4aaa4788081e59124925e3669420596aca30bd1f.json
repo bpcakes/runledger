@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SAVEPOINT reaper_row",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "a8b2151b97f3ac33dfa914df4aaa4788081e59124925e3669420596aca30bd1f"
+}

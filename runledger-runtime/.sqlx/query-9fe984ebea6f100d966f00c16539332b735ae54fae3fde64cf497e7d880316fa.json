@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO organization_memberships (\n            organization_id,\n            user_id,\n            role,\n            status,\n            deactivated_at\n         )\n         VALUES (\n            $1,\n            $2,\n            'ADMIN'::user_role,\n            'ACTIVE'::membership_status,\n            NULL\n         )\n         RETURNING role::text AS \"role!\", status::text AS \"status!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "status!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "9fe984ebea6f100d966f00c16539332b735ae54fae3fde64cf497e7d880316fa"
+}
