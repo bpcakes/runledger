@@ -24,3 +24,6 @@
 
 # Cargo local credentials
 /.cargo/credentials.toml
+
+# External consumer smoke harness lockfile
+/smoke/external-consumer/Cargo.lock

@@ -23,6 +23,7 @@ The root workspace manifest is [Cargo.toml](/Users/aa/Documents/runledger/Cargo.
 
 - Rust crates for the Runledger contracts, runtime, and PostgreSQL persistence layer
 - A Runledger-only SQL migration history in [migrations](/Users/aa/Documents/runledger/migrations)
+- A vendored copy of those migrations in [runledger-postgres/migrations](/Users/aa/Documents/runledger/runledger-postgres/migrations) so packaged crates can apply or validate the schema without relying on repo-relative paths
 - Local test support for DB-backed tests using `testcontainers`
 - SQLx offline metadata in `.sqlx/` so the macro-based queries compile without a live database during normal builds
 
@@ -66,6 +67,11 @@ Key capabilities:
 - query operator/admin views over queue and workflow state
 
 The crate assumes the matching Runledger schema has already been migrated into the target database.
+
+For consumer setup there are two supported modes:
+
+- call `runledger_postgres::migrate(&pool)` to apply the bundled schema during startup
+- call `runledger_postgres::ensure_schema_compatible(&pool)` to perform a read-only validation that an existing `_sqlx_migrations` history matches the bundled migrations, with explicit errors for missing history or PostgreSQL query/connectivity failures
 
 ### `runledger-runtime`
 
@@ -141,7 +147,16 @@ The historical standalone migration chain was intentionally collapsed because th
 
 If you already created databases from the older multi-file standalone migration history, treat this baseline as a new-from-scratch schema definition, not as an in-place upgrade path.
 
-Apply these migrations before using `runledger-postgres` or running DB-backed tests.
+The workspace-root migration directory remains the canonical schema source for repo development and review.
+
+For consumers using the published crate:
+
+- `runledger_postgres::MIGRATOR` embeds the vendored `runledger-postgres/migrations/` copy
+- `runledger_postgres::migrate(&pool)` applies those migrations
+- `runledger_postgres::ensure_schema_compatible(&pool)` validates that an existing `_sqlx_migrations` history matches them without running DDL and returns Runledger-specific errors for missing history, incompatible history, or PostgreSQL query/connectivity failures
+- `runledger-postgres/build.rs` fails local builds if the vendored crate copy drifts from the canonical workspace-root `migrations/` directory
+
+Apply these migrations, or call `runledger_postgres::migrate(&pool)`, before using `runledger-postgres` or running DB-backed tests.
 
 ## Runtime Configuration
 
@@ -174,6 +189,7 @@ cargo test --workspace --no-run
 cargo test -p runledger-core
 cargo test -p runledger-postgres
 cargo test -p runledger-runtime
+./scripts/run-external-consumer-smoke.sh
 ```
 
 The standalone workspace has been validated with:
@@ -205,6 +221,7 @@ What the script does:
 
 - regenerates the workspace root `.sqlx/` cache
 - syncs that cache into `runledger-postgres/.sqlx/` and `runledger-runtime/.sqlx/`
+- syncs the workspace-root `migrations/` directory into `runledger-postgres/migrations/`
 - runs `cargo check --workspace`
 - confirms the publishable crate tarballs include their per-crate SQLx cache
 
@@ -239,6 +256,19 @@ The DB-backed tests:
 - create isolated ephemeral databases per test
 - apply the local Runledger migrations
 
+The packaged external-consumer smoke test:
+
+- packages `runledger-core`, `runledger-postgres`, and `runledger-runtime`
+- extracts those `.crate` archives locally
+- builds a standalone host crate against the packaged manifests via `[patch.crates-io]`
+- runs migrations, starts worker/scheduler/reaper, enqueues jobs, and asserts terminal states
+
+Run it with:
+
+```bash
+./scripts/run-external-consumer-smoke.sh
+```
+
 The default test image is `postgres:18`.
 
 Override it with:
@@ -263,7 +293,7 @@ In particular:
 
 A host application will generally:
 
-1. apply the Runledger migrations to its PostgreSQL database
+1. either call `runledger_postgres::migrate(&pool)` or apply the Runledger migrations with your own deployment tooling
 2. create a shared `sqlx::PgPool`
 3. register concrete handlers in `runledger_runtime::registry::JobRegistry`
 4. start worker, scheduler, and reaper loops with coordinated shutdown
@@ -276,6 +306,8 @@ use runledger_runtime::config::JobsConfig;
 use runledger_runtime::registry::JobRegistry;
 
 let pool = /* sqlx PgPool */;
+runledger_postgres::migrate(&pool).await?;
+
 let mut registry = JobRegistry::new();
 // registry.register(MyHandler);
 

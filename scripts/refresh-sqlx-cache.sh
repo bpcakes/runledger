@@ -35,6 +35,11 @@ for crate_dir in "${PUBLISHABLE_SQLX_CRATES[@]}"; do
   cp -R .sqlx/. "${crate_dir}/.sqlx/"
 done
 
+echo "Syncing workspace migrations into runledger-postgres/migrations..."
+rm -rf runledger-postgres/migrations
+mkdir -p runledger-postgres/migrations
+cp -R migrations/. runledger-postgres/migrations/
+
 echo "Verifying workspace build with refreshed offline metadata..."
 cargo check --workspace
 

@@ -1,10 +1,11 @@
 use super::*;
 use chrono::Duration as ChronoDuration;
-use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use runledger_core::jobs::JobType;
 use runledger_postgres::jobs::upsert_job_definition_tx;
 use serde_json::json;
 use sqlx::types::Uuid;
+
+use crate::test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 
 #[tokio::test]
 async fn materialize_due_schedules_ignores_disabled_job_definition() {

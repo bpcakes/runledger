@@ -23,3 +23,7 @@ pub mod scheduler;
 pub mod worker;
 
 pub use error::{Error, ReaperError, Result, RuntimeError, SchedulerError, WorkerError};
+
+#[cfg(test)]
+#[path = "../test_support.rs"]
+pub(crate) mod test_support;

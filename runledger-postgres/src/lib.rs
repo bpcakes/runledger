@@ -6,22 +6,39 @@
 //! - queueing, claiming, heartbeating, and completing jobs
 //! - listing admin/job log data and runtime configuration
 //! - enqueueing and querying workflow runs and steps
+//! - applying or validating the bundled Runledger schema migrations
 //!
 //! Typical consumers share a [`DbPool`] with `runledger-runtime`, then call the
 //! exported [`jobs`] functions from application setup, admin APIs, or tests.
-//! This crate assumes the matching Runledger schema is already present in the
-//! target database.
+//!
+//! For simple embedding, call [`migrate`] during startup:
+//!
+//! ```rust,no_run
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! let pool = sqlx::PgPool::connect("postgres://localhost/runledger").await?;
+//! runledger_postgres::migrate(&pool).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! For deployments that manage DDL elsewhere, call
+//! [`ensure_schema_compatible`] instead to fail fast if the schema is missing
+//! or drifted. That check is read-only, but it expects the database to retain
+//! SQLx migration history in `_sqlx_migrations` and, when available,
+//! Runledger-owned migration state in `runledger_migration_history`.
 
 use std::fmt;
 
 mod error;
 pub mod jobs;
+mod migrations;
 
 pub use error::{
     FrameworkConstraintSpec, QueryError, QueryErrorCategory, classify_framework_constraint,
     classify_query_error, classify_query_error_with_constraint_classifier,
     has_framework_constraint_classifier,
 };
+pub use migrations::{MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible, migrate};
 
 pub type DbPool = sqlx::PgPool;
 pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;

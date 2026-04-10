@@ -8,6 +8,10 @@ members = [
     "runledger-test-support",
 ]
 
+exclude = [
+    "smoke/external-consumer",
+]
+
 default-members = [
     "runledger-core",
     "runledger-postgres",

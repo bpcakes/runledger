@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use runledger_core::jobs::{
     JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobFailure, JobFailureKind, JobStatus,
     JobType,
@@ -19,6 +18,7 @@ use tokio::sync::watch;
 use tokio::time::{Instant, sleep, timeout};
 
 use crate::registry::{JobHandler, JobRegistry};
+use crate::test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 
 use crate::config::JobsConfig;
 

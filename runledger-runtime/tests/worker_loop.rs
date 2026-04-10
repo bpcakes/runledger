@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use runledger_core::jobs::{JobContext, JobFailure, JobStatus, JobType};
 use runledger_postgres::jobs::{
     JobDefinitionUpsert, JobEnqueue, enqueue_job, get_job_by_id, upsert_job_definition_tx,
@@ -13,6 +12,11 @@ use runledger_runtime::worker::run_worker_loop;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, sleep, timeout};
+
+#[path = "../test_support.rs"]
+mod test_support;
+
+use test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 
 struct BlockingHandler {
     runs: Arc<AtomicUsize>,

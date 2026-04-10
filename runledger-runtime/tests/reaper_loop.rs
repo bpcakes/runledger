@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use runledger_core::jobs::{JobContext, JobDeadLetterInfo, JobFailure, JobStatus, JobType};
 use runledger_postgres::jobs::{
     JobDefinitionUpsert, JobEnqueue, JobProgressUpdate, claim_jobs_for_types, enqueue_job,
@@ -14,6 +13,11 @@ use runledger_runtime::registry::{JobHandler, JobRegistry};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, sleep, timeout};
+
+#[path = "../test_support.rs"]
+mod test_support;
+
+use test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 
 struct ShutdownAwareTerminalHookHandler {
     terminal_starts: Arc<AtomicUsize>,
