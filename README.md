@@ -231,15 +231,29 @@ If the cache and schema drift apart, `cargo check` will fail during macro expans
 
 ## Publishing
 
-Publish the crates in dependency order:
+Prepare a release with the repository script:
 
-1. `cargo publish -p runledger-core`
-2. wait for crates.io to index `runledger-core`
-3. `cargo publish -p runledger-postgres`
-4. wait for crates.io to index `runledger-postgres`
-5. `cargo publish -p runledger-runtime`
+```bash
+./scripts/prepare-release.sh 0.1.1
+```
 
-Before publishing `runledger-postgres` or `runledger-runtime`, run `./scripts/refresh-sqlx-cache.sh` and commit any resulting `.sqlx/` changes.
+The preparation script:
+
+- requires a clean working tree
+- bumps publishable crate versions and root workspace dependency versions
+- refreshes SQLx offline metadata
+- runs workspace tests and the packaged external-consumer smoke test
+- runs `cargo publish --dry-run` for each publishable crate
+
+If publishing manually, run `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres` or `runledger-runtime` and commit any resulting `.sqlx/` changes.
+
+After reviewing and committing the prepared diff, publish with:
+
+```bash
+./scripts/publish-release.sh 0.1.1
+```
+
+The publish script publishes crates in dependency order, waits for crates.io to index each version, creates a `v0.1.1` tag, and pushes the current branch and tag. Set `PUBLISH_REMOTE` to override the git remote used for the final push.
 
 ## Testing
 
