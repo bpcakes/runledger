@@ -16,7 +16,14 @@ crate_version() {
 
 package_crate() {
   local crate="$1"
-  cargo package --allow-dirty -p "$crate" --quiet
+  cargo package \
+    --allow-dirty \
+    --no-verify \
+    -p "$crate" \
+    --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
+    --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
+    --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
+    --quiet
 }
 
 extract_crate() {

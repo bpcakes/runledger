@@ -107,8 +107,18 @@ cargo update -w
 cargo test --workspace
 ./scripts/run-external-consumer-smoke.sh
 
-for crate in "${PUBLISHABLE_CRATES[@]}"; do
-  cargo publish --dry-run -p "$crate"
+cargo publish --allow-dirty --dry-run -p runledger-core
+
+for crate in runledger-postgres runledger-runtime; do
+  cargo package \
+    --allow-dirty \
+    --no-verify \
+    -p "$crate" \
+    --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
+    --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
+    --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
+    --quiet \
+    >/dev/null
 done
 
 echo "Release ${VERSION} is prepared."

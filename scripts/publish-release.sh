@@ -139,13 +139,10 @@ git remote get-url "$PUBLISH_REMOTE" >/dev/null \
   || die "git remote '${PUBLISH_REMOTE}' does not exist"
 
 for crate in "${PUBLISHABLE_CRATES[@]}"; do
-  cargo publish --dry-run -p "$crate"
-done
-
-for crate in "${PUBLISHABLE_CRATES[@]}"; do
   if version_exists_on_crates_io "$crate" "$VERSION"; then
     echo "${crate} ${VERSION} already exists on crates.io; assuming a previous publish completed."
   else
+    cargo publish --dry-run -p "$crate"
     cargo publish -p "$crate"
   fi
 

@@ -26,7 +26,7 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 fi
 
 echo "Refreshing workspace SQLx cache..."
-cargo sqlx prepare --workspace
+cargo sqlx prepare --workspace -- --all-targets
 
 for crate_dir in "${PUBLISHABLE_SQLX_CRATES[@]}"; do
   echo "Syncing SQLx cache into ${crate_dir}/.sqlx..."

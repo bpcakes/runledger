@@ -243,7 +243,7 @@ The preparation script:
 - bumps publishable crate versions and root workspace dependency versions
 - refreshes SQLx offline metadata
 - runs workspace tests and the packaged external-consumer smoke test
-- runs `cargo publish --dry-run` for each publishable crate
+- runs a publish dry-run for `runledger-core` and packages the dependent crates locally
 
 If publishing manually, run `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres` or `runledger-runtime` and commit any resulting `.sqlx/` changes.
 
@@ -253,7 +253,7 @@ After reviewing and committing the prepared diff, publish with:
 ./scripts/publish-release.sh 0.1.1
 ```
 
-The publish script publishes crates in dependency order, waits for crates.io to index each version, creates a `v0.1.1` tag, and pushes the current branch and tag. Set `PUBLISH_REMOTE` to override the git remote used for the final push.
+The publish script publishes crates in dependency order, dry-runs each crate once its workspace dependencies are indexed, creates a `v0.1.1` tag, and pushes the current branch and tag. Set `PUBLISH_REMOTE` to override the git remote used for the final push.
 
 ## Testing
 
