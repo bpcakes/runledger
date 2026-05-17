@@ -26,4 +26,5 @@ uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]
 async-trait = "0.1"
+runledger-postgres = { workspace = true, features = ["test-support"] }
 testcontainers = { version = "0.27", features = ["watchdog"] }

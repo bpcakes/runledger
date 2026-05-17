@@ -11,6 +11,9 @@ documentation = "https://docs.rs/runledger-postgres"
 keywords = ["jobs", "workflows", "postgres", "queue"]
 categories = ["asynchronous", "database"]
 
+[features]
+test-support = []
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 runledger-core = { workspace = true, features = ["sqlx-postgres"] }

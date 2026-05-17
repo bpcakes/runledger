@@ -50,6 +50,10 @@ pub use workflows::{
     list_workflow_step_keys_for_update_tx, list_workflow_steps,
     update_workflow_step_and_pending_job_payload_tx,
 };
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    pub use super::workflows::test_support::workflow_run_release_lock_key;
+}
 
 #[deprecated(note = "Use WorkflowRunDbRecord instead.")]
 pub type WorkflowRunRecord = WorkflowRunDbRecord;

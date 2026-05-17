@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workflow_steps\n         SET status = 'CANCELED',\n             finished_at = COALESCE(finished_at, now()),\n             updated_at = now()\n         WHERE id = $1\n           AND status = 'WAITING_FOR_EXTERNAL'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "38741f5e3e3fb1480e42f11832dad9839ffd9e596eae8461dc7058fefb5231ce"
+}

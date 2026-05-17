@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT jq.id /* runledger:lock_workflow_step_jobs_for_update */\n         FROM job_queue jq\n         JOIN workflow_steps ws ON ws.job_id = jq.id\n         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id\n         WHERE ws.workflow_run_id = $1\n           AND ($2::uuid IS NULL OR wr.organization_id = $2)\n         ORDER BY jq.id ASC\n         FOR UPDATE OF jq",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "59298a264ce41f00ec8616be708e648eccdb11bf52efdc72c7254da176aeca56"
+}

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status IN (\n            'RUNNING'::workflow_run_status,\n            'WAITING_FOR_EXTERNAL'::workflow_run_status\n         ) AS \"allows_release!\"\n         FROM workflow_runs\n         WHERE id = $1\n         FOR SHARE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "allows_release!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1a059fc3168b0f6897930835aa7e98d94cdad6acb84f1d83ab4866646dd50325"
+}

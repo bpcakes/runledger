@@ -1,5 +1,6 @@
 mod enqueue;
 mod hooks;
+mod locking;
 mod mutate;
 mod read;
 mod runtime;
@@ -7,6 +8,9 @@ mod validation;
 
 pub use self::enqueue::{enqueue_workflow_run, enqueue_workflow_run_tx};
 pub(crate) use self::hooks::{on_claim_released, on_claimed, on_terminal};
+pub(crate) use self::locking::{
+    lock_workflow_run_release_tx, try_lock_workflow_run_release_shared_tx,
+};
 pub use self::mutate::{
     append_workflow_steps, append_workflow_steps_tx, cancel_workflow_run_tx,
     list_workflow_step_keys_for_update_tx, update_workflow_step_and_pending_job_payload_tx,
@@ -18,6 +22,10 @@ pub use self::read::{
     list_workflow_steps,
 };
 pub use self::runtime::{complete_external_workflow_step, complete_external_workflow_step_tx};
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    pub use super::locking::test_support::workflow_run_release_lock_key;
+}
 
 use runledger_core::jobs::{
     JobStage, JobTypeName, WorkflowRunStatus, WorkflowStepExecutionKind, WorkflowStepStatus,

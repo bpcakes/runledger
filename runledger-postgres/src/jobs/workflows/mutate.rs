@@ -119,6 +119,34 @@ pub async fn update_workflow_step_and_pending_job_payload_tx(
     Ok(updated)
 }
 
+pub(super) async fn lock_workflow_step_jobs_for_update_tx(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    organization_id: Option<Uuid>,
+) -> Result<()> {
+    sqlx::query!(
+        // Keep the marker in the SQL text; the lock-order regression test
+        // uses it to observe this exact wait in pg_stat_activity.
+        "SELECT jq.id /* runledger:lock_workflow_step_jobs_for_update */
+         FROM job_queue jq
+         JOIN workflow_steps ws ON ws.job_id = jq.id
+         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
+         WHERE ws.workflow_run_id = $1
+           AND ($2::uuid IS NULL OR wr.organization_id = $2)
+         ORDER BY jq.id ASC
+         FOR UPDATE OF jq",
+        workflow_run_id,
+        organization_id,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("lock workflow step jobs for mutation", error)
+    })?;
+
+    Ok(())
+}
+
 async fn lock_workflow_steps_for_update_tx(
     tx: &mut DbTx<'_>,
     workflow_run_id: Uuid,

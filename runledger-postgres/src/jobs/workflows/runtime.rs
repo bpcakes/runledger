@@ -15,10 +15,10 @@ use super::super::row_decode::{
 };
 use super::super::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowStepDbRecord};
 use super::{
-    StepReleaseCandidate, workflow_external_completion_conflict_error,
-    workflow_external_completion_invalid_status_error, workflow_external_step_not_external_error,
-    workflow_external_step_not_found_error, workflow_external_step_not_waiting_error,
-    workflow_internal_state_error,
+    StepReleaseCandidate, try_lock_workflow_run_release_shared_tx,
+    workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
+    workflow_external_step_not_external_error, workflow_external_step_not_found_error,
+    workflow_external_step_not_waiting_error, workflow_internal_state_error,
 };
 
 #[derive(sqlx::FromRow)]
@@ -550,6 +550,25 @@ pub(crate) async fn release_candidate_step_tx(
     tx: &mut DbTx<'_>,
     candidate: &StepReleaseCandidate,
 ) -> Result<()> {
+    // Callers reach step release with the candidate workflow-step rows locked
+    // FOR UPDATE. append_workflow_steps_tx also holds the workflow-run row lock
+    // before inserting and releasing appended steps. If cancel already owns the
+    // exclusive advisory lock, leaving this step blocked is safe: cancel cannot
+    // sweep past those row locks, and will reload nonterminal steps afterward.
+    if !try_lock_workflow_run_release_shared_tx(tx, candidate.workflow_run_id).await? {
+        // Cancellation owns the exclusive advisory lock and will sweep remaining
+        // blocked/enqueued steps; releases must not wait here while holding job
+        // or step row locks.
+        return Ok(());
+    }
+
+    if !workflow_run_allows_step_release_tx(tx, candidate.workflow_run_id).await? {
+        // This also covers reentrant calls from cancellation: PostgreSQL
+        // advisory locks are reentrant for a backend, then the canceled run
+        // status rejects release here.
+        return Ok(());
+    }
+
     match candidate.execution_kind {
         WorkflowStepExecutionKind::Job => {
             let (job_type, priority, max_attempts, timeout_seconds, stage) =
@@ -680,6 +699,32 @@ pub(crate) async fn release_candidate_step_tx(
             Ok(())
         }
     }
+}
+
+async fn workflow_run_allows_step_release_tx(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+) -> Result<bool> {
+    // The shared row lock makes the releasable-status check stable until this
+    // transaction either releases the step or exits. Release callers already
+    // hold workflow-step row locks before taking this workflow-run row lock;
+    // cancel takes the release advisory lock before it takes workflow-step row
+    // locks, and release never blocks on that advisory lock.
+    sqlx::query_scalar!(
+        "SELECT status IN (
+            'RUNNING'::workflow_run_status,
+            'WAITING_FOR_EXTERNAL'::workflow_run_status
+         ) AS \"allows_release!\"
+         FROM workflow_runs
+         WHERE id = $1
+         FOR SHARE",
+        workflow_run_id,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("check workflow run allows step release", error)
+    })
 }
 
 pub(crate) async fn recompute_workflow_run_statuses_tx(

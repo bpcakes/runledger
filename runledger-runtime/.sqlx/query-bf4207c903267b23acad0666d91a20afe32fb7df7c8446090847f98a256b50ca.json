@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"count!\"\n         FROM job_queue jq\n         JOIN workflow_steps ws ON ws.job_id = jq.id\n         WHERE ws.workflow_run_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "bf4207c903267b23acad0666d91a20afe32fb7df7c8446090847f98a256b50ca"
+}
