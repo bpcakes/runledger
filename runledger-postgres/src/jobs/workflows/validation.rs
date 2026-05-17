@@ -20,6 +20,18 @@ pub(crate) fn workflow_dag_validation_error(error: WorkflowDagValidationError) -
             "workflow.invalid_dag_job_type_blank",
             "Workflow step job type must be non-empty.",
         ),
+        WorkflowDagValidationError::BlankIdempotencyKey => (
+            "workflow.invalid_dag_idempotency_key_blank",
+            "Workflow idempotency key must be non-empty.",
+        ),
+        WorkflowDagValidationError::NonPositiveStepMaxAttempts { .. } => (
+            "workflow.invalid_dag_step_max_attempts_non_positive",
+            "Workflow step max attempts must be positive.",
+        ),
+        WorkflowDagValidationError::NonPositiveStepTimeoutSeconds { .. } => (
+            "workflow.invalid_dag_step_timeout_seconds_non_positive",
+            "Workflow step timeout seconds must be positive.",
+        ),
         WorkflowDagValidationError::ExternalStepJobTypeNotAllowed { .. } => (
             "workflow.invalid_dag_external_step_job_type_not_allowed",
             "External workflow steps cannot define a job type.",
@@ -142,6 +154,27 @@ mod tests {
                 },
                 "workflow.invalid_dag_job_type_blank",
                 "Workflow step job type must be non-empty.",
+            ),
+            (
+                WorkflowDagValidationError::BlankIdempotencyKey,
+                "workflow.invalid_dag_idempotency_key_blank",
+                "Workflow idempotency key must be non-empty.",
+            ),
+            (
+                WorkflowDagValidationError::NonPositiveStepMaxAttempts {
+                    step_key: "step.a".to_owned(),
+                    max_attempts: 0,
+                },
+                "workflow.invalid_dag_step_max_attempts_non_positive",
+                "Workflow step max attempts must be positive.",
+            ),
+            (
+                WorkflowDagValidationError::NonPositiveStepTimeoutSeconds {
+                    step_key: "step.a".to_owned(),
+                    timeout_seconds: 0,
+                },
+                "workflow.invalid_dag_step_timeout_seconds_non_positive",
+                "Workflow step timeout seconds must be positive.",
             ),
             (
                 WorkflowDagValidationError::ExternalStepJobTypeNotAllowed {

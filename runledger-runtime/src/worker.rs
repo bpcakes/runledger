@@ -20,6 +20,7 @@ use crate::registry::JobRegistry;
 const UNKNOWN_WORKER_ID: &str = "unknown-worker";
 const LEASE_OWNER_MISMATCH_CODE: &str = "job.lease_owner_mismatch";
 const LEASE_MAINTENANCE_FAILED_CODE: &str = "job.lease_maintenance_failed";
+const WORKFLOW_RELEASE_CONFLICT_CODE: &str = "workflow.release_conflict";
 const HANDLER_PANIC_CODE: &str = "job.handler_panic";
 const RUNNING_PROGRESS_PERSIST_FAILED_REASON: &str = "RUNNING_PROGRESS_PERSIST_FAILED";
 const UNSTARTED_CLAIM_RELEASE_NOT_APPLICABLE_CODE: &str =
@@ -44,18 +45,22 @@ pub async fn run_worker_loop(
     loop {
         drain_finished_tasks(&mut join_set).await;
 
-        if *shutdown.borrow() {
+        if shutdown_requested_or_closed(&shutdown) {
             break;
         }
 
         if claimable_job_types.is_empty() {
-            wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await;
+            if wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await {
+                break;
+            }
             continue;
         }
 
         let available = semaphore.available_permits();
         if available == 0 {
-            wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await;
+            if wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await {
+                break;
+            }
             continue;
         }
 
@@ -104,7 +109,9 @@ pub async fn run_worker_loop(
             continue;
         }
 
-        wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await;
+        if wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await {
+            break;
+        }
     }
 
     info!("worker shutdown requested; draining in-flight jobs");
@@ -119,10 +126,17 @@ async fn drain_finished_tasks(join_set: &mut JoinSet<()>) {
     }
 }
 
-async fn wait_for_shutdown_or_poll(shutdown: &mut watch::Receiver<bool>, poll_interval: Duration) {
+fn shutdown_requested_or_closed(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+async fn wait_for_shutdown_or_poll(
+    shutdown: &mut watch::Receiver<bool>,
+    poll_interval: Duration,
+) -> bool {
     tokio::select! {
-        _ = shutdown.changed() => {},
-        _ = sleep(poll_interval) => {},
+        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
+        _ = sleep(poll_interval) => false,
     }
 }
 
@@ -188,12 +202,21 @@ async fn process_claimed_job(
                 )
                 .await
                 {
+                    let release_conflict = is_workflow_release_conflict_error(&error);
                     let error = WorkerError::CompleteSuccess {
                         job_id: job.id,
                         attempt: job.attempt,
                         source: error,
                     };
-                    error!(%error, job_id = %job.id, "failed to mark job success");
+                    if release_conflict {
+                        warn!(
+                            %error,
+                            job_id = %job.id,
+                            "job success completion conflicted with workflow cancellation; leaving lease for reaper recovery"
+                        );
+                    } else {
+                        error!(%error, job_id = %job.id, "failed to mark job success");
+                    }
                 }
             }
             Err(failure) => {
@@ -229,12 +252,21 @@ async fn process_claimed_job(
                 )
                 .await
                 {
+                    let release_conflict = is_workflow_release_conflict_error(&error);
                     let error = WorkerError::CompleteFailure {
                         job_id: job.id,
                         attempt: job.attempt,
                         source: error,
                     };
-                    error!(%error, job_id = %job.id, "failed to mark job failure");
+                    if release_conflict {
+                        warn!(
+                            %error,
+                            job_id = %job.id,
+                            "job failure completion conflicted with workflow cancellation; leaving lease for reaper recovery"
+                        );
+                    } else {
+                        error!(%error, job_id = %job.id, "failed to mark job failure");
+                    }
                 } else if let Some(dead_letter) = dead_letter {
                     warn!(
                         job_id = %job.id,
@@ -508,6 +540,10 @@ fn is_lease_owner_mismatch_error(error: &runledger_postgres::Error) -> bool {
 
 fn is_unstarted_claim_release_not_applicable_error(error: &runledger_postgres::Error) -> bool {
     has_query_error_code(error, UNSTARTED_CLAIM_RELEASE_NOT_APPLICABLE_CODE)
+}
+
+fn is_workflow_release_conflict_error(error: &runledger_postgres::Error) -> bool {
+    has_query_error_code(error, WORKFLOW_RELEASE_CONFLICT_CODE)
 }
 
 fn is_lease_maintenance_failure(failure: &JobFailure) -> bool {

@@ -26,6 +26,30 @@ fn workflow_build_error_maps_all_dag_validation_variants() {
             },
         ),
         (
+            WorkflowDagValidationError::BlankIdempotencyKey,
+            WorkflowBuildError::BlankIdempotencyKey,
+        ),
+        (
+            WorkflowDagValidationError::NonPositiveStepMaxAttempts {
+                step_key: "step.a".to_owned(),
+                max_attempts: 0,
+            },
+            WorkflowBuildError::NonPositiveStepMaxAttempts {
+                step_key: "step.a".to_owned(),
+                max_attempts: 0,
+            },
+        ),
+        (
+            WorkflowDagValidationError::NonPositiveStepTimeoutSeconds {
+                step_key: "step.a".to_owned(),
+                timeout_seconds: 0,
+            },
+            WorkflowBuildError::NonPositiveStepTimeoutSeconds {
+                step_key: "step.a".to_owned(),
+                timeout_seconds: 0,
+            },
+        ),
+        (
             WorkflowDagValidationError::ExternalStepJobTypeNotAllowed {
                 step_key: "step.a".to_owned(),
             },

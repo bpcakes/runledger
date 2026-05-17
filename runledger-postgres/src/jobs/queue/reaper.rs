@@ -7,7 +7,7 @@ use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::row_decode::parse_job_type_name;
 use super::super::types::{ReapExpiredLeasesResult, ReapedTerminalLeaseRecord};
-use super::super::workflows::on_terminal;
+use super::super::workflows::{on_retry_scheduled, on_terminal};
 use super::attempts::ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART;
 use super::release::{
     TryReleaseUnstartedClaimResult, UnstartedClaimIdentity, try_release_unstarted_job_claim_tx,
@@ -508,6 +508,14 @@ async fn handle_retryable_expired_lease(
     update_retry_attempt(tx, identity, default_retry_delay_ms).await?;
     insert_failed_event(tx, row, identity).await?;
     insert_retry_scheduled_event(tx, row, identity, default_retry_delay_ms, next_run_at).await?;
+    on_retry_scheduled(
+        tx,
+        identity.job_id,
+        Some(LEASE_EXPIRED_KIND),
+        Some(LEASE_EXPIRED_CODE),
+        Some(LEASE_EXPIRED_MESSAGE),
+    )
+    .await?;
     Ok(())
 }
 

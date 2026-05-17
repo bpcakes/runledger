@@ -32,7 +32,7 @@ pub async fn run_reaper_loop(
     let registry = Arc::new(registry);
 
     loop {
-        if *shutdown.borrow() {
+        if shutdown_requested_or_closed(&shutdown) {
             break;
         }
 
@@ -71,13 +71,26 @@ pub async fn run_reaper_loop(
             }
         }
 
-        tokio::select! {
-            _ = shutdown.changed() => {},
-            _ = sleep(config.reaper_interval) => {},
+        if wait_for_shutdown_or_poll(&mut shutdown, config.reaper_interval).await {
+            break;
         }
     }
 
     info!("reaper shutdown complete");
+}
+
+fn shutdown_requested_or_closed(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+async fn wait_for_shutdown_or_poll(
+    shutdown: &mut watch::Receiver<bool>,
+    poll_interval: Duration,
+) -> bool {
+    tokio::select! {
+        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
+        _ = sleep(poll_interval) => false,
+    }
 }
 
 async fn notify_handlers_of_terminal_lease_expirations(
@@ -206,13 +219,19 @@ async fn await_next_hook_result_or_shutdown(
         return NextHookResult::InterruptedByShutdown;
     }
 
-    tokio::select! {
-        _ = shutdown.changed() => NextHookResult::InterruptedByShutdown,
-        result = in_flight.join_next_with_id() => {
-            if let Some(result) = result {
-                handle_next_hook_result(result, metadata);
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return NextHookResult::InterruptedByShutdown;
+                }
             }
-            NextHookResult::HookSettled
+            result = in_flight.join_next_with_id() => {
+                if let Some(result) = result {
+                    handle_next_hook_result(result, metadata);
+                }
+                return NextHookResult::HookSettled;
+            }
         }
     }
 }
@@ -400,6 +419,7 @@ fn handle_next_hook_result(result: HookJoinResult, metadata: &mut HashMap<Id, Ho
 #[cfg(test)]
 mod tests {
     use std::future::pending;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -409,7 +429,7 @@ mod tests {
     use runledger_postgres::jobs::ReapedTerminalLeaseRecord;
     use serde_json::{Value, json};
     use sqlx::types::Uuid;
-    use tokio::sync::watch;
+    use tokio::sync::{Notify, watch};
     use tokio::time::{sleep, timeout};
 
     use crate::registry::{JobHandler, JobRegistry};
@@ -417,6 +437,12 @@ mod tests {
     use super::{TerminalHookFanoutResult, notify_handlers_of_terminal_lease_expirations};
 
     struct HangingTerminalHookHandler;
+    struct ControlledTerminalHookHandler {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        completions: Arc<AtomicUsize>,
+    }
+
     struct RecordingDeadLetterHandler {
         dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
     }
@@ -438,6 +464,28 @@ mod tests {
             _dead_letter: JobDeadLetterInfo,
         ) {
             pending::<()>().await;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl JobHandler for ControlledTerminalHookHandler {
+        fn job_type(&self) -> JobType<'static> {
+            JobType::new("jobs.test.reaper.hook.controlled")
+        }
+
+        async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+            Ok(())
+        }
+
+        async fn on_dead_letter(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+            _dead_letter: JobDeadLetterInfo,
+        ) {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.completions.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -519,6 +567,46 @@ mod tests {
         .await
         .expect("notification pass should return quickly after shutdown signal");
         assert_eq!(result, TerminalHookFanoutResult::InterruptedByShutdown);
+    }
+
+    #[tokio::test]
+    async fn notify_handlers_ignores_non_shutdown_watch_updates() {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let completions = Arc::new(AtomicUsize::new(0));
+        let mut registry = JobRegistry::new();
+        registry.register(ControlledTerminalHookHandler {
+            started: started.clone(),
+            release: release.clone(),
+            completions: completions.clone(),
+        });
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let update_tx = shutdown_tx.clone();
+
+        let jobs = vec![ReapedTerminalLeaseRecord {
+            job_id: Uuid::now_v7(),
+            job_type: runledger_core::jobs::JobTypeName::from_static(
+                "jobs.test.reaper.hook.controlled",
+            ),
+            organization_id: None,
+            run_number: 1,
+            attempt: 1,
+            payload: json!({ "kind": "non-shutdown-watch-update" }),
+        }];
+
+        tokio::spawn(async move {
+            started.notified().await;
+            let _ = update_tx.send(false);
+            sleep(Duration::from_millis(20)).await;
+            release.notify_waiters();
+        });
+
+        let result =
+            notify_handlers_of_terminal_lease_expirations(&registry, &jobs, &mut shutdown_rx).await;
+        drop(shutdown_tx);
+
+        assert_eq!(result, TerminalHookFanoutResult::Completed);
+        assert_eq!(completions.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

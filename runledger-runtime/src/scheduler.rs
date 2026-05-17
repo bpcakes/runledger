@@ -24,7 +24,7 @@ pub async fn run_scheduler_loop(
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
-        if *shutdown.borrow() {
+        if shutdown_requested_or_closed(&shutdown) {
             break;
         }
 
@@ -32,13 +32,26 @@ pub async fn run_scheduler_loop(
             warn!(%error, "schedule materialization failed");
         }
 
-        tokio::select! {
-            _ = shutdown.changed() => {},
-            _ = sleep(config.schedule_poll_interval) => {},
+        if wait_for_shutdown_or_poll(&mut shutdown, config.schedule_poll_interval).await {
+            break;
         }
     }
 
     info!("scheduler shutdown complete");
+}
+
+fn shutdown_requested_or_closed(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+async fn wait_for_shutdown_or_poll(
+    shutdown: &mut watch::Receiver<bool>,
+    poll_interval: std::time::Duration,
+) -> bool {
+    tokio::select! {
+        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
+        _ = sleep(poll_interval) => false,
+    }
 }
 
 async fn materialize_due_schedules(

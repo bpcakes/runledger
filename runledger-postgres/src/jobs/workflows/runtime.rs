@@ -14,11 +14,13 @@ use super::super::row_decode::{
     parse_workflow_step_execution_kind, parse_workflow_step_status,
 };
 use super::super::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowStepDbRecord};
+use super::mutate::lock_workflow_step_rows_for_update_tx;
 use super::{
     StepReleaseCandidate, try_lock_workflow_run_release_shared_tx,
     workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
     workflow_external_step_not_external_error, workflow_external_step_not_found_error,
     workflow_external_step_not_waiting_error, workflow_internal_state_error,
+    workflow_release_conflict_error,
 };
 
 #[derive(sqlx::FromRow)]
@@ -183,6 +185,42 @@ pub(crate) async fn mark_workflow_step_enqueued_for_claim_release_tx(
     Ok(())
 }
 
+pub(crate) async fn mark_workflow_step_enqueued_for_retry_tx(
+    tx: &mut DbTx<'_>,
+    job_id: Uuid,
+    status_reason: Option<&str>,
+    last_error_code: Option<&str>,
+    last_error_message: Option<&str>,
+) -> Result<()> {
+    // A retry keeps started_at as the first time this workflow step began
+    // executing; the next claim should not erase that history. Non-RUNNING
+    // rows are intentionally left alone: non-workflow jobs have no matching
+    // step, and concurrent cancellation or terminal handling must win over
+    // putting a step back into ENQUEUED.
+    sqlx::query(
+        "UPDATE workflow_steps
+         SET status = 'ENQUEUED',
+             finished_at = NULL,
+             status_reason = $2,
+             last_error_code = $3,
+             last_error_message = $4,
+             updated_at = now()
+         WHERE job_id = $1
+           AND status = 'RUNNING'",
+    )
+    .bind(job_id)
+    .bind(status_reason)
+    .bind(last_error_code)
+    .bind(last_error_message)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("mark workflow step enqueued for retry", error)
+    })?;
+
+    Ok(())
+}
+
 pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
     tx: &mut DbTx<'_>,
     job_id: Uuid,
@@ -299,6 +337,7 @@ pub async fn complete_external_workflow_step_tx(
     input: &CompleteExternalWorkflowStepInput<'_>,
 ) -> Result<WorkflowStepDbRecord> {
     validate_external_completion_status(input.terminal_status)?;
+    lock_workflow_step_rows_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;
 
     let row = sqlx::query_as::<_, WorkflowStepRow>(
         "SELECT
@@ -553,13 +592,10 @@ pub(crate) async fn release_candidate_step_tx(
     // Callers reach step release with the candidate workflow-step rows locked
     // FOR UPDATE. append_workflow_steps_tx also holds the workflow-run row lock
     // before inserting and releasing appended steps. If cancel already owns the
-    // exclusive advisory lock, leaving this step blocked is safe: cancel cannot
-    // sweep past those row locks, and will reload nonterminal steps afterward.
+    // exclusive advisory lock, the caller must roll back rather than committing
+    // consumed dependency counters without a matching release/cancel sweep.
     if !try_lock_workflow_run_release_shared_tx(tx, candidate.workflow_run_id).await? {
-        // Cancellation owns the exclusive advisory lock and will sweep remaining
-        // blocked/enqueued steps; releases must not wait here while holding job
-        // or step row locks.
-        return Ok(());
+        return Err(workflow_release_conflict_error(candidate.workflow_run_id));
     }
 
     if !workflow_run_allows_step_release_tx(tx, candidate.workflow_run_id).await? {

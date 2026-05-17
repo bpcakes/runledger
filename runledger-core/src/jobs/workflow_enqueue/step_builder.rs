@@ -178,6 +178,9 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
 
     /// Sets max retry attempts override for this step.
     ///
+    /// The value must be positive (`> 0`); this is enforced when [`Self::try_build`]
+    /// is called.
+    ///
     /// # Examples
     /// ```rust
     /// use runledger_core::jobs::{JobType, StepKey, WorkflowStepEnqueueBuilder};
@@ -204,6 +207,9 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
     }
 
     /// Sets timeout override (in seconds) for this step.
+    ///
+    /// The value must be positive (`> 0`); this is enforced when [`Self::try_build`]
+    /// is called.
     ///
     /// # Examples
     /// ```rust

@@ -31,6 +31,15 @@ pub enum WorkflowDagValidationError {
     BlankStepJobType {
         step_key: String,
     },
+    BlankIdempotencyKey,
+    NonPositiveStepMaxAttempts {
+        step_key: String,
+        max_attempts: i32,
+    },
+    NonPositiveStepTimeoutSeconds {
+        step_key: String,
+        timeout_seconds: i32,
+    },
     ExternalStepJobTypeNotAllowed {
         step_key: String,
     },
@@ -83,6 +92,22 @@ pub fn validate_workflow_dag(
                 if job_type.as_str().trim().is_empty() {
                     return Err(WorkflowDagValidationError::BlankStepJobType {
                         step_key: step.step_key.as_str().to_owned(),
+                    });
+                }
+                if let Some(max_attempts) = step.max_attempts
+                    && max_attempts <= 0
+                {
+                    return Err(WorkflowDagValidationError::NonPositiveStepMaxAttempts {
+                        step_key: step.step_key.as_str().to_owned(),
+                        max_attempts,
+                    });
+                }
+                if let Some(timeout_seconds) = step.timeout_seconds
+                    && timeout_seconds <= 0
+                {
+                    return Err(WorkflowDagValidationError::NonPositiveStepTimeoutSeconds {
+                        step_key: step.step_key.as_str().to_owned(),
+                        timeout_seconds,
                     });
                 }
             }
@@ -182,6 +207,13 @@ pub fn validate_workflow_dag(
 pub fn validate_workflow_run_enqueue(
     payload: &WorkflowRunEnqueue<'_>,
 ) -> Result<(), WorkflowDagValidationError> {
+    if payload
+        .idempotency_key()
+        .is_some_and(|idempotency_key| idempotency_key.trim().is_empty())
+    {
+        return Err(WorkflowDagValidationError::BlankIdempotencyKey);
+    }
+
     let steps = payload
         .steps()
         .iter()
@@ -232,6 +264,23 @@ pub fn validate_workflow_step_append(
                 super::errors::WorkflowBuildError::BlankStepJobType { step_key } => {
                     WorkflowDagValidationError::BlankStepJobType { step_key }
                 }
+                super::errors::WorkflowBuildError::BlankIdempotencyKey => {
+                    WorkflowDagValidationError::BlankIdempotencyKey
+                }
+                super::errors::WorkflowBuildError::NonPositiveStepMaxAttempts {
+                    step_key,
+                    max_attempts,
+                } => WorkflowDagValidationError::NonPositiveStepMaxAttempts {
+                    step_key,
+                    max_attempts,
+                },
+                super::errors::WorkflowBuildError::NonPositiveStepTimeoutSeconds {
+                    step_key,
+                    timeout_seconds,
+                } => WorkflowDagValidationError::NonPositiveStepTimeoutSeconds {
+                    step_key,
+                    timeout_seconds,
+                },
                 super::errors::WorkflowBuildError::ExternalStepJobTypeNotAllowed { step_key } => {
                     WorkflowDagValidationError::ExternalStepJobTypeNotAllowed { step_key }
                 }

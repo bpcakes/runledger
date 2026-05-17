@@ -209,6 +209,39 @@ async fn claim_one_job(pool: &PgPool, worker_id: &str) -> runledger_postgres::jo
     claimed.pop().expect("expected one claimed job")
 }
 
+#[tokio::test]
+async fn run_worker_loop_exits_when_shutdown_sender_is_dropped() {
+    // The lazy pool deliberately points at an invalid port. This test asserts
+    // the loop observes a closed shutdown channel before attempting any claim.
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/runledger")
+        .expect("construct lazy pool");
+    let registry = JobRegistry::new();
+    let config = JobsConfig {
+        worker_id: "dropped-shutdown-worker".to_string(),
+        poll_interval: Duration::from_secs(30),
+        claim_batch_size: 1,
+        lease_ttl_seconds: 30,
+        max_global_concurrency: 1,
+        reaper_interval: Duration::from_secs(30),
+        schedule_poll_interval: Duration::from_secs(30),
+        reaper_retry_delay_ms: 1_000,
+    };
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut worker_task = tokio::spawn(run_worker_loop(pool, registry, config, shutdown_rx));
+
+    drop(shutdown_tx);
+
+    if timeout(Duration::from_millis(200), &mut worker_task)
+        .await
+        .is_err()
+    {
+        worker_task.abort();
+        let _ = worker_task.await;
+        panic!("worker should treat a closed shutdown channel as shutdown");
+    }
+}
+
 async fn enqueue_and_claim_job(
     pool: &PgPool,
     job_type: JobType<'static>,

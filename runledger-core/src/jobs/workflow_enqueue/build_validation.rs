@@ -24,6 +24,22 @@ pub(super) fn validate_step_enqueue(
                     step_key: step.step_key.as_str().to_owned(),
                 });
             }
+            if let Some(max_attempts) = step.max_attempts
+                && max_attempts <= 0
+            {
+                return Err(WorkflowBuildError::NonPositiveStepMaxAttempts {
+                    step_key: step.step_key.as_str().to_owned(),
+                    max_attempts,
+                });
+            }
+            if let Some(timeout_seconds) = step.timeout_seconds
+                && timeout_seconds <= 0
+            {
+                return Err(WorkflowBuildError::NonPositiveStepTimeoutSeconds {
+                    step_key: step.step_key.as_str().to_owned(),
+                    timeout_seconds,
+                });
+            }
         }
         WorkflowStepExecutionKind::External => {
             if step.job_type.is_some() {

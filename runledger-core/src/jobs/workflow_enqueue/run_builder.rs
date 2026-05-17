@@ -131,6 +131,9 @@ impl<'a> WorkflowRunEnqueueBuilder<'a> {
 
     /// Sets a deduplication key for idempotent enqueue behavior.
     ///
+    /// The key must be non-blank after trimming; this is enforced when
+    /// [`Self::try_build`] is called.
+    ///
     /// # Examples
     /// ```rust
     /// use runledger_core::jobs::{JobType, StepKey, WorkflowType, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder};

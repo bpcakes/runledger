@@ -42,6 +42,29 @@ fn workflow_run_enqueue_builder_sets_scope_and_idempotency() {
 }
 
 #[test]
+fn workflow_run_enqueue_builder_rejects_blank_idempotency_key() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "builder-test"});
+    let step = WorkflowStepEnqueueBuilder::new(
+        StepKey::new("step.a"),
+        JobType::new("jobs.test.a"),
+        &payload,
+    )
+    .try_build()
+    .expect("step payload should be valid");
+
+    let result = WorkflowRunEnqueueBuilder::new(WorkflowType::new("workflow.test"), &metadata)
+        .idempotency_key("   ")
+        .step(step)
+        .try_build();
+
+    assert!(
+        result.is_err(),
+        "blank idempotency key should be rejected before storage"
+    );
+}
+
+#[test]
 fn workflow_step_enqueue_builder_defaults_stage_to_queued() {
     let payload = serde_json::json!({"test": true});
     let step = WorkflowStepEnqueueBuilder::new(
@@ -178,6 +201,35 @@ fn workflow_step_enqueue_builder_rejects_queue_settings_on_external_steps() {
         WorkflowBuildError::ExternalStepQueueSettingsNotAllowed {
             step_key: "step.external".to_owned(),
         }
+    );
+}
+
+#[test]
+fn workflow_step_enqueue_builder_rejects_non_positive_execution_limits() {
+    let payload = serde_json::json!({"test": true});
+
+    assert!(
+        WorkflowStepEnqueueBuilder::new(
+            StepKey::new("step.zero_attempts"),
+            JobType::new("jobs.test.a"),
+            &payload,
+        )
+        .max_attempts(0)
+        .try_build()
+        .is_err(),
+        "max_attempts must match the positive persisted workflow constraint"
+    );
+
+    assert!(
+        WorkflowStepEnqueueBuilder::new(
+            StepKey::new("step.zero_timeout"),
+            JobType::new("jobs.test.a"),
+            &payload,
+        )
+        .timeout_seconds(0)
+        .try_build()
+        .is_err(),
+        "timeout_seconds must match the positive persisted workflow constraint"
     );
 }
 

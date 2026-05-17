@@ -7,7 +7,7 @@ mod runtime;
 mod validation;
 
 pub use self::enqueue::{enqueue_workflow_run, enqueue_workflow_run_tx};
-pub(crate) use self::hooks::{on_claim_released, on_claimed, on_terminal};
+pub(crate) use self::hooks::{on_claim_released, on_claimed, on_retry_scheduled, on_terminal};
 pub(crate) use self::locking::{
     lock_workflow_run_release_tx, try_lock_workflow_run_release_shared_tx,
 };
@@ -70,6 +70,15 @@ fn workflow_internal_state_error(message: impl Into<String>) -> Error {
         "workflow.internal_state",
         "Workflow state is invalid.",
         message,
+    ))
+}
+
+fn workflow_release_conflict_error(workflow_run_id: Uuid) -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Conflict,
+        "workflow.release_conflict",
+        "Workflow step release conflicted with another workflow mutation.",
+        format!("workflow run {workflow_run_id} is locked for an exclusive mutation"),
     ))
 }
 

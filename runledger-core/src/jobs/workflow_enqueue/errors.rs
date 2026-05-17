@@ -13,6 +13,15 @@ pub enum WorkflowBuildError {
     BlankStepJobType {
         step_key: String,
     },
+    BlankIdempotencyKey,
+    NonPositiveStepMaxAttempts {
+        step_key: String,
+        max_attempts: i32,
+    },
+    NonPositiveStepTimeoutSeconds {
+        step_key: String,
+        timeout_seconds: i32,
+    },
     ExternalStepJobTypeNotAllowed {
         step_key: String,
     },
@@ -50,6 +59,21 @@ impl From<WorkflowDagValidationError> for WorkflowBuildError {
             WorkflowDagValidationError::BlankStepJobType { step_key } => {
                 Self::BlankStepJobType { step_key }
             }
+            WorkflowDagValidationError::BlankIdempotencyKey => Self::BlankIdempotencyKey,
+            WorkflowDagValidationError::NonPositiveStepMaxAttempts {
+                step_key,
+                max_attempts,
+            } => Self::NonPositiveStepMaxAttempts {
+                step_key,
+                max_attempts,
+            },
+            WorkflowDagValidationError::NonPositiveStepTimeoutSeconds {
+                step_key,
+                timeout_seconds,
+            } => Self::NonPositiveStepTimeoutSeconds {
+                step_key,
+                timeout_seconds,
+            },
             WorkflowDagValidationError::ExternalStepJobTypeNotAllowed { step_key } => {
                 Self::ExternalStepJobTypeNotAllowed { step_key }
             }
@@ -99,6 +123,25 @@ impl fmt::Display for WorkflowBuildError {
             }
             Self::BlankStepJobType { step_key } => {
                 write!(f, "job_type for step '{step_key}' must be non-empty")
+            }
+            Self::BlankIdempotencyKey => write!(f, "idempotency_key must be non-empty"),
+            Self::NonPositiveStepMaxAttempts {
+                step_key,
+                max_attempts,
+            } => {
+                write!(
+                    f,
+                    "max_attempts for step '{step_key}' must be positive; got {max_attempts}"
+                )
+            }
+            Self::NonPositiveStepTimeoutSeconds {
+                step_key,
+                timeout_seconds,
+            } => {
+                write!(
+                    f,
+                    "timeout_seconds for step '{step_key}' must be positive; got {timeout_seconds}"
+                )
             }
             Self::ExternalStepJobTypeNotAllowed { step_key } => {
                 write!(f, "external step '{step_key}' cannot define a job_type")

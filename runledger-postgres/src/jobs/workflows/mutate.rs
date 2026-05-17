@@ -147,6 +147,33 @@ pub(super) async fn lock_workflow_step_jobs_for_update_tx(
     Ok(())
 }
 
+pub(crate) async fn lock_workflow_step_rows_for_update_tx(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    organization_id: Option<Uuid>,
+) -> Result<()> {
+    // Keep the inline marker below in sync with lock-order regression tests
+    // that identify this wait in pg_stat_activity.
+    sqlx::query(
+        "SELECT ws.id /* runledger:lock_workflow_step_rows_for_update */
+         FROM workflow_steps ws
+         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
+         WHERE ws.workflow_run_id = $1
+           AND ($2::uuid IS NULL OR wr.organization_id = $2)
+         ORDER BY ws.id ASC
+         FOR UPDATE OF ws",
+    )
+    .bind(workflow_run_id)
+    .bind(organization_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("lock workflow step rows for mutation", error)
+    })?;
+
+    Ok(())
+}
+
 async fn lock_workflow_steps_for_update_tx(
     tx: &mut DbTx<'_>,
     workflow_run_id: Uuid,

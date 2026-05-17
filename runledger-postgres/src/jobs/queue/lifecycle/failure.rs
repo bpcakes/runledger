@@ -7,7 +7,7 @@ use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::super::row_decode::parse_job_type_name;
 use super::super::super::types::JobFailureUpdate;
-use super::super::super::workflows::on_terminal;
+use super::super::super::workflows::{on_retry_scheduled, on_terminal};
 use super::common::{
     COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT, INSERT_FAILED_EVENT_RETRY_CONTEXT,
     INSERT_FAILED_EVENT_TERMINAL_CONTEXT, rollback_and_return_lease_mismatch,
@@ -296,6 +296,14 @@ async fn apply_retryable_failure(
         .await?;
     insert_retry_scheduled_event_for_failure_tx(tx, identity, outcome.retry_delay_ms, next_run_at)
         .await?;
+    on_retry_scheduled(
+        tx,
+        identity.job_id,
+        Some(outcome.kind_db_value),
+        Some(outcome.code),
+        Some(outcome.message),
+    )
+    .await?;
 
     Ok(())
 }
