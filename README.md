@@ -234,7 +234,7 @@ If the cache and schema drift apart, `cargo check` will fail during macro expans
 Prepare a release with the repository script:
 
 ```bash
-./scripts/prepare-release.sh 0.1.1
+./scripts/prepare-release.sh 0.1.2
 ```
 
 The preparation script:
@@ -250,10 +250,10 @@ If publishing manually, run `./scripts/refresh-sqlx-cache.sh` before publishing 
 After reviewing and committing the prepared diff, publish with:
 
 ```bash
-./scripts/publish-release.sh 0.1.1
+./scripts/publish-release.sh 0.1.2
 ```
 
-The publish script publishes crates in dependency order, dry-runs each crate once its workspace dependencies are indexed, creates a `v0.1.1` tag, and pushes the current branch and tag. Set `PUBLISH_REMOTE` to override the git remote used for the final push.
+The publish script publishes crates in dependency order, dry-runs each crate once its workspace dependencies are indexed, creates a `v0.1.2` tag, and pushes the current branch and tag. Set `PUBLISH_REMOTE` to override the git remote used for the final push.
 
 ## Testing
 
