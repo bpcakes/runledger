@@ -1,10 +1,13 @@
-use super::*;
-use chrono::Duration as ChronoDuration;
+use std::str::FromStr;
+
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use cron::Schedule;
 use runledger_core::jobs::JobType;
 use runledger_postgres::jobs::upsert_job_definition_tx;
 use serde_json::json;
 use sqlx::types::Uuid;
 
+use super::{compute_next_fire_at_utc, materialize_due_schedules, materialize_due_schedules_tx};
 use crate::test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 
 #[tokio::test]
@@ -139,6 +142,80 @@ async fn materialize_due_schedules_ignores_disabled_job_definition() {
         compute_next_fire_at_utc("*/1 * * * * * *", from, Uuid::nil(), 0)
             .expect("non jittered schedule"),
         base_next
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn materialize_due_schedules_includes_scheduled_for_metadata() {
+    let (pool, database) = setup_ephemeral_pool("jobs_sched_metadata", 8).await;
+    const SCHEDULED_FOR_RFC3339: &str = "2026-02-01T00:00:00Z";
+
+    let mut tx = pool.begin().await.expect("begin tx");
+    upsert_job_definition_tx(
+        &mut tx,
+        &runledger_postgres::jobs::JobDefinitionUpsert {
+            job_type: JobType::new("jobs.schedule.metadata"),
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 60,
+            default_priority: 100,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert metadata definition");
+    tx.commit().await.expect("commit tx");
+
+    let scheduled_for = DateTime::parse_from_rfc3339(SCHEDULED_FOR_RFC3339)
+        .expect("fixed scheduled_for")
+        .with_timezone(&Utc);
+    let schedule_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO job_schedules (
+            name,
+            job_type,
+            organization_id,
+            payload_template,
+            cron_expr,
+            next_fire_at
+         )
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+         RETURNING id",
+    )
+    .bind("metadata-schedule")
+    .bind("jobs.schedule.metadata")
+    .bind::<Option<Uuid>>(None)
+    .bind(json!({"kind": "metadata"}))
+    .bind("0 0 0 * * * *")
+    .bind(scheduled_for)
+    .fetch_one(&pool)
+    .await
+    .expect("insert metadata schedule");
+
+    materialize_due_schedules(&pool, 10)
+        .await
+        .expect("due schedules materialization");
+
+    let payload = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT payload
+         FROM job_queue
+         WHERE job_type = $1",
+    )
+    .bind("jobs.schedule.metadata")
+    .fetch_one(&pool)
+    .await
+    .expect("load enqueued payload");
+
+    assert_eq!(payload["kind"], json!("metadata"));
+    assert_eq!(payload["_schedule"]["schedule_id"], json!(schedule_id));
+    assert_eq!(
+        payload["_schedule"]["schedule_name"],
+        json!("metadata-schedule")
+    );
+    assert_eq!(
+        payload["_schedule"]["scheduled_for"],
+        json!(SCHEDULED_FOR_RFC3339)
     );
 
     teardown_ephemeral_pool(pool, database).await;

@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use cron::Schedule;
 use runledger_postgres::jobs::{self, JobEnqueue};
 use serde_json::{Value, json};
@@ -212,7 +212,12 @@ async fn materialize_schedule_tx(
     .ok_or_else(|| invalid_schedule_cron_error(schedule))?;
 
     let mut payload = schedule.payload_template.clone();
-    merge_schedule_metadata(&mut payload, schedule.id, &schedule.name);
+    merge_schedule_metadata(
+        &mut payload,
+        schedule.id,
+        &schedule.name,
+        schedule.next_fire_at,
+    );
 
     let enqueue_payload = JobEnqueue {
         job_type: schedule.job_type.as_borrowed(),
@@ -251,10 +256,16 @@ fn invalid_schedule_cron_error(schedule: &jobs::JobScheduleRecord) -> SchedulerE
     }
 }
 
-fn merge_schedule_metadata(payload: &mut Value, schedule_id: uuid::Uuid, schedule_name: &str) {
+fn merge_schedule_metadata(
+    payload: &mut Value,
+    schedule_id: uuid::Uuid,
+    schedule_name: &str,
+    scheduled_for: DateTime<Utc>,
+) {
     let metadata = json!({
         "schedule_id": schedule_id,
         "schedule_name": schedule_name,
+        "scheduled_for": scheduled_for.to_rfc3339_opts(SecondsFormat::AutoSi, true),
     });
 
     match payload {
