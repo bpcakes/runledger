@@ -233,7 +233,11 @@ async fn process_claimed_job(
                 let retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
                     None
                 } else {
-                    Some(compute_retry_delay_ms(job.attempt, job.id))
+                    Some(retry_delay_ms_for_failure(
+                        registry.as_ref(),
+                        &job,
+                        &failure,
+                    ))
                 };
                 let failure_payload = JobFailureUpdate {
                     kind: failure.kind,
@@ -562,6 +566,16 @@ fn heartbeat_interval(lease_ttl_seconds: i32) -> Duration {
 
 fn is_non_retryable_failure_kind(kind: JobFailureKind) -> bool {
     matches!(kind, JobFailureKind::Terminal | JobFailureKind::Panicked)
+}
+
+fn retry_delay_ms_for_failure(
+    registry: &JobRegistry,
+    job: &jobs::JobQueueRecord,
+    failure: &JobFailure,
+) -> i32 {
+    registry
+        .retry_delay_override(job.job_type.as_borrowed(), failure.code)
+        .unwrap_or_else(|| compute_retry_delay_ms(job.attempt, job.id))
 }
 
 fn dead_letter_info(job: &jobs::JobQueueRecord, failure: &JobFailure) -> Option<JobDeadLetterInfo> {

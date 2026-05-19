@@ -1,11 +1,14 @@
 use std::future::pending;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{
-    JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobFailure, JobFailureKind, JobStatus,
-    JobType,
+    JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobEventType, JobFailure, JobFailureKind,
+    JobStatus, JobType,
 };
 use runledger_postgres::jobs::{
     JobDefinitionUpsert, JobEnqueue, JobProgressUpdate, claim_prestart_jobs, enqueue_job,
@@ -17,12 +20,10 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, timeout};
 
+use super::{compute_retry_delay_ms, process_claimed_job, run_worker_loop};
+use crate::config::JobsConfig;
 use crate::registry::{JobHandler, JobRegistry};
 use crate::test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
-
-use crate::config::JobsConfig;
-
-use super::{process_claimed_job, run_worker_loop};
 
 struct CountingHandler {
     runs: Arc<AtomicUsize>,
@@ -73,6 +74,12 @@ struct RecordingDeadLetterHandler {
     failure: JobFailure,
     runs: Arc<AtomicUsize>,
     dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
+}
+
+struct FailingHandler {
+    job_type_name: &'static str,
+    failure: JobFailure,
+    runs: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
@@ -142,6 +149,18 @@ impl JobHandler for RecordingDeadLetterHandler {
     }
 }
 
+#[async_trait::async_trait]
+impl JobHandler for FailingHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new(self.job_type_name)
+    }
+
+    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Err(self.failure.clone())
+    }
+}
+
 struct TerminalHookPanicHandler {
     runs: Arc<AtomicUsize>,
     terminal_failures: Arc<AtomicUsize>,
@@ -150,6 +169,17 @@ struct TerminalHookPanicHandler {
 struct TerminalHookHangHandler {
     runs: Arc<AtomicUsize>,
     terminal_failures: Arc<AtomicUsize>,
+}
+
+struct RetryDelayOverrideObservation {
+    status: JobStatus,
+    next_run_at: DateTime<Utc>,
+    retry_event_delay_ms: Option<i64>,
+    attempt_retry_delay_ms: Option<i32>,
+    default_retry_delay_ms: i32,
+    db_now_before: DateTime<Utc>,
+    db_now_after: DateTime<Utc>,
+    runs: usize,
 }
 
 #[async_trait::async_trait]
@@ -346,6 +376,229 @@ fn clone_dead_letters(dead_letters: &Arc<Mutex<Vec<JobDeadLetterInfo>>>) -> Vec<
         .lock()
         .expect("dead-letter list lock should not be poisoned")
         .clone()
+}
+
+async fn database_now(pool: &PgPool) -> DateTime<Utc> {
+    sqlx::query_scalar::<_, DateTime<Utc>>("SELECT now()")
+        .fetch_one(pool)
+        .await
+        .expect("fetch database now")
+}
+
+async fn observe_retry_delay_override_failure(
+    database_name: &str,
+    handler_job_type: &'static str,
+    failure: JobFailure,
+    max_attempts: i32,
+    override_registration: Option<(JobType<'static>, &'static str, i32)>,
+) -> RetryDelayOverrideObservation {
+    let (pool, database) = setup_ephemeral_pool(database_name, 8).await;
+    let (job_id, claimed_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new(handler_job_type),
+        max_attempts,
+        json!({"kind":"retry-delay-override"}),
+        "worker-retry-delay-override",
+    )
+    .await;
+
+    let default_retry_delay_ms = compute_retry_delay_ms(claimed_job.attempt, claimed_job.id);
+    let db_now_before = database_now(&pool).await;
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = JobRegistry::new();
+    registry.register(FailingHandler {
+        job_type_name: handler_job_type,
+        failure,
+        runs: runs.clone(),
+    });
+    if let Some((job_type, failure_code, retry_delay_ms)) = override_registration {
+        registry.register_retry_delay_override(job_type, failure_code, retry_delay_ms);
+    }
+
+    process_claimed_job(pool.clone(), Arc::new(registry), claimed_job, 30).await;
+    let db_now_after = database_now(&pool).await;
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job after failure")
+        .expect("job exists");
+    let events = list_job_events(&pool, None, job_id, 50, None)
+        .await
+        .expect("list job events");
+    let retry_event_delay_ms = events
+        .iter()
+        .find(|event| event.event_type == JobEventType::RetryScheduled)
+        .and_then(|event| event.payload.get("retry_delay_ms"))
+        .and_then(Value::as_i64);
+    let attempt_retry_delay_ms = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT retry_delay_ms
+         FROM job_attempts
+         WHERE job_id = $1
+           AND run_number = 1
+           AND attempt = 1",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch attempt retry delay");
+
+    let observation = RetryDelayOverrideObservation {
+        status: persisted.status,
+        next_run_at: persisted.next_run_at,
+        retry_event_delay_ms,
+        attempt_retry_delay_ms,
+        default_retry_delay_ms,
+        db_now_before,
+        db_now_after,
+        runs: runs.load(Ordering::SeqCst),
+    };
+
+    teardown_ephemeral_pool(pool, database).await;
+    observation
+}
+
+fn assert_next_run_at_around_delay(observation: &RetryDelayOverrideObservation, delay_ms: i32) {
+    let lower_bound = observation.db_now_before + ChronoDuration::milliseconds(i64::from(delay_ms));
+    let upper_bound = observation.db_now_after
+        + ChronoDuration::milliseconds(i64::from(delay_ms))
+        + ChronoDuration::seconds(1);
+
+    assert!(
+        observation.next_run_at >= lower_bound && observation.next_run_at <= upper_bound,
+        "expected next_run_at {} to be between {} and {}",
+        observation.next_run_at,
+        lower_bound,
+        upper_bound
+    );
+}
+
+#[tokio::test]
+async fn process_claimed_job_uses_registered_retry_delay_override() {
+    const OVERRIDE_RETRY_DELAY_MS: i32 = 120_000;
+
+    let observation = observe_retry_delay_override_failure(
+        "jobs_worker_retry_override",
+        "jobs.test.retry_override",
+        JobFailure::retryable(
+            "job.test.waiting_for_external_refresh",
+            "waiting for external refresh",
+        ),
+        3,
+        Some((
+            JobType::new("jobs.test.retry_override"),
+            "job.test.waiting_for_external_refresh",
+            OVERRIDE_RETRY_DELAY_MS,
+        )),
+    )
+    .await;
+
+    assert_eq!(observation.runs, 1);
+    assert_eq!(observation.status, JobStatus::Pending);
+    assert_eq!(
+        observation.retry_event_delay_ms,
+        Some(i64::from(OVERRIDE_RETRY_DELAY_MS))
+    );
+    assert_eq!(
+        observation.attempt_retry_delay_ms,
+        Some(OVERRIDE_RETRY_DELAY_MS)
+    );
+    assert_next_run_at_around_delay(&observation, OVERRIDE_RETRY_DELAY_MS);
+}
+
+#[tokio::test]
+async fn process_claimed_job_does_not_apply_override_to_other_job_type() {
+    const OVERRIDE_RETRY_DELAY_MS: i32 = 120_000;
+
+    let observation = observe_retry_delay_override_failure(
+        "jobs_worker_retry_override_type",
+        "jobs.test.retry_override.other",
+        JobFailure::retryable(
+            "job.test.waiting_for_external_refresh",
+            "waiting for external refresh",
+        ),
+        3,
+        Some((
+            JobType::new("jobs.test.retry_override"),
+            "job.test.waiting_for_external_refresh",
+            OVERRIDE_RETRY_DELAY_MS,
+        )),
+    )
+    .await;
+
+    assert_eq!(observation.status, JobStatus::Pending);
+    assert_ne!(
+        observation.retry_event_delay_ms,
+        Some(i64::from(OVERRIDE_RETRY_DELAY_MS))
+    );
+    assert_eq!(
+        observation.retry_event_delay_ms,
+        Some(i64::from(observation.default_retry_delay_ms))
+    );
+    assert_eq!(
+        observation.attempt_retry_delay_ms,
+        Some(observation.default_retry_delay_ms)
+    );
+}
+
+#[tokio::test]
+async fn process_claimed_job_does_not_apply_override_to_other_failure_code() {
+    const OVERRIDE_RETRY_DELAY_MS: i32 = 120_000;
+
+    let observation = observe_retry_delay_override_failure(
+        "jobs_worker_retry_override_code",
+        "jobs.test.retry_override",
+        JobFailure::retryable(
+            "job.test.other_waiting_reason",
+            "waiting for a different reason",
+        ),
+        3,
+        Some((
+            JobType::new("jobs.test.retry_override"),
+            "job.test.waiting_for_external_refresh",
+            OVERRIDE_RETRY_DELAY_MS,
+        )),
+    )
+    .await;
+
+    assert_eq!(observation.status, JobStatus::Pending);
+    assert_ne!(
+        observation.retry_event_delay_ms,
+        Some(i64::from(OVERRIDE_RETRY_DELAY_MS))
+    );
+    assert_eq!(
+        observation.retry_event_delay_ms,
+        Some(i64::from(observation.default_retry_delay_ms))
+    );
+    assert_eq!(
+        observation.attempt_retry_delay_ms,
+        Some(observation.default_retry_delay_ms)
+    );
+}
+
+#[tokio::test]
+async fn process_claimed_job_ignores_retry_delay_override_for_terminal_failure() {
+    const OVERRIDE_RETRY_DELAY_MS: i32 = 120_000;
+
+    let observation = observe_retry_delay_override_failure(
+        "jobs_worker_retry_override_terminal",
+        "jobs.test.retry_override",
+        JobFailure::terminal(
+            "job.test.waiting_for_external_refresh",
+            "terminal failure with matching code",
+        ),
+        3,
+        Some((
+            JobType::new("jobs.test.retry_override"),
+            "job.test.waiting_for_external_refresh",
+            OVERRIDE_RETRY_DELAY_MS,
+        )),
+    )
+    .await;
+
+    assert_eq!(observation.runs, 1);
+    assert_eq!(observation.status, JobStatus::DeadLettered);
+    assert_eq!(observation.retry_event_delay_ms, None);
+    assert_eq!(observation.attempt_retry_delay_ms, None);
 }
 
 #[tokio::test]
