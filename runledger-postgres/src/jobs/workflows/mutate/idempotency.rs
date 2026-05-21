@@ -1,11 +1,13 @@
-use runledger_core::jobs::{StepKey, WorkflowDependencyReleaseMode, WorkflowStepEnqueue};
+use runledger_core::jobs::{JobStage, StepKey, WorkflowDependencyReleaseMode, WorkflowStepEnqueue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
 
 use crate::{DbTx, Error, Result};
 
-use super::super::enqueue::workflow_step_effective_organization_id;
+use super::super::enqueue::{
+    workflow_step_effective_organization_id, workflow_step_effective_stage,
+};
 use super::super::workflow_internal_state_error;
 
 #[derive(Serialize)]
@@ -99,9 +101,7 @@ pub(super) fn canonical_append_request(
                 priority: step.priority(),
                 max_attempts: step.max_attempts(),
                 timeout_seconds: step.timeout_seconds(),
-                stage: step
-                    .stage()
-                    .map(runledger_core::jobs::JobStage::as_db_value),
+                stage: workflow_step_effective_stage(step),
                 dependencies,
             }
         })
@@ -141,6 +141,11 @@ fn normalize_stored_append_request(
 ) -> StoredCanonicalAppendRequest {
     for step in &mut request.steps {
         step.organization_id = step.organization_id.or(workflow_organization_id);
+        if step.execution_kind == "JOB" && step.stage.is_none() {
+            // Older append snapshots stored an explicitly cleared job stage as
+            // null, while insertion still materialized the step as queued.
+            step.stage = Some(JobStage::Queued.as_db_value().to_owned());
+        }
         step.dependencies.sort_by(|left, right| {
             left.prerequisite_step_key
                 .cmp(&right.prerequisite_step_key)
@@ -153,22 +158,106 @@ fn normalize_stored_append_request(
     request
 }
 
-pub(super) fn stored_append_request_matches(
+pub(super) async fn stored_append_request_matches_tx(
+    tx: &mut DbTx<'_>,
     existing_request: &JsonValue,
     workflow_organization_id: Option<Uuid>,
     requested: &StoredCanonicalAppendRequest,
 ) -> Result<bool> {
     let existing = deserialize_stored_append_request(existing_request, workflow_organization_id)?;
-    if existing.steps != requested.steps {
-        return Ok(false);
-    }
-
-    Ok(existing
+    if !existing
         .append_window_step_key
         .as_ref()
         .is_none_or(|stored_key| {
             Some(stored_key.as_str()) == requested.append_window_step_key.as_deref()
-        }))
+        })
+    {
+        return Ok(false);
+    }
+
+    stored_append_steps_match_tx(tx, &existing.steps, &requested.steps).await
+}
+
+#[cfg(test)]
+fn stored_append_request_matches_for_test(
+    existing_request: &JsonValue,
+    workflow_organization_id: Option<Uuid>,
+    requested: &StoredCanonicalAppendRequest,
+) -> Result<bool> {
+    let existing = deserialize_stored_append_request(existing_request, workflow_organization_id)?;
+    Ok(
+        stored_append_steps_match_for_test(&existing.steps, &requested.steps)
+            && existing
+                .append_window_step_key
+                .as_ref()
+                .is_none_or(|stored_key| {
+                    Some(stored_key.as_str()) == requested.append_window_step_key.as_deref()
+                }),
+    )
+}
+
+#[cfg(test)]
+fn stored_append_steps_match_for_test(
+    left: &[StoredCanonicalStep],
+    right: &[StoredCanonicalStep],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            stored_append_step_fields_match(left, right) && left.payload == right.payload
+        })
+}
+
+async fn stored_append_steps_match_tx(
+    tx: &mut DbTx<'_>,
+    left: &[StoredCanonicalStep],
+    right: &[StoredCanonicalStep],
+) -> Result<bool> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+
+    for (left, right) in left.iter().zip(right) {
+        if !stored_append_step_fields_match(left, right) {
+            return Ok(false);
+        }
+        if left.payload != right.payload
+            && !jsonb_values_equal_tx(tx, &left.payload, &right.payload).await?
+        {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn stored_append_step_fields_match(
+    left: &StoredCanonicalStep,
+    right: &StoredCanonicalStep,
+) -> bool {
+    left.step_key == right.step_key
+        && left.execution_kind == right.execution_kind
+        && left.job_type == right.job_type
+        && left.organization_id == right.organization_id
+        && left.priority == right.priority
+        && left.max_attempts == right.max_attempts
+        && left.timeout_seconds == right.timeout_seconds
+        && left.stage == right.stage
+        && left.dependencies == right.dependencies
+}
+
+async fn jsonb_values_equal_tx(
+    tx: &mut DbTx<'_>,
+    left: &JsonValue,
+    right: &JsonValue,
+) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>("SELECT $1::jsonb = $2::jsonb")
+        .bind(left)
+        .bind(right)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| {
+            Error::from_query_sqlx_with_context("compare workflow append request payload", error)
+        })
 }
 
 pub(super) async fn load_existing_mutation_request_tx(
@@ -228,7 +317,8 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        canonical_append_request, deserialize_stored_append_request, stored_append_request_matches,
+        canonical_append_request, deserialize_stored_append_request,
+        stored_append_request_matches_for_test,
     };
 
     #[test]
@@ -269,8 +359,12 @@ mod tests {
                 .expect("deserialize reordered append request");
 
         assert!(
-            stored_append_request_matches(&existing_request, workflow_organization_id, &requested)
-                .expect("compare reordered append request"),
+            stored_append_request_matches_for_test(
+                &existing_request,
+                workflow_organization_id,
+                &requested,
+            )
+            .expect("compare reordered append request"),
             "same logical append batch should match after step reordering",
         );
     }
@@ -347,8 +441,12 @@ mod tests {
                 .expect("deserialize reordered append request");
 
         assert!(
-            stored_append_request_matches(&legacy_request, workflow_organization_id, &requested)
-                .expect("compare legacy append request"),
+            stored_append_request_matches_for_test(
+                &legacy_request,
+                workflow_organization_id,
+                &requested
+            )
+            .expect("compare legacy append request"),
             "legacy stored rows with unsorted steps should still match",
         );
     }
@@ -385,9 +483,68 @@ mod tests {
                 .expect("deserialize explicit request");
 
         assert!(
-            stored_append_request_matches(&existing_request, workflow_organization_id, &requested)
-                .expect("compare implicit and explicit requests"),
+            stored_append_request_matches_for_test(
+                &existing_request,
+                workflow_organization_id,
+                &requested,
+            )
+            .expect("compare implicit and explicit requests"),
             "same effective workflow organization should compare equal",
+        );
+    }
+
+    #[test]
+    fn workflow_append_request_treats_cleared_stage_as_queued() {
+        let payload = json!({"batch": "default-stage"});
+        let cleared = WorkflowStepEnqueueBuilder::new(
+            StepKey::new("child"),
+            JobType::new("jobs.test.child"),
+            &payload,
+        )
+        .clear_stage()
+        .try_build()
+        .expect("build step with cleared stage");
+        let queued = WorkflowStepEnqueueBuilder::new(
+            StepKey::new("child"),
+            JobType::new("jobs.test.child"),
+            &payload,
+        )
+        .try_build()
+        .expect("build step with default queued stage");
+
+        let existing_request = canonical_append_request(StepKey::new("gate"), None, &[cleared])
+            .expect("build cleared-stage request");
+        let queued_request = canonical_append_request(StepKey::new("gate"), None, &[queued])
+            .expect("build queued-stage request");
+        let requested = deserialize_stored_append_request(&queued_request, None)
+            .expect("deserialize queued-stage request");
+
+        assert!(
+            stored_append_request_matches_for_test(&existing_request, None, &requested)
+                .expect("compare cleared and queued stage requests"),
+            "cleared job stage should compare as the inserted queued default",
+        );
+
+        let legacy_cleared_request = json!({
+            "append_window_step_key": "gate",
+            "steps": [
+                {
+                    "step_key": "child",
+                    "execution_kind": "JOB",
+                    "job_type": "jobs.test.child",
+                    "payload": payload,
+                    "priority": null,
+                    "max_attempts": null,
+                    "timeout_seconds": null,
+                    "stage": null,
+                    "dependencies": []
+                }
+            ]
+        });
+        assert!(
+            stored_append_request_matches_for_test(&legacy_cleared_request, None, &requested)
+                .expect("compare legacy cleared and queued stage requests"),
+            "legacy null job stage should normalize to the inserted queued default",
         );
     }
 
@@ -428,8 +585,12 @@ mod tests {
                 .expect("deserialize changed request");
 
         assert!(
-            !stored_append_request_matches(&existing_request, workflow_organization_id, &requested)
-                .expect("compare changed requests"),
+            !stored_append_request_matches_for_test(
+                &existing_request,
+                workflow_organization_id,
+                &requested,
+            )
+            .expect("compare changed requests"),
             "changed step organization must not compare equal",
         );
     }
@@ -471,8 +632,12 @@ mod tests {
                 .expect("deserialize current request");
 
         assert!(
-            stored_append_request_matches(&legacy_request, workflow_organization_id, &requested)
-                .expect("compare legacy request without step scope"),
+            stored_append_request_matches_for_test(
+                &legacy_request,
+                workflow_organization_id,
+                &requested
+            )
+            .expect("compare legacy request without step scope"),
             "legacy rows without step scope should match the run organization by default",
         );
     }

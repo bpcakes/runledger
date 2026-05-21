@@ -27,7 +27,7 @@ use super::super::runtime::{
     recompute_workflow_run_statuses_tx, release_candidate_step_tx, resolve_terminal_step_queue_tx,
 };
 use super::super::{
-    StepReleaseCandidate, workflow_append_blank_mutation_key_error,
+    StepReleaseCandidate, ensure_read_committed_tx, workflow_append_blank_mutation_key_error,
     workflow_append_conflicting_retry_error, workflow_append_terminal_run_error,
     workflow_append_window_missing_error, workflow_append_window_not_external_error,
     workflow_append_window_not_open_error, workflow_dag_validation_error,
@@ -35,7 +35,7 @@ use super::super::{
 };
 use super::idempotency::{
     canonical_append_request, deserialize_stored_append_request, insert_workflow_mutation_row_tx,
-    load_existing_mutation_request_tx, stored_append_request_matches,
+    load_existing_mutation_request_tx, stored_append_request_matches_tx,
 };
 use super::{
     LockedWorkflowStepState, lock_workflow_run_for_update_tx, lock_workflow_steps_for_update_tx,
@@ -70,6 +70,13 @@ pub async fn append_workflow_steps_tx(
     if input.mutation_key.trim().is_empty() {
         return Err(workflow_append_blank_mutation_key_error());
     }
+    ensure_read_committed_tx(
+        tx,
+        "workflow append mutation",
+        "workflow.append_unsupported_isolation",
+        "Workflow append mutation requires READ COMMITTED transaction isolation.",
+    )
+    .await?;
 
     let locked_steps =
         lock_workflow_steps_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;
@@ -86,11 +93,14 @@ pub async fn append_workflow_steps_tx(
     if let Some(existing_request) =
         load_existing_mutation_request_tx(tx, workflow_run.id, input.mutation_key).await?
     {
-        if !stored_append_request_matches(
+        if !stored_append_request_matches_tx(
+            tx,
             &existing_request,
             workflow_run.organization_id,
             &comparable_request,
-        )? {
+        )
+        .await?
+        {
             return Err(workflow_append_conflicting_retry_error(input.mutation_key));
         }
 

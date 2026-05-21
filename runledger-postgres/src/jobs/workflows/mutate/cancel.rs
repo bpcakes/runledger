@@ -12,7 +12,10 @@ use super::super::runtime::{
     complete_external_workflow_step_tx, recompute_workflow_run_statuses_tx,
     resolve_terminal_step_queue_tx,
 };
-use super::super::{lock_workflow_run_release_tx, workflow_internal_state_error};
+use super::super::{
+    ensure_read_committed_tx, lock_workflow_run_release_exclusive_after_jobs_tx,
+    workflow_internal_state_error,
+};
 use super::{
     LockedWorkflowStepState, lock_workflow_run_for_update_tx,
     lock_workflow_step_jobs_for_update_tx, lock_workflow_steps_for_update_tx,
@@ -26,6 +29,14 @@ pub async fn cancel_workflow_run_tx(
     last_error_code: Option<&str>,
     last_error_message: Option<&str>,
 ) -> Result<WorkflowRunDbRecord> {
+    ensure_read_committed_tx(
+        tx,
+        "workflow cancel",
+        "workflow.cancel_unsupported_isolation",
+        "Workflow cancellation requires READ COMMITTED transaction isolation.",
+    )
+    .await?;
+
     // Lock job rows before workflow-step rows so cancel does not wait on a
     // step while an in-flight release has already locked that step and is
     // inserting or updating its job row. After the advisory wait, that release
@@ -36,7 +47,7 @@ pub async fn cancel_workflow_run_tx(
     // COMMITTED isolation so the second job-lock query observes rows committed
     // while this transaction waited on the advisory lock.
     lock_workflow_step_jobs_for_update_tx(tx, workflow_run_id, organization_id).await?;
-    lock_workflow_run_release_tx(tx, workflow_run_id).await?;
+    lock_workflow_run_release_exclusive_after_jobs_tx(tx, workflow_run_id).await?;
     // Catch job rows inserted by releases that committed while cancel was
     // waiting on the advisory lock.
     lock_workflow_step_jobs_for_update_tx(tx, workflow_run_id, organization_id).await?;

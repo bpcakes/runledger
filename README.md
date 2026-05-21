@@ -73,6 +73,17 @@ For consumer setup there are two supported modes:
 - call `runledger_postgres::migrate(&pool)` to apply the bundled schema during startup
 - call `runledger_postgres::ensure_schema_compatible(&pool)` to perform a read-only validation that an existing `_sqlx_migrations` history matches the bundled migrations, with explicit errors for missing history or PostgreSQL query/connectivity failures
 
+Operational API notes:
+
+- `QueryError::Display` and `Debug` are safe for public surfaces and omit internal database context; use `QueryError::internal_message()` for server-side diagnostics.
+- Worker lifecycle updates reject expired leases with the stable `job.lease_owner_mismatch` code, even when the lease was lost by time rather than by another worker; once `lease_expires_at` has passed there is no owner grace period.
+- `complete_job_success` persists `JobStage::Completed`; passing any other success stage is rejected as a caller error.
+- Workflow-backed job completion waits for an in-flight workflow cancellation to commit or roll back instead of returning a transient `workflow.release_conflict`; append and external-step release paths may still return `workflow.release_conflict` while cancellation owns the exclusive release lock.
+- Retry conflicts such as `workflow.append_conflicting_retry` are reported as conflict-category query errors; clients should prefer stable error codes over broad categories for exact branching.
+- Release-sensitive workflow operations, workflow append mutations, and keyed enqueue retries require PostgreSQL `READ COMMITTED` semantics. PostgreSQL's `READ UNCOMMITTED` mode is accepted because PostgreSQL implements it as read committed.
+- Keyed rows created before enqueue snapshots existed cannot be fully reconstructed. Legacy job retries compare durable queue fields; legacy workflow retries can only be metadata-checked because workflow steps may have been appended or mutated after enqueue.
+- For legacy workflow rows with `enqueue_request IS NULL`, a keyed retry with matching metadata returns the existing run even if the submitted steps, dependencies, or payloads differ. Treat this as a compatibility fallback only, monitor the legacy fallback warning logs, and retire the fallback after old rows have drained.
+
 ### `runledger-runtime`
 
 Use `runledger-runtime` to run the operational loops around the storage layer:
@@ -244,6 +255,8 @@ The preparation script:
 - refreshes SQLx offline metadata
 - runs workspace tests and the packaged external-consumer smoke test
 - runs a publish dry-run for `runledger-core` and packages the dependent crates locally
+
+Before publishing this release line, call out observable contract changes in release notes: `QueryError::Display` now returns client-safe messages, expired leases have no owner grace period for heartbeat/progress/success/failure writes, the `job.lease_owner_mismatch` message now covers time-based loss of ownership, success completion rejects non-`Completed` stages, workflow-backed job completion waits on in-flight cancellation instead of returning `workflow.release_conflict`, append/external release can still return `workflow.release_conflict`, workflow append mutations require read-committed transaction isolation, idempotent enqueue adds new conflict/isolation error codes, and `workflow.append_conflicting_retry` is now a conflict-category error.
 
 If publishing manually, run `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres` or `runledger-runtime` and commit any resulting `.sqlx/` changes.
 

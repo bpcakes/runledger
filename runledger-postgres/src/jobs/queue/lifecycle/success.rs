@@ -1,15 +1,15 @@
-use runledger_core::jobs::WorkflowStepStatus;
+use runledger_core::jobs::{JobStage, WorkflowStepStatus};
 use serde_json::Value;
 use sqlx::types::Uuid;
 
-use crate::{DbPool, DbTx, Error, Result};
+use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
 use super::super::super::types::JobProgressUpdate;
 use super::super::super::workflows::on_terminal;
 use super::common::{COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
 
 struct SuccessProgressUpdate<'a> {
-    stage: runledger_core::jobs::JobStage,
+    stage: JobStage,
     progress_done: Option<i64>,
     progress_total: Option<i64>,
     checkpoint: Option<&'a Value>,
@@ -17,15 +17,31 @@ struct SuccessProgressUpdate<'a> {
 
 fn success_progress_update<'a>(
     progress: Option<&'a JobProgressUpdate<'a>>,
-) -> SuccessProgressUpdate<'a> {
-    SuccessProgressUpdate {
-        stage: progress
-            .and_then(|value| value.stage)
-            .unwrap_or(runledger_core::jobs::JobStage::Completed),
+) -> Result<SuccessProgressUpdate<'a>> {
+    if let Some(stage) = progress.and_then(|value| value.stage)
+        && stage != JobStage::Completed
+    {
+        return Err(job_success_stage_invalid_error(stage));
+    }
+
+    Ok(SuccessProgressUpdate {
+        stage: JobStage::Completed,
         progress_done: progress.and_then(|value| value.progress_done),
         progress_total: progress.and_then(|value| value.progress_total),
         checkpoint: progress.and_then(|value| value.checkpoint),
-    }
+    })
+}
+
+fn job_success_stage_invalid_error(stage: JobStage) -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Validation,
+        "job.success_stage_invalid",
+        "Successful job completion requires the completed stage.",
+        format!(
+            "complete job success received non-completed stage '{}'",
+            stage.as_db_value()
+        ),
+    ))
 }
 
 async fn mark_job_succeeded_tx(
@@ -37,7 +53,18 @@ async fn mark_job_succeeded_tx(
     progress: &SuccessProgressUpdate<'_>,
 ) -> Result<u64> {
     let rows_affected = sqlx::query!(
-        "UPDATE job_queue
+        "WITH locked_job AS MATERIALIZED (
+             SELECT id
+             FROM job_queue
+             WHERE id = $1
+               AND run_number = $2
+               AND attempt = $3
+               AND worker_id = $4
+               AND status = 'LEASED'
+               AND lease_expires_at IS NOT NULL
+             FOR UPDATE
+         )
+         UPDATE job_queue
          SET status = 'SUCCEEDED',
              lease_expires_at = NULL,
              last_heartbeat_at = NULL,
@@ -51,11 +78,9 @@ async fn mark_job_succeeded_tx(
              last_error_code = NULL,
              last_error_message = NULL,
              updated_at = now()
-         WHERE id = $1
-           AND run_number = $2
-           AND attempt = $3
-           AND worker_id = $4
-           AND status = 'LEASED'",
+         FROM locked_job
+         WHERE job_queue.id = locked_job.id
+           AND job_queue.lease_expires_at > clock_timestamp()",
         job_id,
         run_number,
         attempt,
@@ -133,6 +158,10 @@ async fn insert_job_succeeded_event_tx(
     Ok(())
 }
 
+/// Completes a leased job successfully.
+///
+/// Successful completion always persists `JobStage::Completed`; passing any
+/// other stage in the optional progress update is rejected.
 pub async fn complete_job_success(
     pool: &DbPool,
     job_id: Uuid,
@@ -141,12 +170,12 @@ pub async fn complete_job_success(
     worker_id: &str,
     progress: Option<&JobProgressUpdate<'_>>,
 ) -> Result<()> {
+    let progress = success_progress_update(progress)?;
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    let progress = success_progress_update(progress);
     let updated =
         mark_job_succeeded_tx(&mut tx, job_id, run_number, attempt, worker_id, &progress).await?;
 

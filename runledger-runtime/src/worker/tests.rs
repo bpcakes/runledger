@@ -11,9 +11,10 @@ use runledger_core::jobs::{
     JobStatus, JobType,
 };
 use runledger_postgres::jobs::{
-    JobDefinitionUpsert, JobEnqueue, JobProgressUpdate, claim_prestart_jobs, enqueue_job,
-    get_job_by_id, list_job_events, reap_expired_leases, release_unstarted_job_claim,
-    update_job_progress, upsert_job_definition_tx,
+    JobDefinitionUpsert, JobEnqueue, JobFailureUpdate, JobProgressUpdate, claim_prestart_jobs,
+    complete_job_failure, complete_job_success, enqueue_job, get_job_by_id, heartbeat_job,
+    list_job_events, reap_expired_leases, release_unstarted_job_claim, update_job_progress,
+    upsert_job_definition_tx,
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -338,6 +339,32 @@ async fn expire_job_lease(pool: &PgPool, job_id: uuid::Uuid) {
     .expect("expire leased job");
 }
 
+async fn wait_for_heartbeat_to_block_on_job_lock(pool: &PgPool) {
+    for _ in 0..100 {
+        let waiting = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE wait_event_type = 'Lock'
+                   AND query LIKE '%UPDATE job_queue%'
+                   AND query LIKE '%make_interval%'
+                   AND query NOT LIKE '%pg_stat_activity%'
+             )",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("query waiting heartbeat activity");
+
+        if waiting {
+            return;
+        }
+
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("heartbeat did not block on the job-row lock");
+}
+
 async fn wait_for_status(
     pool: &PgPool,
     job_id: uuid::Uuid,
@@ -599,6 +626,290 @@ async fn process_claimed_job_ignores_retry_delay_override_for_terminal_failure()
     assert_eq!(observation.status, JobStatus::DeadLettered);
     assert_eq!(observation.retry_event_delay_ms, None);
     assert_eq!(observation.attempt_retry_delay_ms, None);
+}
+
+#[tokio::test]
+async fn expired_lease_rejects_worker_lifecycle_updates() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_expired_lifecycle", 8).await;
+    let job_type = JobType::new("jobs.test.expired_lifecycle");
+
+    let (heartbeat_job_id, heartbeat_claim) = enqueue_and_claim_job(
+        &pool,
+        job_type,
+        3,
+        json!({"kind":"expired-heartbeat"}),
+        "worker-expired-heartbeat",
+    )
+    .await;
+    expire_job_lease(&pool, heartbeat_job_id).await;
+    let heartbeat_error = heartbeat_job(
+        &pool,
+        heartbeat_claim.id,
+        heartbeat_claim.run_number,
+        heartbeat_claim.attempt,
+        heartbeat_claim
+            .worker_id
+            .as_deref()
+            .expect("claimed job has worker id"),
+        30,
+    )
+    .await
+    .expect_err("expired lease heartbeat should fail");
+    assert_eq!(
+        query_error_code(&heartbeat_error),
+        Some("job.lease_owner_mismatch")
+    );
+
+    let (progress_job_id, progress_claim) = enqueue_and_claim_job(
+        &pool,
+        job_type,
+        3,
+        json!({"kind":"expired-progress"}),
+        "worker-expired-progress",
+    )
+    .await;
+    expire_job_lease(&pool, progress_job_id).await;
+    let progress_error = update_job_progress(
+        &pool,
+        progress_claim.id,
+        progress_claim.run_number,
+        progress_claim.attempt,
+        progress_claim
+            .worker_id
+            .as_deref()
+            .expect("claimed job has worker id"),
+        &JobProgressUpdate {
+            stage: Some(runledger_core::jobs::JobStage::Running),
+            progress_done: None,
+            progress_total: None,
+            checkpoint: None,
+        },
+    )
+    .await
+    .expect_err("expired lease progress update should fail");
+    assert_eq!(
+        query_error_code(&progress_error),
+        Some("job.lease_owner_mismatch")
+    );
+
+    let (success_job_id, success_claim) = enqueue_and_claim_job(
+        &pool,
+        job_type,
+        3,
+        json!({"kind":"expired-success"}),
+        "worker-expired-success",
+    )
+    .await;
+    expire_job_lease(&pool, success_job_id).await;
+    let success_error = complete_job_success(
+        &pool,
+        success_claim.id,
+        success_claim.run_number,
+        success_claim.attempt,
+        success_claim
+            .worker_id
+            .as_deref()
+            .expect("claimed job has worker id"),
+        None,
+    )
+    .await
+    .expect_err("expired lease success completion should fail");
+    assert_eq!(
+        query_error_code(&success_error),
+        Some("job.lease_owner_mismatch")
+    );
+
+    let (failure_job_id, failure_claim) = enqueue_and_claim_job(
+        &pool,
+        job_type,
+        3,
+        json!({"kind":"expired-failure"}),
+        "worker-expired-failure",
+    )
+    .await;
+    expire_job_lease(&pool, failure_job_id).await;
+    let failure_error = complete_job_failure(
+        &pool,
+        failure_claim.id,
+        failure_claim.run_number,
+        failure_claim.attempt,
+        failure_claim
+            .worker_id
+            .as_deref()
+            .expect("claimed job has worker id"),
+        &JobFailureUpdate {
+            kind: JobFailureKind::Retryable,
+            code: "job.test.expired_failure",
+            message: "expired failure should not persist",
+            retry_delay_ms: Some(1_000),
+        },
+    )
+    .await
+    .expect_err("expired lease failure completion should fail");
+    assert_eq!(
+        query_error_code(&failure_error),
+        Some("job.lease_owner_mismatch")
+    );
+
+    for job_id in [
+        heartbeat_job_id,
+        progress_job_id,
+        success_job_id,
+        failure_job_id,
+    ] {
+        let job = get_job_by_id(&pool, None, job_id)
+            .await
+            .expect("load job")
+            .expect("job exists");
+        assert_eq!(job.status, JobStatus::Leased);
+    }
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn heartbeat_rejects_lease_that_expires_while_waiting_for_job_lock() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_heartbeat_clock_expiry", 8).await;
+    let job_type = JobType::new("jobs.test.heartbeat_clock_expiry");
+    let (job_id, claim) = enqueue_and_claim_job(
+        &pool,
+        job_type,
+        3,
+        json!({"kind":"heartbeat-clock-expiry"}),
+        "worker-heartbeat-clock-expiry",
+    )
+    .await;
+    let worker_id = claim.worker_id.clone().expect("claimed job has worker id");
+
+    sqlx::query(
+        "UPDATE job_queue
+         SET lease_expires_at = clock_timestamp() + interval '1 second'
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await
+    .expect("shorten lease before blocking heartbeat");
+
+    let mut lock_tx = pool.begin().await.expect("begin job lock transaction");
+    sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
+        .bind(job_id)
+        .execute(&mut *lock_tx)
+        .await
+        .expect("hold job row lock");
+
+    let heartbeat_pool = pool.clone();
+    let heartbeat_task = tokio::spawn(async move {
+        heartbeat_job(
+            &heartbeat_pool,
+            claim.id,
+            claim.run_number,
+            claim.attempt,
+            &worker_id,
+            30,
+        )
+        .await
+    });
+
+    wait_for_heartbeat_to_block_on_job_lock(&pool).await;
+    sleep(Duration::from_millis(1_200)).await;
+    lock_tx.rollback().await.expect("release job row lock");
+
+    let error = timeout(Duration::from_secs(5), heartbeat_task)
+        .await
+        .expect("heartbeat should finish after row lock release")
+        .expect("heartbeat task should not panic")
+        .expect_err("heartbeat should reject lease expired during lock wait");
+    assert_eq!(query_error_code(&error), Some("job.lease_owner_mismatch"));
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn successful_completion_rejects_non_completed_stage() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_success_invalid_stage", 8).await;
+    let job_type = JobType::new("jobs.test.success_invalid_stage");
+    let (job_id, claim) = enqueue_and_claim_job(
+        &pool,
+        job_type,
+        3,
+        json!({"kind":"invalid-success-stage"}),
+        "worker-invalid-success-stage",
+    )
+    .await;
+
+    let error = complete_job_success(
+        &pool,
+        claim.id,
+        claim.run_number,
+        claim.attempt,
+        claim
+            .worker_id
+            .as_deref()
+            .expect("claimed job has worker id"),
+        Some(&JobProgressUpdate {
+            stage: Some(runledger_core::jobs::JobStage::Running),
+            progress_done: None,
+            progress_total: None,
+            checkpoint: None,
+        }),
+    )
+    .await
+    .expect_err("success completion should reject non-completed stage");
+    assert_eq!(query_error_code(&error), Some("job.success_stage_invalid"));
+
+    let job = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job")
+        .expect("job exists");
+    assert_eq!(job.status, JobStatus::Leased);
+    assert_eq!(job.stage, runledger_core::jobs::JobStage::Queued);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn standalone_success_completion_allows_non_read_committed_session() {
+    // The session-level isolation setting must apply to the same connection
+    // complete_job_success borrows from the pool.
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_success_repeatable_read", 1).await;
+    let job_type = JobType::new("jobs.test.success_repeatable_read");
+    let (job_id, claim) = enqueue_and_claim_job(
+        &pool,
+        job_type,
+        3,
+        json!({"kind":"standalone-repeatable-read-success"}),
+        "worker-standalone-repeatable-read",
+    )
+    .await;
+    let worker_id = claim.worker_id.clone().expect("claimed job has worker id");
+
+    sqlx::query("SET default_transaction_isolation = 'repeatable read'")
+        .execute(&pool)
+        .await
+        .expect("set default isolation to repeatable read");
+    let result = complete_job_success(
+        &pool,
+        claim.id,
+        claim.run_number,
+        claim.attempt,
+        &worker_id,
+        None,
+    )
+    .await;
+    sqlx::query("SET default_transaction_isolation = 'read committed'")
+        .execute(&pool)
+        .await
+        .expect("reset default isolation to read committed");
+    result.expect("standalone job completion does not require workflow isolation");
+
+    let job = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job")
+        .expect("job exists");
+    assert_eq!(job.status, JobStatus::Succeeded);
+
+    teardown_ephemeral_pool(pool, database).await;
 }
 
 #[tokio::test]

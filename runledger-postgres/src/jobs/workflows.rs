@@ -9,7 +9,8 @@ mod validation;
 pub use self::enqueue::{enqueue_workflow_run, enqueue_workflow_run_tx};
 pub(crate) use self::hooks::{on_claim_released, on_claimed, on_retry_scheduled, on_terminal};
 pub(crate) use self::locking::{
-    lock_workflow_run_release_tx, try_lock_workflow_run_release_shared_tx,
+    lock_workflow_run_release_exclusive_after_jobs_tx, lock_workflow_run_release_shared_tx,
+    try_lock_workflow_run_release_shared_tx,
 };
 pub use self::mutate::{
     append_workflow_steps, append_workflow_steps_tx, cancel_workflow_run_tx,
@@ -22,6 +23,7 @@ pub use self::read::{
     list_workflow_steps,
 };
 pub use self::runtime::{complete_external_workflow_step, complete_external_workflow_step_tx};
+pub(crate) use super::transaction_isolation::ensure_read_committed_tx;
 #[cfg(feature = "test-support")]
 pub mod test_support {
     pub use super::locking::test_support::workflow_run_release_lock_key;
@@ -173,11 +175,22 @@ fn workflow_append_terminal_run_error(status: WorkflowRunStatus) -> Error {
 
 fn workflow_append_conflicting_retry_error(mutation_key: &str) -> Error {
     Error::QueryError(QueryError::from_classified(
-        QueryErrorCategory::Validation,
+        QueryErrorCategory::Conflict,
         "workflow.append_conflicting_retry",
         "Workflow append retry conflicts with the existing mutation.",
         format!(
             "workflow append mutation '{mutation_key}' does not match the already-recorded request"
+        ),
+    ))
+}
+
+fn workflow_enqueue_conflicting_retry_error(field: &str) -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Conflict,
+        "workflow.enqueue_conflicting_retry",
+        "Workflow enqueue retry conflicts with the existing idempotency key.",
+        format!(
+            "workflow enqueue idempotency key conflicts with existing workflow run field '{field}'"
         ),
     ))
 }

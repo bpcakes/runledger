@@ -16,11 +16,11 @@ use super::super::row_decode::{
 use super::super::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowStepDbRecord};
 use super::mutate::lock_workflow_step_rows_for_update_tx;
 use super::{
-    StepReleaseCandidate, try_lock_workflow_run_release_shared_tx,
-    workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
-    workflow_external_step_not_external_error, workflow_external_step_not_found_error,
-    workflow_external_step_not_waiting_error, workflow_internal_state_error,
-    workflow_release_conflict_error,
+    StepReleaseCandidate, ensure_read_committed_tx, lock_workflow_run_release_shared_tx,
+    try_lock_workflow_run_release_shared_tx, workflow_external_completion_conflict_error,
+    workflow_external_completion_invalid_status_error, workflow_external_step_not_external_error,
+    workflow_external_step_not_found_error, workflow_external_step_not_waiting_error,
+    workflow_internal_state_error, workflow_release_conflict_error,
 };
 
 #[derive(sqlx::FromRow)]
@@ -229,6 +229,9 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
     last_error_code: Option<&str>,
     last_error_message: Option<&str>,
 ) -> Result<()> {
+    // Lifecycle callers already hold the job_queue row lock for `job_id`, so
+    // the lookup below is reentrant. Cancellation follows the same job-row-first
+    // ordering before taking the exclusive release advisory lock.
     validate_terminal_transition_status(terminal_status)?;
 
     let linked_workflow_step_id: Option<Uuid> = sqlx::query_scalar!(
@@ -244,6 +247,16 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
         )
     })?
     .flatten();
+
+    if linked_workflow_step_id.is_some() {
+        ensure_read_committed_tx(
+            tx,
+            "workflow job terminal completion",
+            "workflow.terminal_completion_unsupported_isolation",
+            "Workflow job completion requires READ COMMITTED transaction isolation.",
+        )
+        .await?;
+    }
 
     let row = sqlx::query!(
         "SELECT id, workflow_run_id, status::text AS \"status!\"
@@ -311,6 +324,14 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
     .map_err(|error| Error::from_query_sqlx_with_context("mark workflow step terminal", error))?;
 
     let mut touched_run_ids = BTreeSet::from([workflow_run_id]);
+    // Job-backed terminal completion already owns the job row. Real cancellation
+    // locks job rows before taking the exclusive release lock, so cancellation
+    // cannot hold the exclusive lock while also waiting on this job row. Waiting
+    // here keeps terminal persistence atomic with dependency release instead of
+    // stranding dependents behind a rolled-back exclusive holder.
+    // Invariant: dependency release runs later in this same transaction, on this
+    // same connection, so its shared advisory try-lock is reentrant.
+    lock_workflow_run_release_shared_tx(tx, workflow_run_id).await?;
     resolve_terminal_step_queue_tx(tx, step_id, terminal_status, &mut touched_run_ids).await?;
     recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
 
@@ -592,8 +613,11 @@ pub(crate) async fn release_candidate_step_tx(
     // Callers reach step release with the candidate workflow-step rows locked
     // FOR UPDATE. append_workflow_steps_tx also holds the workflow-run row lock
     // before inserting and releasing appended steps. If cancel already owns the
-    // exclusive advisory lock, the caller must roll back rather than committing
-    // consumed dependency counters without a matching release/cancel sweep.
+    // exclusive advisory lock, append/external callers must roll back rather
+    // than committing consumed dependency counters without a matching
+    // release/cancel sweep. Job terminal completion waits on the blocking
+    // shared lock before it gets here, so this try-lock succeeds reentrantly on
+    // that connection.
     if !try_lock_workflow_run_release_shared_tx(tx, candidate.workflow_run_id).await? {
         return Err(workflow_release_conflict_error(candidate.workflow_run_id));
     }

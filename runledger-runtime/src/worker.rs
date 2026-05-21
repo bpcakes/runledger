@@ -18,6 +18,8 @@ use crate::config::JobsConfig;
 use crate::registry::JobRegistry;
 
 const UNKNOWN_WORKER_ID: &str = "unknown-worker";
+// Kept stable for clients that already match this code; it also covers leases
+// that expired before the worker's lifecycle update reached storage.
 const LEASE_OWNER_MISMATCH_CODE: &str = "job.lease_owner_mismatch";
 const LEASE_MAINTENANCE_FAILED_CODE: &str = "job.lease_maintenance_failed";
 const WORKFLOW_RELEASE_CONFLICT_CODE: &str = "workflow.release_conflict";

@@ -49,7 +49,7 @@ impl FrameworkConstraintSpec {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QueryError {
     category: QueryErrorCategory,
     code: &'static str,
@@ -179,17 +179,28 @@ impl QueryError {
     }
 }
 
+impl fmt::Debug for QueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryError")
+            .field("category", &self.category)
+            .field("code", &self.code)
+            .field("client_message", &self.client_message)
+            .field("sqlstate", &self.sqlstate)
+            .field("constraint", &self.constraint)
+            .field("has_source", &self.source.is_some())
+            .finish()
+    }
+}
+
 impl fmt::Display for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+        write!(f, "{}", self.client_message)
     }
 }
 
 impl std::error::Error for QueryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn std::error::Error + 'static))
+        None
     }
 }
 
@@ -446,6 +457,46 @@ mod tests {
         assert_eq!(spec.category(), QueryErrorCategory::Forbidden);
         assert_eq!(spec.code(), "custom.override");
         assert_eq!(spec.client_message(), "Custom override wins.");
+    }
+
+    #[test]
+    fn query_error_debug_omits_internal_message() {
+        let error = QueryError::from_classified(
+            QueryErrorCategory::Conflict,
+            "job.idempotency_conflict",
+            "Job enqueue retry conflicts with the existing idempotency key.",
+            "internal context includes secret-idempotency-key",
+        );
+
+        let debug = format!("{error:?}");
+        assert!(debug.contains("job.idempotency_conflict"));
+        assert!(!debug.contains("secret-idempotency-key"));
+
+        let display = error.to_string();
+        assert_eq!(
+            display,
+            "Job enqueue retry conflicts with the existing idempotency key."
+        );
+        assert!(!display.contains("secret-idempotency-key"));
+    }
+
+    #[test]
+    fn query_error_from_sqlx_uses_sanitized_display_and_debug() {
+        let error = QueryError::from_sqlx(
+            sqlx::Error::Protocol("internal secret-idempotency-key detail".into()),
+            Some("sensitive context"),
+        );
+
+        let display = error.to_string();
+        assert_eq!(display, "Database operation failed.");
+        assert!(!display.contains("secret-idempotency-key"));
+
+        let debug = format!("{error:?}");
+        assert!(debug.contains("db.query_failed"));
+        assert!(!debug.contains("secret-idempotency-key"));
+        assert!(error.internal_message().contains("secret-idempotency-key"));
+        assert!(std::error::Error::source(&error).is_none());
+        assert!(error.source_arc().is_some());
     }
 
     #[test]

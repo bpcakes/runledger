@@ -127,6 +127,11 @@ pub(super) async fn lock_workflow_step_jobs_for_update_tx(
     sqlx::query!(
         // Keep the marker in the SQL text; the lock-order regression test
         // uses it to observe this exact wait in pg_stat_activity.
+        //
+        // Lock in UUIDv7 creation order. Terminal completion holds a prerequisite
+        // job row before releasing dependent jobs, and dependent job rows are
+        // inserted later, so cancel must block on older prerequisite rows before
+        // it can lock newer dependent rows.
         "SELECT jq.id /* runledger:lock_workflow_step_jobs_for_update */
          FROM job_queue jq
          JOIN workflow_steps ws ON ws.job_id = jq.id

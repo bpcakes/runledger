@@ -5,6 +5,7 @@ mod queue;
 mod row_decode;
 mod runtime_configs;
 mod schedules;
+mod transaction_isolation;
 mod types;
 mod workflow_types;
 mod workflows;
