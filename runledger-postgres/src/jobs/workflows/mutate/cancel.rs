@@ -4,21 +4,20 @@ use runledger_core::jobs::{WorkflowRunStatus, WorkflowStepStatus};
 use sqlx::types::Uuid;
 
 use crate::jobs::admin::cancel_job_tx;
+use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::jobs::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowRunDbRecord};
 use crate::{DbTx, Error, Result};
 
-use super::super::enqueue::load_workflow_run_by_id_tx;
+use super::super::errors::workflow_internal_state_error;
+use super::super::locking::{
+    LockedWorkflowStepState, lock_workflow_run_for_update_tx,
+    lock_workflow_run_release_exclusive_after_jobs_tx, lock_workflow_step_jobs_for_update_tx,
+    lock_workflow_steps_for_update_tx,
+};
+use super::super::read::load_workflow_run_by_id_tx;
 use super::super::runtime::{
     complete_external_workflow_step_tx, recompute_workflow_run_statuses_tx,
     resolve_terminal_step_queue_tx,
-};
-use super::super::{
-    ensure_read_committed_tx, lock_workflow_run_release_exclusive_after_jobs_tx,
-    workflow_internal_state_error,
-};
-use super::{
-    LockedWorkflowStepState, lock_workflow_run_for_update_tx,
-    lock_workflow_step_jobs_for_update_tx, lock_workflow_steps_for_update_tx,
 };
 
 pub async fn cancel_workflow_run_tx(
@@ -57,7 +56,12 @@ pub async fn cancel_workflow_run_tx(
         lock_workflow_run_for_update_tx(tx, workflow_run_id, organization_id).await?;
 
     if workflow_run.status == WorkflowRunStatus::Canceled {
-        return load_workflow_run_by_id_tx(tx, workflow_run.id).await;
+        return load_workflow_run_by_id_tx(
+            tx,
+            workflow_run.id,
+            "load already-canceled workflow run",
+        )
+        .await;
     }
 
     // Keep this status update before cancel_nonterminal_workflow_step_tx: that
@@ -107,7 +111,7 @@ pub async fn cancel_workflow_run_tx(
     }
 
     recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
-    load_workflow_run_by_id_tx(tx, workflow_run.id).await
+    load_workflow_run_by_id_tx(tx, workflow_run.id, "load workflow run after cancel").await
 }
 
 async fn load_nonterminal_workflow_steps_for_cancel_tx(

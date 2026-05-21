@@ -5,46 +5,22 @@ use runledger_core::jobs::{
     JobStage, JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowType,
 };
 use runledger_postgres::jobs::{
-    AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, JobDefinitionUpsert, JobEnqueue,
-    JobProgressUpdate, append_workflow_steps, append_workflow_steps_tx, claim_jobs_for_types,
-    complete_job_success, enqueue_job, enqueue_job_tx, enqueue_workflow_run,
-    enqueue_workflow_run_tx, get_workflow_run_by_type_and_idempotency_key, list_job_events,
-    list_workflow_steps, update_job_progress, update_workflow_step_and_pending_job_payload_tx,
-    upsert_job_definition_tx,
+    AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, JobEnqueue, JobProgressUpdate,
+    append_workflow_steps, append_workflow_steps_tx, claim_jobs_for_types, complete_job_success,
+    enqueue_job, enqueue_job_tx, enqueue_workflow_run, enqueue_workflow_run_tx,
+    get_workflow_run_by_type_and_idempotency_key, list_job_events, list_workflow_steps,
+    update_job_progress, update_workflow_step_and_pending_job_payload_tx,
 };
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
 use tokio::sync::Barrier;
 
-#[path = "../test_support.rs"]
-mod test_support;
-
+use support::{query_error_code, register_job_definition};
 use test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 
-async fn register_job_definition(pool: &sqlx::PgPool, job_type: JobType<'static>) {
-    let mut tx = pool.begin().await.expect("begin setup tx");
-    upsert_job_definition_tx(
-        &mut tx,
-        &JobDefinitionUpsert {
-            job_type,
-            version: 1,
-            max_attempts: 3,
-            default_timeout_seconds: 60,
-            default_priority: 100,
-            is_enabled: true,
-        },
-    )
-    .await
-    .expect("upsert job definition");
-    tx.commit().await.expect("commit setup tx");
-}
-
-fn query_error_code(error: &runledger_postgres::Error) -> Option<&str> {
-    match error {
-        runledger_postgres::Error::QueryError(query_error) => Some(query_error.code()),
-        _ => None,
-    }
-}
+mod support;
+#[path = "../test_support.rs"]
+mod test_support;
 
 fn assert_error_does_not_expose(error: &runledger_postgres::Error, sensitive: &str) {
     assert!(

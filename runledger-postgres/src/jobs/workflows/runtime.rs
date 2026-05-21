@@ -2,11 +2,11 @@ use std::collections::{BTreeSet, VecDeque};
 
 use chrono::{DateTime, Utc};
 use runledger_core::jobs::{
-    JobStage, JobTypeName, WorkflowDependencyReleaseMode, WorkflowRunStatus,
-    WorkflowStepExecutionKind, WorkflowStepStatus,
+    WorkflowDependencyReleaseMode, WorkflowRunStatus, WorkflowStepExecutionKind, WorkflowStepStatus,
 };
 use sqlx::types::Uuid;
 
+use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::{DbTx, Error, Result};
 
 use super::super::row_decode::{
@@ -14,14 +14,13 @@ use super::super::row_decode::{
     parse_workflow_step_execution_kind, parse_workflow_step_status,
 };
 use super::super::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowStepDbRecord};
-use super::mutate::lock_workflow_step_rows_for_update_tx;
-use super::{
-    StepReleaseCandidate, ensure_read_committed_tx, lock_workflow_run_release_shared_tx,
-    try_lock_workflow_run_release_shared_tx, workflow_external_completion_conflict_error,
-    workflow_external_completion_invalid_status_error, workflow_external_step_not_external_error,
-    workflow_external_step_not_found_error, workflow_external_step_not_waiting_error,
-    workflow_internal_state_error, workflow_release_conflict_error,
+use super::errors::{
+    workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
+    workflow_external_step_not_external_error, workflow_external_step_not_found_error,
+    workflow_external_step_not_waiting_error, workflow_internal_state_error,
 };
+use super::locking::{lock_workflow_run_release_shared_tx, lock_workflow_step_rows_for_update_tx};
+use super::release::{StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx};
 
 #[derive(sqlx::FromRow)]
 struct WorkflowStepRow {
@@ -88,38 +87,6 @@ fn validate_external_completion_status(terminal_status: WorkflowStepStatus) -> R
     Err(workflow_external_completion_invalid_status_error(
         terminal_status,
     ))
-}
-
-fn job_release_fields(
-    candidate: &StepReleaseCandidate,
-) -> Result<(&JobTypeName, i32, i32, i32, JobStage)> {
-    let Some(job_type) = candidate.job_type.as_ref() else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing job_type",
-        ));
-    };
-    let Some(priority) = candidate.priority else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing priority",
-        ));
-    };
-    let Some(max_attempts) = candidate.max_attempts else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing max_attempts",
-        ));
-    };
-    let Some(timeout_seconds) = candidate.timeout_seconds else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing timeout_seconds",
-        ));
-    };
-    let Some(stage) = candidate.stage else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing stage",
-        ));
-    };
-
-    Ok((job_type, priority, max_attempts, timeout_seconds, stage))
 }
 
 fn validate_terminal_transition_status(terminal_status: WorkflowStepStatus) -> Result<()> {
@@ -546,7 +513,7 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                 )
             })?;
 
-            let candidate = StepReleaseCandidate {
+            let candidate = StepReleaseCandidate::from_init(StepReleaseCandidateInit {
                 id: row.id,
                 workflow_run_id: row.workflow_run_id,
                 execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,
@@ -557,11 +524,11 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                 max_attempts: row.max_attempts,
                 timeout_seconds: row.timeout_seconds,
                 stage: row.stage.map(parse_job_stage).transpose()?,
-            };
+            });
             let status = parse_workflow_step_status(row.status)?;
             let dependency_count_pending: i32 = row.dependency_count_pending;
             let dependency_count_unsatisfied: i32 = row.dependency_count_unsatisfied;
-            touched_run_ids.insert(candidate.workflow_run_id);
+            touched_run_ids.insert(candidate.workflow_run_id());
 
             if dependency_count_pending != 0 {
                 continue;
@@ -587,7 +554,7 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                  WHERE id = $1
                    AND status = 'BLOCKED'
                  RETURNING workflow_run_id",
-                candidate.id,
+                candidate.id(),
             )
             .fetch_optional(&mut **tx)
             .await
@@ -598,193 +565,12 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
             if let Some(canceled_row) = canceled_row {
                 let workflow_run_id: Uuid = canceled_row.workflow_run_id;
                 touched_run_ids.insert(workflow_run_id);
-                terminal_queue.push_back((candidate.id, WorkflowStepStatus::Canceled));
+                terminal_queue.push_back((candidate.id(), WorkflowStepStatus::Canceled));
             }
         }
     }
 
     Ok(())
-}
-
-pub(crate) async fn release_candidate_step_tx(
-    tx: &mut DbTx<'_>,
-    candidate: &StepReleaseCandidate,
-) -> Result<()> {
-    // Callers reach step release with the candidate workflow-step rows locked
-    // FOR UPDATE. append_workflow_steps_tx also holds the workflow-run row lock
-    // before inserting and releasing appended steps. If cancel already owns the
-    // exclusive advisory lock, append/external callers must roll back rather
-    // than committing consumed dependency counters without a matching
-    // release/cancel sweep. Job terminal completion waits on the blocking
-    // shared lock before it gets here, so this try-lock succeeds reentrantly on
-    // that connection.
-    if !try_lock_workflow_run_release_shared_tx(tx, candidate.workflow_run_id).await? {
-        return Err(workflow_release_conflict_error(candidate.workflow_run_id));
-    }
-
-    if !workflow_run_allows_step_release_tx(tx, candidate.workflow_run_id).await? {
-        // This also covers reentrant calls from cancellation: PostgreSQL
-        // advisory locks are reentrant for a backend, then the canceled run
-        // status rejects release here.
-        return Ok(());
-    }
-
-    match candidate.execution_kind {
-        WorkflowStepExecutionKind::Job => {
-            let (job_type, priority, max_attempts, timeout_seconds, stage) =
-                job_release_fields(candidate)?;
-            let row = sqlx::query!(
-                "INSERT INTO job_queue (
-                    job_type,
-                    organization_id,
-                    payload,
-                    priority,
-                    max_attempts,
-                    timeout_seconds,
-                    next_run_at,
-                    workflow_step_id,
-                    stage
-                 )
-                 VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8)
-                 RETURNING id, run_number",
-                job_type.as_str(),
-                candidate.organization_id,
-                &candidate.payload,
-                priority,
-                max_attempts,
-                timeout_seconds,
-                candidate.id,
-                stage.as_db_value(),
-            )
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context("enqueue released workflow step job", error)
-            })?;
-
-            let job_id: Uuid = row.id;
-            let run_number: i32 = row.run_number;
-
-            let updated = sqlx::query!(
-                "UPDATE workflow_steps
-                 SET status = 'ENQUEUED',
-                     job_id = $2,
-                     released_at = COALESCE(released_at, now()),
-                     status_reason = NULL,
-                     last_error_code = NULL,
-                     last_error_message = NULL,
-                     updated_at = now()
-                 WHERE id = $1
-                   AND status = 'BLOCKED'
-                   AND job_id IS NULL
-                   AND dependency_count_pending = 0
-                   AND dependency_count_unsatisfied = 0",
-                candidate.id,
-                job_id,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context(
-                    "mark released workflow step as enqueued",
-                    error,
-                )
-            })?
-            .rows_affected();
-            if updated != 1 {
-                return Err(workflow_internal_state_error(
-                    "workflow step release preconditions were not met",
-                ));
-            }
-
-            sqlx::query!(
-                "INSERT INTO job_events (
-                    job_id,
-                    run_number,
-                    event_type,
-                    stage,
-                    payload
-                 )
-                 VALUES ($1, $2, 'ENQUEUED', $3, jsonb_build_object('job_type', $4::text))",
-                job_id,
-                run_number,
-                stage.as_db_value(),
-                job_type.as_str(),
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context(
-                    "insert released workflow step enqueue event",
-                    error,
-                )
-            })?;
-
-            Ok(())
-        }
-        WorkflowStepExecutionKind::External => {
-            let updated = sqlx::query!(
-                "UPDATE workflow_steps
-                 SET status = 'WAITING_FOR_EXTERNAL',
-                     job_id = NULL,
-                     released_at = COALESCE(released_at, now()),
-                     started_at = NULL,
-                     finished_at = NULL,
-                     status_reason = NULL,
-                     last_error_code = NULL,
-                     last_error_message = NULL,
-                     updated_at = now()
-                 WHERE id = $1
-                   AND status = 'BLOCKED'
-                   AND job_id IS NULL
-                   AND dependency_count_pending = 0
-                   AND dependency_count_unsatisfied = 0",
-                candidate.id,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context(
-                    "mark released workflow step as waiting for external completion",
-                    error,
-                )
-            })?
-            .rows_affected();
-            if updated != 1 {
-                return Err(workflow_internal_state_error(
-                    "workflow step release preconditions were not met",
-                ));
-            }
-
-            Ok(())
-        }
-    }
-}
-
-async fn workflow_run_allows_step_release_tx(
-    tx: &mut DbTx<'_>,
-    workflow_run_id: Uuid,
-) -> Result<bool> {
-    // The shared row lock makes the releasable-status check stable until this
-    // transaction either releases the step or exits. Release callers already
-    // hold workflow-step row locks before taking this workflow-run row lock;
-    // cancel takes the release advisory lock before it takes workflow-step row
-    // locks, and release never blocks on that advisory lock.
-    sqlx::query_scalar!(
-        "SELECT status IN (
-            'RUNNING'::workflow_run_status,
-            'WAITING_FOR_EXTERNAL'::workflow_run_status
-         ) AS \"allows_release!\"
-         FROM workflow_runs
-         WHERE id = $1
-         FOR SHARE",
-        workflow_run_id,
-    )
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("check workflow run allows step release", error)
-    })
 }
 
 pub(crate) async fn recompute_workflow_run_statuses_tx(

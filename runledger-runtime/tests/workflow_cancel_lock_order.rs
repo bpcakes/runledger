@@ -6,48 +6,25 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::jobs::test_support::workflow_run_release_lock_key;
 use runledger_postgres::jobs::{
-    CompleteExternalWorkflowStepInput, JobDefinitionUpsert, JobFailureUpdate, WorkflowStepDbRecord,
+    CompleteExternalWorkflowStepInput, JobFailureUpdate, WorkflowStepDbRecord,
     cancel_workflow_run_tx, claim_jobs_for_types, complete_external_workflow_step_tx,
     complete_job_failure, complete_job_success, enqueue_workflow_run, get_job_by_id,
-    list_workflow_steps, upsert_job_definition_tx,
+    list_workflow_steps,
 };
 use serde_json::json;
 use sqlx::types::Uuid;
 use tokio::time::{sleep, timeout};
 
+use support::{query_error_code, register_job_definition};
+use test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
+
+mod support;
 #[path = "../test_support.rs"]
 mod test_support;
-
-use test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 
 // These tests observe blocking through SQL markers in pg_stat_activity. If a
 // marker changes, update the matching wait helper rather than weakening the
 // production SQL comments.
-
-async fn register_job_definition(pool: &sqlx::PgPool, job_type: JobType<'static>) {
-    let mut setup_tx = pool.begin().await.expect("begin setup tx");
-    upsert_job_definition_tx(
-        &mut setup_tx,
-        &JobDefinitionUpsert {
-            job_type,
-            version: 1,
-            max_attempts: 3,
-            default_timeout_seconds: 60,
-            default_priority: 100,
-            is_enabled: true,
-        },
-    )
-    .await
-    .expect("upsert job definition");
-    setup_tx.commit().await.expect("commit setup tx");
-}
-
-fn query_error_code(error: &runledger_postgres::Error) -> Option<&str> {
-    match error {
-        runledger_postgres::Error::QueryError(query_error) => Some(query_error.code()),
-        _ => None,
-    }
-}
 
 #[tokio::test]
 async fn cancel_workflow_run_rejects_non_read_committed_transaction() {

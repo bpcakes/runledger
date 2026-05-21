@@ -5,10 +5,8 @@ use sqlx::types::Uuid;
 
 use crate::{DbTx, Error, Result};
 
-use super::super::enqueue::{
-    workflow_step_effective_organization_id, workflow_step_effective_stage,
-};
-use super::super::workflow_internal_state_error;
+use super::super::errors::workflow_internal_state_error;
+use super::super::steps::{workflow_step_effective_organization_id, workflow_step_effective_stage};
 
 #[derive(Serialize)]
 struct CanonicalAppendRequest<'a> {
@@ -16,14 +14,14 @@ struct CanonicalAppendRequest<'a> {
     steps: Vec<CanonicalStep<'a>>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(super) struct StoredCanonicalAppendRequest {
     #[serde(default)]
     append_window_step_key: Option<String>,
     steps: Vec<StoredCanonicalStep>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct StoredCanonicalStep {
     step_key: String,
     execution_kind: String,
@@ -38,7 +36,7 @@ struct StoredCanonicalStep {
     dependencies: Vec<StoredCanonicalDependency>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct StoredCanonicalDependency {
     prerequisite_step_key: String,
     release_mode: String,
