@@ -18,8 +18,12 @@ use super::errors::{
     workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
     workflow_external_step_not_external_error, workflow_external_step_not_found_error,
     workflow_external_step_not_waiting_error, workflow_internal_state_error,
+    workflow_release_conflict_error,
 };
-use super::locking::{lock_workflow_run_release_shared_tx, lock_workflow_step_rows_for_update_tx};
+use super::locking::{
+    lock_workflow_run_release_shared_tx, lock_workflow_step_rows_for_update_tx,
+    try_lock_workflow_run_release_shared_tx,
+};
 use super::release::{StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx};
 
 #[derive(sqlx::FromRow)]
@@ -293,11 +297,15 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
     let mut touched_run_ids = BTreeSet::from([workflow_run_id]);
     // Job-backed terminal completion already owns the job row. Real cancellation
     // locks job rows before taking the exclusive release lock, so cancellation
-    // cannot hold the exclusive lock while also waiting on this job row. Waiting
-    // here keeps terminal persistence atomic with dependency release instead of
-    // stranding dependents behind a rolled-back exclusive holder.
+    // cannot hold the exclusive lock while also waiting on this job row. If the
+    // two transactions meet in the narrow job-row/advisory-lock cycle, this
+    // bounded wait turns it into workflow.release_conflict instead of an
+    // unbounded deadlock. Waiting here keeps terminal persistence atomic with
+    // dependency release instead of stranding dependents behind a rolled-back
+    // exclusive holder.
     // Invariant: dependency release runs later in this same transaction, on this
-    // same connection, so its shared advisory try-lock is reentrant.
+    // same connection, so its pg_try_advisory_xact_lock_shared call is reentrant
+    // after this blocking shared acquire.
     lock_workflow_run_release_shared_tx(tx, workflow_run_id).await?;
     resolve_terminal_step_queue_tx(tx, step_id, terminal_status, &mut touched_run_ids).await?;
     recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
@@ -401,6 +409,10 @@ pub async fn complete_external_workflow_step_tx(
             step.step_key.as_str(),
             step.status,
         ));
+    }
+
+    if !try_lock_workflow_run_release_shared_tx(tx, step.workflow_run_id).await? {
+        return Err(workflow_release_conflict_error(step.workflow_run_id));
     }
 
     let updated = sqlx::query_as::<_, WorkflowStepRow>(

@@ -15,15 +15,16 @@ use super::errors::{
 use super::read::load_workflow_run_by_id_tx;
 
 // Reserved for workflow-run release, cancellation, and terminal-completion
-// advisory lock coordination. This separates this lock class from other
-// advisory-lock families; UUID folding still determines the collision
-// probability between workflow runs.
-const WORKFLOW_RUN_RELEASE_LOCK_NAMESPACE: u64 = 0x7275_6e6c_0000_0000;
+// advisory lock coordination. This changes the folded key space used by this
+// lock family, but PostgreSQL advisory locks still share one int64 namespace;
+// rare collisions only over-serialize unrelated work.
+const WORKFLOW_RUN_RELEASE_LOCK_NAMESPACE: u64 = 0x7275_6e6c_9e37_79b9;
 // Bound terminal completion waits behind an in-flight cancel/release without
 // making normal short cancellation transactions surface as conflicts. Existing
-// nonzero lock_timeout values shorter than this cap remain in force. This maps
-// only PostgreSQL lock_timeout (55P03); a shorter statement_timeout remains a
-// caller or deployment-level cancellation.
+// nonzero lock_timeout values shorter than this cap remain in force. A shorter
+// statement_timeout can also cancel this acquire; during the release-lock wait,
+// map both timeout codes to workflow.release_conflict so callers retry/rollback
+// the whole terminal transition consistently.
 const WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT_MS: i64 = 5_000;
 const WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT: &str = "5s";
 
@@ -127,7 +128,7 @@ pub(in crate::jobs::workflows) async fn lock_workflow_run_release_shared_tx(
         // PostgreSQL errors leave the transaction unusable until rollback, and
         // callers return/rollback on this path, so there is no useful timeout
         // value to restore here.
-        Err(error) if is_lock_timeout_error(&error) => Err(
+        Err(error) if is_release_lock_timeout_error(&error) => Err(
             workflow_release_conflict_timeout_error(workflow_run_id, error),
         ),
         Err(error) => Err(Error::from_query_sqlx_with_context(
@@ -191,11 +192,11 @@ async fn set_local_lock_timeout_tx(
     Ok(())
 }
 
-fn is_lock_timeout_error(error: &sqlx::Error) -> bool {
+fn is_release_lock_timeout_error(error: &sqlx::Error) -> bool {
     error
         .as_database_error()
         .and_then(|database_error| database_error.code())
-        .is_some_and(|code| code.as_ref() == "55P03")
+        .is_some_and(|code| matches!(code.as_ref(), "55P03" | "57014"))
 }
 
 // Releases take a shared advisory lock so independent releases on the same run

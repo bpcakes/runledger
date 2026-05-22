@@ -22,10 +22,11 @@ use super::super::errors::{
     workflow_append_blank_mutation_key_error, workflow_append_conflicting_retry_error,
     workflow_append_terminal_run_error, workflow_append_window_missing_error,
     workflow_append_window_not_external_error, workflow_append_window_not_open_error,
-    workflow_internal_state_error,
+    workflow_internal_state_error, workflow_release_conflict_error,
 };
 use super::super::locking::{
     LockedWorkflowStepState, lock_workflow_run_for_update_tx, lock_workflow_steps_for_update_tx,
+    try_lock_workflow_run_release_shared_tx,
 };
 use super::super::read::load_workflow_run_by_id_tx;
 use super::super::release::{
@@ -133,6 +134,10 @@ pub async fn append_workflow_steps_tx(
         .collect::<BTreeSet<_>>();
     validate_workflow_step_append(&existing_step_keys, &input.steps)
         .map_err(workflow_dag_validation_error)?;
+
+    if !try_lock_workflow_run_release_shared_tx(tx, workflow_run.id).await? {
+        return Err(workflow_release_conflict_error(workflow_run.id));
+    }
 
     let defaults_by_job_type = fetch_job_definition_defaults_tx(tx, &input.steps).await?;
     let existing_statuses_by_key = locked_steps

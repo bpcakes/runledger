@@ -2,12 +2,15 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use runledger_core::jobs::{
-    JobStage, JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowType,
+    JobStage, JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder,
+    WorkflowStepStatus, WorkflowType,
 };
+use runledger_postgres::jobs::test_support::workflow_run_release_lock_key;
 use runledger_postgres::jobs::{
-    AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, JobEnqueue, JobProgressUpdate,
-    append_workflow_steps, append_workflow_steps_tx, claim_jobs_for_types, complete_job_success,
-    enqueue_job, enqueue_job_tx, enqueue_workflow_run, enqueue_workflow_run_tx,
+    AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, CompleteExternalWorkflowStepInput,
+    JobEnqueue, JobProgressUpdate, append_workflow_steps, append_workflow_steps_tx,
+    claim_jobs_for_types, complete_external_workflow_step, complete_job_success, enqueue_job,
+    enqueue_job_tx, enqueue_workflow_run, enqueue_workflow_run_tx,
     get_workflow_run_by_type_and_idempotency_key, list_job_events, list_workflow_steps,
     update_job_progress, update_workflow_step_and_pending_job_payload_tx,
 };
@@ -166,6 +169,51 @@ async fn org_scoped_job_enqueue_idempotency_returns_existing_job() {
         .await
         .expect("list org job events");
     assert_eq!(events.len(), 1);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn job_enqueue_idempotency_keeps_global_and_org_scopes_separate() {
+    let (pool, database) = setup_ephemeral_pool("job_idempotent_scope_retry", 8).await;
+    let job_type = JobType::new("jobs.test.idempotent_scope_retry");
+    register_job_definition(&pool, job_type).await;
+
+    let payload = json!({"kind": "scope-retry"});
+    let organization_id = Uuid::now_v7();
+    let global = JobEnqueue {
+        job_type,
+        organization_id: None,
+        payload: &payload,
+        priority: Some(42),
+        max_attempts: Some(2),
+        timeout_seconds: Some(30),
+        next_run_at: None,
+        idempotency_key: Some("same-scope-key"),
+        stage: Some(JobStage::Queued),
+    };
+    let org_scoped = JobEnqueue {
+        organization_id: Some(organization_id),
+        ..global.clone()
+    };
+
+    let global_id = enqueue_job(&pool, &global)
+        .await
+        .expect("first global enqueue succeeds");
+    let org_job_id = enqueue_job(&pool, &org_scoped)
+        .await
+        .expect("first org-scoped enqueue succeeds");
+    assert_ne!(global_id, org_job_id);
+
+    let global_retry = enqueue_job(&pool, &global)
+        .await
+        .expect("global retry returns original global job");
+    let org_retry = enqueue_job(&pool, &org_scoped)
+        .await
+        .expect("org-scoped retry returns original org-scoped job");
+
+    assert_eq!(global_retry, global_id);
+    assert_eq!(org_retry, org_job_id);
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -1143,6 +1191,87 @@ async fn append_workflow_steps_tx_rejects_non_read_committed_transaction() {
 }
 
 #[tokio::test]
+async fn append_workflow_steps_release_conflict_can_be_committed_without_partial_mutation() {
+    let (pool, database) = setup_ephemeral_pool("workflow_append_release_conflict_commit", 8).await;
+
+    let workflow_type = WorkflowType::new("workflow.test.append_release_conflict_commit");
+    let gate_payload = json!({"kind": "append-release-conflict-gate"});
+    let metadata = json!({"source": "test"});
+    let gate = WorkflowStepEnqueueBuilder::new_external(StepKey::new("gate"), &gate_payload)
+        .try_build()
+        .expect("build external gate");
+    let workflow = WorkflowRunEnqueueBuilder::new(workflow_type, &metadata)
+        .step(gate)
+        .try_build()
+        .expect("build workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue workflow");
+
+    let append_payload = json!({"kind": "append-release-conflict"});
+    let appended =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("appended"), &append_payload)
+            .try_build()
+            .expect("build appended step");
+    let mutation_metadata = json!({});
+    let input = AppendWorkflowStepsInput {
+        workflow_run_id: run.id,
+        organization_id: None,
+        mutation_key: "append-release-conflict",
+        mutation_metadata: &mutation_metadata,
+        append_window_step_key: StepKey::new("gate"),
+        steps: vec![appended],
+    };
+
+    let mut release_lock_tx = pool.begin().await.expect("begin release lock tx");
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock($1)",
+        workflow_run_release_lock_key(run.id)
+    )
+    .execute(&mut *release_lock_tx)
+    .await
+    .expect("hold exclusive workflow release lock");
+
+    let mut append_tx = pool.begin().await.expect("begin append tx");
+    let error = append_workflow_steps_tx(&mut append_tx, &input)
+        .await
+        .expect_err("exclusive release lock should make append conflict");
+    assert_eq!(query_error_code(&error), Some("workflow.release_conflict"));
+    append_tx
+        .commit()
+        .await
+        .expect("commit after conflict should not persist partial append");
+    release_lock_tx
+        .rollback()
+        .await
+        .expect("release exclusive workflow release lock");
+
+    let steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list workflow steps");
+    assert!(
+        steps
+            .iter()
+            .all(|step| step.step_key.as_str() != "appended")
+    );
+
+    let mutation_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM workflow_run_mutations
+         WHERE workflow_run_id = $1
+           AND mutation_key = $2",
+    )
+    .bind(run.id)
+    .bind("append-release-conflict")
+    .fetch_one(&pool)
+    .await
+    .expect("count append mutation rows");
+    assert_eq!(mutation_count, 0);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn append_workflow_steps_idempotency_uses_jsonb_numeric_equality() {
     let (pool, database) = setup_ephemeral_pool("workflow_append_numeric_retry", 8).await;
 
@@ -1209,6 +1338,70 @@ async fn append_workflow_steps_idempotency_uses_jsonb_numeric_equality() {
     .await
     .expect("numeric-equivalent append retry returns existing mutation");
     assert_eq!(retry.outcome, AppendWorkflowStepsOutcome::AlreadyApplied);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn append_workflow_steps_identical_retry_after_closed_window_is_already_applied() {
+    let (pool, database) = setup_ephemeral_pool("workflow_append_retry_closed_window", 8).await;
+
+    let workflow_type = WorkflowType::new("workflow.test.append_retry_closed_window");
+    let gate_payload = json!({"kind": "append-closed-window-gate"});
+    let metadata = json!({"source": "test"});
+    let gate = WorkflowStepEnqueueBuilder::new_external(StepKey::new("gate"), &gate_payload)
+        .try_build()
+        .expect("build external gate");
+    let workflow = WorkflowRunEnqueueBuilder::new(workflow_type, &metadata)
+        .step(gate)
+        .try_build()
+        .expect("build workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue workflow");
+
+    let append_payload = json!({"kind": "append-after-closed-window"});
+    let appended =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("appended"), &append_payload)
+            .try_build()
+            .expect("build appended step");
+    let mutation_metadata = json!({});
+    let input = AppendWorkflowStepsInput {
+        workflow_run_id: run.id,
+        organization_id: None,
+        mutation_key: "append-closed-window",
+        mutation_metadata: &mutation_metadata,
+        append_window_step_key: StepKey::new("gate"),
+        steps: vec![appended],
+    };
+
+    let first = append_workflow_steps(&pool, &input)
+        .await
+        .expect("first append succeeds");
+    assert_eq!(first.outcome, AppendWorkflowStepsOutcome::Appended);
+
+    let completed_gate = complete_external_workflow_step(
+        &pool,
+        &CompleteExternalWorkflowStepInput {
+            workflow_run_id: run.id,
+            organization_id: None,
+            step_key: StepKey::new("gate"),
+            terminal_status: WorkflowStepStatus::Succeeded,
+            status_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+        },
+    )
+    .await
+    .expect("complete append window external step");
+    assert_eq!(completed_gate.status, WorkflowStepStatus::Succeeded);
+
+    let retry = append_workflow_steps(&pool, &input)
+        .await
+        .expect("identical append retry after closed window returns existing mutation");
+    assert_eq!(retry.outcome, AppendWorkflowStepsOutcome::AlreadyApplied);
+    assert_eq!(retry.appended_steps.len(), 1);
+    assert_eq!(retry.appended_steps[0].id, first.appended_steps[0].id);
 
     teardown_ephemeral_pool(pool, database).await;
 }

@@ -373,6 +373,50 @@ pub async fn enqueue_job(pool: &DbPool, payload: &JobEnqueue<'_>) -> Result<Uuid
     Ok(id)
 }
 
+#[cfg(test)]
+mod idempotency_tests {
+    use chrono::{TimeZone, Utc};
+    use runledger_core::jobs::{JobStage, JobType};
+    use serde_json::json;
+
+    use super::{JobEnqueue, canonical_job_enqueue_request};
+
+    #[test]
+    fn canonical_job_enqueue_request_matches_golden_snapshot() {
+        let payload = json!({"kind": "golden"});
+        let enqueue = JobEnqueue {
+            job_type: JobType::new("jobs.test.golden"),
+            organization_id: None,
+            payload: &payload,
+            priority: Some(10),
+            max_attempts: Some(3),
+            timeout_seconds: Some(30),
+            next_run_at: Some(
+                Utc.with_ymd_and_hms(2026, 5, 22, 10, 30, 45)
+                    .single()
+                    .expect("valid timestamp"),
+            ),
+            idempotency_key: Some("job-golden"),
+            stage: Some(JobStage::Scheduled),
+        };
+
+        let canonical = canonical_job_enqueue_request(&enqueue, JobStage::Scheduled.as_db_value())
+            .expect("canonicalize job enqueue");
+
+        assert_eq!(
+            canonical,
+            json!({
+                "payload": {"kind": "golden"},
+                "priority": 10,
+                "max_attempts": 3,
+                "timeout_seconds": 30,
+                "next_run_at": "2026-05-22T10:30:45.000000Z",
+                "stage": "scheduled"
+            })
+        );
+    }
+}
+
 pub async fn claim_jobs(
     pool: &DbPool,
     worker_id: &str,

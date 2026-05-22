@@ -70,6 +70,9 @@ pub struct JobEnqueue<'a> {
     pub priority: Option<i32>,
     pub max_attempts: Option<i32>,
     pub timeout_seconds: Option<i32>,
+    /// For keyed enqueues, this value is part of the stored idempotency request
+    /// snapshot. Retries must pass the same scheduled time as the original
+    /// enqueue instead of recomputing a fresh timestamp.
     pub next_run_at: Option<DateTime<Utc>>,
     pub idempotency_key: Option<&'a str>,
     pub stage: Option<JobStage>,

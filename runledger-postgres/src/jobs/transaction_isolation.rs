@@ -9,6 +9,10 @@ pub(crate) async fn ensure_read_committed_tx(
     // SHOW reports the effective isolation for the current transaction, so a
     // caller's SET TRANSACTION change is visible here. PostgreSQL treats READ
     // UNCOMMITTED as READ COMMITTED.
+    //
+    // Call this at the start of each transaction-sensitive operation. The guard
+    // is not meant to defend against callers changing isolation again later in
+    // the same transaction.
     let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
         .fetch_one(&mut **tx)
         .await

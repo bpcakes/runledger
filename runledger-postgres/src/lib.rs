@@ -23,8 +23,9 @@
 //! [`QueryError::client_message`] and [`QueryError::code`] are the stable values
 //! intended for public error responses. Detailed internal context remains
 //! available through [`QueryError::internal_message`] for server-side diagnostics.
-//! Raw SQLx errors are kept out of the standard error source chain; use
-//! [`QueryError::source_arc`] only in trusted server-side diagnostics.
+//! Public formatting keeps raw SQLx details sanitized. The standard error source
+//! chain and [`QueryError::source_arc`] are available for trusted server-side
+//! diagnostics.
 //! Runtime lifecycle, workflow mutation, and idempotent enqueue APIs are designed
 //! for PostgreSQL's default `READ COMMITTED` transaction isolation so they can
 //! observe rows committed after lock waits or uniqueness conflicts.
@@ -65,6 +66,8 @@ pub use migrations::{
     MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
     migrate_after_idempotency_cutover,
 };
+#[allow(deprecated)]
+pub use migrations::{ensure_schema_compatible, migrate};
 
 pub type DbPool = sqlx::PgPool;
 pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;

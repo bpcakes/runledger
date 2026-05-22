@@ -187,6 +187,12 @@ impl QueryError {
         &self.message
     }
 
+    /// Returns the underlying SQLx error for trusted diagnostics.
+    ///
+    /// Public [`Display`](fmt::Display) and [`Debug`](fmt::Debug) output for
+    /// [`QueryError`] is sanitized, but the returned source may contain raw
+    /// database details. Do not log or expose it on untrusted boundaries without
+    /// redaction.
     #[must_use]
     pub fn source_arc(&self) -> Option<Arc<sqlx::Error>> {
         self.source.clone()
@@ -229,7 +235,9 @@ impl fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
     }
 }
 
@@ -524,7 +532,7 @@ mod tests {
         assert!(debug.contains("db.query_failed"));
         assert!(!debug.contains("secret-idempotency-key"));
         assert!(error.internal_message().contains("secret-idempotency-key"));
-        assert!(std::error::Error::source(&error).is_none());
+        assert!(std::error::Error::source(&error).is_some());
         assert!(error.source_arc().is_some());
     }
 
@@ -546,7 +554,7 @@ mod tests {
         );
         assert!(error.internal_message().contains("secret-lock-key"));
         assert!(error.source_arc().is_some());
-        assert!(std::error::Error::source(&error).is_none());
+        assert!(std::error::Error::source(&error).is_some());
 
         let display = error.to_string();
         assert_eq!(

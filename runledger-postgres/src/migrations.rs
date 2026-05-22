@@ -109,7 +109,7 @@ pub async fn migrate_after_idempotency_cutover(
 
     match (result, unlock_result) {
         (Err(migration_error), Err(unlock_error)) => {
-            tracing::warn!(
+            tracing::error!(
                 error = %unlock_error,
                 "failed to unlock migration lock after migration failure"
             );
@@ -125,6 +125,19 @@ pub async fn migrate_after_idempotency_cutover(
             validate_idempotency_cutover_constraints(&mut conn).await
         }
     }
+}
+
+/// Apply the bundled Runledger schema migrations to a PostgreSQL pool.
+///
+/// Deprecated compatibility alias for [`migrate_after_idempotency_cutover`].
+/// The current migration set enforces the enqueue request snapshot cutover, so
+/// this function has the same strict behavior as the new explicit API.
+#[deprecated(
+    since = "0.1.2",
+    note = "use migrate_after_idempotency_cutover to make the enqueue request snapshot cutover explicit"
+)]
+pub async fn migrate(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
+    migrate_after_idempotency_cutover(pool).await
 }
 
 /// Validate that the target database's SQLx migration history matches the
@@ -208,6 +221,21 @@ pub async fn ensure_schema_compatible_after_idempotency_cutover(
     }
 
     reject_legacy_idempotency_rows(&mut conn).await
+}
+
+/// Validate that the target database's SQLx migration history matches the
+/// bundled Runledger migrations.
+///
+/// Deprecated compatibility alias for
+/// [`ensure_schema_compatible_after_idempotency_cutover`]. The current schema
+/// compatibility check rejects keyed legacy rows without enqueue request
+/// snapshots, matching the stricter cutover API.
+#[deprecated(
+    since = "0.1.2",
+    note = "use ensure_schema_compatible_after_idempotency_cutover to make the enqueue request snapshot cutover explicit"
+)]
+pub async fn ensure_schema_compatible(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
+    ensure_schema_compatible_after_idempotency_cutover(pool).await
 }
 
 async fn has_migrations_table(conn: &mut PgPoolConnection) -> Result<bool, sqlx::Error> {
@@ -329,6 +357,10 @@ async fn validate_idempotency_cutover_constraints(
 async fn idempotency_cutover_constraints_valid(
     conn: &mut PgPoolConnection,
 ) -> Result<bool, sqlx::Error> {
+    // A validated cutover constraint is the durable proof that legacy keyed rows
+    // without enqueue_request snapshots cannot exist for that table. If future
+    // migrations replace these constraints, they must preserve that invariant
+    // before this short-circuit remains valid.
     sqlx::query_scalar::<_, bool>(
         "SELECT COUNT(*) FILTER (WHERE c.convalidated) = 2
          FROM pg_constraint c

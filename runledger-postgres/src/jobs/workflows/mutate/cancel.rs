@@ -81,6 +81,7 @@ pub async fn cancel_workflow_run_tx(
 
     let mut touched_run_ids = BTreeSet::from([workflow_run.id]);
     let mut pending_steps = locked_steps;
+    let mut stalled_once = false;
     loop {
         let mut progressed = false;
         for step in pending_steps {
@@ -103,11 +104,26 @@ pub async fn cancel_workflow_run_tx(
             break;
         }
         if !progressed {
+            if !stalled_once {
+                // The locked range should normally make new nonterminal rows
+                // impossible here. Allow one fresh READ COMMITTED reload per
+                // no-progress streak before treating it as state corruption, so
+                // a row that became visible between loop statements can still
+                // be swept.
+                stalled_once = true;
+                continue;
+            }
+            let pending_step_ids = pending_steps
+                .iter()
+                .map(|step| step.id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(workflow_internal_state_error(format!(
-                "workflow cancel found nonterminal steps on run {} but made no progress",
-                workflow_run.id
+                "workflow cancel found nonterminal steps on run {} but made no progress; pending step ids: {}",
+                workflow_run.id, pending_step_ids
             )));
         }
+        stalled_once = false;
     }
 
     recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;

@@ -242,8 +242,9 @@ async fn load_existing_idempotent_workflow_run_tx(
     idempotency_key: &str,
     enqueue_request: &JsonValue,
 ) -> Result<WorkflowRunRow> {
-    // FOR SHARE keeps the matched run stable until the enqueue transaction
-    // returns the existing idempotent result.
+    // After INSERT ... ON CONFLICT reports an existing keyed run, this locks the
+    // matched committed row while the enqueue transaction compares and returns
+    // the idempotent result.
     let run = if let Some(organization_id) = payload.organization_id() {
         sqlx::query_as!(
             WorkflowRunRow,
@@ -440,4 +441,89 @@ pub(crate) async fn enqueue_root_steps_tx(tx: &mut DbTx<'_>, workflow_run_id: Uu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use runledger_core::jobs::{
+        JobStage, JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder,
+        WorkflowType,
+    };
+    use serde_json::json;
+    use sqlx::types::Uuid;
+
+    use super::canonical_workflow_enqueue_request;
+
+    #[test]
+    fn canonical_workflow_enqueue_request_matches_golden_snapshot() {
+        let run_org = Uuid::now_v7();
+        let step_org = Uuid::now_v7();
+        let metadata = json!({"kind": "golden"});
+        let root_payload = json!({"step": "root"});
+        let child_payload = json!({"step": "child"});
+        let root = WorkflowStepEnqueueBuilder::new_external(StepKey::new("root"), &root_payload)
+            .try_build()
+            .expect("build root step");
+        let child = WorkflowStepEnqueueBuilder::new(
+            StepKey::new("child"),
+            JobType::new("jobs.test.child"),
+            &child_payload,
+        )
+        .organization_id(step_org)
+        .priority(7)
+        .max_attempts(2)
+        .timeout_seconds(45)
+        .stage(JobStage::Scheduled)
+        .depends_on_success(&[StepKey::new("root")])
+        .try_build()
+        .expect("build child step");
+        let workflow =
+            WorkflowRunEnqueueBuilder::new(WorkflowType::new("workflow.test.golden"), &metadata)
+                .organization_id(run_org)
+                .step(child)
+                .step(root)
+                .try_build()
+                .expect("build workflow");
+
+        let canonical =
+            canonical_workflow_enqueue_request(&workflow).expect("canonicalize workflow enqueue");
+
+        assert_eq!(
+            canonical,
+            json!({
+                "metadata": {"kind": "golden"},
+                "steps": [
+                    {
+                        "step_key": "child",
+                        "execution_kind": "JOB",
+                        "job_type": "jobs.test.child",
+                        "organization_id": step_org,
+                        "payload": {"step": "child"},
+                        "priority": 7,
+                        "max_attempts": 2,
+                        "timeout_seconds": 45,
+                        "stage": "scheduled",
+                        "dependencies": [
+                            {
+                                "prerequisite_step_key": "root",
+                                "release_mode": "ON_SUCCESS"
+                            }
+                        ]
+                    },
+                    {
+                        "step_key": "root",
+                        "execution_kind": "EXTERNAL",
+                        "job_type": null,
+                        "organization_id": run_org,
+                        "payload": {"step": "root"},
+                        "priority": null,
+                        "max_attempts": null,
+                        "timeout_seconds": null,
+                        "stage": null,
+                        "dependencies": []
+                    }
+                ]
+            })
+        );
+    }
 }

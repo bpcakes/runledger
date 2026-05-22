@@ -104,7 +104,9 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
     // than committing consumed dependency counters without a matching
     // release/cancel sweep. Job terminal completion waits on the blocking
     // shared lock before it gets here, so this try-lock succeeds reentrantly on
-    // that connection.
+    // that connection. Root enqueue also reaches this path, but a just-inserted
+    // workflow run is not externally visible before commit, so the lock is
+    // expected to be uncontended there.
     if !try_lock_workflow_run_release_shared_tx(tx, candidate.workflow_run_id).await? {
         return Err(workflow_release_conflict_error(candidate.workflow_run_id));
     }

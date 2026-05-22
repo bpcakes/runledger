@@ -320,6 +320,53 @@ mod tests {
     };
 
     #[test]
+    fn canonical_append_request_matches_golden_snapshot() {
+        let workflow_organization_id = Some(Uuid::now_v7());
+        let payload = json!({"kind": "golden"});
+        let step = WorkflowStepEnqueueBuilder::new(
+            StepKey::new("child"),
+            JobType::new("jobs.test.child"),
+            &payload,
+        )
+        .priority(5)
+        .max_attempts(2)
+        .timeout_seconds(60)
+        .depends_on_terminal(&[StepKey::new("gate")])
+        .try_build()
+        .expect("build appended step");
+
+        let canonical =
+            canonical_append_request(StepKey::new("gate"), workflow_organization_id, &[step])
+                .expect("canonicalize append request");
+
+        assert_eq!(
+            canonical,
+            json!({
+                "append_window_step_key": "gate",
+                "steps": [
+                    {
+                        "step_key": "child",
+                        "execution_kind": "JOB",
+                        "job_type": "jobs.test.child",
+                        "organization_id": workflow_organization_id,
+                        "payload": {"kind": "golden"},
+                        "priority": 5,
+                        "max_attempts": 2,
+                        "timeout_seconds": 60,
+                        "stage": "queued",
+                        "dependencies": [
+                            {
+                                "prerequisite_step_key": "gate",
+                                "release_mode": "ON_TERMINAL"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn workflow_append_request_matches_reordered_steps() {
         let workflow_organization_id = Some(Uuid::now_v7());
         let payload = json!({"batch": 1});

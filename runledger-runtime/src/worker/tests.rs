@@ -19,6 +19,7 @@ use runledger_postgres::jobs::{
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
 
 use super::{compute_retry_delay_ms, process_claimed_job, run_worker_loop};
@@ -28,6 +29,22 @@ use crate::test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 
 struct CountingHandler {
     runs: Arc<AtomicUsize>,
+}
+
+async fn await_spawned_task<T>(
+    handle: &mut JoinHandle<T>,
+    timeout_duration: Duration,
+    timeout_message: &str,
+    panic_message: &str,
+) -> T {
+    match timeout(timeout_duration, &mut *handle).await {
+        Ok(result) => result.expect(panic_message),
+        Err(_) => {
+            handle.abort();
+            let _ = handle.await;
+            panic!("{timeout_message}");
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -799,7 +816,7 @@ async fn heartbeat_rejects_lease_that_expires_while_waiting_for_job_lock() {
         .expect("hold job row lock");
 
     let heartbeat_pool = pool.clone();
-    let heartbeat_task = tokio::spawn(async move {
+    let mut heartbeat_task = tokio::spawn(async move {
         heartbeat_job(
             &heartbeat_pool,
             claim.id,
@@ -815,11 +832,14 @@ async fn heartbeat_rejects_lease_that_expires_while_waiting_for_job_lock() {
     sleep(Duration::from_millis(1_200)).await;
     lock_tx.rollback().await.expect("release job row lock");
 
-    let error = timeout(Duration::from_secs(5), heartbeat_task)
-        .await
-        .expect("heartbeat should finish after row lock release")
-        .expect("heartbeat task should not panic")
-        .expect_err("heartbeat should reject lease expired during lock wait");
+    let error = await_spawned_task(
+        &mut heartbeat_task,
+        Duration::from_secs(5),
+        "heartbeat should finish after row lock release",
+        "heartbeat task should not panic",
+    )
+    .await
+    .expect_err("heartbeat should reject lease expired during lock wait");
     assert_eq!(query_error_code(&error), Some("job.lease_owner_mismatch"));
 
     teardown_ephemeral_pool(pool, database).await;
