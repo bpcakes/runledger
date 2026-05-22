@@ -32,6 +32,19 @@ pub(in crate::jobs::workflows) fn workflow_release_conflict_error(workflow_run_i
     ))
 }
 
+pub(in crate::jobs::workflows) fn workflow_release_conflict_timeout_error(
+    workflow_run_id: Uuid,
+    source: sqlx::Error,
+) -> Error {
+    Error::QueryError(QueryError::from_classified_sqlx(
+        QueryErrorCategory::Conflict,
+        "workflow.release_conflict",
+        "Workflow step release conflicted with another workflow mutation.",
+        format!("workflow run {workflow_run_id} timed out acquiring shared release advisory lock"),
+        source,
+    ))
+}
+
 pub(in crate::jobs::workflows) fn workflow_external_step_not_found_error() -> Error {
     Error::QueryError(QueryError::from_classified(
         QueryErrorCategory::Validation,

@@ -17,13 +17,13 @@ The workspace contains four crates:
 - `runledger-test-support`
   Local test-only helpers for ephemeral PostgreSQL databases and scoped environment-variable overrides.
 
-The root workspace manifest is [Cargo.toml](/Users/aa/Documents/runledger/Cargo.toml).
+The root workspace manifest is [Cargo.toml](Cargo.toml).
 
 ## What This Repo Includes
 
 - Rust crates for the Runledger contracts, runtime, and PostgreSQL persistence layer
-- A Runledger-only SQL migration history in [migrations](/Users/aa/Documents/runledger/migrations)
-- A vendored copy of those migrations in [runledger-postgres/migrations](/Users/aa/Documents/runledger/runledger-postgres/migrations) so packaged crates can apply or validate the schema without relying on repo-relative paths
+- A Runledger-only SQL migration history in [migrations](migrations)
+- A vendored copy of those migrations in [runledger-postgres/migrations](runledger-postgres/migrations) so packaged crates can apply or validate the schema without relying on repo-relative paths
 - Local test support for DB-backed tests using `testcontainers`
 - SQLx offline metadata in `.sqlx/` so the macro-based queries compile without a live database during normal builds
 
@@ -146,17 +146,21 @@ These values are now treated as opaque UUIDs from the perspective of Runledger. 
 
 ## Migrations
 
-The migration set lives in [migrations](/Users/aa/Documents/runledger/migrations).
+The migration set lives in [migrations](migrations).
 
-This repo now uses a single flattened baseline migration:
+This repo uses a flattened baseline plus forward migrations:
 
 - `202603280001_runledger_baseline`
-  creates the full current Runledger schema directly, including:
+  creates the standalone Runledger schema baseline, including:
   helper functions, queue tables, workflow DAG tables, logs, runtime configs, workflow mutations, external workflow gates, panic-aware attempt outcomes, and the final metrics rollup view
+- `202604100001_runledger_migration_history`
+  creates `runledger_migration_history` and records the standalone baseline and history-table migration versions
+- `202605180001_add_enqueue_request_snapshots`
+  adds `enqueue_request` snapshots to `job_queue` and `workflow_runs` so keyed enqueue retries can compare the original request instead of mutable runtime state
 
 The historical standalone migration chain was intentionally collapsed because this repository now targets fresh standalone deployments rather than preserving every intermediate extraction-era cutover step.
 
-If you already created databases from the older multi-file standalone migration history, treat this baseline as a new-from-scratch schema definition, not as an in-place upgrade path.
+If you already created databases from the older multi-file standalone migration history, treat the flattened baseline as a new-from-scratch schema definition, not as an in-place upgrade path. Apply later forward migrations normally.
 
 The workspace-root migration directory remains the canonical schema source for repo development and review.
 
@@ -171,7 +175,7 @@ Apply these migrations, or call `runledger_postgres::migrate(&pool)`, before usi
 
 ## Runtime Configuration
 
-`runledger-runtime` exposes `JobsConfig::from_env()` in [runledger-runtime/src/config.rs](/Users/aa/Documents/runledger/runledger-runtime/src/config.rs).
+`runledger-runtime` exposes `JobsConfig::from_env()` in [runledger-runtime/src/config.rs](runledger-runtime/src/config.rs).
 
 Supported environment variables:
 

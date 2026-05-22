@@ -122,6 +122,54 @@ async fn workflow_job_completion_rejects_non_read_committed_transaction() {
 }
 
 #[tokio::test]
+async fn external_workflow_completion_rejects_non_read_committed_transaction() {
+    let (pool, database) = setup_ephemeral_pool("workflow_external_completion_isolation", 8).await;
+
+    let payload = json!({"test": "workflow_external_completion_isolation"});
+    let metadata = json!({});
+    let gate = WorkflowStepEnqueueBuilder::new_external(StepKey::new("gate"), &payload)
+        .try_build()
+        .expect("build external gate step");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.external_completion_isolation"),
+        &metadata,
+    )
+    .step(gate)
+    .try_build()
+    .expect("build workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue workflow run");
+
+    let mut tx = pool.begin().await.expect("begin repeatable read tx");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await
+        .expect("set repeatable read isolation");
+    let error = complete_external_workflow_step_tx(
+        &mut tx,
+        &CompleteExternalWorkflowStepInput {
+            workflow_run_id: run.id,
+            organization_id: None,
+            step_key: StepKey::new("gate"),
+            terminal_status: WorkflowStepStatus::Succeeded,
+            status_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+        },
+    )
+    .await
+    .expect_err("external completion should reject non-read-committed isolation");
+    assert_eq!(
+        query_error_code(&error),
+        Some("workflow.external_completion_unsupported_isolation")
+    );
+    tx.rollback().await.expect("rollback repeatable read tx");
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn cancel_workflow_run_locks_job_rows_before_workflow_steps() {
     let (pool, database) = setup_ephemeral_pool("workflow_cancel_lock_order", 8).await;
 
@@ -492,6 +540,100 @@ async fn job_completion_waits_for_release_lock_and_releases_after_rollback() {
 }
 
 #[tokio::test]
+async fn job_completion_release_lock_timeout_returns_release_conflict() {
+    let (pool, database) = setup_ephemeral_pool("workflow_terminal_release_lock_timeout", 2).await;
+
+    let job_type = JobType::new("jobs.test.workflow_terminal_release_lock_timeout");
+    register_job_definition(&pool, job_type).await;
+
+    let payload = json!({"test": "workflow_terminal_release_lock_timeout"});
+    let metadata = json!({});
+    let root = WorkflowStepEnqueueBuilder::new(StepKey::new("root"), job_type, &payload)
+        .try_build()
+        .expect("build root job step");
+    let dependent = WorkflowStepEnqueueBuilder::new(StepKey::new("dependent"), job_type, &payload)
+        .depends_on_success(&[StepKey::new("root")])
+        .try_build()
+        .expect("build dependent job step");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.terminal_release_lock_timeout"),
+        &metadata,
+    )
+    .step(root)
+    .step(dependent)
+    .try_build()
+    .expect("build workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue workflow run");
+
+    let mut claimed = claim_jobs_for_types(&pool, "worker-timeout", 30, 1, &[job_type])
+        .await
+        .expect("claim root job");
+    let root_job = claimed.pop().expect("root job should be claimable");
+    let worker_id = root_job
+        .worker_id
+        .clone()
+        .expect("claimed job has worker id");
+
+    let mut cancel_lock_tx = pool.begin().await.expect("begin cancel lock tx");
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock($1)",
+        workflow_run_release_lock_key(run.id)
+    )
+    .execute(&mut *cancel_lock_tx)
+    .await
+    .expect("hold exclusive workflow release lock");
+
+    let error = timeout(
+        Duration::from_secs(15),
+        complete_job_success(
+            &pool,
+            root_job.id,
+            root_job.run_number,
+            root_job.attempt,
+            &worker_id,
+            None,
+        ),
+    )
+    .await
+    .expect("completion should return after release lock timeout")
+    .expect_err("release lock timeout should return a release conflict");
+    assert_eq!(query_error_code(&error), Some("workflow.release_conflict"));
+    let runledger_postgres::Error::QueryError(query_error) = &error else {
+        panic!("expected query error");
+    };
+    assert_eq!(query_error.sqlstate(), Some("55P03"));
+    assert!(query_error.source_arc().is_some());
+    assert!(
+        query_error
+            .internal_message()
+            .contains("timed out acquiring shared release advisory lock"),
+        "{}",
+        query_error.internal_message()
+    );
+
+    let lock_timeout: String = sqlx::query_scalar("SELECT current_setting('lock_timeout')")
+        .fetch_one(&pool)
+        .await
+        .expect("read returned completion connection lock_timeout");
+    assert_eq!(lock_timeout, "0");
+
+    cancel_lock_tx
+        .rollback()
+        .await
+        .expect("release exclusive workflow release lock");
+    let persisted = get_job_by_id(&pool, None, root_job.id)
+        .await
+        .expect("load root job")
+        .expect("root job exists");
+    assert_eq!(persisted.status, JobStatus::Leased);
+    assert_eq!(persisted.worker_id.as_deref(), Some(worker_id.as_str()));
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn job_completion_after_cancel_commit_does_not_reenqueue_dependents() {
     let (pool, database) = setup_ephemeral_pool("workflow_terminal_release_cancel_commit", 8).await;
 
@@ -789,6 +931,107 @@ async fn external_completion_waits_for_ordered_step_locks_before_locking_gate() 
 }
 
 #[tokio::test]
+async fn external_completion_conflicts_when_cancel_waits_on_step_rows() {
+    let (pool, database) = setup_ephemeral_pool("workflow_external_cancel_step_rows", 8).await;
+
+    let job_type = JobType::new("jobs.test.workflow_external_cancel_step_rows");
+    register_job_definition(&pool, job_type).await;
+
+    let payload = json!({"test": "workflow_external_cancel_step_rows"});
+    let metadata = json!({});
+    let gate = WorkflowStepEnqueueBuilder::new_external(StepKey::new("gate"), &payload)
+        .try_build()
+        .expect("build external gate step");
+    let dependent = WorkflowStepEnqueueBuilder::new(StepKey::new("dependent"), job_type, &payload)
+        .depends_on_success(&[StepKey::new("gate")])
+        .try_build()
+        .expect("build dependent job step");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.external_cancel_step_rows"),
+        &metadata,
+    )
+    .step(gate)
+    .step(dependent)
+    .try_build()
+    .expect("build workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue workflow run");
+    let run_id = run.id;
+
+    let mut external_tx = pool.begin().await.expect("begin external tx");
+    sqlx::query(
+        "SELECT id
+         FROM workflow_steps
+         WHERE workflow_run_id = $1
+         ORDER BY id ASC
+         FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_all(&mut *external_tx)
+    .await
+    .expect("hold workflow step rows for external completion");
+
+    let cancel_pool = pool.clone();
+    let cancel_task = tokio::spawn(async move {
+        let mut tx = cancel_pool.begin().await.expect("begin cancel tx");
+        let result =
+            cancel_workflow_run_tx(&mut tx, run_id, None, Some("test.cancel"), None, None).await;
+        if result.is_ok() {
+            tx.commit().await.expect("commit cancel tx");
+        } else {
+            tx.rollback().await.expect("rollback cancel tx");
+        }
+        result.map(|_| ())
+    });
+
+    wait_for_cancel_to_block_on_workflow_step_lock(&pool).await;
+
+    let error = complete_external_workflow_step_tx(
+        &mut external_tx,
+        &CompleteExternalWorkflowStepInput {
+            workflow_run_id: run_id,
+            organization_id: None,
+            step_key: StepKey::new("gate"),
+            terminal_status: WorkflowStepStatus::Succeeded,
+            status_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+        },
+    )
+    .await
+    .expect_err("cancel-owned release lock should make external completion conflict");
+    assert_eq!(query_error_code(&error), Some("workflow.release_conflict"));
+    external_tx
+        .rollback()
+        .await
+        .expect("rollback external completion");
+
+    timeout(Duration::from_secs(5), cancel_task)
+        .await
+        .expect("cancel should finish after external rollback")
+        .expect("cancel task should not panic")
+        .expect("cancel workflow run should succeed");
+
+    let steps = list_workflow_steps(&pool, None, run_id)
+        .await
+        .expect("list workflow steps");
+    let gate_step = steps
+        .iter()
+        .find(|step| step.step_key.as_str() == "gate")
+        .expect("gate step exists");
+    let dependent_step = steps
+        .iter()
+        .find(|step| step.step_key.as_str() == "dependent")
+        .expect("dependent step exists");
+    assert_eq!(gate_step.status, WorkflowStepStatus::Canceled);
+    assert_eq!(dependent_step.status, WorkflowStepStatus::Canceled);
+    assert!(dependent_step.job_id.is_none());
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn queue_success_waits_for_release_lock_and_releases_dependents() {
     let (pool, database) = setup_ephemeral_pool("workflow_release_cancel_rollback", 8).await;
 
@@ -1061,6 +1304,31 @@ async fn wait_for_cancel_to_block_on_release_lock(pool: &sqlx::PgPool) {
     }
 
     panic!("cancel workflow run did not block on the release advisory lock");
+}
+
+async fn wait_for_cancel_to_block_on_workflow_step_lock(pool: &sqlx::PgPool) {
+    for _ in 0..100 {
+        let waiting = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE wait_event_type = 'Lock'
+                   AND query LIKE '%runledger:lock_workflow_steps_for_update%'
+                   AND query NOT LIKE '%pg_stat_activity%'
+             )",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("query waiting cancel workflow step activity");
+
+        if waiting {
+            return;
+        }
+
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("cancel workflow run did not block on the workflow step lock");
 }
 
 async fn wait_for_completion_to_block_on_shared_release_lock(pool: &sqlx::PgPool) {

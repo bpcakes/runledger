@@ -325,6 +325,13 @@ pub async fn complete_external_workflow_step_tx(
     input: &CompleteExternalWorkflowStepInput<'_>,
 ) -> Result<WorkflowStepDbRecord> {
     validate_external_completion_status(input.terminal_status)?;
+    ensure_read_committed_tx(
+        tx,
+        "workflow external step completion",
+        "workflow.external_completion_unsupported_isolation",
+        "External workflow step completion requires READ COMMITTED transaction isolation.",
+    )
+    .await?;
     lock_workflow_step_rows_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;
 
     let row = sqlx::query_as::<_, WorkflowStepRow>(
@@ -444,6 +451,12 @@ pub async fn complete_external_workflow_step_tx(
 
     let updated = workflow_step_db_record_from_row(updated)?;
     let mut touched_run_ids = BTreeSet::from([updated.workflow_run_id]);
+    // External completion already owns the workflow-step row locks. Do not wait
+    // on the shared release advisory lock here: cancellation may own the
+    // exclusive form while waiting on these same rows. Dependent release goes
+    // through try_lock_workflow_run_release_shared_tx, so concurrent
+    // cancellation returns workflow.release_conflict before this transaction can
+    // release new work.
     resolve_terminal_step_queue_tx(tx, updated.id, updated.status, &mut touched_run_ids).await?;
     recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
 

@@ -8,7 +8,10 @@ use crate::jobs::row_decode::{
 use crate::jobs::workflow_types::WorkflowRunDbRecord;
 use crate::{DbTx, Error, Result};
 
-use super::errors::{workflow_internal_state_error, workflow_run_not_found_error};
+use super::errors::{
+    workflow_internal_state_error, workflow_release_conflict_timeout_error,
+    workflow_run_not_found_error,
+};
 use super::read::load_workflow_run_by_id_tx;
 
 // Reserved for workflow-run release, cancellation, and terminal-completion
@@ -16,6 +19,13 @@ use super::read::load_workflow_run_by_id_tx;
 // advisory-lock families; UUID folding still determines the collision
 // probability between workflow runs.
 const WORKFLOW_RUN_RELEASE_LOCK_NAMESPACE: u64 = 0x7275_6e6c_0000_0000;
+// Bound terminal completion waits behind an in-flight cancel/release without
+// making normal short cancellation transactions surface as conflicts. Existing
+// nonzero lock_timeout values shorter than this cap remain in force. This maps
+// only PostgreSQL lock_timeout (55P03); a shorter statement_timeout remains a
+// caller or deployment-level cancellation.
+const WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT_MS: i64 = 5_000;
+const WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT: &str = "5s";
 
 #[derive(Clone, Debug)]
 pub(in crate::jobs::workflows) struct LockedWorkflowStepState {
@@ -85,19 +95,107 @@ pub(in crate::jobs::workflows) async fn lock_workflow_run_release_shared_tx(
     tx: &mut DbTx<'_>,
     workflow_run_id: Uuid,
 ) -> Result<()> {
+    let previous_lock_timeout = cap_local_lock_timeout_tx(
+        tx,
+        WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT,
+        WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT_MS,
+        "set workflow release shared lock timeout",
+    )
+    .await?;
+
     // DO NOT REMOVE the SQL comment marker: lock-order integration tests use it
     // to observe a backend waiting on this advisory lock.
-    sqlx::query(
+    let lock_result = sqlx::query(
         "SELECT pg_advisory_xact_lock_shared($1) /* runledger:lock_workflow_run_release_shared */",
     )
     .bind(workflow_run_release_lock_key(workflow_run_id))
     .execute(&mut **tx)
+    .await;
+
+    match lock_result {
+        Ok(_) => {
+            // Restore defensively so release/recompute work that follows in this
+            // transaction uses the caller's original lock-wait policy.
+            set_local_lock_timeout_tx(
+                tx,
+                &previous_lock_timeout,
+                "restore workflow release shared lock timeout",
+            )
+            .await?;
+            Ok(())
+        }
+        // PostgreSQL errors leave the transaction unusable until rollback, and
+        // callers return/rollback on this path, so there is no useful timeout
+        // value to restore here.
+        Err(error) if is_lock_timeout_error(&error) => Err(
+            workflow_release_conflict_timeout_error(workflow_run_id, error),
+        ),
+        Err(error) => Err(Error::from_query_sqlx_with_context(
+            "lock shared workflow run release",
+            error,
+        )),
+    }
+}
+
+async fn cap_local_lock_timeout_tx(
+    tx: &mut DbTx<'_>,
+    lock_timeout: &str,
+    lock_timeout_ms: i64,
+    context: &'static str,
+) -> Result<String> {
+    // Preserve PostgreSQL's own GUC text so restore keeps units and special
+    // values such as "0" exactly as the connection reported them.
+    // MATERIALIZED is load-bearing: it forces current_setting to be captured
+    // before set_config mutates the transaction-local value. pg_settings.setting
+    // stores lock_timeout in its base unit of milliseconds.
+    sqlx::query_scalar::<_, String>(
+        "WITH previous AS MATERIALIZED (
+             SELECT
+                current_setting('lock_timeout') AS lock_timeout,
+                setting::bigint AS lock_timeout_ms
+             FROM pg_settings
+             WHERE name = 'lock_timeout'
+         )
+         SELECT previous.lock_timeout
+         FROM previous,
+              LATERAL (
+                SELECT set_config(
+                    'lock_timeout',
+                    CASE
+                        WHEN previous.lock_timeout_ms = 0 THEN $1
+                        WHEN previous.lock_timeout_ms <= $2 THEN previous.lock_timeout
+                        ELSE $1
+                    END,
+                    true
+                )
+              ) AS applied",
+    )
+    .bind(lock_timeout)
+    .bind(lock_timeout_ms)
+    .fetch_one(&mut **tx)
     .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("lock shared workflow run release", error)
-    })?;
+    .map_err(|error| Error::from_query_sqlx_with_context(context, error))
+}
+
+async fn set_local_lock_timeout_tx(
+    tx: &mut DbTx<'_>,
+    lock_timeout: &str,
+    context: &'static str,
+) -> Result<()> {
+    sqlx::query_scalar::<_, String>("SELECT set_config('lock_timeout', $1, true)")
+        .bind(lock_timeout)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| Error::from_query_sqlx_with_context(context, error))?;
 
     Ok(())
+}
+
+fn is_lock_timeout_error(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .is_some_and(|code| code.as_ref() == "55P03")
 }
 
 // Releases take a shared advisory lock so independent releases on the same run
@@ -190,6 +288,7 @@ pub(in crate::jobs::workflows) async fn lock_workflow_steps_for_update_tx(
             ws.organization_id,
             ws.status::text AS \"status!\",
             ws.job_id
+            /* runledger:lock_workflow_steps_for_update */
          FROM workflow_steps ws
          JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
          WHERE ws.workflow_run_id = $1
@@ -248,6 +347,106 @@ pub(in crate::jobs::workflows) async fn lock_workflow_run_for_update_tx(
         )));
     }
     Ok(workflow_run)
+}
+
+#[cfg(test)]
+mod tests {
+    use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
+
+    use super::*;
+
+    async fn current_lock_timeout(tx: &mut DbTx<'_>) -> String {
+        sqlx::query_scalar::<_, String>("SELECT current_setting('lock_timeout')")
+            .fetch_one(&mut **tx)
+            .await
+            .expect("read lock_timeout")
+    }
+
+    #[tokio::test]
+    async fn cap_local_lock_timeout_preserves_stricter_existing_timeout() {
+        let (pool, database) = setup_ephemeral_pool("workflow_lock_timeout_cap_strict", 1).await;
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        set_local_lock_timeout_tx(&mut tx, "100ms", "set test lock_timeout")
+            .await
+            .expect("set strict lock_timeout");
+
+        let previous = cap_local_lock_timeout_tx(
+            &mut tx,
+            WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT,
+            WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT_MS,
+            "cap test lock_timeout",
+        )
+        .await
+        .expect("cap lock_timeout");
+        assert_eq!(previous, "100ms");
+        assert_eq!(current_lock_timeout(&mut tx).await, "100ms");
+
+        tx.rollback().await.expect("rollback tx");
+        teardown_ephemeral_pool(pool, database).await;
+    }
+
+    #[tokio::test]
+    async fn cap_local_lock_timeout_caps_unlimited_timeout_and_allows_restore() {
+        let (pool, database) = setup_ephemeral_pool("workflow_lock_timeout_cap_unlimited", 1).await;
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        let previous = cap_local_lock_timeout_tx(
+            &mut tx,
+            WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT,
+            WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT_MS,
+            "cap test lock_timeout",
+        )
+        .await
+        .expect("cap lock_timeout");
+        assert_eq!(previous, "0");
+        assert_eq!(current_lock_timeout(&mut tx).await, "5s");
+
+        set_local_lock_timeout_tx(&mut tx, &previous, "restore test lock_timeout")
+            .await
+            .expect("restore lock_timeout");
+        assert_eq!(current_lock_timeout(&mut tx).await, "0");
+
+        tx.rollback().await.expect("rollback tx");
+        teardown_ephemeral_pool(pool, database).await;
+    }
+
+    #[tokio::test]
+    async fn cap_local_lock_timeout_preserves_equal_cap_and_clamps_longer_timeout() {
+        let (pool, database) = setup_ephemeral_pool("workflow_lock_timeout_cap_matrix", 1).await;
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        set_local_lock_timeout_tx(&mut tx, "5s", "set equal lock_timeout")
+            .await
+            .expect("set equal lock_timeout");
+        let previous = cap_local_lock_timeout_tx(
+            &mut tx,
+            WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT,
+            WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT_MS,
+            "cap equal lock_timeout",
+        )
+        .await
+        .expect("cap equal lock_timeout");
+        assert_eq!(previous, "5s");
+        assert_eq!(current_lock_timeout(&mut tx).await, "5s");
+
+        set_local_lock_timeout_tx(&mut tx, "10s", "set longer lock_timeout")
+            .await
+            .expect("set longer lock_timeout");
+        let previous = cap_local_lock_timeout_tx(
+            &mut tx,
+            WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT,
+            WORKFLOW_RUN_RELEASE_SHARED_LOCK_ACQUIRE_TIMEOUT_MS,
+            "cap longer lock_timeout",
+        )
+        .await
+        .expect("cap longer lock_timeout");
+        assert_eq!(previous, "10s");
+        assert_eq!(current_lock_timeout(&mut tx).await, "5s");
+
+        tx.rollback().await.expect("rollback tx");
+        teardown_ephemeral_pool(pool, database).await;
+    }
 }
 
 #[cfg(feature = "test-support")]

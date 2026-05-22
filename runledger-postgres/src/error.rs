@@ -80,6 +80,35 @@ impl QueryError {
     }
 
     #[must_use]
+    pub(crate) fn from_classified_sqlx(
+        category: QueryErrorCategory,
+        code: &'static str,
+        client_message: &'static str,
+        internal_message: impl Into<String>,
+        source: sqlx::Error,
+    ) -> Self {
+        let (sqlstate, constraint) = source
+            .as_database_error()
+            .map(|database_error| {
+                (
+                    database_error.code().map(|code| code.into_owned()),
+                    database_error.constraint().map(ToOwned::to_owned),
+                )
+            })
+            .unwrap_or((None, None));
+
+        Self {
+            category,
+            code,
+            client_message,
+            sqlstate,
+            constraint,
+            message: internal_message.into(),
+            source: Some(Arc::new(source)),
+        }
+    }
+
+    #[must_use]
     pub fn from_sqlx_with_constraint_classifier<F>(
         error: sqlx::Error,
         context: Option<&str>,
@@ -497,6 +526,39 @@ mod tests {
         assert!(error.internal_message().contains("secret-idempotency-key"));
         assert!(std::error::Error::source(&error).is_none());
         assert!(error.source_arc().is_some());
+    }
+
+    #[test]
+    fn query_error_from_classified_sqlx_preserves_source_without_leaking_display() {
+        let error = QueryError::from_classified_sqlx(
+            QueryErrorCategory::Conflict,
+            "workflow.release_conflict",
+            "Workflow step release conflicted with another workflow mutation.",
+            "internal context includes secret-lock-key",
+            sqlx::Error::Protocol("database detail includes secret-lock-key".into()),
+        );
+
+        assert_eq!(error.category(), QueryErrorCategory::Conflict);
+        assert_eq!(error.code(), "workflow.release_conflict");
+        assert_eq!(
+            error.client_message(),
+            "Workflow step release conflicted with another workflow mutation."
+        );
+        assert!(error.internal_message().contains("secret-lock-key"));
+        assert!(error.source_arc().is_some());
+        assert!(std::error::Error::source(&error).is_none());
+
+        let display = error.to_string();
+        assert_eq!(
+            display,
+            "Workflow step release conflicted with another workflow mutation."
+        );
+        assert!(!display.contains("secret-lock-key"));
+
+        let debug = format!("{error:?}");
+        assert!(debug.contains("workflow.release_conflict"));
+        assert!(debug.contains("has_source: true"));
+        assert!(!debug.contains("secret-lock-key"));
     }
 
     #[test]

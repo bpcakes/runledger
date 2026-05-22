@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            ws.id,\n            ws.step_key,\n            ws.execution_kind::text AS \"execution_kind!\",\n            ws.organization_id,\n            ws.status::text AS \"status!\",\n            ws.job_id\n         FROM workflow_steps ws\n         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id\n         WHERE ws.workflow_run_id = $1\n           AND ($2::uuid IS NULL OR wr.organization_id = $2)\n         ORDER BY ws.id ASC\n         FOR UPDATE OF ws",
+  "query": "SELECT\n            ws.id,\n            ws.step_key,\n            ws.execution_kind::text AS \"execution_kind!\",\n            ws.organization_id,\n            ws.status::text AS \"status!\",\n            ws.job_id\n            /* runledger:lock_workflow_steps_for_update */\n         FROM workflow_steps ws\n         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id\n         WHERE ws.workflow_run_id = $1\n           AND ($2::uuid IS NULL OR wr.organization_id = $2)\n         ORDER BY ws.id ASC\n         FOR UPDATE OF ws",
   "describe": {
     "columns": [
       {
@@ -49,5 +49,5 @@
       true
     ]
   },
-  "hash": "23502ff48b42bc43a94f0de6fa59f8ec5a2e6eb95568d1fef8e84030a96ca533"
+  "hash": "1974da11d9162d9afa16c33f912e03b5548a9b48b2a95027148bff603e9194c1"
 }
