@@ -21,10 +21,6 @@ struct EnqueuedJobRow {
 #[derive(sqlx::FromRow)]
 struct ExistingIdempotentJobRow {
     id: Uuid,
-    payload_matches: bool,
-    priority: i32,
-    max_attempts: i32,
-    timeout_seconds: i32,
     enqueue_request_matches: Option<bool>,
 }
 
@@ -58,8 +54,8 @@ impl AttemptClaimOrigin {
 /// Idempotency is strict for the submitted request snapshot, including the
 /// requested initial stage and schedule. Later runtime mutations of those
 /// fields do not affect retries because keyed rows compare the stored original
-/// request; unkeyed rows do not store snapshots, and legacy keyed rows without
-/// snapshots can only compare durable request fields.
+/// request. Unkeyed rows do not store snapshots, and keyed rows without
+/// snapshots are rejected by the idempotency cutover.
 pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Result<Uuid> {
     let stage = payload
         .stage
@@ -229,48 +225,40 @@ async fn load_existing_idempotent_job_tx(
     // FOR SHARE keeps the matched job stable until the enqueue transaction
     // returns the existing idempotent result.
     if let Some(organization_id) = payload.organization_id {
-        sqlx::query_as::<_, ExistingIdempotentJobRow>(
-            "SELECT
+        sqlx::query_as!(
+            ExistingIdempotentJobRow,
+            r#"SELECT
                 id,
-                payload = $5::jsonb AS payload_matches,
-                priority,
-                max_attempts,
-                timeout_seconds,
-                enqueue_request = $4::jsonb AS enqueue_request_matches
+                enqueue_request = $4::jsonb AS "enqueue_request_matches?"
              FROM job_queue
              WHERE job_type = $1
                AND organization_id = $2
                AND idempotency_key = $3
              LIMIT 1
-             FOR SHARE",
+             FOR SHARE"#,
+            payload.job_type as _,
+            organization_id,
+            idempotency_key,
+            enqueue_request,
         )
-        .bind(payload.job_type)
-        .bind(organization_id)
-        .bind(idempotency_key)
-        .bind(enqueue_request)
-        .bind(payload.payload)
         .fetch_optional(&mut **tx)
         .await
     } else {
-        sqlx::query_as::<_, ExistingIdempotentJobRow>(
-            "SELECT
+        sqlx::query_as!(
+            ExistingIdempotentJobRow,
+            r#"SELECT
                 id,
-                payload = $4::jsonb AS payload_matches,
-                priority,
-                max_attempts,
-                timeout_seconds,
-                enqueue_request = $3::jsonb AS enqueue_request_matches
+                enqueue_request = $3::jsonb AS "enqueue_request_matches?"
              FROM job_queue
              WHERE job_type = $1
                AND organization_id IS NULL
                AND idempotency_key = $2
              LIMIT 1
-             FOR SHARE",
+             FOR SHARE"#,
+            payload.job_type as _,
+            idempotency_key,
+            enqueue_request,
         )
-        .bind(payload.job_type)
-        .bind(idempotency_key)
-        .bind(enqueue_request)
-        .bind(payload.payload)
         .fetch_optional(&mut **tx)
         .await
     }
@@ -302,58 +290,16 @@ fn validate_existing_idempotent_job(
     existing: &ExistingIdempotentJobRow,
 ) -> Result<()> {
     match existing.enqueue_request_matches {
-        Some(true) => return Ok(()),
-        Some(false) => {
-            return Err(idempotent_job_conflict_error(
-                payload.job_type.as_str(),
-                "request",
-            ));
-        }
-        None => {}
-    }
-
-    // Legacy rows created before enqueue_request existed can only be compared
-    // against durable queue fields. Omitted optional fields intentionally skip
-    // comparison because the original request may have relied on then-current
-    // defaults, or may have supplied the same value the row now stores. Do not
-    // compare lifecycle-mutated fields such as stage or next_run_at.
-    if !existing.payload_matches {
-        return Err(idempotent_job_conflict_error(
+        Some(true) => Ok(()),
+        Some(false) => Err(idempotent_job_conflict_error(
             payload.job_type.as_str(),
-            "payload",
-        ));
-    }
-    if let Some(priority) = payload.priority
-        && existing.priority != priority
-    {
-        return Err(idempotent_job_conflict_error(
+            "request",
+        )),
+        None => Err(legacy_job_idempotency_snapshot_missing_error(
             payload.job_type.as_str(),
-            "priority",
-        ));
+            existing.id,
+        )),
     }
-    if let Some(max_attempts) = payload.max_attempts
-        && existing.max_attempts != max_attempts
-    {
-        return Err(idempotent_job_conflict_error(
-            payload.job_type.as_str(),
-            "max_attempts",
-        ));
-    }
-    if let Some(timeout_seconds) = payload.timeout_seconds
-        && existing.timeout_seconds != timeout_seconds
-    {
-        return Err(idempotent_job_conflict_error(
-            payload.job_type.as_str(),
-            "timeout_seconds",
-        ));
-    }
-    tracing::warn!(
-        job_id = %existing.id,
-        job_type = payload.job_type.as_str(),
-        organization_id = ?payload.organization_id,
-        "accepted legacy job idempotency retry without enqueue_request snapshot"
-    );
-    Ok(())
 }
 
 fn canonical_job_enqueue_request(payload: &JobEnqueue<'_>, stage: &'static str) -> Result<Value> {
@@ -395,6 +341,17 @@ fn idempotent_job_missing_existing_error(job_type: &str) -> Error {
         "Job enqueue retry could not be resolved.",
         format!(
             "job enqueue insert for job_type={job_type} conflicted but matching idempotent job was not found"
+        ),
+    ))
+}
+
+fn legacy_job_idempotency_snapshot_missing_error(job_type: &str, job_id: Uuid) -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Conflict,
+        "job.legacy_idempotency_snapshot_missing",
+        "Job enqueue retry cannot be resolved because the existing idempotency key is missing its request snapshot.",
+        format!(
+            "job enqueue idempotency retry for job_type={job_type} matched legacy job {job_id} without enqueue_request snapshot"
         ),
     ))
 }

@@ -296,13 +296,12 @@ async fn job_enqueue_idempotency_normalizes_next_run_at_to_postgres_precision() 
 }
 
 #[tokio::test]
-async fn legacy_job_enqueue_idempotency_uses_jsonb_numeric_equality() {
-    let (pool, database) = setup_ephemeral_pool("legacy_idempotent_job_numeric_retry", 8).await;
-    let job_type = JobType::new("jobs.test.legacy_idempotent_numeric_retry");
+async fn legacy_job_enqueue_idempotency_snapshot_missing_is_rejected() {
+    let (pool, database) = setup_ephemeral_pool("legacy_idempotent_job_rejected", 8).await;
+    let job_type = JobType::new("jobs.test.legacy_idempotent_rejected");
     register_job_definition(&pool, job_type).await;
 
-    let first_payload = json!({"kind": "legacy-numeric", "amount": 1.0});
-    let retry_payload = json!({"kind": "legacy-numeric", "amount": 1});
+    let first_payload = json!({"kind": "legacy-snapshot-missing"});
     let first = JobEnqueue {
         job_type,
         organization_id: None,
@@ -311,28 +310,29 @@ async fn legacy_job_enqueue_idempotency_uses_jsonb_numeric_equality() {
         max_attempts: Some(2),
         timeout_seconds: Some(30),
         next_run_at: None,
-        idempotency_key: Some("legacy-same-job-numeric"),
+        idempotency_key: Some("legacy-same-job-missing-snapshot"),
         stage: Some(runledger_core::jobs::JobStage::Queued),
     };
-    let retry = JobEnqueue {
-        payload: &retry_payload,
-        ..first.clone()
-    };
+    let retry = first.clone();
 
     let first_id = enqueue_job(&pool, &first)
         .await
         .expect("first enqueue succeeds");
+    drop_job_idempotency_cutover_constraint(&pool).await;
     sqlx::query("UPDATE job_queue SET enqueue_request = NULL WHERE id = $1")
         .bind(first_id)
         .execute(&pool)
         .await
         .expect("simulate legacy job row");
 
-    let retry_id = enqueue_job(&pool, &retry)
+    let error = enqueue_job(&pool, &retry)
         .await
-        .expect("numeric-equivalent legacy retry returns existing job");
+        .expect_err("legacy retry without enqueue_request should be rejected");
 
-    assert_eq!(first_id, retry_id);
+    assert_eq!(
+        query_error_code(&error),
+        Some("job.legacy_idempotency_snapshot_missing")
+    );
     teardown_ephemeral_pool(pool, database).await;
 }
 
@@ -761,27 +761,25 @@ async fn workflow_enqueue_idempotency_uses_jsonb_numeric_equality() {
 }
 
 #[tokio::test]
-async fn legacy_workflow_enqueue_idempotency_uses_jsonb_numeric_equality() {
-    let (pool, database) =
-        setup_ephemeral_pool("legacy_workflow_idempotent_numeric_retry", 8).await;
+async fn legacy_workflow_enqueue_idempotency_snapshot_missing_is_rejected() {
+    let (pool, database) = setup_ephemeral_pool("legacy_workflow_idempotent_rejected", 8).await;
 
-    let workflow_type = WorkflowType::new("workflow.test.legacy_idempotent_numeric_retry");
-    let payload = json!({"kind": "legacy-numeric"});
-    let first_metadata = json!({"source": "test", "batch": 1.0});
-    let retry_metadata = json!({"source": "test", "batch": 1});
+    let workflow_type = WorkflowType::new("workflow.test.legacy_idempotent_rejected");
+    let payload = json!({"kind": "legacy-snapshot-missing"});
+    let metadata = json!({"source": "test"});
     let first_step = WorkflowStepEnqueueBuilder::new_external(StepKey::new("gate"), &payload)
         .try_build()
         .expect("build first external step");
-    let first_workflow = WorkflowRunEnqueueBuilder::new(workflow_type, &first_metadata)
-        .idempotency_key("legacy-same-workflow-numeric")
+    let first_workflow = WorkflowRunEnqueueBuilder::new(workflow_type, &metadata)
+        .idempotency_key("legacy-same-workflow-missing-snapshot")
         .step(first_step)
         .try_build()
         .expect("build first workflow");
     let retry_step = WorkflowStepEnqueueBuilder::new_external(StepKey::new("gate"), &payload)
         .try_build()
         .expect("build retry external step");
-    let retry_workflow = WorkflowRunEnqueueBuilder::new(workflow_type, &retry_metadata)
-        .idempotency_key("legacy-same-workflow-numeric")
+    let retry_workflow = WorkflowRunEnqueueBuilder::new(workflow_type, &metadata)
+        .idempotency_key("legacy-same-workflow-missing-snapshot")
         .step(retry_step)
         .try_build()
         .expect("build retry workflow");
@@ -789,18 +787,38 @@ async fn legacy_workflow_enqueue_idempotency_uses_jsonb_numeric_equality() {
     let first = enqueue_workflow_run(&pool, &first_workflow)
         .await
         .expect("first workflow enqueue succeeds");
+    drop_workflow_idempotency_cutover_constraint(&pool).await;
     sqlx::query("UPDATE workflow_runs SET enqueue_request = NULL WHERE id = $1")
         .bind(first.id)
         .execute(&pool)
         .await
         .expect("simulate legacy workflow row");
 
-    let retry = enqueue_workflow_run(&pool, &retry_workflow)
+    let error = enqueue_workflow_run(&pool, &retry_workflow)
         .await
-        .expect("numeric-equivalent legacy workflow retry returns existing run");
+        .expect_err("legacy workflow retry without enqueue_request should be rejected");
 
-    assert_eq!(first.id, retry.id);
+    assert_eq!(
+        query_error_code(&error),
+        Some("workflow.legacy_idempotency_snapshot_missing")
+    );
     teardown_ephemeral_pool(pool, database).await;
+}
+
+async fn drop_job_idempotency_cutover_constraint(pool: &sqlx::PgPool) {
+    sqlx::query("ALTER TABLE job_queue DROP CONSTRAINT ck_job_queue_idempotency_enqueue_request")
+        .execute(pool)
+        .await
+        .expect("drop job_queue idempotency cutover constraint");
+}
+
+async fn drop_workflow_idempotency_cutover_constraint(pool: &sqlx::PgPool) {
+    sqlx::query(
+        "ALTER TABLE workflow_runs DROP CONSTRAINT ck_workflow_runs_idempotency_enqueue_request",
+    )
+    .execute(pool)
+    .await
+    .expect("drop workflow_runs idempotency cutover constraint");
 }
 
 #[tokio::test]

@@ -23,6 +23,7 @@ package_crate() {
     --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
     --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
     --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
+    --config "patch.crates-io.runledger-test-support.path=\"${ROOT_DIR}/runledger-test-support\"" \
     --quiet
 }
 

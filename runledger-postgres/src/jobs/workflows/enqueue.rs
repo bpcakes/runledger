@@ -13,7 +13,10 @@ use super::super::row_decode::{
     parse_workflow_step_execution_kind, parse_workflow_type_name,
 };
 use super::super::workflow_types::WorkflowRunDbRecord;
-use super::errors::{workflow_enqueue_conflicting_retry_error, workflow_internal_state_error};
+use super::errors::{
+    workflow_enqueue_conflicting_retry_error, workflow_internal_state_error,
+    workflow_legacy_idempotency_snapshot_missing_error,
+};
 use super::read::load_workflow_run_by_id_tx;
 use super::release::{StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx};
 use super::runtime::recompute_workflow_run_statuses_tx;
@@ -38,7 +41,6 @@ struct WorkflowRunRow {
     idempotency_key: Option<String>,
     metadata: JsonValue,
     enqueue_request_matches: Option<bool>,
-    metadata_matches: Option<bool>,
     started_at: chrono::DateTime<chrono::Utc>,
     finished_at: Option<chrono::DateTime<chrono::Utc>>,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -75,9 +77,8 @@ struct CanonicalWorkflowDependency<'a> {
 ///
 /// Calls without an idempotency key always create a new workflow run. Calls
 /// with an idempotency key return the existing run only when the canonical
-/// enqueue request snapshot matches. Keyed legacy rows created before enqueue
-/// snapshots existed cannot reconstruct their original step request, so retries
-/// against those rows fall back to metadata-only comparison.
+/// enqueue request snapshot matches. Keyed rows without snapshots are rejected
+/// by the idempotency cutover.
 pub async fn enqueue_workflow_run(
     pool: &DbPool,
     payload: &WorkflowRunEnqueue<'_>,
@@ -99,9 +100,8 @@ pub async fn enqueue_workflow_run(
 /// compared instead of live workflow step rows because steps and dependencies
 /// can be legitimately appended or mutated after initial enqueue. Strict
 /// workflow idempotency applies to keyed rows with an `enqueue_request`
-/// snapshot; unkeyed rows do not store snapshots, and legacy keyed rows created
-/// before that snapshot existed can only be metadata-checked because their
-/// original step request is not recoverable after later mutations.
+/// snapshot; unkeyed rows do not store snapshots, and keyed rows without
+/// snapshots are rejected by the idempotency cutover.
 /// Job-step stage is part of the canonical initial request after normalizing an
 /// omitted stage to `Queued`; changing the requested initial stage is treated as
 /// a different enqueue request.
@@ -177,7 +177,6 @@ async fn insert_workflow_run_record_tx(
             idempotency_key,
             metadata,
             NULL::boolean AS enqueue_request_matches,
-            TRUE AS metadata_matches,
             started_at,
             finished_at,
             created_at,
@@ -246,16 +245,16 @@ async fn load_existing_idempotent_workflow_run_tx(
     // FOR SHARE keeps the matched run stable until the enqueue transaction
     // returns the existing idempotent result.
     let run = if let Some(organization_id) = payload.organization_id() {
-        sqlx::query_as::<_, WorkflowRunRow>(
-            "SELECT
+        sqlx::query_as!(
+            WorkflowRunRow,
+            r#"SELECT
                 id,
                 workflow_type,
                 organization_id,
-                status::text AS status,
+                status::text AS "status!",
                 idempotency_key,
                 metadata,
-                enqueue_request = $4::jsonb AS enqueue_request_matches,
-                metadata = $5::jsonb AS metadata_matches,
+                enqueue_request = $4::jsonb AS "enqueue_request_matches?",
                 started_at,
                 finished_at,
                 created_at,
@@ -265,26 +264,25 @@ async fn load_existing_idempotent_workflow_run_tx(
                AND organization_id = $2
                AND idempotency_key = $3
              LIMIT 1
-             FOR SHARE",
+             FOR SHARE"#,
+            payload.workflow_type() as _,
+            organization_id,
+            idempotency_key,
+            enqueue_request,
         )
-        .bind(payload.workflow_type())
-        .bind(organization_id)
-        .bind(idempotency_key)
-        .bind(enqueue_request)
-        .bind(payload.metadata())
         .fetch_optional(&mut **tx)
         .await
     } else {
-        sqlx::query_as::<_, WorkflowRunRow>(
-            "SELECT
+        sqlx::query_as!(
+            WorkflowRunRow,
+            r#"SELECT
                 id,
                 workflow_type,
                 organization_id,
-                status::text AS status,
+                status::text AS "status!",
                 idempotency_key,
                 metadata,
-                enqueue_request = $3::jsonb AS enqueue_request_matches,
-                metadata = $4::jsonb AS metadata_matches,
+                enqueue_request = $3::jsonb AS "enqueue_request_matches?",
                 started_at,
                 finished_at,
                 created_at,
@@ -294,12 +292,11 @@ async fn load_existing_idempotent_workflow_run_tx(
                AND organization_id IS NULL
                AND idempotency_key = $2
              LIMIT 1
-             FOR SHARE",
+             FOR SHARE"#,
+            payload.workflow_type() as _,
+            idempotency_key,
+            enqueue_request,
         )
-        .bind(payload.workflow_type())
-        .bind(idempotency_key)
-        .bind(enqueue_request)
-        .bind(payload.metadata())
         .fetch_optional(&mut **tx)
         .await
     };
@@ -340,22 +337,10 @@ fn validate_existing_idempotent_workflow_run(existing: &WorkflowRunRow) -> Resul
     match existing.enqueue_request_matches {
         Some(true) => Ok(()),
         Some(false) => Err(workflow_enqueue_conflicting_retry_error("request")),
-        None => {
-            // Legacy rows created before enqueue_request existed have no stable
-            // original request snapshot. Live workflow_steps are mutable through
-            // append and pending-payload updates, so accepting the existing run is
-            // safer than rejecting a legitimate retry against changed state.
-            if existing.metadata_matches != Some(true) {
-                return Err(workflow_enqueue_conflicting_retry_error("metadata"));
-            }
-            tracing::warn!(
-                workflow_run_id = %existing.id,
-                workflow_type = existing.workflow_type.as_str(),
-                organization_id = ?existing.organization_id,
-                "accepted legacy workflow idempotency retry without enqueue_request snapshot"
-            );
-            Ok(())
-        }
+        None => Err(workflow_legacy_idempotency_snapshot_missing_error(
+            existing.workflow_type.as_str(),
+            existing.id,
+        )),
     }
 }
 

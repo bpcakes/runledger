@@ -70,8 +70,8 @@ The crate assumes the matching Runledger schema has already been migrated into t
 
 For consumer setup there are two supported modes:
 
-- call `runledger_postgres::migrate(&pool)` to apply the bundled schema during startup
-- call `runledger_postgres::ensure_schema_compatible(&pool)` to perform a read-only validation that an existing `_sqlx_migrations` history matches the bundled migrations, with explicit errors for missing history or PostgreSQL query/connectivity failures
+- call `runledger_postgres::migrate_after_idempotency_cutover(&pool)` to apply the bundled schema during startup and reject keyed legacy rows without enqueue snapshots
+- call `runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool)` to perform a read-only validation that an existing `_sqlx_migrations` history matches the bundled migrations, with explicit errors for missing history, incompatible history, legacy idempotency rows, or PostgreSQL query/connectivity failures
 
 Operational API notes:
 
@@ -81,8 +81,7 @@ Operational API notes:
 - Workflow-backed job completion waits for an in-flight workflow cancellation to commit or roll back instead of returning a transient `workflow.release_conflict`; append and external-step release paths may still return `workflow.release_conflict` while cancellation owns the exclusive release lock.
 - Retry conflicts such as `workflow.append_conflicting_retry` are reported as conflict-category query errors; clients should prefer stable error codes over broad categories for exact branching.
 - Release-sensitive workflow operations, workflow append mutations, and keyed enqueue retries require PostgreSQL `READ COMMITTED` semantics. PostgreSQL's `READ UNCOMMITTED` mode is accepted because PostgreSQL implements it as read committed.
-- Keyed rows created before enqueue snapshots existed cannot be fully reconstructed. Legacy job retries compare durable queue fields; legacy workflow retries can only be metadata-checked because workflow steps may have been appended or mutated after enqueue.
-- For legacy workflow rows with `enqueue_request IS NULL`, a keyed retry with matching metadata returns the existing run even if the submitted steps, dependencies, or payloads differ. Treat this as a compatibility fallback only, monitor the legacy fallback warning logs, and retire the fallback after old rows have drained.
+- Keyed rows created before enqueue snapshots existed cannot be safely reconstructed. The idempotency cutover rejects keyed job and workflow rows with `enqueue_request IS NULL` during startup/schema validation, and keyed retries against such rows return dedicated conflict errors instead of falling back to mutable state comparisons.
 
 ### `runledger-runtime`
 
@@ -157,6 +156,8 @@ This repo uses a flattened baseline plus forward migrations:
   creates `runledger_migration_history` and records the standalone baseline and history-table migration versions
 - `202605180001_add_enqueue_request_snapshots`
   adds `enqueue_request` snapshots to `job_queue` and `workflow_runs` so keyed enqueue retries can compare the original request instead of mutable runtime state
+- `202605220001_enforce_enqueue_request_snapshots`
+  blocks new keyed queue/workflow rows without snapshots while startup validation rejects pre-cutover legacy rows; the application migration API validates the cutover constraints after legacy-row validation passes
 
 The historical standalone migration chain was intentionally collapsed because this repository now targets fresh standalone deployments rather than preserving every intermediate extraction-era cutover step.
 
@@ -167,11 +168,26 @@ The workspace-root migration directory remains the canonical schema source for r
 For consumers using the published crate:
 
 - `runledger_postgres::MIGRATOR` embeds the vendored `runledger-postgres/migrations/` copy
-- `runledger_postgres::migrate(&pool)` applies those migrations
-- `runledger_postgres::ensure_schema_compatible(&pool)` validates that an existing `_sqlx_migrations` history matches them without running DDL and returns Runledger-specific errors for missing history, incompatible history, or PostgreSQL query/connectivity failures
+- `runledger_postgres::migrate_after_idempotency_cutover(&pool)` applies those migrations and rejects keyed legacy rows without snapshots
+- `runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool)` validates that an existing `_sqlx_migrations` history matches them without running DDL and returns Runledger-specific errors for missing history, incompatible history, legacy idempotency rows, or PostgreSQL query/connectivity failures; externally managed DDL can validate the `NOT VALID` cutover constraints after this check passes
 - `runledger-postgres/build.rs` fails local builds if the vendored crate copy drifts from the canonical workspace-root `migrations/` directory
 
-Apply these migrations, or call `runledger_postgres::migrate(&pool)`, before using `runledger-postgres` or running DB-backed tests.
+Apply these migrations, or call `runledger_postgres::migrate_after_idempotency_cutover(&pool)`, before using `runledger-postgres` or running DB-backed tests.
+
+For the enqueue-request snapshot cutover, apply the bundled migrations first,
+then run either startup API. If it returns
+`SchemaCompatibilityError::LegacyIdempotencySnapshotsMissing`, inspect the
+legacy rows with the `idx_job_queue_missing_enqueue_request_snapshot` and
+`idx_workflow_runs_missing_enqueue_request_snapshot` partial indexes, remediate
+or drain those keyed rows, and retry startup. Prefer natural drain or clearing
+the stale `idempotency_key` where retry identity no longer matters; only backfill
+`enqueue_request` when you have the original canonical enqueue request, not from
+mutable live queue/workflow state. `migrate_after_idempotency_cutover` validates
+the cutover constraints once no legacy rows remain; that first validation scans
+`job_queue` and `workflow_runs` and may briefly delay startup on large tables
+without blocking ordinary DML. The cutover migration also builds helper indexes
+for locating legacy rows; on large tables, apply it during a maintenance window
+appropriate for your write volume.
 
 ## Runtime Configuration
 
@@ -324,7 +340,7 @@ In particular:
 
 A host application will generally:
 
-1. either call `runledger_postgres::migrate(&pool)` or apply the Runledger migrations with your own deployment tooling
+1. either call `runledger_postgres::migrate_after_idempotency_cutover(&pool)` or apply the Runledger migrations with your own deployment tooling and then call `runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool)`
 2. create a shared `sqlx::PgPool`
 3. register concrete handlers in `runledger_runtime::registry::JobRegistry`
 4. start worker, scheduler, and reaper loops with coordinated shutdown
@@ -337,7 +353,7 @@ use runledger_runtime::config::JobsConfig;
 use runledger_runtime::registry::JobRegistry;
 
 let pool = /* sqlx PgPool */;
-runledger_postgres::migrate(&pool).await?;
+runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
 
 let mut registry = JobRegistry::new();
 // registry.register(MyHandler);

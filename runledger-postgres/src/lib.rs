@@ -32,21 +32,23 @@
 //! before running because their correctness depends on second reads after waits
 //! or conflicts.
 //!
-//! For simple embedding, call [`migrate`] during startup:
+//! For simple embedding, call [`migrate_after_idempotency_cutover`] during
+//! startup:
 //!
 //! ```rust,no_run
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! let pool = sqlx::PgPool::connect("postgres://localhost/runledger").await?;
-//! runledger_postgres::migrate(&pool).await?;
+//! runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! For deployments that manage DDL elsewhere, call
-//! [`ensure_schema_compatible`] instead to fail fast if the schema is missing
-//! or drifted. That check is read-only, but it expects the database to retain
-//! SQLx migration history in `_sqlx_migrations` and, when available,
-//! Runledger-owned migration state in `runledger_migration_history`.
+//! [`ensure_schema_compatible_after_idempotency_cutover`] instead to fail fast
+//! if the schema is missing, drifted, or still has keyed legacy rows without
+//! idempotency request snapshots. That check is read-only, but it expects the
+//! database to retain SQLx migration history in `_sqlx_migrations` and, when
+//! available, Runledger-owned migration state in `runledger_migration_history`.
 
 use std::fmt;
 
@@ -59,7 +61,10 @@ pub use error::{
     classify_query_error, classify_query_error_with_constraint_classifier,
     has_framework_constraint_classifier,
 };
-pub use migrations::{MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible, migrate};
+pub use migrations::{
+    MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
+    migrate_after_idempotency_cutover,
+};
 
 pub type DbPool = sqlx::PgPool;
 pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;

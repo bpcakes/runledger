@@ -167,6 +167,20 @@ pub(in crate::jobs::workflows) fn workflow_enqueue_conflicting_retry_error(field
     ))
 }
 
+pub(in crate::jobs::workflows) fn workflow_legacy_idempotency_snapshot_missing_error(
+    workflow_type: &str,
+    workflow_run_id: Uuid,
+) -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Conflict,
+        "workflow.legacy_idempotency_snapshot_missing",
+        "Workflow enqueue retry cannot be resolved because the existing idempotency key is missing its request snapshot.",
+        format!(
+            "workflow enqueue idempotency retry for workflow_type={workflow_type} matched legacy workflow run {workflow_run_id} without enqueue_request snapshot"
+        ),
+    ))
+}
+
 pub(in crate::jobs::workflows) fn workflow_append_window_missing_error(step_key: &str) -> Error {
     Error::QueryError(QueryError::from_classified(
         QueryErrorCategory::Validation,
