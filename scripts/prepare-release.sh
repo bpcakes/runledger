@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PUBLISHABLE_CRATES=(
   "runledger-core"
+  "runledger-test-support"
   "runledger-postgres"
   "runledger-runtime"
 )
@@ -109,12 +110,13 @@ cargo test --workspace
 
 cargo publish --allow-dirty --dry-run -p runledger-core
 
-for crate in runledger-postgres runledger-runtime; do
+for crate in runledger-test-support runledger-postgres runledger-runtime; do
   cargo package \
     --allow-dirty \
     --no-verify \
     -p "$crate" \
     --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
+    --config "patch.crates-io.runledger-test-support.path=\"${ROOT_DIR}/runledger-test-support\"" \
     --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
     --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
     --quiet \

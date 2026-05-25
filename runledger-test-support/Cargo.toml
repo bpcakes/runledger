@@ -3,7 +3,13 @@ name = "runledger-test-support"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-publish = false
+description = "Test support utilities for Runledger PostgreSQL integration tests"
+readme = "../README.md"
+repository = "https://github.com/featherenvy/runledger"
+homepage = "https://github.com/featherenvy/runledger"
+documentation = "https://docs.rs/runledger-test-support"
+keywords = ["jobs", "workflows", "postgres", "testing"]
+categories = ["development-tools::testing", "database"]
 
 [dependencies]
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "migrate", "uuid"] }

@@ -15,7 +15,7 @@ The workspace contains four crates:
 - `runledger-runtime`
   Async worker, scheduler, and reaper loops plus runtime configuration and handler registry.
 - `runledger-test-support`
-  Local test-only helpers for ephemeral PostgreSQL databases and scoped environment-variable overrides.
+  Published test utilities for ephemeral PostgreSQL databases and scoped environment-variable overrides.
 
 The root workspace manifest is [Cargo.toml](Cargo.toml).
 
@@ -23,7 +23,7 @@ The root workspace manifest is [Cargo.toml](Cargo.toml).
 
 - Rust crates for the Runledger contracts, runtime, and PostgreSQL persistence layer
 - A Runledger-only SQL migration history in [migrations](migrations)
-- A vendored copy of those migrations in [runledger-postgres/migrations](runledger-postgres/migrations) so packaged crates can apply or validate the schema without relying on repo-relative paths
+- Vendored copies of those migrations in [runledger-postgres/migrations](runledger-postgres/migrations) and [runledger-test-support/migrations](runledger-test-support/migrations) so packaged crates can apply schemas without relying on repo-relative paths
 - Local test support for DB-backed tests using `testcontainers`
 - SQLx offline metadata in `.sqlx/` so the macro-based queries compile without a live database during normal builds
 
@@ -97,7 +97,7 @@ The runtime is generic. It does not know about your application-specific job cat
 
 ### `runledger-test-support`
 
-This crate exists only to support tests inside the workspace.
+This crate provides shared testing utilities for Runledger crates and downstream integration tests.
 
 It provides:
 
@@ -105,7 +105,7 @@ It provides:
 - `teardown_ephemeral_pool`
 - `ScopedEnv`
 
-It starts a disposable PostgreSQL container, creates per-test databases, and runs the local Runledger migrations against them.
+It starts a disposable PostgreSQL container, creates per-test databases, and runs its vendored Runledger migrations against them. It is published so package tests in `runledger-postgres` can depend on the same harness that workspace tests use.
 
 ## Database Model
 
@@ -168,6 +168,7 @@ The workspace-root migration directory remains the canonical schema source for r
 For consumers using the published crate:
 
 - `runledger_postgres::MIGRATOR` embeds the vendored `runledger-postgres/migrations/` copy
+- `runledger-test-support` embeds its own `runledger-test-support/migrations/` copy for packaged test harnesses
 - `runledger_postgres::migrate_after_idempotency_cutover(&pool)` applies those migrations and rejects keyed legacy rows without snapshots
 - `runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool)` validates that an existing `_sqlx_migrations` history matches them without running DDL and returns Runledger-specific errors for missing history, incompatible history, legacy idempotency rows, or PostgreSQL query/connectivity failures; externally managed DDL can validate the `NOT VALID` cutover constraints after this check passes
 - `runledger-postgres/build.rs` fails local builds if the vendored crate copy drifts from the canonical workspace-root `migrations/` directory
