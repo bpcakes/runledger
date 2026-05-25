@@ -7,13 +7,22 @@ use crate::DbPool;
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;
+type RunledgerMigrationMap = HashMap<i64, &'static sqlx::migrate::Migration>;
+
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SchemaCompatibilityError {
     Query(sqlx::Error),
     MissingMigrationHistory {
         required_first_migration_version: i64,
     },
+    LegacyIdempotencySnapshotsMissing {
+        job_count: i64,
+        workflow_count: i64,
+    },
     Incompatible(MigrateError),
+    MigrationUnlock(MigrateError),
 }
 
 impl fmt::Display for SchemaCompatibilityError {
@@ -29,7 +38,20 @@ impl fmt::Display for SchemaCompatibilityError {
                 f,
                 "Runledger schema compatibility check requires the _sqlx_migrations table; apply or record Runledger migrations first (expected migration history starting at version {required_first_migration_version})"
             ),
+            Self::LegacyIdempotencySnapshotsMissing {
+                job_count,
+                workflow_count,
+            } => write!(
+                f,
+                "Runledger idempotency cutover requires enqueue_request snapshots for all keyed rows; found {job_count} legacy job rows and {workflow_count} legacy workflow rows"
+            ),
             Self::Incompatible(error) => write!(f, "{error}"),
+            Self::MigrationUnlock(error) => {
+                write!(
+                    f,
+                    "Runledger schema migration lock could not be released: {error}"
+                )
+            }
         }
     }
 }
@@ -39,7 +61,8 @@ impl std::error::Error for SchemaCompatibilityError {
         match self {
             Self::Query(error) => Some(error),
             Self::MissingMigrationHistory { .. } => None,
-            Self::Incompatible(error) => Some(error),
+            Self::LegacyIdempotencySnapshotsMissing { .. } => None,
+            Self::Incompatible(error) | Self::MigrationUnlock(error) => Some(error),
         }
     }
 }
@@ -56,12 +79,25 @@ impl From<sqlx::Error> for SchemaCompatibilityError {
     }
 }
 
-/// Apply the bundled Runledger schema migrations to a PostgreSQL pool.
-pub async fn migrate(pool: &DbPool) -> Result<(), MigrateError> {
+/// Apply the bundled Runledger schema migrations to a PostgreSQL pool, then
+/// enforce the idempotency snapshot cutover.
+///
+/// This is intentionally named as a hard-cutover API. Downstream applications
+/// upgrading from older Runledger versions must update their startup code and
+/// verify no keyed legacy rows remain without `enqueue_request` snapshots.
+pub async fn migrate_after_idempotency_cutover(
+    pool: &DbPool,
+) -> Result<(), SchemaCompatibilityError> {
     let mut conn = pool.acquire().await?;
 
     if MIGRATOR.locking {
-        (*conn).lock().await?;
+        // PostgreSQL advisory migration locks are session-scoped; never return
+        // a possibly locked session to the pool if this future is cancelled.
+        conn.close_on_drop();
+        (*conn)
+            .lock()
+            .await
+            .map_err(SchemaCompatibilityError::Incompatible)?;
     }
 
     let result = run_migrations_with_filtered_history(&mut conn).await;
@@ -72,22 +108,57 @@ pub async fn migrate(pool: &DbPool) -> Result<(), MigrateError> {
     };
 
     match (result, unlock_result) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+        (Err(migration_error), Err(unlock_error)) => {
+            tracing::error!(
+                error = %unlock_error,
+                "failed to unlock migration lock after migration failure"
+            );
+            Err(SchemaCompatibilityError::Incompatible(migration_error))
+        }
+        (Err(error), Ok(())) => Err(SchemaCompatibilityError::Incompatible(error)),
+        (Ok(()), Err(error)) => Err(SchemaCompatibilityError::MigrationUnlock(error)),
+        (Ok(()), Ok(())) => {
+            // The DDL migration lock is no longer needed here: the NOT VALID
+            // cutover constraints already block new violating rows, and
+            // validation is idempotent if another startup validates first.
+            reject_legacy_idempotency_rows(&mut conn).await?;
+            validate_idempotency_cutover_constraints(&mut conn).await
+        }
     }
+}
+
+/// Apply the bundled Runledger schema migrations to a PostgreSQL pool.
+///
+/// Deprecated compatibility alias for [`migrate_after_idempotency_cutover`].
+/// The current migration set enforces the enqueue request snapshot cutover, so
+/// this function has the same strict behavior as the new explicit API.
+#[deprecated(
+    since = "0.1.2",
+    note = "use migrate_after_idempotency_cutover to make the enqueue request snapshot cutover explicit"
+)]
+pub async fn migrate(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
+    migrate_after_idempotency_cutover(pool).await
 }
 
 /// Validate that the target database's SQLx migration history matches the
 /// bundled Runledger migrations.
 ///
-/// Unlike [`migrate`], this does not apply pending migrations. It is intended
+/// Unlike [`migrate_after_idempotency_cutover`], this does not apply pending
+/// migrations. It is intended
 /// for deployments that manage DDL outside the application process but still
 /// want a startup guardrail. This check is read-only, but it relies on the
 /// `_sqlx_migrations` history table being present and up to date. When present,
 /// it also uses Runledger's own `runledger_migration_history` table to detect
 /// migrations applied by newer Runledger releases.
-pub async fn ensure_schema_compatible(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
+///
+/// This read-only path does not validate `NOT VALID` cutover constraints after
+/// legacy rows are remediated. Deployments that apply DDL externally can run
+/// PostgreSQL `VALIDATE CONSTRAINT` for the idempotency cutover constraints
+/// after this check passes, or use [`migrate_after_idempotency_cutover`] to let
+/// Runledger do that promotion.
+pub async fn ensure_schema_compatible_after_idempotency_cutover(
+    pool: &DbPool,
+) -> Result<(), SchemaCompatibilityError> {
     let mut conn = pool.acquire().await?;
 
     if !has_migrations_table(&mut conn).await? {
@@ -149,19 +220,32 @@ pub async fn ensure_schema_compatible(pool: &DbPool) -> Result<(), SchemaCompati
         }
     }
 
-    Ok(())
+    reject_legacy_idempotency_rows(&mut conn).await
 }
 
-async fn has_migrations_table(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
-) -> Result<bool, sqlx::Error> {
+/// Validate that the target database's SQLx migration history matches the
+/// bundled Runledger migrations.
+///
+/// Deprecated compatibility alias for
+/// [`ensure_schema_compatible_after_idempotency_cutover`]. The current schema
+/// compatibility check rejects keyed legacy rows without enqueue request
+/// snapshots, matching the stricter cutover API.
+#[deprecated(
+    since = "0.1.2",
+    note = "use ensure_schema_compatible_after_idempotency_cutover to make the enqueue request snapshot cutover explicit"
+)]
+pub async fn ensure_schema_compatible(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
+    ensure_schema_compatible_after_idempotency_cutover(pool).await
+}
+
+async fn has_migrations_table(conn: &mut PgPoolConnection) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar::<_, bool>("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
         .fetch_one(&mut **conn)
         .await
 }
 
 async fn has_runledger_migration_history_table(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    conn: &mut PgPoolConnection,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar::<_, bool>("SELECT to_regclass('runledger_migration_history') IS NOT NULL")
         .fetch_one(&mut **conn)
@@ -169,7 +253,7 @@ async fn has_runledger_migration_history_table(
 }
 
 async fn list_migration_history(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    conn: &mut PgPoolConnection,
 ) -> Result<Vec<MigrationHistoryRow>, sqlx::Error> {
     sqlx::query_as::<_, MigrationHistoryRow>(
         "SELECT version, checksum, success
@@ -181,7 +265,7 @@ async fn list_migration_history(
 }
 
 async fn list_recorded_runledger_migrations(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    conn: &mut PgPoolConnection,
 ) -> Result<Vec<i64>, sqlx::Error> {
     sqlx::query_scalar::<_, i64>(
         "SELECT version
@@ -189,6 +273,104 @@ async fn list_recorded_runledger_migrations(
          ORDER BY version",
     )
     .fetch_all(&mut **conn)
+    .await
+}
+
+async fn reject_legacy_idempotency_rows(
+    conn: &mut PgPoolConnection,
+) -> Result<(), SchemaCompatibilityError> {
+    if idempotency_cutover_constraints_valid(conn).await? {
+        return Ok(());
+    }
+
+    let row = sqlx::query!(
+        r#"SELECT
+            (
+                SELECT COUNT(*)::bigint
+                FROM job_queue
+                WHERE idempotency_key IS NOT NULL
+                  AND enqueue_request IS NULL
+            ) AS "job_count!",
+            (
+                SELECT COUNT(*)::bigint
+                FROM workflow_runs
+                WHERE idempotency_key IS NOT NULL
+                  AND enqueue_request IS NULL
+            ) AS "workflow_count!""#,
+    )
+    .fetch_one(&mut **conn)
+    .await?;
+
+    if row.job_count == 0 && row.workflow_count == 0 {
+        return Ok(());
+    }
+
+    Err(
+        SchemaCompatibilityError::LegacyIdempotencySnapshotsMissing {
+            job_count: row.job_count,
+            workflow_count: row.workflow_count,
+        },
+    )
+}
+
+async fn validate_idempotency_cutover_constraints(
+    conn: &mut PgPoolConnection,
+) -> Result<(), SchemaCompatibilityError> {
+    if idempotency_cutover_constraints_valid(conn).await? {
+        return Ok(());
+    }
+
+    // PostgreSQL validates each table constraint independently. If one
+    // validation succeeds and the other fails, the next startup skips the valid
+    // constraint and retries the remaining one.
+    sqlx::query(
+        "ALTER TABLE job_queue
+         VALIDATE CONSTRAINT ck_job_queue_idempotency_enqueue_request",
+    )
+    .execute(&mut **conn)
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            "failed to validate job_queue idempotency cutover constraint"
+        );
+        SchemaCompatibilityError::Query(error)
+    })?;
+
+    sqlx::query(
+        "ALTER TABLE workflow_runs
+         VALIDATE CONSTRAINT ck_workflow_runs_idempotency_enqueue_request",
+    )
+    .execute(&mut **conn)
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            "failed to validate workflow_runs idempotency cutover constraint"
+        );
+        SchemaCompatibilityError::Query(error)
+    })?;
+
+    Ok(())
+}
+
+async fn idempotency_cutover_constraints_valid(
+    conn: &mut PgPoolConnection,
+) -> Result<bool, sqlx::Error> {
+    // A validated cutover constraint is the durable proof that legacy keyed rows
+    // without enqueue_request snapshots cannot exist for that table. If future
+    // migrations replace these constraints, they must preserve that invariant
+    // before this short-circuit remains valid.
+    sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) FILTER (WHERE c.convalidated) = 2
+         FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+         WHERE (t.relname, c.conname) IN (
+             ('job_queue', 'ck_job_queue_idempotency_enqueue_request'),
+             ('workflow_runs', 'ck_workflow_runs_idempotency_enqueue_request')
+         )",
+    )
+    .fetch_one(&mut **conn)
     .await
 }
 
@@ -200,7 +382,7 @@ fn first_up_migration_version() -> i64 {
         .unwrap_or_default()
 }
 
-fn expected_runledger_migrations() -> HashMap<i64, &'static sqlx::migrate::Migration> {
+fn expected_runledger_migrations() -> RunledgerMigrationMap {
     MIGRATOR
         .iter()
         .filter(|migration| migration.migration_type.is_up_migration())
@@ -210,7 +392,7 @@ fn expected_runledger_migrations() -> HashMap<i64, &'static sqlx::migrate::Migra
 
 fn first_conflicting_runledger_version(
     history: &[MigrationHistoryRow],
-    expected_migrations: &HashMap<i64, &'static sqlx::migrate::Migration>,
+    expected_migrations: &RunledgerMigrationMap,
 ) -> Option<i64> {
     history.iter().find_map(|row| {
         expected_migrations
@@ -222,23 +404,19 @@ fn first_conflicting_runledger_version(
 
 fn first_dirty_runledger_version(
     history: &[MigrationHistoryRow],
-    expected_migrations: &HashMap<i64, &'static sqlx::migrate::Migration>,
+    expected_migrations: &RunledgerMigrationMap,
 ) -> Option<i64> {
-    history.iter().find_map(|row| {
-        (!row.success)
-            .then(|| {
-                expected_migrations
-                    .get(&row.version)
-                    .filter(|migration| row.checksum.as_slice() == migration.checksum.as_ref())
-                    .map(|_| row.version)
-            })
-            .flatten()
+    history.iter().filter(|row| !row.success).find_map(|row| {
+        expected_migrations
+            .get(&row.version)
+            .filter(|migration| row.checksum.as_slice() == migration.checksum.as_ref())
+            .map(|_| row.version)
     })
 }
 
 fn first_missing_runledger_version(
     recorded_versions: &[i64],
-    expected_migrations: &HashMap<i64, &'static sqlx::migrate::Migration>,
+    expected_migrations: &RunledgerMigrationMap,
 ) -> Option<i64> {
     recorded_versions
         .iter()
@@ -248,7 +426,7 @@ fn first_missing_runledger_version(
 
 fn applied_runledger_migrations(
     history: &[MigrationHistoryRow],
-    expected_migrations: &HashMap<i64, &'static sqlx::migrate::Migration>,
+    expected_migrations: &RunledgerMigrationMap,
 ) -> Vec<AppliedMigration> {
     history
         .iter()
@@ -266,7 +444,7 @@ fn applied_runledger_migrations(
 }
 
 async fn run_migrations_with_filtered_history(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    conn: &mut PgPoolConnection,
 ) -> Result<(), MigrateError> {
     (**conn).ensure_migrations_table().await?;
 

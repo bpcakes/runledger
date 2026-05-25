@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH locked_job AS MATERIALIZED (\n             SELECT id\n             FROM job_queue\n             WHERE id = $1\n               AND run_number = $2\n               AND attempt = $3\n               AND worker_id = $4\n               AND status = 'LEASED'\n               AND lease_expires_at IS NOT NULL\n             FOR UPDATE\n         )\n         UPDATE job_queue\n         SET lease_expires_at = now() + make_interval(secs => $5::int4),\n             last_heartbeat_at = now(),\n             updated_at = now()\n         FROM locked_job\n         WHERE job_queue.id = locked_job.id\n           AND job_queue.lease_expires_at > clock_timestamp()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d7d5485728f8300c2dcc4f28c622d69fbdc4338ba1f80eea9b984b106dc75849"
+}

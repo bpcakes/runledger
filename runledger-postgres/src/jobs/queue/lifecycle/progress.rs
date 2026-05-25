@@ -16,17 +16,26 @@ async fn update_job_progress_row_tx(
     progress: &JobProgressUpdate<'_>,
 ) -> Result<u64> {
     let rows_affected = sqlx::query!(
-        "UPDATE job_queue
+        "WITH locked_job AS MATERIALIZED (
+             SELECT id
+             FROM job_queue
+             WHERE id = $1
+               AND run_number = $2
+               AND attempt = $3
+               AND worker_id = $4
+               AND status = 'LEASED'
+               AND lease_expires_at IS NOT NULL
+             FOR UPDATE
+         )
+         UPDATE job_queue
          SET stage = COALESCE($5, stage),
              progress_done = COALESCE($6, progress_done),
              progress_total = COALESCE($7, progress_total),
              checkpoint = COALESCE($8::jsonb, checkpoint),
              updated_at = now()
-         WHERE id = $1
-           AND run_number = $2
-           AND attempt = $3
-           AND worker_id = $4
-           AND status = 'LEASED'",
+         FROM locked_job
+         WHERE job_queue.id = locked_job.id
+           AND job_queue.lease_expires_at > clock_timestamp()",
         job_id,
         run_number,
         attempt,

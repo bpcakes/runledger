@@ -13,6 +13,19 @@ use super::super::workflow_types::{
     WorkflowStepDependencyDbRecord,
 };
 
+struct WorkflowRunLookupRow {
+    id: Uuid,
+    workflow_type: String,
+    organization_id: Option<Uuid>,
+    status: String,
+    idempotency_key: Option<String>,
+    metadata: serde_json::Value,
+    started_at: chrono::DateTime<chrono::Utc>,
+    finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub async fn get_workflow_run_by_id(
     pool: &DbPool,
     organization_id: Option<Uuid>,
@@ -56,6 +69,46 @@ pub async fn get_workflow_run_by_id(
         })
     })
     .transpose()
+}
+
+pub(in crate::jobs::workflows) async fn load_workflow_run_by_id_tx(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    context: &'static str,
+) -> Result<WorkflowRunDbRecord> {
+    let run_row = sqlx::query_as!(
+        WorkflowRunLookupRow,
+        "SELECT
+            id,
+            workflow_type,
+            organization_id,
+            status::text AS \"status!\",
+            idempotency_key,
+            metadata,
+            started_at,
+            finished_at,
+            created_at,
+            updated_at
+         FROM workflow_runs
+         WHERE id = $1",
+        workflow_run_id,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| crate::Error::from_query_sqlx_with_context(context, error))?;
+
+    Ok(WorkflowRunDbRecord {
+        id: run_row.id,
+        workflow_type: parse_workflow_type_name(run_row.workflow_type)?,
+        organization_id: run_row.organization_id,
+        status: parse_workflow_run_status(run_row.status)?,
+        idempotency_key: run_row.idempotency_key,
+        metadata: run_row.metadata,
+        started_at: run_row.started_at,
+        finished_at: run_row.finished_at,
+        created_at: run_row.created_at,
+        updated_at: run_row.updated_at,
+    })
 }
 
 pub async fn list_workflow_steps(
@@ -316,29 +369,56 @@ pub async fn get_workflow_run_by_type_and_idempotency_key_tx(
     workflow_type: WorkflowType<'_>,
     idempotency_key: &str,
 ) -> Result<Option<WorkflowRunDbRecord>> {
-    let row = sqlx::query!(
-        "SELECT
-            id,
-            workflow_type,
-            organization_id,
-            status::text AS \"status!\",
+    let row = if let Some(organization_id) = organization_id {
+        sqlx::query_as!(
+            WorkflowRunLookupRow,
+            "SELECT
+                id,
+                workflow_type,
+                organization_id,
+                status::text AS \"status!\",
+                idempotency_key,
+                metadata,
+                started_at,
+                finished_at,
+                created_at,
+                updated_at
+             FROM workflow_runs
+             WHERE workflow_type = $1
+               AND idempotency_key = $2
+               AND organization_id = $3
+             LIMIT 1",
+            workflow_type as _,
             idempotency_key,
-            metadata,
-            started_at,
-            finished_at,
-            created_at,
-            updated_at
-         FROM workflow_runs
-         WHERE workflow_type = $1
-           AND idempotency_key = $2
-           AND ($3::uuid IS NULL OR organization_id = $3)
-         LIMIT 1",
-        workflow_type as _,
-        idempotency_key,
-        organization_id,
-    )
-    .fetch_optional(&mut **tx)
-    .await
+            organization_id,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+    } else {
+        sqlx::query_as!(
+            WorkflowRunLookupRow,
+            "SELECT
+                id,
+                workflow_type,
+                organization_id,
+                status::text AS \"status!\",
+                idempotency_key,
+                metadata,
+                started_at,
+                finished_at,
+                created_at,
+                updated_at
+             FROM workflow_runs
+             WHERE workflow_type = $1
+               AND idempotency_key = $2
+               AND organization_id IS NULL
+             LIMIT 1",
+            workflow_type as _,
+            idempotency_key,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+    }
     .map_err(|error| {
         crate::Error::from_query_sqlx_with_context(
             "get workflow run by type and idempotency key",

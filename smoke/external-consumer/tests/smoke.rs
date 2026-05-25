@@ -36,7 +36,7 @@ const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
 #[tokio::test]
 async fn packaged_crates_support_external_consumer_embedding() {
     let harness = PostgresHarness::start().await;
-    runledger_postgres::migrate(&harness.pool)
+    runledger_postgres::migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect("apply packaged migrations");
 
