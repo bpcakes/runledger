@@ -39,21 +39,24 @@ cd "$ROOT_DIR"
 rm -rf "$VENDOR_DIR" "$TARGET_DIR"
 mkdir -p "$VENDOR_DIR" "$TARGET_DIR"
 
-for crate in runledger-core runledger-postgres runledger-runtime; do
+for crate in runledger-core runledger-test-support runledger-postgres runledger-runtime; do
   package_crate "$crate"
 done
 
 CORE_VERSION="$(crate_version runledger-core)"
+TEST_SUPPORT_VERSION="$(crate_version runledger-test-support)"
 POSTGRES_VERSION="$(crate_version runledger-postgres)"
 RUNTIME_VERSION="$(crate_version runledger-runtime)"
 
 extract_crate runledger-core "$CORE_VERSION"
+extract_crate runledger-test-support "$TEST_SUPPORT_VERSION"
 extract_crate runledger-postgres "$POSTGRES_VERSION"
 extract_crate runledger-runtime "$RUNTIME_VERSION"
 
 cat > "$TMP_CONFIG" <<EOF
 [patch.crates-io]
 runledger-core = { path = "${VENDOR_DIR}/runledger-core-${CORE_VERSION}" }
+runledger-test-support = { path = "${VENDOR_DIR}/runledger-test-support-${TEST_SUPPORT_VERSION}" }
 runledger-postgres = { path = "${VENDOR_DIR}/runledger-postgres-${POSTGRES_VERSION}" }
 runledger-runtime = { path = "${VENDOR_DIR}/runledger-runtime-${RUNTIME_VERSION}" }
 EOF
