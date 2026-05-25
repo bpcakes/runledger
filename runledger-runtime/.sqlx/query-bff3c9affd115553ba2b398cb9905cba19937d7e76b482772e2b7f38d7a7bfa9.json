@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                id,\n                enqueue_request = $4::jsonb AS \"enqueue_request_matches?\"\n             FROM job_queue\n             WHERE job_type = $1\n               AND organization_id = $2\n               AND idempotency_key = $3\n             LIMIT 1\n             FOR SHARE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "enqueue_request_matches?",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "bff3c9affd115553ba2b398cb9905cba19937d7e76b482772e2b7f38d7a7bfa9"
+}
