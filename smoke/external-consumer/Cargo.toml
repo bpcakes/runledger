@@ -12,6 +12,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 runledger-core = "0.1.0"
 runledger-postgres = "0.1.0"
 runledger-runtime = "0.1.0"
+runledger-test-support = "0.1.0"
 serde_json = "1"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
 testcontainers = { version = "0.27", features = ["watchdog"] }
