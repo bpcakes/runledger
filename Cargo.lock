@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "runledger-core"
-version = "0.1.2"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "proptest",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "runledger-postgres"
-version = "0.1.2"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "runledger-core",
@@ -1939,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "runledger-runtime"
-version = "0.1.2"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1958,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "runledger-test-support"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "sqlx",
  "testcontainers",
