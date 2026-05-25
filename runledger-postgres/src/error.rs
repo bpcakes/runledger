@@ -49,7 +49,7 @@ impl FrameworkConstraintSpec {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QueryError {
     category: QueryErrorCategory,
     code: &'static str,
@@ -76,6 +76,35 @@ impl QueryError {
             constraint: None,
             message: internal_message.into(),
             source: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn from_classified_sqlx(
+        category: QueryErrorCategory,
+        code: &'static str,
+        client_message: &'static str,
+        internal_message: impl Into<String>,
+        source: sqlx::Error,
+    ) -> Self {
+        let (sqlstate, constraint) = source
+            .as_database_error()
+            .map(|database_error| {
+                (
+                    database_error.code().map(|code| code.into_owned()),
+                    database_error.constraint().map(ToOwned::to_owned),
+                )
+            })
+            .unwrap_or((None, None));
+
+        Self {
+            category,
+            code,
+            client_message,
+            sqlstate,
+            constraint,
+            message: internal_message.into(),
+            source: Some(Arc::new(source)),
         }
     }
 
@@ -158,6 +187,12 @@ impl QueryError {
         &self.message
     }
 
+    /// Returns the underlying SQLx error for trusted diagnostics.
+    ///
+    /// Public [`Display`](fmt::Display) and [`Debug`](fmt::Debug) output for
+    /// [`QueryError`] is sanitized, but the returned source may contain raw
+    /// database details. Do not log or expose it on untrusted boundaries without
+    /// redaction.
     #[must_use]
     pub fn source_arc(&self) -> Option<Arc<sqlx::Error>> {
         self.source.clone()
@@ -179,9 +214,22 @@ impl QueryError {
     }
 }
 
+impl fmt::Debug for QueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryError")
+            .field("category", &self.category)
+            .field("code", &self.code)
+            .field("client_message", &self.client_message)
+            .field("sqlstate", &self.sqlstate)
+            .field("constraint", &self.constraint)
+            .field("has_source", &self.source.is_some())
+            .finish()
+    }
+}
+
 impl fmt::Display for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+        write!(f, "{}", self.client_message)
     }
 }
 
@@ -446,6 +494,79 @@ mod tests {
         assert_eq!(spec.category(), QueryErrorCategory::Forbidden);
         assert_eq!(spec.code(), "custom.override");
         assert_eq!(spec.client_message(), "Custom override wins.");
+    }
+
+    #[test]
+    fn query_error_debug_omits_internal_message() {
+        let error = QueryError::from_classified(
+            QueryErrorCategory::Conflict,
+            "job.idempotency_conflict",
+            "Job enqueue retry conflicts with the existing idempotency key.",
+            "internal context includes secret-idempotency-key",
+        );
+
+        let debug = format!("{error:?}");
+        assert!(debug.contains("job.idempotency_conflict"));
+        assert!(!debug.contains("secret-idempotency-key"));
+
+        let display = error.to_string();
+        assert_eq!(
+            display,
+            "Job enqueue retry conflicts with the existing idempotency key."
+        );
+        assert!(!display.contains("secret-idempotency-key"));
+    }
+
+    #[test]
+    fn query_error_from_sqlx_uses_sanitized_display_and_debug() {
+        let error = QueryError::from_sqlx(
+            sqlx::Error::Protocol("internal secret-idempotency-key detail".into()),
+            Some("sensitive context"),
+        );
+
+        let display = error.to_string();
+        assert_eq!(display, "Database operation failed.");
+        assert!(!display.contains("secret-idempotency-key"));
+
+        let debug = format!("{error:?}");
+        assert!(debug.contains("db.query_failed"));
+        assert!(!debug.contains("secret-idempotency-key"));
+        assert!(error.internal_message().contains("secret-idempotency-key"));
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(error.source_arc().is_some());
+    }
+
+    #[test]
+    fn query_error_from_classified_sqlx_preserves_source_without_leaking_display() {
+        let error = QueryError::from_classified_sqlx(
+            QueryErrorCategory::Conflict,
+            "workflow.release_conflict",
+            "Workflow step release conflicted with another workflow mutation.",
+            "internal context includes secret-lock-key",
+            sqlx::Error::Protocol("database detail includes secret-lock-key".into()),
+        );
+
+        assert_eq!(error.category(), QueryErrorCategory::Conflict);
+        assert_eq!(error.code(), "workflow.release_conflict");
+        assert_eq!(
+            error.client_message(),
+            "Workflow step release conflicted with another workflow mutation."
+        );
+        assert!(error.internal_message().contains("secret-lock-key"));
+        assert!(error.source_arc().is_some());
+        assert!(std::error::Error::source(&error).is_some());
+
+        let display = error.to_string();
+        assert_eq!(
+            display,
+            "Workflow step release conflicted with another workflow mutation."
+        );
+        assert!(!display.contains("secret-lock-key"));
+
+        let debug = format!("{error:?}");
+        assert!(debug.contains("workflow.release_conflict"));
+        assert!(debug.contains("has_source: true"));
+        assert!(!debug.contains("secret-lock-key"));
     }
 
     #[test]

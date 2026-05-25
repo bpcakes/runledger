@@ -11,21 +11,45 @@
 //! Typical consumers share a [`DbPool`] with `runledger-runtime`, then call the
 //! exported [`jobs`] functions from application setup, admin APIs, or tests.
 //!
-//! For simple embedding, call [`migrate`] during startup:
+//! # Security Boundary
+//!
+//! This crate is a persistence layer, not an authentication or authorization
+//! layer. Public job and workflow APIs that accept `organization_id`,
+//! idempotency keys, workflow IDs, job IDs, or metadata expect those values to
+//! come from a trusted service boundary. HTTP or RPC handlers should derive
+//! organization scope from authenticated claims or server-side policy, not from
+//! untrusted request parameters alone.
+//!
+//! [`QueryError::client_message`] and [`QueryError::code`] are the stable values
+//! intended for public error responses. Detailed internal context remains
+//! available through [`QueryError::internal_message`] for server-side diagnostics.
+//! Public formatting keeps raw SQLx details sanitized. The standard error source
+//! chain and [`QueryError::source_arc`] are available for trusted server-side
+//! diagnostics.
+//! Runtime lifecycle, workflow mutation, and idempotent enqueue APIs are designed
+//! for PostgreSQL's default `READ COMMITTED` transaction isolation so they can
+//! observe rows committed after lock waits or uniqueness conflicts.
+//! Release-sensitive, workflow-append, and keyed-enqueue paths validate this
+//! before running because their correctness depends on second reads after waits
+//! or conflicts.
+//!
+//! For simple embedding, call [`migrate_after_idempotency_cutover`] during
+//! startup:
 //!
 //! ```rust,no_run
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! let pool = sqlx::PgPool::connect("postgres://localhost/runledger").await?;
-//! runledger_postgres::migrate(&pool).await?;
+//! runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! For deployments that manage DDL elsewhere, call
-//! [`ensure_schema_compatible`] instead to fail fast if the schema is missing
-//! or drifted. That check is read-only, but it expects the database to retain
-//! SQLx migration history in `_sqlx_migrations` and, when available,
-//! Runledger-owned migration state in `runledger_migration_history`.
+//! [`ensure_schema_compatible_after_idempotency_cutover`] instead to fail fast
+//! if the schema is missing, drifted, or still has keyed legacy rows without
+//! idempotency request snapshots. That check is read-only, but it expects the
+//! database to retain SQLx migration history in `_sqlx_migrations` and, when
+//! available, Runledger-owned migration state in `runledger_migration_history`.
 
 use std::fmt;
 
@@ -38,7 +62,12 @@ pub use error::{
     classify_query_error, classify_query_error_with_constraint_classifier,
     has_framework_constraint_classifier,
 };
-pub use migrations::{MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible, migrate};
+pub use migrations::{
+    MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
+    migrate_after_idempotency_cutover,
+};
+#[allow(deprecated)]
+pub use migrations::{ensure_schema_compatible, migrate};
 
 pub type DbPool = sqlx::PgPool;
 pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;

@@ -22,8 +22,8 @@ pub(super) fn lease_owner_mismatch_error() -> Error {
     Error::QueryError(QueryError::from_classified(
         QueryErrorCategory::Forbidden,
         "job.lease_owner_mismatch",
-        "Job lease is owned by another worker.",
-        "job lease owner mismatch",
+        "Job lease is not currently held by this worker.",
+        "job lease owner mismatch, missing lease, or expired lease",
     ))
 }
 

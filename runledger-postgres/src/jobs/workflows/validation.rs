@@ -1,6 +1,8 @@
-use crate::{Error, QueryError, QueryErrorCategory};
+use std::num::TryFromIntError;
 
 use runledger_core::jobs::WorkflowDagValidationError;
+
+use crate::{Error, QueryError, QueryErrorCategory};
 
 pub(crate) fn workflow_dag_validation_error(error: WorkflowDagValidationError) -> Error {
     let (code, client_message) = match error {
@@ -74,12 +76,18 @@ pub(crate) fn workflow_dag_validation_error(error: WorkflowDagValidationError) -
     ))
 }
 
-pub(crate) fn workflow_dependency_count_overflow_error(step_key: &str) -> Error {
+pub(crate) fn workflow_dependency_count_overflow_error(
+    step_key: &str,
+    dependency_count: usize,
+    source: TryFromIntError,
+) -> Error {
     Error::QueryError(QueryError::from_classified(
         QueryErrorCategory::Validation,
         "workflow.invalid_dag_dependency_count_overflow",
         "Workflow dependency count is too large.",
-        format!("workflow DAG validation failed: too many dependencies for step '{step_key}'"),
+        format!(
+            "workflow DAG validation failed: {dependency_count} dependencies for step '{step_key}' exceed i32 range: {source}"
+        ),
     ))
 }
 
@@ -199,7 +207,10 @@ mod tests {
 
     #[test]
     fn maps_dependency_overflow_to_validation_query_error() {
-        let error = workflow_dependency_count_overflow_error("step.a");
+        let dependency_count = i32::MAX as usize + 1;
+        let source = i32::try_from(dependency_count).expect_err("dependency count exceeds i32");
+        let source_message = source.to_string();
+        let error = workflow_dependency_count_overflow_error("step.a", dependency_count, source);
 
         let Error::QueryError(query_error) = error else {
             panic!("expected query error");
@@ -208,6 +219,23 @@ mod tests {
         assert_eq!(
             query_error.code(),
             "workflow.invalid_dag_dependency_count_overflow"
+        );
+        assert!(
+            query_error.internal_message().contains("step.a"),
+            "unexpected internal message: {}",
+            query_error.internal_message()
+        );
+        assert!(
+            query_error
+                .internal_message()
+                .contains(&dependency_count.to_string()),
+            "unexpected internal message: {}",
+            query_error.internal_message()
+        );
+        assert!(
+            query_error.internal_message().contains(&source_message),
+            "unexpected internal message: {}",
+            query_error.internal_message()
         );
     }
 }

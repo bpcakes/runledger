@@ -1,8 +1,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use runledger_postgres::{MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible, migrate};
-use sqlx::migrate::MigrateError;
+use runledger_postgres::{
+    MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
+    migrate_after_idempotency_cutover,
+};
+use sqlx::migrate::{Migrate, MigrateError};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt, core::ContainerPort, runners::AsyncRunner,
@@ -14,6 +17,7 @@ const POSTGRES_PASSWORD: &str = "runledger";
 const POSTGRES_DB: &str = "postgres";
 const MAX_POSTGRES_BOOTSTRAP_ATTEMPTS: u8 = 40;
 const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
+const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
 
 static DATABASE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -98,10 +102,19 @@ impl TestHarness {
 async fn migrate_applies_bundled_schema_to_fresh_database() {
     let harness = TestHarness::fresh("runledger_pg_migrate").await;
 
-    migrate(&harness.pool).await.expect("apply migrations");
-    ensure_schema_compatible(&harness.pool)
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("apply migrations");
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("repeat migrate after constraints are validated");
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
         .expect("schema should validate after migrate");
+    assert!(
+        idempotency_cutover_constraints_valid(&harness.pool).await,
+        "migrate should validate idempotency cutover constraints after legacy check passes"
+    );
 
     let migrations_row_count =
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations")
@@ -142,10 +155,10 @@ async fn migrate_ignores_unrelated_sqlx_history() {
     let harness = TestHarness::fresh("runledger_pg_migrate_shared").await;
     seed_unrelated_sqlx_migration(&harness.pool, 202401010001, false).await;
 
-    migrate(&harness.pool)
+    migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect("apply runledger migrations alongside app migrations");
-    ensure_schema_compatible(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
         .expect("schema should validate when unrelated migrations are present");
 
@@ -166,14 +179,14 @@ async fn migrate_ignores_unrelated_sqlx_history() {
 async fn ensure_schema_compatible_rejects_fresh_database_without_migrations() {
     let harness = TestHarness::fresh("runledger_pg_validate").await;
 
-    let error = ensure_schema_compatible(&harness.pool)
+    let error = ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
         .expect_err("validation should fail before migrations are applied");
-    match error {
+    match &error {
         SchemaCompatibilityError::MissingMigrationHistory {
             required_first_migration_version,
         } => {
-            assert_eq!(required_first_migration_version, 202603280001);
+            assert_eq!(*required_first_migration_version, 202603280001);
         }
         other => panic!("unexpected migration validation error: {other}"),
     }
@@ -199,9 +212,11 @@ async fn ensure_schema_compatible_rejects_fresh_database_without_migrations() {
 async fn ensure_schema_compatible_ignores_unrelated_sqlx_history() {
     let harness = TestHarness::fresh("runledger_pg_validate_shared").await;
     seed_unrelated_sqlx_migration(&harness.pool, 202401010001, false).await;
-    migrate(&harness.pool).await.expect("apply migrations");
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("apply migrations");
 
-    ensure_schema_compatible(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
         .expect("validation should ignore unrelated migration versions");
 
@@ -219,11 +234,74 @@ async fn ensure_schema_compatible_ignores_unrelated_sqlx_history_with_runledger_
         vec![1_u8, 2, 3, 4],
     )
     .await;
-    migrate(&harness.pool).await.expect("apply migrations");
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("apply migrations");
 
-    ensure_schema_compatible(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
         .expect("validation should ignore unrelated descriptions");
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn ensure_schema_compatible_rejects_legacy_idempotency_rows() {
+    let harness = TestHarness::fresh("runledger_pg_validate_legacy").await;
+    apply_runledger_migrations_before_cutover(&harness.pool).await;
+    seed_legacy_idempotency_rows(&harness.pool).await;
+    apply_enqueue_request_cutover_migration(&harness.pool).await;
+
+    let error = ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect_err("validation should reject legacy keyed rows without snapshots");
+    assert_legacy_idempotency_snapshot_error(&error, 1, 1);
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn migrate_after_idempotency_cutover_rejects_legacy_idempotency_rows() {
+    let harness = TestHarness::fresh("runledger_pg_migrate_legacy").await;
+    apply_runledger_migrations_before_cutover(&harness.pool).await;
+    seed_legacy_idempotency_rows(&harness.pool).await;
+
+    let error = migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect_err("migrate should reject legacy keyed rows without snapshots");
+    assert_legacy_idempotency_snapshot_error(&error, 1, 1);
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn enqueue_request_cutover_constraints_reject_new_legacy_idempotency_rows() {
+    let harness = TestHarness::fresh("runledger_pg_cutover_constraints").await;
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("apply migrations");
+
+    seed_legacy_job_definition(&harness.pool).await;
+
+    let job_error = insert_legacy_job_row(&harness.pool, "legacy-job-after-cutover")
+        .await
+        .expect_err("job_queue constraint should reject keyed rows without enqueue_request");
+    assert!(
+        job_error
+            .to_string()
+            .contains("ck_job_queue_idempotency_enqueue_request"),
+        "unexpected job constraint error: {job_error}"
+    );
+
+    let workflow_error = insert_legacy_workflow_row(&harness.pool, "legacy-workflow-after-cutover")
+        .await
+        .expect_err("workflow_runs constraint should reject keyed rows without enqueue_request");
+    assert!(
+        workflow_error
+            .to_string()
+            .contains("ck_workflow_runs_idempotency_enqueue_request"),
+        "unexpected workflow constraint error: {workflow_error}"
+    );
 
     harness.teardown().await;
 }
@@ -237,11 +315,15 @@ async fn migrate_rejects_conflicting_sqlx_version_namespace() {
         .expect("runledger should include at least one up migration");
     seed_unrelated_sqlx_migration(&harness.pool, conflicting_version, true).await;
 
-    let error = migrate(&harness.pool)
+    let error = migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect_err("migrate should reject conflicting version namespace");
     assert!(
-        matches!(error, MigrateError::VersionMismatch(version) if version == conflicting_version),
+        matches!(
+            &error,
+            SchemaCompatibilityError::Incompatible(MigrateError::VersionMismatch(version))
+                if *version == conflicting_version
+        ),
         "unexpected migration error: {error}"
     );
 
@@ -251,7 +333,7 @@ async fn migrate_rejects_conflicting_sqlx_version_namespace() {
 #[tokio::test]
 async fn migrate_rejects_newer_runledger_migration_history() {
     let harness = TestHarness::fresh("runledger_pg_migrate_newer").await;
-    migrate(&harness.pool)
+    migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect("apply current migrations");
 
@@ -262,11 +344,15 @@ async fn migrate_rejects_newer_runledger_migration_history() {
         + 1;
     seed_runledger_migration_history(&harness.pool, newer_version).await;
 
-    let error = migrate(&harness.pool)
+    let error = migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect_err("migrate should reject newer runledger history");
     assert!(
-        matches!(error, MigrateError::VersionMissing(version) if version == newer_version),
+        matches!(
+            &error,
+            SchemaCompatibilityError::Incompatible(MigrateError::VersionMissing(version))
+                if *version == newer_version
+        ),
         "unexpected migration error: {error}"
     );
 
@@ -282,14 +368,14 @@ async fn ensure_schema_compatible_rejects_conflicting_sqlx_version_namespace() {
         .expect("runledger should include at least one up migration");
     seed_unrelated_sqlx_migration(&harness.pool, conflicting_version, true).await;
 
-    let error = ensure_schema_compatible(&harness.pool)
+    let error = ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
         .expect_err("validation should reject conflicting version namespace");
     assert!(
         matches!(
-            error,
+            &error,
             SchemaCompatibilityError::Incompatible(MigrateError::VersionMismatch(version))
-                if version == conflicting_version
+                if *version == conflicting_version
         ),
         "unexpected schema compatibility error: {error}"
     );
@@ -300,7 +386,7 @@ async fn ensure_schema_compatible_rejects_conflicting_sqlx_version_namespace() {
 #[tokio::test]
 async fn ensure_schema_compatible_rejects_newer_runledger_migration_history() {
     let harness = TestHarness::fresh("runledger_pg_validate_newer").await;
-    migrate(&harness.pool)
+    migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect("apply current migrations");
 
@@ -311,14 +397,14 @@ async fn ensure_schema_compatible_rejects_newer_runledger_migration_history() {
         + 1;
     seed_runledger_migration_history(&harness.pool, newer_version).await;
 
-    let error = ensure_schema_compatible(&harness.pool)
+    let error = ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
         .expect_err("validation should reject newer runledger history");
     assert!(
         matches!(
-            error,
+            &error,
             SchemaCompatibilityError::Incompatible(MigrateError::VersionMissing(version))
-                if version == newer_version
+                if *version == newer_version
         ),
         "unexpected schema compatibility error: {error}"
     );
@@ -474,6 +560,60 @@ fn runledger_migration_versions() -> Vec<i64> {
         .collect()
 }
 
+async fn apply_runledger_migrations_before_cutover(pool: &PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire migration connection");
+    (*conn)
+        .ensure_migrations_table()
+        .await
+        .expect("create sqlx migrations table");
+
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .filter(|migration| migration.version < ENQUEUE_REQUEST_CUTOVER_VERSION)
+    {
+        (*conn).apply(migration).await.unwrap_or_else(|error| {
+            panic!(
+                "apply pre-cutover Runledger migration {}: {error}",
+                migration.version
+            )
+        });
+    }
+}
+
+async fn apply_enqueue_request_cutover_migration(pool: &PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire migration connection");
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| {
+            migration.migration_type.is_up_migration()
+                && migration.version == ENQUEUE_REQUEST_CUTOVER_VERSION
+        })
+        .expect("enqueue request cutover migration should exist");
+
+    (*conn)
+        .apply(migration)
+        .await
+        .expect("apply enqueue request cutover migration");
+}
+
+fn assert_legacy_idempotency_snapshot_error(
+    error: &SchemaCompatibilityError,
+    job_count: i64,
+    workflow_count: i64,
+) {
+    assert!(
+        matches!(
+            error,
+            SchemaCompatibilityError::LegacyIdempotencySnapshotsMissing {
+                job_count: actual_job_count,
+                workflow_count: actual_workflow_count,
+            } if *actual_job_count == job_count && *actual_workflow_count == workflow_count
+        ),
+        "unexpected schema compatibility error: {error}"
+    );
+}
+
 async fn seed_runledger_migration_history(pool: &PgPool, version: i64) {
     sqlx::query(
         r#"
@@ -497,6 +637,96 @@ VALUES ($1)
     .execute(pool)
     .await
     .expect("insert runledger migration history");
+}
+
+async fn idempotency_cutover_constraints_valid(pool: &PgPool) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) FILTER (WHERE c.convalidated) = 2
+         FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+         WHERE (t.relname, c.conname) IN (
+             ('job_queue', 'ck_job_queue_idempotency_enqueue_request'),
+             ('workflow_runs', 'ck_workflow_runs_idempotency_enqueue_request')
+         )",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("check idempotency cutover constraint validation")
+}
+
+async fn seed_legacy_idempotency_rows(pool: &PgPool) {
+    seed_legacy_job_definition(pool).await;
+    insert_legacy_job_row(pool, "legacy-job")
+        .await
+        .expect("insert legacy job row");
+    insert_legacy_workflow_row(pool, "legacy-workflow")
+        .await
+        .expect("insert legacy workflow row");
+}
+
+async fn seed_legacy_job_definition(pool: &PgPool) {
+    sqlx::query(
+        "INSERT INTO job_definitions (
+            job_type,
+            version,
+            max_attempts,
+            default_timeout_seconds,
+            default_priority,
+            is_enabled
+         )
+         VALUES ('jobs.test.legacy_cutover', 1, 3, 30, 100, true)",
+    )
+    .execute(pool)
+    .await
+    .expect("insert job definition");
+}
+
+async fn insert_legacy_job_row(
+    pool: &PgPool,
+    idempotency_key: &str,
+) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO job_queue (
+            job_type,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            idempotency_key
+         )
+         VALUES (
+            'jobs.test.legacy_cutover',
+            '{}'::jsonb,
+            100,
+            3,
+            30,
+            $1
+         )",
+    )
+    .bind(idempotency_key)
+    .execute(pool)
+    .await
+}
+
+async fn insert_legacy_workflow_row(
+    pool: &PgPool,
+    idempotency_key: &str,
+) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO workflow_runs (
+            workflow_type,
+            idempotency_key,
+            metadata
+         )
+         VALUES (
+            'workflow.test.legacy_cutover',
+            $1,
+            '{}'::jsonb
+         )",
+    )
+    .bind(idempotency_key)
+    .execute(pool)
+    .await
 }
 
 async fn seed_unrelated_sqlx_migration(pool: &PgPool, version: i64, success: bool) {

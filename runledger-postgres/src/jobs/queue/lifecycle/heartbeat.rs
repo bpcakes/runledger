@@ -18,15 +18,24 @@ pub async fn heartbeat_job(
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
     let updated = sqlx::query!(
-        "UPDATE job_queue
+        "WITH locked_job AS MATERIALIZED (
+             SELECT id
+             FROM job_queue
+             WHERE id = $1
+               AND run_number = $2
+               AND attempt = $3
+               AND worker_id = $4
+               AND status = 'LEASED'
+               AND lease_expires_at IS NOT NULL
+             FOR UPDATE
+         )
+         UPDATE job_queue
          SET lease_expires_at = now() + make_interval(secs => $5::int4),
              last_heartbeat_at = now(),
              updated_at = now()
-         WHERE id = $1
-           AND run_number = $2
-           AND attempt = $3
-           AND worker_id = $4
-           AND status = 'LEASED'",
+         FROM locked_job
+         WHERE job_queue.id = locked_job.id
+           AND job_queue.lease_expires_at > clock_timestamp()",
         job_id,
         run_number,
         attempt,

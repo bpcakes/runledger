@@ -23,5 +23,6 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "uuid", "ch
 tracing = { workspace = true }
 
 [dev-dependencies]
+runledger-test-support = { workspace = true }
 testcontainers = { version = "0.27", features = ["watchdog"] }
 tokio = { workspace = true }

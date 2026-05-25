@@ -7,6 +7,10 @@ PUBLISHABLE_SQLX_CRATES=(
   "runledger-postgres"
   "runledger-runtime"
 )
+VENDORED_MIGRATION_CRATES=(
+  "runledger-postgres"
+  "runledger-test-support"
+)
 
 cd "$ROOT_DIR"
 
@@ -35,10 +39,12 @@ for crate_dir in "${PUBLISHABLE_SQLX_CRATES[@]}"; do
   cp -R .sqlx/. "${crate_dir}/.sqlx/"
 done
 
-echo "Syncing workspace migrations into runledger-postgres/migrations..."
-rm -rf runledger-postgres/migrations
-mkdir -p runledger-postgres/migrations
-cp -R migrations/. runledger-postgres/migrations/
+for crate_dir in "${VENDORED_MIGRATION_CRATES[@]}"; do
+  echo "Syncing workspace migrations into ${crate_dir}/migrations..."
+  rm -rf "${crate_dir}/migrations"
+  mkdir -p "${crate_dir}/migrations"
+  cp -R migrations/. "${crate_dir}/migrations/"
+done
 
 echo "Verifying workspace build with refreshed offline metadata..."
 cargo check --workspace

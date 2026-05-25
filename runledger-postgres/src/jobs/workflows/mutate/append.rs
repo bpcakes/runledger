@@ -10,6 +10,7 @@ use crate::jobs::row_decode::{
     parse_job_stage, parse_job_type_name, parse_step_key_name, parse_workflow_step_execution_kind,
     parse_workflow_step_status,
 };
+use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::jobs::workflow_types::{
     AppendWorkflowStepsInput as AppendWorkflowStepsInputRecord,
     AppendWorkflowStepsOutcome as AppendOutcome, AppendWorkflowStepsResult as AppendResult,
@@ -17,28 +18,30 @@ use crate::jobs::workflow_types::{
 };
 use crate::{DbPool, DbTx, Error, Result};
 
-use super::super::enqueue::{
+use super::super::errors::{
+    workflow_append_blank_mutation_key_error, workflow_append_conflicting_retry_error,
+    workflow_append_terminal_run_error, workflow_append_window_missing_error,
+    workflow_append_window_not_external_error, workflow_append_window_not_open_error,
+    workflow_internal_state_error, workflow_release_conflict_error,
+};
+use super::super::locking::{
+    LockedWorkflowStepState, lock_workflow_run_for_update_tx, lock_workflow_steps_for_update_tx,
+    try_lock_workflow_run_release_shared_tx,
+};
+use super::super::read::load_workflow_run_by_id_tx;
+use super::super::release::{
+    StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx,
+};
+use super::super::runtime::{recompute_workflow_run_statuses_tx, resolve_terminal_step_queue_tx};
+use super::super::steps::{
     WorkflowStepIdsByKey, dependency_count_total, fetch_job_definition_defaults_tx,
-    insert_workflow_step_dependency_record_tx, insert_workflow_step_record_tx,
-    load_workflow_run_by_id_tx, step_id_for_key, workflow_step_defaults,
-    workflow_step_effective_organization_id,
+    insert_workflow_step_dependency_record_tx, insert_workflow_step_record_tx, step_id_for_key,
+    workflow_step_defaults, workflow_step_effective_organization_id,
 };
-use super::super::runtime::{
-    recompute_workflow_run_statuses_tx, release_candidate_step_tx, resolve_terminal_step_queue_tx,
-};
-use super::super::{
-    StepReleaseCandidate, workflow_append_blank_mutation_key_error,
-    workflow_append_conflicting_retry_error, workflow_append_terminal_run_error,
-    workflow_append_window_missing_error, workflow_append_window_not_external_error,
-    workflow_append_window_not_open_error, workflow_dag_validation_error,
-    workflow_internal_state_error,
-};
+use super::super::validation::workflow_dag_validation_error;
 use super::idempotency::{
     canonical_append_request, deserialize_stored_append_request, insert_workflow_mutation_row_tx,
-    load_existing_mutation_request_tx, stored_append_request_matches,
-};
-use super::{
-    LockedWorkflowStepState, lock_workflow_run_for_update_tx, lock_workflow_steps_for_update_tx,
+    load_existing_mutation_request_tx, stored_append_request_matches_tx,
 };
 
 #[derive(Debug)]
@@ -70,6 +73,13 @@ pub async fn append_workflow_steps_tx(
     if input.mutation_key.trim().is_empty() {
         return Err(workflow_append_blank_mutation_key_error());
     }
+    ensure_read_committed_tx(
+        tx,
+        "workflow append mutation",
+        "workflow.append_unsupported_isolation",
+        "Workflow append mutation requires READ COMMITTED transaction isolation.",
+    )
+    .await?;
 
     let locked_steps =
         lock_workflow_steps_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;
@@ -86,11 +96,14 @@ pub async fn append_workflow_steps_tx(
     if let Some(existing_request) =
         load_existing_mutation_request_tx(tx, workflow_run.id, input.mutation_key).await?
     {
-        if !stored_append_request_matches(
+        if !stored_append_request_matches_tx(
+            tx,
             &existing_request,
             workflow_run.organization_id,
             &comparable_request,
-        )? {
+        )
+        .await?
+        {
             return Err(workflow_append_conflicting_retry_error(input.mutation_key));
         }
 
@@ -121,6 +134,10 @@ pub async fn append_workflow_steps_tx(
         .collect::<BTreeSet<_>>();
     validate_workflow_step_append(&existing_step_keys, &input.steps)
         .map_err(workflow_dag_validation_error)?;
+
+    if !try_lock_workflow_run_release_shared_tx(tx, workflow_run.id).await? {
+        return Err(workflow_release_conflict_error(workflow_run.id));
+    }
 
     let defaults_by_job_type = fetch_job_definition_defaults_tx(tx, &input.steps).await?;
     let existing_statuses_by_key = locked_steps
@@ -295,7 +312,7 @@ async fn resolve_appended_step_state_tx(
              WHERE id = $1
                AND status = 'BLOCKED'
              RETURNING workflow_run_id",
-        step_state.candidate.id,
+        step_state.candidate.id(),
     )
     .fetch_optional(&mut **tx)
     .await
@@ -306,7 +323,7 @@ async fn resolve_appended_step_state_tx(
     if canceled.is_some() {
         resolve_terminal_step_queue_tx(
             tx,
-            step_state.candidate.id,
+            step_state.candidate.id(),
             WorkflowStepStatus::Canceled,
             touched_run_ids,
         )
@@ -389,7 +406,7 @@ async fn load_appended_step_states_tx(
             Ok((
                 row.id,
                 AppendedStepState {
-                    candidate: StepReleaseCandidate {
+                    candidate: StepReleaseCandidate::from_init(StepReleaseCandidateInit {
                         id: row.id,
                         workflow_run_id: row.workflow_run_id,
                         execution_kind,
@@ -400,7 +417,7 @@ async fn load_appended_step_states_tx(
                         max_attempts: row.max_attempts,
                         timeout_seconds: row.timeout_seconds,
                         stage,
-                    },
+                    }),
                     dependency_count_pending: row.dependency_count_pending,
                     dependency_count_unsatisfied: row.dependency_count_unsatisfied,
                 },
@@ -523,7 +540,12 @@ async fn load_append_result_tx(
         load_workflow_steps_by_keys_tx(tx, workflow_run_id, input_steps, organization_id).await?;
 
     Ok(AppendResult {
-        workflow_run: load_workflow_run_by_id_tx(tx, workflow_run_id).await?,
+        workflow_run: load_workflow_run_by_id_tx(
+            tx,
+            workflow_run_id,
+            "load workflow run after append",
+        )
+        .await?,
         appended_steps,
         outcome,
     })

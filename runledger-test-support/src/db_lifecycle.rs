@@ -29,7 +29,7 @@ pub async fn setup_ephemeral_pool(
 }
 
 fn runledger_migrations_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../migrations")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations")
 }
 
 pub async fn teardown_ephemeral_pool(pool: PgPool, database: EphemeralDatabase) {

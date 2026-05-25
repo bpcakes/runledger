@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH locked_job AS MATERIALIZED (\n             SELECT id\n             FROM job_queue\n             WHERE id = $1\n               AND run_number = $2\n               AND attempt = $3\n               AND worker_id = $4\n               AND status = 'LEASED'\n               AND lease_expires_at IS NOT NULL\n             FOR UPDATE\n         )\n         UPDATE job_queue\n         SET stage = COALESCE($5, stage),\n             progress_done = COALESCE($6, progress_done),\n             progress_total = COALESCE($7, progress_total),\n             checkpoint = COALESCE($8::jsonb, checkpoint),\n             updated_at = now()\n         FROM locked_job\n         WHERE job_queue.id = locked_job.id\n           AND job_queue.lease_expires_at > clock_timestamp()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f6b58ff379b8af9e2ab6346743ad1da85494d295268da6627d59c2bcc70b9fb0"
+}

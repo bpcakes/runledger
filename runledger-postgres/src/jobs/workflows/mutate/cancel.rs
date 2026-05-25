@@ -4,18 +4,20 @@ use runledger_core::jobs::{WorkflowRunStatus, WorkflowStepStatus};
 use sqlx::types::Uuid;
 
 use crate::jobs::admin::cancel_job_tx;
+use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::jobs::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowRunDbRecord};
 use crate::{DbTx, Error, Result};
 
-use super::super::enqueue::load_workflow_run_by_id_tx;
+use super::super::errors::workflow_internal_state_error;
+use super::super::locking::{
+    LockedWorkflowStepState, lock_workflow_run_for_update_tx,
+    lock_workflow_run_release_exclusive_after_jobs_tx, lock_workflow_step_jobs_for_update_tx,
+    lock_workflow_steps_for_update_tx,
+};
+use super::super::read::load_workflow_run_by_id_tx;
 use super::super::runtime::{
     complete_external_workflow_step_tx, recompute_workflow_run_statuses_tx,
     resolve_terminal_step_queue_tx,
-};
-use super::super::{lock_workflow_run_release_tx, workflow_internal_state_error};
-use super::{
-    LockedWorkflowStepState, lock_workflow_run_for_update_tx,
-    lock_workflow_step_jobs_for_update_tx, lock_workflow_steps_for_update_tx,
 };
 
 pub async fn cancel_workflow_run_tx(
@@ -26,6 +28,14 @@ pub async fn cancel_workflow_run_tx(
     last_error_code: Option<&str>,
     last_error_message: Option<&str>,
 ) -> Result<WorkflowRunDbRecord> {
+    ensure_read_committed_tx(
+        tx,
+        "workflow cancel",
+        "workflow.cancel_unsupported_isolation",
+        "Workflow cancellation requires READ COMMITTED transaction isolation.",
+    )
+    .await?;
+
     // Lock job rows before workflow-step rows so cancel does not wait on a
     // step while an in-flight release has already locked that step and is
     // inserting or updating its job row. After the advisory wait, that release
@@ -36,7 +46,7 @@ pub async fn cancel_workflow_run_tx(
     // COMMITTED isolation so the second job-lock query observes rows committed
     // while this transaction waited on the advisory lock.
     lock_workflow_step_jobs_for_update_tx(tx, workflow_run_id, organization_id).await?;
-    lock_workflow_run_release_tx(tx, workflow_run_id).await?;
+    lock_workflow_run_release_exclusive_after_jobs_tx(tx, workflow_run_id).await?;
     // Catch job rows inserted by releases that committed while cancel was
     // waiting on the advisory lock.
     lock_workflow_step_jobs_for_update_tx(tx, workflow_run_id, organization_id).await?;
@@ -46,7 +56,12 @@ pub async fn cancel_workflow_run_tx(
         lock_workflow_run_for_update_tx(tx, workflow_run_id, organization_id).await?;
 
     if workflow_run.status == WorkflowRunStatus::Canceled {
-        return load_workflow_run_by_id_tx(tx, workflow_run.id).await;
+        return load_workflow_run_by_id_tx(
+            tx,
+            workflow_run.id,
+            "load already-canceled workflow run",
+        )
+        .await;
     }
 
     // Keep this status update before cancel_nonterminal_workflow_step_tx: that
@@ -66,6 +81,7 @@ pub async fn cancel_workflow_run_tx(
 
     let mut touched_run_ids = BTreeSet::from([workflow_run.id]);
     let mut pending_steps = locked_steps;
+    let mut stalled_once = false;
     loop {
         let mut progressed = false;
         for step in pending_steps {
@@ -88,15 +104,30 @@ pub async fn cancel_workflow_run_tx(
             break;
         }
         if !progressed {
+            if !stalled_once {
+                // The locked range should normally make new nonterminal rows
+                // impossible here. Allow one fresh READ COMMITTED reload per
+                // no-progress streak before treating it as state corruption, so
+                // a row that became visible between loop statements can still
+                // be swept.
+                stalled_once = true;
+                continue;
+            }
+            let pending_step_ids = pending_steps
+                .iter()
+                .map(|step| step.id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(workflow_internal_state_error(format!(
-                "workflow cancel found nonterminal steps on run {} but made no progress",
-                workflow_run.id
+                "workflow cancel found nonterminal steps on run {} but made no progress; pending step ids: {}",
+                workflow_run.id, pending_step_ids
             )));
         }
+        stalled_once = false;
     }
 
     recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
-    load_workflow_run_by_id_tx(tx, workflow_run.id).await
+    load_workflow_run_by_id_tx(tx, workflow_run.id, "load workflow run after cancel").await
 }
 
 async fn load_nonterminal_workflow_steps_for_cancel_tx(

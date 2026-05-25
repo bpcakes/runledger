@@ -43,14 +43,20 @@ async fn load_failure_lookup_row(
     identity: FailureJobIdentity<'_>,
 ) -> Result<Option<FailureLookupRow>> {
     let row = sqlx::query!(
-        "SELECT max_attempts, payload, checkpoint, job_type, organization_id
-         FROM job_queue
-         WHERE id = $1
-           AND run_number = $2
-           AND attempt = $3
-           AND worker_id = $4
-           AND status = 'LEASED'
-         FOR UPDATE",
+        "WITH locked_job AS MATERIALIZED (
+             SELECT max_attempts, payload, checkpoint, job_type, organization_id, lease_expires_at
+             FROM job_queue
+             WHERE id = $1
+               AND run_number = $2
+               AND attempt = $3
+               AND worker_id = $4
+               AND status = 'LEASED'
+               AND lease_expires_at IS NOT NULL
+             FOR UPDATE
+         )
+         SELECT max_attempts, payload, checkpoint, job_type, organization_id
+         FROM locked_job
+         WHERE lease_expires_at > clock_timestamp()",
         identity.job_id,
         identity.run_number,
         identity.attempt,
