@@ -16,6 +16,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_DENY_VERSION: "0.19.7"
   SQLX_OFFLINE: "true"
   RUNLEDGER_TEST_PG_IMAGE: postgres:18
 
@@ -68,5 +69,8 @@ jobs:
     steps:
       # actions/checkout v4.3.1
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      # EmbarkStudios/cargo-deny-action v2.0.9
-      - uses: EmbarkStudios/cargo-deny-action@d8395c1c8c9df74d968a3bcbba5533e396ff43cf
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+      - run: cargo deny check
