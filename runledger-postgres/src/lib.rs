@@ -53,13 +53,13 @@
 //!
 //! # Copy-Paste Examples
 //!
-//! - [Enqueue one job](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/enqueue_job.rs)
-//! - [Enqueue a workflow DAG](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/workflow_dag.rs)
-//! - [Use an external workflow gate](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/external_gate.rs)
-//! - [Create a scheduled job entrypoint](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/schedule_job.rs)
+//! - [Enqueue one job](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/enqueue_job.rs)
+//! - [Enqueue a workflow DAG](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/workflow_dag.rs)
+//! - [Use an external workflow gate](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/external_gate.rs)
+//! - [Create a scheduled job entrypoint](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/schedule_job.rs)
 //!
 //! Import `runledger_runtime::prelude::*` and use
-//! [the worker binary example](https://github.com/featherenvy/runledger/blob/main/runledger-runtime/examples/worker_binary.rs)
+//! [the worker binary example](https://github.com/featherenvy/runledger/blob/master/runledger-runtime/examples/worker_binary.rs)
 //! when adding a worker process for the jobs and workflows enqueued through this
 //! crate.
 //!
@@ -97,6 +97,39 @@
 //! };
 //!
 //! let _job_id = enqueue_job(&pool, &job).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Create A Scheduled Job Entrypoint
+//!
+//! Use [`JobScheduleUpsert`] to create or update the cron row consumed by the
+//! runtime scheduler. Schedules are UTC-only. Updating an existing schedule
+//! refreshes its definition while preserving `is_active` and `organization_id`;
+//! `next_fire_at` is refreshed when `cron_expr` changes. Cron expressions are
+//! validated with the same parser used by `runledger-runtime`. Use
+//! [`set_job_schedule_active`] to pause or resume a schedule, and
+//! [`set_job_schedule_next_fire_at`] to manually retime its cursor.
+//!
+//! ```rust,no_run
+//! # async fn demo(pool: runledger_postgres::DbPool) -> Result<(), Box<dyn std::error::Error>> {
+//! use chrono::Utc;
+//! use runledger_core::prelude::*;
+//! use runledger_postgres::prelude::*;
+//!
+//! let payload_template = serde_json::json!({"source": "api"});
+//! let schedule = JobScheduleUpsert {
+//!     name: "profile-refresh-hourly",
+//!     job_type: JobType::new("profiles.refresh"),
+//!     organization_id: None,
+//!     payload_template: &payload_template,
+//!     cron_expr: "0 0 * * * *",
+//!     is_active: true,
+//!     next_fire_at: Utc::now(),
+//!     max_jitter_seconds: 0,
+//! };
+//!
+//! let _schedule = upsert_job_schedule(&pool, &schedule).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -239,22 +272,24 @@ pub mod prelude {
         JobDefinitionUpdate, JobDefinitionUpsert, JobEnqueue, JobEventRecord, JobFailureUpdate,
         JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord, JobProgressUpdate,
         JobQueueRecord, JobRuntimeConfigListFilter, JobRuntimeConfigRecord, JobRuntimeConfigUpsert,
-        JobScheduleRecord, ReapExpiredLeasesResult, ReapedTerminalLeaseRecord, WorkflowRunDbRecord,
-        WorkflowRunListFilter, WorkflowStepDbRecord, WorkflowStepDependencyDbRecord,
-        append_workflow_steps, append_workflow_steps_tx, cancel_job, cancel_workflow_run_tx,
-        complete_external_workflow_step, complete_external_workflow_step_tx, complete_job_failure,
-        complete_job_success, enqueue_job, enqueue_job_tx, enqueue_workflow_run,
-        enqueue_workflow_run_tx, get_job_by_id, get_job_definition_by_type, get_job_metrics,
-        get_job_payload_by_idempotency_key, get_job_runtime_config_by_type,
-        get_latest_job_payload_for_run, get_latest_workflow_run_by_type,
-        get_required_job_runtime_config_by_type, get_workflow_run_by_id,
-        get_workflow_run_by_type_and_idempotency_key, get_workflow_run_id_for_job,
-        insert_job_definition_if_missing_tx, insert_job_log, insert_job_runtime_config_if_missing,
-        list_job_definitions, list_job_events, list_job_logs, list_job_runtime_configs, list_jobs,
-        list_workflow_runs, list_workflow_step_dependencies, list_workflow_steps, requeue_job,
-        update_job_definition, update_job_payload_uuid_array_field,
-        update_workflow_step_and_pending_job_payload_tx, upsert_job_definition_tx,
-        upsert_job_runtime_config, upsert_job_runtime_config_tx,
+        JobScheduleRecord, JobScheduleUpsert, ReapExpiredLeasesResult, ReapedTerminalLeaseRecord,
+        WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowStepDbRecord,
+        WorkflowStepDependencyDbRecord, append_workflow_steps, append_workflow_steps_tx,
+        cancel_job, cancel_workflow_run_tx, complete_external_workflow_step,
+        complete_external_workflow_step_tx, complete_job_failure, complete_job_success,
+        enqueue_job, enqueue_job_tx, enqueue_workflow_run, enqueue_workflow_run_tx, get_job_by_id,
+        get_job_definition_by_type, get_job_metrics, get_job_payload_by_idempotency_key,
+        get_job_runtime_config_by_type, get_latest_job_payload_for_run,
+        get_latest_workflow_run_by_type, get_required_job_runtime_config_by_type,
+        get_workflow_run_by_id, get_workflow_run_by_type_and_idempotency_key,
+        get_workflow_run_id_for_job, insert_job_definition_if_missing_tx, insert_job_log,
+        insert_job_runtime_config_if_missing, list_job_definitions, list_job_events, list_job_logs,
+        list_job_runtime_configs, list_jobs, list_workflow_runs, list_workflow_step_dependencies,
+        list_workflow_steps, requeue_job, set_job_schedule_active, set_job_schedule_active_tx,
+        set_job_schedule_next_fire_at, set_job_schedule_next_fire_at_tx, update_job_definition,
+        update_job_payload_uuid_array_field, update_workflow_step_and_pending_job_payload_tx,
+        upsert_job_definition_tx, upsert_job_runtime_config, upsert_job_runtime_config_tx,
+        upsert_job_schedule, upsert_job_schedule_tx,
     };
     pub use crate::{
         DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, QueryError, QueryErrorCategory,

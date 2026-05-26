@@ -24,9 +24,13 @@ jobs:
     name: Lint and compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - uses: Swatinem/rust-cache@v2
+      # actions/checkout v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal --component rustfmt --component clippy
+      # Swatinem/rust-cache v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo check --workspace
@@ -36,9 +40,13 @@ jobs:
     name: Test and smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - uses: Swatinem/rust-cache@v2
+      # actions/checkout v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal --component rustfmt --component clippy
+      # Swatinem/rust-cache v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
       - name: Wait for Docker
         run: |
           for attempt in $(seq 1 30); do
@@ -58,6 +66,7 @@ jobs:
     name: Cargo deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # actions/checkout v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # EmbarkStudios/cargo-deny-action v2.0.9
+      - uses: EmbarkStudios/cargo-deny-action@d8395c1c8c9df74d968a3bcbba5533e396ff43cf

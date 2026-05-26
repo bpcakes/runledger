@@ -1,7 +1,8 @@
 [package]
 name = "runledger-test-support"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 description = "Test support utilities for Runledger PostgreSQL integration tests"
 readme = "../README.md"

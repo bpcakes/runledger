@@ -1,7 +1,8 @@
 [package]
 name = "runledger-postgres"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 description = "PostgreSQL persistence layer for the Runledger durable job and workflow system"
 readme = "../README.md"
@@ -17,6 +18,7 @@ test-support = []
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+cron = { workspace = true }
 runledger-core = { workspace = true, features = ["sqlx-postgres"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

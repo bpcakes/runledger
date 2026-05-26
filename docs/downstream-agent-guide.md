@@ -25,9 +25,13 @@ together.
 | Multi-step work with dependencies | Workflow DAG APIs |
 | Fan-out, fan-in, or ordered stages | Workflow DAG APIs |
 | Human/API approval or another external gate | External workflow steps |
-| Delayed or recurring entrypoint | Job schedules |
+| Delayed or recurring entrypoint | `runledger_postgres::jobs::upsert_job_schedule` |
 | Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
 | Admin/status views | `runledger_postgres::jobs` read/list APIs |
+
+Use `runledger_postgres::jobs::set_job_schedule_active` to pause or resume a
+schedule, and `runledger_postgres::jobs::set_job_schedule_next_fire_at` to
+retime the schedule cursor.
 
 ## Workflow DAG Rule
 

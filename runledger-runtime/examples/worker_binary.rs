@@ -21,6 +21,9 @@ impl JobHandler for SendEmail {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Copied worker binaries need tracing-subscriber or another subscriber setup.
+    tracing_subscriber::fmt::init();
+
     let database_url = std::env::var("DATABASE_URL")?;
     let pool = PgPoolOptions::new().connect(&database_url).await?;
 

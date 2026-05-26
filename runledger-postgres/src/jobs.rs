@@ -40,13 +40,17 @@ pub use runtime_configs::{
     insert_job_runtime_config_if_missing, insert_job_runtime_config_if_missing_tx,
     list_job_runtime_configs, upsert_job_runtime_config, upsert_job_runtime_config_tx,
 };
-pub use schedules::{claim_due_schedules_tx, mark_schedule_fired_tx};
+pub use schedules::{
+    claim_due_schedules_tx, mark_schedule_fired_tx, set_job_schedule_active,
+    set_job_schedule_active_tx, set_job_schedule_next_fire_at, set_job_schedule_next_fire_at_tx,
+    upsert_job_schedule, upsert_job_schedule_tx,
+};
 pub use types::{
     JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,
     JobEnqueue, JobEventRecord, JobFailureUpdate, JobListFilter, JobLogRecord, JobLogRecordInput,
     JobMetricsRecord, JobProgressUpdate, JobQueueRecord, JobRuntimeConfigListFilter,
-    JobRuntimeConfigRecord, JobRuntimeConfigUpsert, JobScheduleRecord, ReapExpiredLeasesResult,
-    ReapedTerminalLeaseRecord,
+    JobRuntimeConfigRecord, JobRuntimeConfigUpsert, JobScheduleRecord, JobScheduleUpsert,
+    ReapExpiredLeasesResult, ReapedTerminalLeaseRecord,
 };
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,

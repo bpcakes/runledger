@@ -2,7 +2,6 @@ use chrono::{Duration as ChronoDuration, Utc};
 use runledger_core::prelude::*;
 use runledger_postgres::prelude::*;
 use serde_json::json;
-use sqlx::Row;
 
 const REFRESH_JOB: &str = "profiles.refresh";
 
@@ -21,46 +20,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let payload_template = json!({ "source": "schedule_job_example" });
     let cron_expr = "0 0 * * * *";
     let next_fire_at = Utc::now() + ChronoDuration::minutes(5);
-    let row = sqlx::query(
-        "INSERT INTO job_schedules (
-            name,
+
+    // Re-running this setup refreshes the schedule definition but preserves
+    // the existing row's is_active and organization_id. A cron change stores
+    // the next_fire_at cursor supplied here.
+    let schedule = upsert_job_schedule(
+        &pool,
+        &JobScheduleUpsert {
+            name: &schedule_name,
             job_type,
-            payload_template,
+            organization_id: None,
+            payload_template: &payload_template,
             cron_expr,
-            timezone,
-            is_active,
+            is_active: true,
             next_fire_at,
-            max_jitter_seconds
-         )
-         VALUES ($1, $2, $3::jsonb, $4, 'UTC', true, $5, $6)
-         ON CONFLICT (name)
-         DO UPDATE
-            SET job_type = EXCLUDED.job_type,
-                payload_template = EXCLUDED.payload_template,
-                cron_expr = EXCLUDED.cron_expr,
-                timezone = EXCLUDED.timezone,
-                is_active = true,
-                next_fire_at = EXCLUDED.next_fire_at,
-                max_jitter_seconds = EXCLUDED.max_jitter_seconds,
-                updated_at = now()
-         RETURNING id",
+            max_jitter_seconds: 0,
+        },
     )
-    .bind(&schedule_name)
-    .bind(job_type.as_str())
-    .bind(&payload_template)
-    .bind(cron_expr)
-    .bind(next_fire_at)
-    .bind(0_i32)
-    .fetch_one(&pool)
     .await?;
-    let schedule_id: sqlx::types::Uuid = row.try_get("id")?;
 
     println!(
         "schedule_id={} name={} job_type={} next_fire_at={}",
-        schedule_id,
-        schedule_name,
-        job_type.as_str(),
-        next_fire_at
+        schedule.id,
+        schedule.name,
+        schedule.job_type.as_str(),
+        schedule.next_fire_at
     );
 
     Ok(())
