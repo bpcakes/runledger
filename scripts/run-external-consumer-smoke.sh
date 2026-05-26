@@ -61,13 +61,13 @@ RELEASE_TEST_SUPPORT_VERSION="$TEST_SUPPORT_VERSION" \
 RELEASE_POSTGRES_VERSION="$POSTGRES_VERSION" \
 RELEASE_RUNTIME_VERSION="$RUNTIME_VERSION" \
 perl -0pi -e '
-  s/^runledger-core = "[^"]+"/runledger-core = "$ENV{RELEASE_CORE_VERSION}"/m
+  s/^runledger-core = .+$/runledger-core = "$ENV{RELEASE_CORE_VERSION}"/m
     or die "failed to pin runledger-core in $ARGV\n";
-  s/^runledger-test-support = "[^"]+"/runledger-test-support = "$ENV{RELEASE_TEST_SUPPORT_VERSION}"/m
+  s/^runledger-test-support = .+$/runledger-test-support = "$ENV{RELEASE_TEST_SUPPORT_VERSION}"/m
     if /^runledger-test-support = /m;
-  s/^runledger-postgres = "[^"]+"/runledger-postgres = "$ENV{RELEASE_POSTGRES_VERSION}"/m
+  s/^runledger-postgres = .+$/runledger-postgres = "$ENV{RELEASE_POSTGRES_VERSION}"/m
     or die "failed to pin runledger-postgres in $ARGV\n";
-  s/^runledger-runtime = "[^"]+"/runledger-runtime = "$ENV{RELEASE_RUNTIME_VERSION}"/m
+  s/^runledger-runtime = .+$/runledger-runtime = "$ENV{RELEASE_RUNTIME_VERSION}"/m
     or die "failed to pin runledger-runtime in $ARGV\n";
 ' "$SMOKE_MANIFEST"
 
