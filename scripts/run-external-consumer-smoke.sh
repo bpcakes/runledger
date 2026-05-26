@@ -3,7 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SMOKE_MANIFEST="$ROOT_DIR/smoke/external-consumer/Cargo.toml"
+SMOKE_SOURCE_DIR="$ROOT_DIR/smoke/external-consumer"
+WORK_DIR="$ROOT_DIR/target/external-consumer-smoke/work"
+SMOKE_MANIFEST="$WORK_DIR/Cargo.toml"
 VENDOR_DIR="$ROOT_DIR/target/external-consumer-smoke/vendor"
 TARGET_DIR="$ROOT_DIR/target/external-consumer-smoke/target"
 TMP_CONFIG="$(mktemp)"
@@ -36,8 +38,9 @@ extract_crate() {
 
 cd "$ROOT_DIR"
 
-rm -rf "$VENDOR_DIR" "$TARGET_DIR"
+rm -rf "$VENDOR_DIR" "$TARGET_DIR" "$WORK_DIR"
 mkdir -p "$VENDOR_DIR" "$TARGET_DIR"
+cp -R "$SMOKE_SOURCE_DIR" "$WORK_DIR"
 
 for crate in runledger-core runledger-test-support runledger-postgres runledger-runtime; do
   package_crate "$crate"
@@ -53,13 +56,28 @@ extract_crate runledger-test-support "$TEST_SUPPORT_VERSION"
 extract_crate runledger-postgres "$POSTGRES_VERSION"
 extract_crate runledger-runtime "$RUNTIME_VERSION"
 
-cat > "$TMP_CONFIG" <<EOF
-[patch.crates-io]
-runledger-core = { path = "${VENDOR_DIR}/runledger-core-${CORE_VERSION}" }
-runledger-test-support = { path = "${VENDOR_DIR}/runledger-test-support-${TEST_SUPPORT_VERSION}" }
-runledger-postgres = { path = "${VENDOR_DIR}/runledger-postgres-${POSTGRES_VERSION}" }
-runledger-runtime = { path = "${VENDOR_DIR}/runledger-runtime-${RUNTIME_VERSION}" }
-EOF
+RELEASE_CORE_VERSION="$CORE_VERSION" \
+RELEASE_TEST_SUPPORT_VERSION="$TEST_SUPPORT_VERSION" \
+RELEASE_POSTGRES_VERSION="$POSTGRES_VERSION" \
+RELEASE_RUNTIME_VERSION="$RUNTIME_VERSION" \
+perl -0pi -e '
+  s/^runledger-core = "[^"]+"/runledger-core = "$ENV{RELEASE_CORE_VERSION}"/m
+    or die "failed to pin runledger-core in $ARGV\n";
+  s/^runledger-test-support = "[^"]+"/runledger-test-support = "$ENV{RELEASE_TEST_SUPPORT_VERSION}"/m
+    if /^runledger-test-support = /m;
+  s/^runledger-postgres = "[^"]+"/runledger-postgres = "$ENV{RELEASE_POSTGRES_VERSION}"/m
+    or die "failed to pin runledger-postgres in $ARGV\n";
+  s/^runledger-runtime = "[^"]+"/runledger-runtime = "$ENV{RELEASE_RUNTIME_VERSION}"/m
+    or die "failed to pin runledger-runtime in $ARGV\n";
+' "$SMOKE_MANIFEST"
+
+{
+  printf '[patch.crates-io]\n'
+  printf 'runledger-core = { path = "%s/runledger-core-%s" }\n' "$VENDOR_DIR" "$CORE_VERSION"
+  printf 'runledger-test-support = { path = "%s/runledger-test-support-%s" }\n' "$VENDOR_DIR" "$TEST_SUPPORT_VERSION"
+  printf 'runledger-postgres = { path = "%s/runledger-postgres-%s" }\n' "$VENDOR_DIR" "$POSTGRES_VERSION"
+  printf 'runledger-runtime = { path = "%s/runledger-runtime-%s" }\n' "$VENDOR_DIR" "$RUNTIME_VERSION"
+} > "$TMP_CONFIG"
 
 CARGO_TARGET_DIR="$TARGET_DIR" cargo test \
   --manifest-path "$SMOKE_MANIFEST" \

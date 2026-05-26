@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            (\n                SELECT COUNT(*)::bigint\n                FROM job_queue\n                WHERE idempotency_key IS NOT NULL\n                  AND enqueue_request IS NULL\n            ) AS \"job_count!\",\n            (\n                SELECT COUNT(*)::bigint\n                FROM workflow_runs\n                WHERE idempotency_key IS NOT NULL\n                  AND enqueue_request IS NULL\n            ) AS \"workflow_count!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "workflow_count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "3237c8ec292070e45a9bb88359aae9297f15e6e2d6b062ac2eae0122a2e09a4a"
+}
