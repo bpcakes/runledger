@@ -7,6 +7,7 @@ use tokio::time::{Duration, sleep, timeout};
 use tracing::{info, warn};
 
 use crate::ReaperError;
+use crate::RuntimeLoopExit;
 use crate::config::JobsConfig;
 use crate::registry::JobRegistry;
 
@@ -28,12 +29,12 @@ pub async fn run_reaper_loop(
     registry: JobRegistry,
     config: JobsConfig,
     mut shutdown: watch::Receiver<bool>,
-) {
+) -> RuntimeLoopExit {
     let registry = Arc::new(registry);
 
     loop {
         if shutdown_requested_or_closed(&shutdown) {
-            break;
+            return reaper_shutdown_complete();
         }
 
         match runledger_postgres::jobs::reap_expired_leases_with_terminal_records(
@@ -58,7 +59,7 @@ pub async fn run_reaper_loop(
                     fanout_result,
                     TerminalHookFanoutResult::InterruptedByShutdown
                 ) {
-                    break;
+                    return reaper_shutdown_complete();
                 }
             }
             Err(error) => {
@@ -72,11 +73,14 @@ pub async fn run_reaper_loop(
         }
 
         if wait_for_shutdown_or_poll(&mut shutdown, config.reaper_interval).await {
-            break;
+            return reaper_shutdown_complete();
         }
     }
+}
 
+fn reaper_shutdown_complete() -> RuntimeLoopExit {
     info!("reaper shutdown complete");
+    RuntimeLoopExit::Shutdown
 }
 
 fn shutdown_requested_or_closed(shutdown: &watch::Receiver<bool>) -> bool {

@@ -75,10 +75,18 @@ struct CanonicalWorkflowDependency<'a> {
 
 /// Enqueues a workflow run in its own transaction.
 ///
+/// Use this API for multi-step work with dependencies, fan-out/fan-in, external
+/// gates, cancellation as one logical run, or workflow-level idempotency. Build
+/// the payload with `WorkflowRunEnqueueBuilder` and
+/// `WorkflowStepEnqueueBuilder`.
+///
 /// Calls without an idempotency key always create a new workflow run. Calls
 /// with an idempotency key return the existing run only when the canonical
 /// enqueue request snapshot matches. Keyed rows without snapshots are rejected
 /// by the idempotency cutover.
+#[doc(alias = "dag")]
+#[doc(alias = "orchestration")]
+#[doc(alias = "dependencies")]
 pub async fn enqueue_workflow_run(
     pool: &DbPool,
     payload: &WorkflowRunEnqueue<'_>,
@@ -96,6 +104,10 @@ pub async fn enqueue_workflow_run(
 
 /// Enqueues a workflow run and returns the existing run for an identical keyed retry.
 ///
+/// Use this API when composing a workflow enqueue with other database writes in
+/// one transaction. For ordinary dependent work, prefer this workflow path over
+/// direct-job polling or handler-chained follow-up jobs.
+///
 /// Idempotency is strict for the submitted request snapshot. The snapshot is
 /// compared instead of live workflow step rows because steps and dependencies
 /// can be legitimately appended or mutated after initial enqueue. Strict
@@ -105,6 +117,9 @@ pub async fn enqueue_workflow_run(
 /// Job-step stage is part of the canonical initial request after normalizing an
 /// omitted stage to `Queued`; changing the requested initial stage is treated as
 /// a different enqueue request.
+#[doc(alias = "dag")]
+#[doc(alias = "orchestration")]
+#[doc(alias = "dependencies")]
 pub async fn enqueue_workflow_run_tx(
     tx: &mut DbTx<'_>,
     payload: &WorkflowRunEnqueue<'_>,

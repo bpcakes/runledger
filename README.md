@@ -41,6 +41,42 @@ You are expected to embed these crates inside your own service and supply:
 - database provisioning
 - application-level auth/admin surfaces
 
+## Choosing The API
+
+Use the highest-level Runledger API that matches the shape of the work. This is
+especially important for agents and generated integrations: a workflow DAG is a
+first-class Runledger feature, not something consumers should recreate by
+polling jobs or chaining handlers manually.
+
+For a shorter prompt-facing version, see
+[docs/llms.txt](https://github.com/featherenvy/runledger/blob/master/docs/llms.txt).
+For a slightly longer guide, see
+[docs/downstream-agent-guide.md](https://github.com/featherenvy/runledger/blob/master/docs/downstream-agent-guide.md).
+
+Common integration imports:
+
+```rust
+use runledger_core::prelude::*;
+use runledger_postgres::prelude::*;
+use runledger_runtime::prelude::*;
+```
+
+| Need | Prefer |
+| --- | --- |
+| One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
+| Multi-step work with dependencies | `WorkflowRunEnqueueBuilder`, `WorkflowStepEnqueueBuilder`, and `enqueue_workflow_run` |
+| Fan-out, fan-in, or ordered stages | Workflow DAG dependencies via `depends_on_success` or `depends_on_terminal` |
+| Human/API approval or another external gate | External workflow steps and `complete_external_workflow_step` |
+| Delayed or recurring entrypoint | `JobScheduleUpsert` and `upsert_job_schedule` |
+| Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
+| Admin/status views | `runledger_postgres::jobs` read/list APIs |
+
+Avoid manual workflow orchestration unless you are intentionally building a
+custom orchestrator outside Runledger. For ordinary dependent work, do not poll
+`get_job_by_id` in a loop, enqueue dependent jobs from parent handlers, encode
+dependency state in job payload JSON, or add app-owned tables to track workflow
+edges. Model the run as a workflow DAG instead.
+
 ## Crate Responsibilities
 
 ### `runledger-core`
@@ -61,7 +97,7 @@ Use `runledger-postgres` when you need durable state in PostgreSQL.
 Key capabilities:
 
 - enqueue, claim, heartbeat, retry, succeed, cancel, dead-letter, and requeue jobs
-- materialize and update cron schedules
+- create, materialize, and update cron schedules
 - persist job logs and runtime configs
 - create, read, mutate, and advance workflow runs and steps
 - query operator/admin views over queue and workflow state
@@ -87,13 +123,11 @@ Operational API notes:
 
 Use `runledger-runtime` to run the operational loops around the storage layer:
 
-- `worker::run_worker_loop`
-- `scheduler::run_scheduler_loop`
-- `reaper::run_reaper_loop`
+- `Supervisor`
 - `registry::JobRegistry`
 - `config::JobsConfig`
 
-The runtime is generic. It does not know about your application-specific job catalog beyond the handlers you register.
+The runtime is generic. It does not know about your application-specific job catalog beyond the handlers you register. `Supervisor` is the preferred facade for worker processes; `worker::run_worker_loop`, `scheduler::run_scheduler_loop`, and `reaper::run_reaper_loop` remain available as low-level building blocks for custom orchestration. Those low-level loops return `RuntimeLoopExit`; custom orchestrators that type their join handles explicitly should use `JoinHandle<RuntimeLoopExit>`.
 
 ### `runledger-test-support`
 
@@ -266,7 +300,7 @@ If the cache and schema drift apart, `cargo check` will fail during macro expans
 Prepare a release with the repository script:
 
 ```bash
-./scripts/prepare-release.sh 0.1.2
+./scripts/prepare-release.sh 0.3.0
 ```
 
 The preparation script:
@@ -277,17 +311,33 @@ The preparation script:
 - runs workspace tests and the packaged external-consumer smoke test
 - runs a publish dry-run for `runledger-core` and packages the dependent crates locally
 
-Before publishing this release line, call out observable contract changes in release notes: `QueryError::Display` now returns client-safe messages, expired leases have no owner grace period for heartbeat/progress/success/failure writes, the `job.lease_owner_mismatch` message now covers time-based loss of ownership, success completion rejects non-`Completed` stages, workflow-backed job completion waits on in-flight cancellation instead of returning `workflow.release_conflict`, append/external release can still return `workflow.release_conflict`, workflow append mutations require read-committed transaction isolation, idempotent enqueue adds new conflict/isolation error codes, and `workflow.append_conflicting_retry` is now a conflict-category error.
+Before publishing this release line, call out observable contract changes in release notes:
+
+- published crates require Rust 1.88+
+- `runledger-runtime` adds `Supervisor`
+- low-level runtime loops now return `RuntimeLoopExit`
+- `runledger-postgres` adds `JobScheduleUpsert`, `upsert_job_schedule`, `set_job_schedule_active`, and `set_job_schedule_next_fire_at`; conflict updates refresh the schedule definition while preserving `is_active` and `organization_id`, refresh `next_fire_at` when cron syntax changes, and validate cron syntax plus name/jitter bounds
+- `JobScheduleRecord` exposes `is_active` so setup code can observe preserved pause/resume state after schedule upserts
+- schedules are UTC-only; schedule upserts store `timezone = 'UTC'`, and accepted cron expressions use the same parser as `runledger-runtime`
+- `QueryError::Display` now returns client-safe messages
+- expired leases have no owner grace period for heartbeat/progress/success/failure writes
+- the `job.lease_owner_mismatch` message now covers time-based loss of ownership
+- success completion rejects non-`Completed` stages
+- workflow-backed job completion waits on in-flight cancellation instead of returning `workflow.release_conflict`
+- append/external release can still return `workflow.release_conflict`
+- workflow append mutations require read-committed transaction isolation
+- idempotent enqueue adds new conflict/isolation error codes
+- `workflow.append_conflicting_retry` is now a conflict-category error
 
 If publishing manually, run `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres` or `runledger-runtime` and commit any resulting `.sqlx/` changes.
 
 After reviewing and committing the prepared diff, publish with:
 
 ```bash
-./scripts/publish-release.sh 0.1.2
+./scripts/publish-release.sh 0.3.0
 ```
 
-The publish script publishes crates in dependency order, dry-runs each crate once its workspace dependencies are indexed, creates a `v0.1.2` tag, and pushes the current branch and tag. Set `PUBLISH_REMOTE` to override the git remote used for the final push.
+The publish script publishes crates in dependency order, dry-runs each crate once its workspace dependencies are indexed, creates a `v0.3.0` tag, and pushes the current branch and tag. Set `PUBLISH_REMOTE` to override the git remote used for the final push.
 
 ## Testing
 
@@ -309,7 +359,7 @@ The packaged external-consumer smoke test:
 - packages `runledger-core`, `runledger-postgres`, and `runledger-runtime`
 - extracts those `.crate` archives locally
 - builds a standalone host crate against the packaged manifests via `[patch.crates-io]`
-- runs migrations, starts worker/scheduler/reaper, enqueues jobs, and asserts terminal states
+- runs migrations, starts the runtime supervisor, enqueues jobs, and asserts terminal states
 
 Run it with:
 
@@ -344,12 +394,15 @@ A host application will generally:
 1. either call `runledger_postgres::migrate_after_idempotency_cutover(&pool)` or apply the Runledger migrations with your own deployment tooling and then call `runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool)`
 2. create a shared `sqlx::PgPool`
 3. register concrete handlers in `runledger_runtime::registry::JobRegistry`
-4. start worker, scheduler, and reaper loops with coordinated shutdown
+4. start `runledger_runtime::Supervisor` in a worker process
 5. call `runledger_postgres::jobs::*` APIs from its own admin/API surfaces
 
 At a high level:
 
 ```rust
+use std::time::Duration;
+
+use runledger_runtime::Supervisor;
 use runledger_runtime::config::JobsConfig;
 use runledger_runtime::registry::JobRegistry;
 
@@ -360,10 +413,174 @@ let mut registry = JobRegistry::new();
 // registry.register(MyHandler);
 
 let config = JobsConfig::from_env();
-// spawn worker/scheduler/reaper loops with the shared pool and registry
+let supervisor = Supervisor::builder(&pool, config)?
+    .with_registry(registry)
+    .build()?;
+supervisor
+    .run_until_shutdown(
+        async {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                eprintln!("failed to listen for shutdown signal: {error}");
+            }
+        },
+        Duration::from_secs(30),
+    )
+    .await?;
 ```
 
+Production worker binaries should still close their pool after supervisor
+shutdown; the worker example below keeps cleanup independent from shutdown
+errors.
+
+See [runledger-runtime/examples/worker_binary.rs](https://github.com/featherenvy/runledger/blob/master/runledger-runtime/examples/worker_binary.rs)
+for a compile-checked worker binary skeleton.
+
 This workspace deliberately stops at the library boundary; it does not prescribe your process model or handler packaging.
+
+## Workflow DAG Recipe
+
+When work has dependencies, model those dependencies directly in the workflow
+enqueue request. The workflow engine persists the run, validates the DAG,
+enqueues root steps, releases dependents when prerequisites finish, and keeps the
+run status coherent with cancellation and external gates.
+
+```rust
+use runledger_core::jobs::{
+    JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder,
+    WorkflowType,
+};
+
+let metadata = serde_json::json!({"source": "api"});
+let crawl_payload = serde_json::json!({"profile_id": "p_123"});
+let classify_payload = serde_json::json!({"profile_id": "p_123"});
+let score_payload = serde_json::json!({"profile_id": "p_123"});
+let persist_payload = serde_json::json!({"profile_id": "p_123"});
+
+let crawl = WorkflowStepEnqueueBuilder::new(
+    StepKey::new("crawl"),
+    JobType::new("profiles.crawl"),
+    &crawl_payload,
+)
+.try_build()?;
+
+let classify = WorkflowStepEnqueueBuilder::new(
+    StepKey::new("classify"),
+    JobType::new("profiles.classify"),
+    &classify_payload,
+)
+.depends_on_success(&[StepKey::new("crawl")])
+.try_build()?;
+
+let score = WorkflowStepEnqueueBuilder::new(
+    StepKey::new("score"),
+    JobType::new("profiles.score"),
+    &score_payload,
+)
+.depends_on_success(&[StepKey::new("crawl")])
+.try_build()?;
+
+let persist = WorkflowStepEnqueueBuilder::new(
+    StepKey::new("persist"),
+    JobType::new("profiles.persist"),
+    &persist_payload,
+)
+.depends_on_success(&[StepKey::new("classify"), StepKey::new("score")])
+.try_build()?;
+
+let run = WorkflowRunEnqueueBuilder::new(
+    WorkflowType::new("profiles.research"),
+    &metadata,
+)
+.idempotency_key("profile:p_123:research")
+.extend_steps([crawl, classify, score, persist])
+.try_build()?;
+
+let workflow_run = runledger_postgres::jobs::enqueue_workflow_run(&pool, &run).await?;
+```
+
+See [runledger-postgres/examples/workflow_dag.rs](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/workflow_dag.rs)
+for a compile-checked example that shows a fan-out/fan-in DAG.
+
+## Worker Binary
+
+Downstream services commonly run a web/API process and a separate worker
+process against the same PostgreSQL database. The web process enqueues jobs and
+workflows. The worker process registers handlers and runs the supervisor:
+
+```rust
+use std::time::Duration;
+
+use runledger_core::jobs::{JobContext, JobFailure, JobType};
+use runledger_core::prelude::async_trait;
+use runledger_runtime::Supervisor;
+use runledger_runtime::config::JobsConfig;
+use runledger_runtime::registry::{JobHandler, JobRegistry};
+use serde_json::Value;
+use sqlx::postgres::PgPoolOptions;
+
+struct SendEmail;
+
+#[async_trait]
+impl JobHandler for SendEmail {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.email.send")
+    }
+
+    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+        Ok(())
+    }
+}
+
+async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = PgPoolOptions::new()
+        .connect(&std::env::var("DATABASE_URL")?)
+        .await?;
+
+    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
+
+    let mut registry = JobRegistry::new();
+    registry.register(SendEmail);
+
+    let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
+        .with_registry(registry)
+        .build()?;
+    let shutdown_result = supervisor
+        .run_until_shutdown(
+            async {
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    eprintln!("failed to listen for shutdown signal: {error}");
+                }
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+
+    // Keep pool cleanup independent from the shutdown result.
+    pool.close().await;
+    shutdown_result?;
+    Ok(())
+}
+```
+
+Treat a `run_until_shutdown()`, `shutdown()`, or `shutdown_with_timeout()` error
+as fatal for the worker process: it means a supervised loop panicked, exited
+cleanly before shutdown was requested, or did not observe shutdown within the
+process deadline. `run_until_shutdown()` is the preferred method for worker
+binaries because it observes internal task failures while still applying a
+shutdown deadline; when it times out, remaining supervised tasks are aborted
+and in-flight handler futures are dropped. Size the shutdown timeout to cover
+handler drain time, worker pool concurrency, and database capacity. A useful
+starting point is your per-handler high-percentile latency under
+`JobsConfig::max_global_concurrency`. The worker example stores the shutdown
+result before closing the pool so cleanup still runs when shutdown reports an error.
+
+Additional compile-checked integration examples:
+
+- [Enqueue one job](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/enqueue_job.rs)
+- [Workflow DAG](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/workflow_dag.rs)
+- [External workflow gate](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/external_gate.rs)
+- [Append workflow steps](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/append_workflow_steps.rs)
+- [Scheduled job entrypoint](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/schedule_job.rs)
 
 ## Repository Layout
 

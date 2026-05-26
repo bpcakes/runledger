@@ -13,6 +13,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant, MissedTickBehavior, sleep, sleep_until};
 use tracing::{Instrument, error, info, info_span, warn};
 
+use crate::RuntimeLoopExit;
 use crate::WorkerError;
 use crate::config::JobsConfig;
 use crate::registry::JobRegistry;
@@ -38,7 +39,7 @@ pub async fn run_worker_loop(
     registry: JobRegistry,
     config: JobsConfig,
     mut shutdown: watch::Receiver<bool>,
-) {
+) -> RuntimeLoopExit {
     let registry = Arc::new(registry);
     let claimable_job_types = registry.registered_types();
     let semaphore = Arc::new(Semaphore::new(config.max_global_concurrency));
@@ -48,12 +49,12 @@ pub async fn run_worker_loop(
         drain_finished_tasks(&mut join_set).await;
 
         if shutdown_requested_or_closed(&shutdown) {
-            break;
+            return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
         }
 
         if claimable_job_types.is_empty() {
             if wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await {
-                break;
+                return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
             }
             continue;
         }
@@ -61,7 +62,7 @@ pub async fn run_worker_loop(
         let available = semaphore.available_permits();
         if available == 0 {
             if wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await {
-                break;
+                return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
             }
             continue;
         }
@@ -96,7 +97,13 @@ pub async fn run_worker_loop(
         for job in claimed {
             let permit = match Arc::clone(&semaphore).acquire_owned().await {
                 Ok(permit) => permit,
-                Err(_) => break,
+                Err(_) => {
+                    // The worker owns this semaphore and never closes it. If
+                    // this defensive branch fires, surface it as an unexpected
+                    // loop completion rather than graceful shutdown.
+                    warn!("worker semaphore closed; stopping worker loop");
+                    return drain_in_flight_jobs(join_set, RuntimeLoopExit::Completed).await;
+                }
             };
             let pool_clone = pool.clone();
             let registry_clone = Arc::clone(&registry);
@@ -112,12 +119,24 @@ pub async fn run_worker_loop(
         }
 
         if wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await {
-            break;
+            return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
         }
     }
+}
 
-    info!("worker shutdown requested; draining in-flight jobs");
+async fn drain_in_flight_jobs(mut join_set: JoinSet<()>, exit: RuntimeLoopExit) -> RuntimeLoopExit {
+    if !join_set.is_empty() {
+        match exit {
+            RuntimeLoopExit::Shutdown => {
+                info!("worker shutdown requested; draining in-flight jobs")
+            }
+            RuntimeLoopExit::Completed => {
+                warn!("worker loop completed before shutdown; draining in-flight jobs");
+            }
+        }
+    }
     while join_set.join_next().await.is_some() {}
+    exit
 }
 
 async fn drain_finished_tasks(join_set: &mut JoinSet<()>) {

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_DENY_VERSION: "0.19.7"
+  SQLX_OFFLINE: "true"
+  RUNLEDGER_TEST_PG_IMAGE: postgres:18
+
+jobs:
+  lint:
+    name: Lint and compile
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal --component rustfmt --component clippy
+      # Swatinem/rust-cache v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo check --workspace
+      - run: cargo test --workspace --no-run
+
+  test:
+    name: Test and smoke
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal --component rustfmt --component clippy
+      # Swatinem/rust-cache v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - name: Wait for Docker
+        run: |
+          for attempt in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Docker did not become ready in time" >&2
+          exit 1
+      - name: Run workspace tests
+        run: cargo test --workspace
+      - name: Run packaged-crate smoke test
+        run: ./scripts/run-external-consumer-smoke.sh
+
+  deny:
+    name: Cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+      - run: cargo deny check
