@@ -1,3 +1,14 @@
+//! Workflow enqueue builders and DAG validation.
+//!
+//! Use this module when work is more than one independent retried job. A
+//! workflow run gives dependent steps one durable identity, validates the graph
+//! up front, and lets the PostgreSQL workflow runtime release downstream steps
+//! as prerequisites finish.
+//!
+//! For ordinary dependent work, prefer [`WorkflowRunEnqueueBuilder`] and
+//! [`WorkflowStepEnqueueBuilder`] over direct-job polling or handler-chained
+//! follow-up jobs. Direct jobs are best for one independent unit of work.
+
 mod build_validation;
 mod dag_validation;
 mod errors;
