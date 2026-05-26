@@ -560,9 +560,11 @@ result before closing the pool so cleanup still runs when shutdown reports an er
 
 Additional compile-checked integration examples:
 
-- [External workflow gate](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/external_workflow_step.rs)
+- [Enqueue one job](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/enqueue_job.rs)
+- [Workflow DAG](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/workflow_dag.rs)
+- [External workflow gate](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/external_gate.rs)
 - [Append workflow steps](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/append_workflow_steps.rs)
-- [Scheduled entrypoint](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/scheduled_entrypoint.rs)
+- [Scheduled job entrypoint](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/schedule_job.rs)
 
 ## Repository Layout
 

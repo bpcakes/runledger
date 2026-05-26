@@ -86,9 +86,10 @@ trusted diagnostics.
 
 ## More Complete Examples
 
+- `runledger-postgres/examples/enqueue_job.rs`
 - `runledger-postgres/examples/workflow_dag.rs`
-- `runledger-postgres/examples/external_workflow_step.rs`
+- `runledger-postgres/examples/external_gate.rs`
 - `runledger-postgres/examples/append_workflow_steps.rs`
-- `runledger-postgres/examples/scheduled_entrypoint.rs`
+- `runledger-postgres/examples/schedule_job.rs`
 - `runledger-runtime/examples/worker_binary.rs`
 - `docs/downstream-agent-guide.md`

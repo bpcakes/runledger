@@ -65,7 +65,7 @@ async fn enqueue_approval_workflow(
 ) -> Result<WorkflowRunDbRecord, Box<dyn std::error::Error>> {
     let approval_payload = json!({ "profile_id": profile_id, "gate": "human_approval" });
     let persist_payload = json!({ "profile_id": profile_id });
-    let metadata = json!({ "source": "external_workflow_step_example" });
+    let metadata = json!({ "source": "external_gate_example" });
     let request_suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();

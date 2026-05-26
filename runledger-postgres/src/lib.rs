@@ -51,6 +51,18 @@
 //! database to retain SQLx migration history in `_sqlx_migrations` and, when
 //! available, Runledger-owned migration state in `runledger_migration_history`.
 //!
+//! # Copy-Paste Examples
+//!
+//! - [Enqueue one job](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/enqueue_job.rs)
+//! - [Enqueue a workflow DAG](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/workflow_dag.rs)
+//! - [Use an external workflow gate](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/external_gate.rs)
+//! - [Create a scheduled job entrypoint](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/schedule_job.rs)
+//!
+//! Import `runledger_runtime::prelude::*` and use
+//! [the worker binary example](https://github.com/featherenvy/runledger/blob/main/runledger-runtime/examples/worker_binary.rs)
+//! when adding a worker process for the jobs and workflows enqueued through this
+//! crate.
+//!
 //! # Prelude
 //!
 //! ```rust
