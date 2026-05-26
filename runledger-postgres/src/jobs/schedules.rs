@@ -18,6 +18,7 @@ struct JobScheduleRow {
     organization_id: Option<Uuid>,
     payload_template: serde_json::Value,
     cron_expr: String,
+    is_active: bool,
     max_jitter_seconds: i32,
     next_fire_at: DateTime<Utc>,
 }
@@ -88,6 +89,7 @@ pub async fn upsert_job_schedule_tx(
             organization_id,
             payload_template,
             cron_expr,
+            is_active,
             max_jitter_seconds,
             next_fire_at",
     )
@@ -227,6 +229,7 @@ pub async fn claim_due_schedules_tx(
                 organization_id: row.organization_id,
                 payload_template: row.payload_template,
                 cron_expr: row.cron_expr,
+                is_active: true,
                 max_jitter_seconds: row.max_jitter_seconds,
                 next_fire_at: row.next_fire_at,
             })
@@ -265,6 +268,7 @@ fn job_schedule_from_row(row: JobScheduleRow) -> Result<JobScheduleRecord> {
         organization_id: row.organization_id,
         payload_template: row.payload_template,
         cron_expr: row.cron_expr,
+        is_active: row.is_active,
         max_jitter_seconds: row.max_jitter_seconds,
         next_fire_at: row.next_fire_at,
     })

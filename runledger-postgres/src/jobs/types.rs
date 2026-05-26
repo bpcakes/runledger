@@ -86,6 +86,11 @@ pub struct JobScheduleRecord {
     pub organization_id: Option<Uuid>,
     pub payload_template: Value,
     pub cron_expr: String,
+    /// Whether the runtime scheduler may claim this schedule.
+    ///
+    /// Schedule upserts preserve this value for existing rows; use
+    /// `set_job_schedule_active` to pause or resume a schedule intentionally.
+    pub is_active: bool,
     pub max_jitter_seconds: i32,
     pub next_fire_at: DateTime<Utc>,
 }
