@@ -50,6 +50,151 @@
 //! idempotency request snapshots. That check is read-only, but it expects the
 //! database to retain SQLx migration history in `_sqlx_migrations` and, when
 //! available, Runledger-owned migration state in `runledger_migration_history`.
+//!
+//! # Prelude
+//!
+//! ```rust
+//! use runledger_core::prelude::*;
+//! use runledger_postgres::prelude::*;
+//! ```
+//!
+//! The PostgreSQL prelude exports persistence functions and record/input types.
+//! It intentionally does not re-export core contract types, so import
+//! `runledger_core::prelude::*` beside it when building job or workflow inputs.
+//!
+//! # Enqueue One Job
+//!
+//! Use direct job enqueue for one independent retried unit of work.
+//!
+//! ```rust,no_run
+//! # async fn demo(pool: runledger_postgres::DbPool) -> Result<(), Box<dyn std::error::Error>> {
+//! use runledger_core::prelude::*;
+//! use runledger_postgres::prelude::*;
+//!
+//! let payload = serde_json::json!({"email_id": "email_123"});
+//! let job = JobEnqueue {
+//!     job_type: JobType::new("jobs.email.send"),
+//!     organization_id: None,
+//!     payload: &payload,
+//!     priority: None,
+//!     max_attempts: None,
+//!     timeout_seconds: None,
+//!     next_run_at: None,
+//!     idempotency_key: Some("email:email_123:send"),
+//!     stage: None,
+//! };
+//!
+//! let _job_id = enqueue_job(&pool, &job).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Enqueue A Workflow DAG
+//!
+//! Use workflows when the work has step dependencies, fan-out/fan-in, external
+//! gates, cancellation as one logical run, or workflow-level idempotency.
+//!
+//! ```rust,no_run
+//! # async fn demo(pool: runledger_postgres::DbPool) -> Result<(), Box<dyn std::error::Error>> {
+//! use runledger_core::prelude::*;
+//! use runledger_postgres::prelude::*;
+//!
+//! let crawl_payload = serde_json::json!({"profile_id": "p_123"});
+//! let classify_payload = serde_json::json!({"profile_id": "p_123"});
+//! let metadata = serde_json::json!({"source": "api"});
+//!
+//! let crawl = WorkflowStepEnqueueBuilder::new(
+//!     StepKey::new("crawl"),
+//!     JobType::new("profiles.crawl"),
+//!     &crawl_payload,
+//! )
+//! .try_build()?;
+//!
+//! let classify = WorkflowStepEnqueueBuilder::new(
+//!     StepKey::new("classify"),
+//!     JobType::new("profiles.classify"),
+//!     &classify_payload,
+//! )
+//! .depends_on_success(&[StepKey::new("crawl")])
+//! .try_build()?;
+//!
+//! let run = WorkflowRunEnqueueBuilder::new(WorkflowType::new("profiles.research"), &metadata)
+//!     .idempotency_key("profile:p_123:research")
+//!     .extend_steps([crawl, classify])
+//!     .try_build()?;
+//!
+//! let _workflow_run = enqueue_workflow_run(&pool, &run).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Use An External Workflow Gate
+//!
+//! Create the gate with `WorkflowStepEnqueueBuilder::new_external`, then
+//! complete it from a trusted service boundary when the external condition is
+//! known.
+//!
+//! ```rust,no_run
+//! # async fn demo(
+//! #     pool: runledger_postgres::DbPool,
+//! #     workflow_run_id: sqlx::types::Uuid,
+//! # ) -> Result<(), Box<dyn std::error::Error>> {
+//! use runledger_core::prelude::*;
+//! use runledger_postgres::prelude::*;
+//!
+//! let input = CompleteExternalWorkflowStepInput {
+//!     workflow_run_id,
+//!     organization_id: None,
+//!     step_key: StepKey::new("approval"),
+//!     terminal_status: WorkflowStepStatus::Succeeded,
+//!     status_reason: Some("approved"),
+//!     last_error_code: None,
+//!     last_error_message: None,
+//! };
+//!
+//! let _step = complete_external_workflow_step(&pool, &input).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Inspect Workflow State
+//!
+//! ```rust,no_run
+//! # async fn demo(
+//! #     pool: runledger_postgres::DbPool,
+//! #     workflow_run_id: sqlx::types::Uuid,
+//! # ) -> Result<(), Box<dyn std::error::Error>> {
+//! use runledger_postgres::prelude::*;
+//!
+//! let _run = get_workflow_run_by_id(&pool, None, workflow_run_id).await?;
+//! let _steps = list_workflow_steps(&pool, None, workflow_run_id).await?;
+//! let _dependencies = list_workflow_step_dependencies(&pool, None, workflow_run_id).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Handle Errors Safely
+//!
+//! `QueryError::client_message` and `QueryError::code` are safe for public
+//! responses. `QueryError::internal_message` is for trusted diagnostics.
+//!
+//! ```rust,no_run
+//! # async fn demo(
+//! #     pool: runledger_postgres::DbPool,
+//! #     job: runledger_postgres::jobs::JobEnqueue<'_>,
+//! # ) -> Result<(), runledger_postgres::Error> {
+//! match runledger_postgres::jobs::enqueue_job(&pool, &job).await {
+//!     Ok(_job_id) => {}
+//!     Err(runledger_postgres::Error::QueryError(query_error)) => {
+//!         let _public_code = query_error.code();
+//!         let _public_message = query_error.client_message();
+//!         let _private_diagnostic = query_error.internal_message();
+//!     }
+//!     Err(error) => return Err(error),
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use std::fmt;
 
@@ -68,6 +213,43 @@ pub use migrations::{
 };
 #[allow(deprecated)]
 pub use migrations::{ensure_schema_compatible, migrate};
+
+/// Common `runledger-postgres` imports for integration crates.
+///
+/// This prelude contains persistence APIs, DB types, and database record/input
+/// structs. It avoids generic `Result` or `Error` aliases and does not re-export
+/// `runledger-core` contracts, so it can be glob-imported alongside
+/// `runledger_core::prelude::*` and `runledger_runtime::prelude::*`.
+pub mod prelude {
+    pub use crate::jobs::{
+        AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,
+        CompleteExternalWorkflowStepInput, JobDefinitionListFilter, JobDefinitionRecord,
+        JobDefinitionUpdate, JobDefinitionUpsert, JobEnqueue, JobEventRecord, JobFailureUpdate,
+        JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord, JobProgressUpdate,
+        JobQueueRecord, JobRuntimeConfigListFilter, JobRuntimeConfigRecord, JobRuntimeConfigUpsert,
+        JobScheduleRecord, ReapExpiredLeasesResult, ReapedTerminalLeaseRecord, WorkflowRunDbRecord,
+        WorkflowRunListFilter, WorkflowStepDbRecord, WorkflowStepDependencyDbRecord,
+        append_workflow_steps, append_workflow_steps_tx, cancel_job, cancel_workflow_run_tx,
+        complete_external_workflow_step, complete_external_workflow_step_tx, complete_job_failure,
+        complete_job_success, enqueue_job, enqueue_job_tx, enqueue_workflow_run,
+        enqueue_workflow_run_tx, get_job_by_id, get_job_definition_by_type, get_job_metrics,
+        get_job_payload_by_idempotency_key, get_job_runtime_config_by_type,
+        get_latest_job_payload_for_run, get_latest_workflow_run_by_type,
+        get_required_job_runtime_config_by_type, get_workflow_run_by_id,
+        get_workflow_run_by_type_and_idempotency_key, get_workflow_run_id_for_job,
+        insert_job_definition_if_missing_tx, insert_job_log, insert_job_runtime_config_if_missing,
+        list_job_definitions, list_job_events, list_job_logs, list_job_runtime_configs, list_jobs,
+        list_workflow_runs, list_workflow_step_dependencies, list_workflow_steps, requeue_job,
+        update_job_definition, update_job_payload_uuid_array_field,
+        update_workflow_step_and_pending_job_payload_tx, upsert_job_definition_tx,
+        upsert_job_runtime_config, upsert_job_runtime_config_tx,
+    };
+    pub use crate::{
+        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, QueryError, QueryErrorCategory,
+        SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
+        migrate_after_idempotency_cutover,
+    };
+}
 
 pub type DbPool = sqlx::PgPool;
 pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;

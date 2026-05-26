@@ -1,3 +1,14 @@
+//! Durable job, schedule, workflow, and admin persistence APIs.
+//!
+//! Choose the highest-level API that matches the work. Use `enqueue_job` for
+//! one independent retried unit. Use workflow DAG APIs such as
+//! `enqueue_workflow_run`, `WorkflowRunEnqueueBuilder`, and
+//! `WorkflowStepEnqueueBuilder` when work has dependencies, fan-out/fan-in,
+//! external gates, or workflow-level idempotency.
+//!
+//! Avoid manually orchestrating ordinary workflows by polling job state,
+//! enqueueing child jobs from handlers, or storing dependency state in payloads.
+
 mod admin;
 mod errors;
 mod logs;

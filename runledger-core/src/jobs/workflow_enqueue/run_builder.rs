@@ -8,6 +8,9 @@ use super::types::{WorkflowRunEnqueue, WorkflowStepEnqueue};
 /// Builder for [`WorkflowRunEnqueue`].
 ///
 /// Use this builder to assemble a workflow enqueue payload incrementally.
+/// Prefer a workflow run over direct jobs when the work has step dependencies,
+/// fan-out/fan-in, external gates, cancellation as one logical run, or
+/// workflow-level idempotency.
 ///
 /// Defaults:
 /// - `organization_id`: `None`
@@ -41,6 +44,9 @@ use super::types::{WorkflowRunEnqueue, WorkflowStepEnqueue};
 /// assert_eq!(run.workflow_type(), WorkflowType::new("seller.profile.research.initial"));
 /// assert_eq!(run.steps().len(), 1);
 /// ```
+#[doc(alias = "dag")]
+#[doc(alias = "orchestration")]
+#[doc(alias = "dependencies")]
 #[derive(Debug, Clone)]
 pub struct WorkflowRunEnqueueBuilder<'a> {
     workflow_type: WorkflowType<'a>,

@@ -1,0 +1,94 @@
+# Runledger LLM Integration Summary
+
+Runledger is a Rust workspace for durable jobs, workflow orchestration, and
+worker runtime loops on PostgreSQL.
+
+This file is for downstream agents integrating Runledger into another
+application. It is not an AGENTS.md file and should not be treated as maintainer
+instructions for this repository.
+
+## Imports
+
+```rust
+use runledger_core::prelude::*;
+use runledger_postgres::prelude::*;
+use runledger_runtime::prelude::*;
+```
+
+The preludes intentionally avoid generic `Result` and `Error` aliases so they
+can be imported together.
+
+## Choose The API
+
+| Need | Use |
+| --- | --- |
+| One independent retried unit of work | `enqueue_job` with `JobEnqueue` |
+| Multi-step work with dependencies | Workflow DAG APIs |
+| Fan-out, fan-in, or ordered stages | `depends_on_success` / `depends_on_terminal` |
+| Human/API approval or another external gate | External workflow steps |
+| Delayed or recurring entrypoint | Job schedules |
+| Worker process lifecycle | `Supervisor::run_until_shutdown` |
+| Admin/status views | `get_*` and `list_*` APIs in `runledger_postgres::jobs` |
+
+## Workflow DAG Rule
+
+If work has step dependencies, build a workflow DAG:
+
+```rust
+let step_a = WorkflowStepEnqueueBuilder::new(
+    StepKey::new("a"),
+    JobType::new("jobs.a"),
+    &payload_a,
+)
+.try_build()?;
+
+let step_b = WorkflowStepEnqueueBuilder::new(
+    StepKey::new("b"),
+    JobType::new("jobs.b"),
+    &payload_b,
+)
+.depends_on_success(&[StepKey::new("a")])
+.try_build()?;
+
+let run = WorkflowRunEnqueueBuilder::new(WorkflowType::new("workflow.example"), &metadata)
+    .extend_steps([step_a, step_b])
+    .try_build()?;
+
+enqueue_workflow_run(&pool, &run).await?;
+```
+
+Do not manually orchestrate ordinary workflows by polling job status, enqueueing
+dependent jobs from parent handlers, encoding dependency state in payload JSON,
+or adding app-owned workflow edge tables.
+
+## Worker Runtime Rule
+
+Use `Supervisor::run_until_shutdown` for ordinary worker binaries:
+
+```rust
+let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
+    .with_registry(registry)
+    .build()?;
+
+supervisor
+    .run_until_shutdown(shutdown_signal, std::time::Duration::from_secs(30))
+    .await?;
+```
+
+Use `worker::run_worker_loop`, `scheduler::run_scheduler_loop`, and
+`reaper::run_reaper_loop` only for custom runtime orchestration.
+
+## Error Handling
+
+For public surfaces, return `QueryError::code()` and
+`QueryError::client_message()`. Use `QueryError::internal_message()` only for
+trusted diagnostics.
+
+## More Complete Examples
+
+- `runledger-postgres/examples/workflow_dag.rs`
+- `runledger-postgres/examples/external_workflow_step.rs`
+- `runledger-postgres/examples/append_workflow_steps.rs`
+- `runledger-postgres/examples/scheduled_entrypoint.rs`
+- `runledger-runtime/examples/worker_binary.rs`
+- `docs/downstream-agent-guide.md`
