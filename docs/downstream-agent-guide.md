@@ -58,7 +58,8 @@ for a compile-checked fan-out/fan-in workflow DAG.
 
 Other compile-checked examples:
 
-- [`runledger-postgres/examples/external_workflow_step.rs`](../runledger-postgres/examples/external_workflow_step.rs)
+- [`runledger-postgres/examples/enqueue_job.rs`](../runledger-postgres/examples/enqueue_job.rs)
+- [`runledger-postgres/examples/external_gate.rs`](../runledger-postgres/examples/external_gate.rs)
 - [`runledger-postgres/examples/append_workflow_steps.rs`](../runledger-postgres/examples/append_workflow_steps.rs)
-- [`runledger-postgres/examples/scheduled_entrypoint.rs`](../runledger-postgres/examples/scheduled_entrypoint.rs)
+- [`runledger-postgres/examples/schedule_job.rs`](../runledger-postgres/examples/schedule_job.rs)
 - [`runledger-runtime/examples/worker_binary.rs`](../runledger-runtime/examples/worker_binary.rs)

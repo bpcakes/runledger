@@ -16,6 +16,14 @@
 //! `runledger-postgres` for PostgreSQL-backed storage and `runledger-runtime`
 //! for worker, scheduler, and reaper execution.
 //!
+//! # Copy-Paste Examples
+//!
+//! - [Enqueue one job](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/enqueue_job.rs)
+//! - [Enqueue a workflow DAG](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/workflow_dag.rs)
+//! - [Use an external workflow gate](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/external_gate.rs)
+//! - [Run a worker binary](https://github.com/featherenvy/runledger/blob/main/runledger-runtime/examples/worker_binary.rs)
+//! - [Create a scheduled job entrypoint](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/schedule_job.rs)
+//!
 //! # Prelude
 //!
 //! Import the common contracts with:

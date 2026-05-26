@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ensure_job_definition(&pool).await?;
 
     let job_type = JobType::new(REFRESH_JOB);
-    let payload_template = json!({ "source": "scheduled_entrypoint_example" });
+    let payload_template = json!({ "source": "schedule_job_example" });
     let cron_expr = "0 0 * * * *";
     let next_fire_at = Utc::now() + ChronoDuration::minutes(5);
     let row = sqlx::query(

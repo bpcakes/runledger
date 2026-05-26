@@ -1,5 +1,5 @@
 [toolchain]
-# Edition 2024 stabilized in Rust 1.85.
-channel = "1.85"
+# Runledger uses dependencies and language features that require Rust 1.88+.
+channel = "1.88"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
