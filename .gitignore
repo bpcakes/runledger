@@ -1,5 +1,6 @@
 # Rust build output
 /target/
+smoke/external-consumer/target/
 /.rustc_info.json
 
 # Local environment and secrets

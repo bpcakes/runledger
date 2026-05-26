@@ -9,7 +9,7 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::config::JobsConfig;
-use crate::{Result, SchedulerError};
+use crate::{Result, RuntimeLoopExit, SchedulerError};
 
 const FAILED_SCHEDULE_RETRY_DELAY_SECONDS: i64 = 30;
 const CREATE_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL: &str = "SAVEPOINT materialize_due_schedule";
@@ -22,10 +22,10 @@ pub async fn run_scheduler_loop(
     pool: runledger_postgres::DbPool,
     config: JobsConfig,
     mut shutdown: watch::Receiver<bool>,
-) {
+) -> RuntimeLoopExit {
     loop {
         if shutdown_requested_or_closed(&shutdown) {
-            break;
+            return scheduler_shutdown_complete();
         }
 
         if let Err(error) = materialize_due_schedules(&pool, config.claim_batch_size).await {
@@ -33,11 +33,14 @@ pub async fn run_scheduler_loop(
         }
 
         if wait_for_shutdown_or_poll(&mut shutdown, config.schedule_poll_interval).await {
-            break;
+            return scheduler_shutdown_complete();
         }
     }
+}
 
+fn scheduler_shutdown_complete() -> RuntimeLoopExit {
     info!("scheduler shutdown complete");
+    RuntimeLoopExit::Shutdown
 }
 
 fn shutdown_requested_or_closed(shutdown: &watch::Receiver<bool>) -> bool {

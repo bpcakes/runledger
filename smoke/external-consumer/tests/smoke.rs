@@ -12,17 +12,15 @@ use runledger_postgres::jobs::{
     self, JobDefinitionUpsert, JobEnqueue, JobListFilter, JobQueueRecord, get_job_by_id,
     upsert_job_definition_tx,
 };
+use runledger_runtime::Supervisor;
 use runledger_runtime::config::JobsConfig;
-use runledger_runtime::reaper::run_reaper_loop;
 use runledger_runtime::registry::{JobHandler, JobRegistry};
-use runledger_runtime::scheduler::run_scheduler_loop;
-use runledger_runtime::worker::run_worker_loop;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt, core::ContainerPort, runners::AsyncRunner,
 };
-use tokio::sync::{Mutex, Notify, watch};
+use tokio::sync::{Mutex, Notify};
 use tokio::time::{Instant, sleep, timeout};
 
 const SMOKE_JOB_TYPE: &str = "jobs.external.smoke";
@@ -45,9 +43,9 @@ async fn packaged_crates_support_external_consumer_embedding() {
     let execution_count = Arc::new(AtomicUsize::new(0));
 
     let handler = SmokeHandler {
-        execution_count: execution_count.clone(),
-        hang_release: hang_release.clone(),
-        dead_letters: dead_letters.clone(),
+        execution_count: Arc::clone(&execution_count),
+        hang_release: Arc::clone(&hang_release),
+        dead_letters: Arc::clone(&dead_letters),
     };
 
     let mut registry = JobRegistry::new();
@@ -80,23 +78,17 @@ async fn packaged_crates_support_external_consumer_embedding() {
         reaper_retry_delay_ms: 1_000,
     };
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let worker_task = tokio::spawn(run_worker_loop(
-        harness.pool.clone(),
-        registry.clone(),
-        config.clone(),
-        shutdown_rx.clone(),
-    ));
-    let scheduler_task = tokio::spawn(run_scheduler_loop(
-        harness.pool.clone(),
-        config.clone(),
-        shutdown_rx.clone(),
-    ));
-    let reaper_task = tokio::spawn(run_reaper_loop(
-        harness.pool.clone(),
-        registry.clone(),
-        config,
-        shutdown_rx,
+    let supervisor = Supervisor::builder(&harness.pool, config)
+        .expect("supervisor builder should find active Tokio runtime")
+        .with_registry(registry)
+        .build()
+        .expect("supervisor should build");
+    let (stop_supervisor_tx, stop_supervisor_rx) = tokio::sync::oneshot::channel();
+    let supervisor_task = tokio::spawn(supervisor.run_until_shutdown(
+        async move {
+            let _ = stop_supervisor_rx.await;
+        },
+        Duration::from_secs(10),
     ));
 
     let success_job_id = enqueue_kind(&harness.pool, "success").await;
@@ -141,20 +133,12 @@ async fn packaged_crates_support_external_consumer_embedding() {
     );
 
     hang_release.notify_waiters();
-    let _ = shutdown_tx.send(true);
-
-    timeout(Duration::from_secs(3), worker_task)
+    let _ = stop_supervisor_tx.send(());
+    let shutdown_result = timeout(Duration::from_secs(12), supervisor_task)
         .await
-        .expect("worker should stop")
-        .expect("worker task should join cleanly");
-    timeout(Duration::from_secs(3), scheduler_task)
-        .await
-        .expect("scheduler should stop")
-        .expect("scheduler task should join cleanly");
-    timeout(Duration::from_secs(3), reaper_task)
-        .await
-        .expect("reaper should stop")
-        .expect("reaper task should join cleanly");
+        .expect("supervisor monitor task should stop before outer timeout")
+        .expect("supervisor monitor task should join");
+    shutdown_result.expect("supervisor tasks should stop and join cleanly");
 
     harness.teardown().await;
 }
@@ -211,6 +195,7 @@ struct PostgresHarness {
 
 impl PostgresHarness {
     async fn start() -> Self {
+        // Missing override intentionally falls back to the default smoke image.
         let image_ref = std::env::var("RUNLEDGER_TEST_PG_IMAGE")
             .unwrap_or_else(|_| DEFAULT_POSTGRES_IMAGE.into());
         let (repository, tag) = parse_image_ref(&image_ref);
@@ -294,6 +279,8 @@ async fn resolve_host_port(container: &ContainerAsync<GenericImage>, internal_po
 
 async fn wait_for_postgres(database_url: &str) {
     for attempt in 1..=MAX_POSTGRES_BOOTSTRAP_ATTEMPTS {
+        // Connection failures are expected while the container is still booting;
+        // retry until the bootstrap deadline before failing the smoke test.
         if let Ok(pool) = PgPoolOptions::new()
             .max_connections(1)
             .connect(database_url)
@@ -360,8 +347,9 @@ async fn insert_due_schedule(pool: &DbPool, kind: &str) -> Result<(), sqlx::Erro
     .bind("0 0 0 1 1 * *")
     .bind(Utc::now() - ChronoDuration::seconds(5))
     .execute(pool)
-    .await
-    .map(|_| ())
+    .await?;
+
+    Ok(())
 }
 
 async fn expire_job_lease(pool: &DbPool, job_id: sqlx::types::Uuid) -> Result<(), sqlx::Error> {
@@ -372,8 +360,9 @@ async fn expire_job_lease(pool: &DbPool, job_id: sqlx::types::Uuid) -> Result<()
     )
     .bind(job_id)
     .execute(pool)
-    .await
-    .map(|_| ())
+    .await?;
+
+    Ok(())
 }
 
 async fn wait_for_status(

@@ -1,13 +1,15 @@
 [package]
 name = "runledger-postgres"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 description = "PostgreSQL persistence layer for the Runledger durable job and workflow system"
 readme = "../README.md"
 repository = "https://github.com/featherenvy/runledger"
 homepage = "https://github.com/featherenvy/runledger"
 documentation = "https://docs.rs/runledger-postgres"
+exclude = ["AGENTS.md"]
 keywords = ["jobs", "workflows", "postgres", "queue"]
 categories = ["asynchronous", "database"]
 
@@ -16,6 +18,7 @@ test-support = []
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+cron = { workspace = true }
 runledger-core = { workspace = true, features = ["sqlx-postgres"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

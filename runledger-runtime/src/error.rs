@@ -116,13 +116,62 @@ pub enum ReaperError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    /// The supervisor builder requires a job registry when the worker or reaper
+    /// loop is enabled, but none was provided. Call
+    /// [`SupervisorBuilder::with_registry`] before [`SupervisorBuilder::build`].
+    ///
+    /// [`SupervisorBuilder::with_registry`]: crate::supervisor::SupervisorBuilder::with_registry
+    /// [`SupervisorBuilder::build`]: crate::supervisor::SupervisorBuilder::build
+    #[error(
+        "supervisor builder requires a job registry when worker or reaper loops are enabled \
+         (worker_enabled={worker_enabled}, reaper_enabled={reaper_enabled})"
+    )]
+    MissingRegistry {
+        worker_enabled: bool,
+        reaper_enabled: bool,
+    },
+    /// The supervisor builder must be called from within an active Tokio runtime
+    /// context. Ensure you are calling it inside a `#[tokio::main]`, `#[tokio::test]`,
+    /// or within a spawned task inside an existing runtime.
+    #[error("supervisor builder requires an active Tokio runtime")]
+    MissingTokioRuntime {
+        #[source]
+        source: tokio::runtime::TryCurrentError,
+    },
+    /// A supervised runtime task exited cleanly before shutdown was requested.
+    /// This is treated as an error because long-running loops should only exit
+    /// in response to a shutdown signal. Investigate logs for the specific task
+    /// that exited unexpectedly.
     #[error("jobs runtime task `{task}` exited unexpectedly before shutdown")]
     TaskExitedUnexpectedly { task: &'static str },
+    /// A supervised task panicked or failed to join cleanly. Examine logs and
+    /// process panic output for more details about the underlying task failure.
     #[error("failed joining jobs runtime task `{task}`")]
     TaskJoin {
         task: &'static str,
         #[source]
         source: tokio::task::JoinError,
+    },
+    /// The supervisor did not complete shutdown within the requested timeout.
+    /// Some tasks may not have received or responded to the shutdown signal.
+    /// Consider increasing the timeout or investigating why tasks are shutting
+    /// down slowly.
+    #[error("jobs runtime shutdown exceeded timeout {timeout:?}")]
+    ShutdownTimeout { timeout: std::time::Duration },
+    /// The requested shutdown timeout is too large to represent as a deadline.
+    /// Use a smaller timeout value.
+    #[error("jobs runtime shutdown timeout {timeout:?} is too large to represent")]
+    ShutdownTimeoutTooLarge { timeout: std::time::Duration },
+    /// A supervised task failed (panicked or exited unexpectedly) and the
+    /// remaining tasks could not be shut down within the timeout. The original
+    /// task failure is available through the source error.
+    #[error(
+        "jobs runtime shutdown exceeded timeout {timeout:?} while draining after earlier task failure"
+    )]
+    ShutdownTimeoutAfterTaskError {
+        timeout: std::time::Duration,
+        #[source]
+        source: Box<RuntimeError>,
     },
 }
 

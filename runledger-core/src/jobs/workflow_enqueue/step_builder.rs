@@ -12,7 +12,9 @@ use super::types::{
 /// Builder for [`WorkflowStepEnqueue`].
 ///
 /// Use this builder to configure optional per-step execution settings and
-/// dependencies.
+/// dependencies. Use [`Self::depends_on_success`] and
+/// [`Self::depends_on_terminal`] to model workflow DAG edges instead of
+/// manually polling jobs or enqueueing child jobs from handlers.
 ///
 /// Defaults:
 /// - `organization_id`: `None`
@@ -35,6 +37,9 @@ use super::types::{
 /// assert_eq!(step.stage(), Some(JobStage::Queued));
 /// assert_eq!(step.dependencies().len(), 2);
 /// ```
+#[doc(alias = "dag")]
+#[doc(alias = "dependency")]
+#[doc(alias = "dependencies")]
 #[derive(Debug, Clone)]
 pub struct WorkflowStepEnqueueBuilder<'a> {
     step_key: StepKey<'a>,

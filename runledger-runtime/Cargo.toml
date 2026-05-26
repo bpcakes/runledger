@@ -1,19 +1,21 @@
 [package]
 name = "runledger-runtime"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 description = "Async worker, scheduler, and reaper runtime for the Runledger job system"
 readme = "../README.md"
 repository = "https://github.com/featherenvy/runledger"
 homepage = "https://github.com/featherenvy/runledger"
 documentation = "https://docs.rs/runledger-runtime"
+exclude = ["AGENTS.md"]
 keywords = ["jobs", "workflows", "postgres", "queue"]
 categories = ["asynchronous", "database"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-cron = "0.16"
+cron = { workspace = true }
 futures-util = "0.3"
 runledger-core = { workspace = true }
 runledger-postgres = { workspace = true }
@@ -28,3 +30,4 @@ uuid = { version = "1", features = ["v7", "serde"] }
 async-trait = "0.1"
 runledger-postgres = { workspace = true, features = ["test-support"] }
 testcontainers = { version = "0.27", features = ["watchdog"] }
+tracing-subscriber = "0.3"
