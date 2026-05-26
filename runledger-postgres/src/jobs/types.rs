@@ -90,6 +90,34 @@ pub struct JobScheduleRecord {
     pub next_fire_at: DateTime<Utc>,
 }
 
+/// Input for creating or updating a cron-backed job schedule.
+///
+/// Schedules are keyed by `name`. Updating an existing schedule refreshes the
+/// stored job type, payload template, cron expression, and jitter, while leaving
+/// scheduler-managed state intact. `organization_id` and `is_active` apply only
+/// when a new schedule row is inserted. `next_fire_at` applies on insert and
+/// when the cron expression changes.
+#[derive(Debug, Clone)]
+pub struct JobScheduleUpsert<'a> {
+    /// Stable unique schedule name without surrounding whitespace.
+    pub name: &'a str,
+    /// Job type to enqueue whenever the schedule fires.
+    pub job_type: JobType<'a>,
+    /// Optional organization scope for enqueued jobs on first insert.
+    pub organization_id: Option<Uuid>,
+    /// JSON payload copied into each job created by the scheduler.
+    pub payload_template: &'a Value,
+    /// Cron expression without surrounding whitespace, validated on upsert and
+    /// parsed again when the schedule fires.
+    pub cron_expr: &'a str,
+    /// Whether the runtime scheduler should claim this schedule on first insert.
+    pub is_active: bool,
+    /// Initial fire cursor for the scheduler, also used when changing cron syntax.
+    pub next_fire_at: DateTime<Utc>,
+    /// Maximum random delay applied when materializing a due schedule, capped at 86400 seconds.
+    pub max_jitter_seconds: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct JobQueueRecord {
     pub id: Uuid,

@@ -21,11 +21,11 @@
 //!
 //! # Copy-Paste Examples
 //!
-//! - [Run a worker binary](https://github.com/featherenvy/runledger/blob/main/runledger-runtime/examples/worker_binary.rs)
-//! - [Enqueue one job](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/enqueue_job.rs)
-//! - [Enqueue a workflow DAG](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/workflow_dag.rs)
-//! - [Use an external workflow gate](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/external_gate.rs)
-//! - [Create a scheduled job entrypoint](https://github.com/featherenvy/runledger/blob/main/runledger-postgres/examples/schedule_job.rs)
+//! - [Run a worker binary](https://github.com/featherenvy/runledger/blob/master/runledger-runtime/examples/worker_binary.rs)
+//! - [Enqueue one job](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/enqueue_job.rs)
+//! - [Enqueue a workflow DAG](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/workflow_dag.rs)
+//! - [Use an external workflow gate](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/external_gate.rs)
+//! - [Create a scheduled job entrypoint](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/schedule_job.rs)
 //!
 //! # Prelude
 //!

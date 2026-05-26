@@ -26,9 +26,12 @@ can be imported together.
 | Multi-step work with dependencies | Workflow DAG APIs |
 | Fan-out, fan-in, or ordered stages | `depends_on_success` / `depends_on_terminal` |
 | Human/API approval or another external gate | External workflow steps |
-| Delayed or recurring entrypoint | Job schedules |
+| Delayed or recurring entrypoint | `upsert_job_schedule` with `JobScheduleUpsert` |
 | Worker process lifecycle | `Supervisor::run_until_shutdown` |
 | Admin/status views | `get_*` and `list_*` APIs in `runledger_postgres::jobs` |
+
+Use `set_job_schedule_active` to pause/resume schedules and
+`set_job_schedule_next_fire_at` to retime a schedule cursor.
 
 ## Workflow DAG Rule
 
