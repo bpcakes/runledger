@@ -1,0 +1,5 @@
+[toolchain]
+# Edition 2024 stabilized in Rust 1.85.
+channel = "1.85"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
