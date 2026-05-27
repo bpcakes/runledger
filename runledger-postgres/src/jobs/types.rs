@@ -80,18 +80,28 @@ pub struct JobEnqueue<'a> {
 
 #[derive(Debug, Clone)]
 pub struct JobScheduleRecord {
+    /// Stable schedule row identifier.
     pub id: Uuid,
+    /// Unique schedule name.
     pub name: String,
+    /// Job type enqueued whenever the schedule fires.
     pub job_type: JobTypeName,
+    /// Optional organization scope copied into jobs created by this schedule.
     pub organization_id: Option<Uuid>,
+    /// JSON payload template copied into each scheduled job before runtime
+    /// schedule metadata is merged.
     pub payload_template: Value,
+    /// UTC cron expression used by the runtime scheduler.
     pub cron_expr: String,
     /// Whether the runtime scheduler may claim this schedule.
     ///
     /// Schedule upserts preserve this value for existing rows; use
     /// `set_job_schedule_active` to pause or resume a schedule intentionally.
     pub is_active: bool,
+    /// Maximum deterministic jitter, in seconds, applied when computing the next
+    /// fire cursor.
     pub max_jitter_seconds: i32,
+    /// Next UTC instant at which this schedule is due for materialization.
     pub next_fire_at: DateTime<Utc>,
 }
 
@@ -102,6 +112,17 @@ pub struct JobScheduleRecord {
 /// scheduler-managed state intact. `organization_id` and `is_active` apply only
 /// when a new schedule row is inserted. `next_fire_at` applies on insert and
 /// when the cron expression changes.
+///
+/// Cron expressions are interpreted in UTC and must be accepted by
+/// `cron::Schedule::from_str`, the same parser used by `runledger-runtime` when
+/// materializing due schedules. The upsert validator rejects blank or padded
+/// schedule names, blank or padded cron expressions, invalid cron expressions,
+/// negative jitter, and jitter above 86,400 seconds.
+///
+/// This input does not encode a compile-time job catalog. The PostgreSQL schema
+/// requires a matching job-definition row for `job_type`, but this API does not
+/// prove that a worker process has registered a runtime handler for that job
+/// type.
 #[derive(Debug, Clone)]
 pub struct JobScheduleUpsert<'a> {
     /// Stable unique schedule name without surrounding whitespace.
@@ -112,14 +133,15 @@ pub struct JobScheduleUpsert<'a> {
     pub organization_id: Option<Uuid>,
     /// JSON payload copied into each job created by the scheduler.
     pub payload_template: &'a Value,
-    /// Cron expression without surrounding whitespace, validated on upsert and
-    /// parsed again when the schedule fires.
+    /// UTC cron expression without surrounding whitespace, validated on upsert
+    /// and parsed again when the schedule fires.
     pub cron_expr: &'a str,
     /// Whether the runtime scheduler should claim this schedule on first insert.
     pub is_active: bool,
     /// Initial fire cursor for the scheduler, also used when changing cron syntax.
     pub next_fire_at: DateTime<Utc>,
-    /// Maximum random delay applied when materializing a due schedule, capped at 86400 seconds.
+    /// Maximum deterministic jitter applied when materializing a due schedule,
+    /// capped at 86,400 seconds.
     pub max_jitter_seconds: i32,
 }
 

@@ -61,6 +61,13 @@ pub enum SchedulerError {
         schedule_id: uuid::Uuid,
         source: runledger_postgres::Error,
     },
+    /// A schedule row returned by the runtime claim query disappeared before the
+    /// scheduler could advance or defer its next fire cursor.
+    #[error("claimed schedule `{schedule_id}` was missing while {operation}")]
+    ClaimedScheduleMissing {
+        schedule_id: uuid::Uuid,
+        operation: &'static str,
+    },
 }
 
 #[derive(Debug, Error)]

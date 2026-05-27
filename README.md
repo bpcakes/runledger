@@ -317,6 +317,7 @@ Before publishing this release line, call out observable contract changes in rel
 - `runledger-runtime` adds `Supervisor`
 - low-level runtime loops now return `RuntimeLoopExit`
 - `runledger-postgres` adds `JobScheduleUpsert`, `upsert_job_schedule`, `set_job_schedule_active`, and `set_job_schedule_next_fire_at`; conflict updates refresh the schedule definition while preserving `is_active` and `organization_id`, refresh `next_fire_at` when cron syntax changes, and validate cron syntax plus name/jitter bounds
+- low-level `runledger-postgres::jobs::mark_schedule_fired_tx` now returns `Result<bool>` so runtime internals can distinguish a successful cursor advance from a missing schedule row
 - `JobScheduleRecord` exposes `is_active` so setup code can observe preserved pause/resume state after schedule upserts
 - schedules are UTC-only; schedule upserts store `timezone = 'UTC'`, and accepted cron expressions use the same parser as `runledger-runtime`
 - `QueryError::Display` now returns client-safe messages
