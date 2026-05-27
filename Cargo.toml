@@ -6,6 +6,7 @@ members = [
     "runledger-postgres",
     "runledger-runtime",
     "runledger-test-support",
+    "runledger-tui",
 ]
 
 exclude = [
