@@ -124,10 +124,11 @@ Operational API notes:
 Use `runledger-runtime` to run the operational loops around the storage layer:
 
 - `Supervisor`
-- `registry::JobRegistry`
+- `catalog::JobCatalog` for single-source handler registration, definition sync, and validated enqueue helpers
+- `registry::JobRegistry` for advanced setups that manage handlers separately from definitions
 - `config::JobsConfig`
 
-The runtime is generic. It does not know about your application-specific job catalog beyond the handlers you register. `Supervisor` is the preferred facade for worker processes; `worker::run_worker_loop`, `scheduler::run_scheduler_loop`, and `reaper::run_reaper_loop` remain available as low-level building blocks for custom orchestration. Those low-level loops return `RuntimeLoopExit`; custom orchestrators that type their join handles explicitly should use `JoinHandle<RuntimeLoopExit>`.
+The runtime is generic. It does not embed application-specific job lists; applications build their own [`JobCatalog`](runledger-runtime/src/catalog/mod.rs) at startup. `Supervisor` is the preferred facade for worker processes; `worker::run_worker_loop`, `scheduler::run_scheduler_loop`, and `reaper::run_reaper_loop` remain available as low-level building blocks for custom orchestration. Those low-level loops return `RuntimeLoopExit`; custom orchestrators that type their join handles explicitly should use `JoinHandle<RuntimeLoopExit>`.
 
 ### `runledger-test-support`
 
@@ -394,7 +395,7 @@ A host application will generally:
 
 1. either call `runledger_postgres::migrate_after_idempotency_cutover(&pool)` or apply the Runledger migrations with your own deployment tooling and then call `runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool)`
 2. create a shared `sqlx::PgPool`
-3. register concrete handlers in `runledger_runtime::registry::JobRegistry`
+3. register concrete handlers in a `runledger_runtime::catalog::JobCatalog` (or directly in `runledger_runtime::registry::JobRegistry` for advanced setups)
 4. start `runledger_runtime::Supervisor` in a worker process
 5. call `runledger_postgres::jobs::*` APIs from its own admin/API surfaces
 
@@ -404,18 +405,20 @@ At a high level:
 use std::time::Duration;
 
 use runledger_runtime::Supervisor;
+use runledger_runtime::catalog::JobCatalog;
 use runledger_runtime::config::JobsConfig;
-use runledger_runtime::registry::JobRegistry;
 
 let pool = /* sqlx PgPool */;
 runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
 
-let mut registry = JobRegistry::new();
-// registry.register(MyHandler);
+let catalog = JobCatalog::new()
+    .job("jobs.example", MyHandler);
+
+catalog.sync_definitions(&pool).await?;
 
 let config = JobsConfig::from_env();
 let supervisor = Supervisor::builder(&pool, config)?
-    .with_registry(registry)
+    .with_catalog(&catalog)
     .build()?;
 supervisor
     .run_until_shutdown(
@@ -505,8 +508,9 @@ use std::time::Duration;
 use runledger_core::jobs::{JobContext, JobFailure, JobType};
 use runledger_core::prelude::async_trait;
 use runledger_runtime::Supervisor;
+use runledger_runtime::catalog::JobCatalog;
 use runledger_runtime::config::JobsConfig;
-use runledger_runtime::registry::{JobHandler, JobRegistry};
+use runledger_runtime::registry::JobHandler;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 
@@ -530,11 +534,11 @@ async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
 
     runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
 
-    let mut registry = JobRegistry::new();
-    registry.register(SendEmail);
+    let catalog = JobCatalog::new().job("jobs.email.send", SendEmail);
+    catalog.sync_definitions(&pool).await?;
 
     let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
-        .with_registry(registry)
+        .with_catalog(&catalog)
         .build()?;
     let shutdown_result = supervisor
         .run_until_shutdown(
@@ -565,6 +569,44 @@ handler drain time, worker pool concurrency, and database capacity. A useful
 starting point is your per-handler high-percentile latency under
 `JobsConfig::max_global_concurrency`. The worker example stores the shutdown
 result before closing the pool so cleanup still runs when shutdown reports an error.
+
+For schedules and workflows, build persistence inputs from the same catalog so
+job types stay aligned with synced `job_definitions` and registered handlers:
+
+```rust
+use runledger_runtime::catalog::{CatalogJobScheduleInput, JobCatalog};
+
+let payload = serde_json::json!({});
+let schedule = catalog.job_schedule(&CatalogJobScheduleInput {
+    name: "profiles.refresh.hourly",
+    job_type: "profiles.refresh",
+    organization_id: None,
+    payload_template: &payload,
+    cron_expr: "0 0 * * * *",
+    is_active: true,
+    next_fire_at: chrono::Utc::now(),
+    max_jitter_seconds: 0,
+})?;
+runledger_postgres::jobs::upsert_job_schedule(&pool, &schedule).await?;
+```
+
+Catalog sync owns the definition fields it writes: `version`, retry limits,
+timeout, and priority are restored to catalog defaults on each startup sync.
+Enabled catalog sync preserves an existing disabled row so operator pauses
+survive worker restarts; a catalog with `enabled(false)` explicitly disables its
+registered definitions. `sync_definitions` is additive: removed catalog entries
+are not deleted or disabled. Use `sync_definitions_exact` with a
+`JobCatalogSyncScope` when deployment startup should also disable enabled
+`job_definitions` rows that are absent from the catalog but inside an explicit
+owned job-type set. Exact sync returns the disabled job types and refuses to
+disable definitions while active schedules still reference them. Unlike additive
+sync, exact sync restores catalog entries' enabled state from catalog defaults.
+Catalog helper builders validate catalog membership and catalog defaults only;
+operator-disabled database rows are enforced later by persistence APIs such as
+job enqueue, schedule materialization, and workflow enqueue.
+
+Lower-level `JobEnqueue`, `JobScheduleUpsert`, `WorkflowDagBuilder`, and
+`WorkflowStepEnqueueBuilder` APIs remain available when you do not use a catalog.
 
 Additional compile-checked integration examples:
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT job_type, default_priority, max_attempts, default_timeout_seconds\n         FROM job_definitions\n         WHERE is_enabled = true\n           AND job_type = ANY($1::text[])",
+  "query": "SELECT job_type, default_priority, max_attempts, default_timeout_seconds\n         FROM job_definitions jd\n         WHERE is_enabled = true\n           AND job_type = ANY($1::text[])\n         FOR SHARE OF jd",
   "describe": {
     "columns": [
       {
@@ -36,5 +36,5 @@
       false
     ]
   },
-  "hash": "e86b66524c9a516ab5e0d3511848d2e4641654248872287f710bcd6901625f75"
+  "hash": "5a063a6481b8fa739281e4d0ddb19a35cf5422eef44d8a178538fbb80d579b06"
 }

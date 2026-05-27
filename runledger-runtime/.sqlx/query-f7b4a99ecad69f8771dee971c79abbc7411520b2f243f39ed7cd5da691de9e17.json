@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT catalog.job_type as \"job_type!\"\n         FROM unnest($1::text[]) AS catalog(job_type)\n         LEFT JOIN job_definitions\n            ON job_definitions.job_type = catalog.job_type\n         WHERE job_definitions.job_type IS NULL\n            OR job_definitions.is_enabled = true",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f7b4a99ecad69f8771dee971c79abbc7411520b2f243f39ed7cd5da691de9e17"
+}

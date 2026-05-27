@@ -93,6 +93,7 @@ pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Resu
             FROM job_definitions jd
             WHERE jd.job_type = $1
               AND jd.is_enabled = true
+            FOR SHARE OF jd
          )
          INSERT INTO job_queue (
             job_type,

@@ -123,6 +123,16 @@ pub enum ReaperError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    /// The supervisor builder received both direct registry and catalog
+    /// registration sources. Choose either [`SupervisorBuilder::with_registry`]
+    /// or [`SupervisorBuilder::with_catalog`] for a single builder.
+    ///
+    /// [`SupervisorBuilder::with_catalog`]: crate::supervisor::SupervisorBuilder::with_catalog
+    /// [`SupervisorBuilder::with_registry`]: crate::supervisor::SupervisorBuilder::with_registry
+    #[error(
+        "supervisor builder received both a job registry and a job catalog; choose one registration source"
+    )]
+    MixedRegistrySources,
     /// The supervisor builder requires a job registry when the worker or reaper
     /// loop is enabled, but none was provided. Call
     /// [`SupervisorBuilder::with_registry`] before [`SupervisorBuilder::build`].
