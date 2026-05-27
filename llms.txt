@@ -23,8 +23,8 @@ can be imported together.
 | Need | Use |
 | --- | --- |
 | One independent retried unit of work | `enqueue_job` with `JobEnqueue` |
-| Multi-step work with dependencies | Workflow DAG APIs |
-| Fan-out, fan-in, or ordered stages | `depends_on_success` / `depends_on_terminal` |
+| Multi-step work with dependencies | `WorkflowDagBuilder` (simple) or workflow run/step builders (advanced) |
+| Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal` |
 | Human/API approval or another external gate | External workflow steps |
 | Delayed or recurring entrypoint | `upsert_job_schedule` with `JobScheduleUpsert` |
 | Worker process lifecycle | `Supervisor::run_until_shutdown` |
@@ -38,27 +38,26 @@ Use `set_job_schedule_active` to pause/resume schedules and
 If work has step dependencies, build a workflow DAG:
 
 ```rust
-let step_a = WorkflowStepEnqueueBuilder::new(
-    StepKey::new("a"),
-    JobType::new("jobs.a"),
-    &payload_a,
-)
-.try_build()?;
-
-let step_b = WorkflowStepEnqueueBuilder::new(
-    StepKey::new("b"),
-    JobType::new("jobs.b"),
-    &payload_b,
-)
-.depends_on_success(&[StepKey::new("a")])
-.try_build()?;
-
-let run = WorkflowRunEnqueueBuilder::new(WorkflowType::new("workflow.example"), &metadata)
-    .extend_steps([step_a, step_b])
-    .try_build()?;
+let run = WorkflowDagBuilder::new("workflow.example", &metadata)
+    .job("a", "jobs.a", &payload_a)?
+    .job("b", "jobs.b", &payload_b)?
+    .after_success("b", ["a"])?
+    .build()?;
 
 enqueue_workflow_run(&pool, &run).await?;
 ```
+
+Use `WorkflowRunEnqueueBuilder` and `WorkflowStepEnqueueBuilder` for advanced per-step
+settings, external steps, or hand-authored dependency specs.
+
+`WorkflowDagBuilder` validates workflow shape, not job registration. `.job(...)`
+fails immediately for blank step keys, blank job types, and duplicate step keys.
+`.after_success(...)` / `.after_terminal(...)` fail immediately for blank
+identifiers or an unknown target step. Missing prerequisites, self-dependencies,
+duplicate dependencies, cycles, empty step lists, blank workflow types from
+`new(...)`, and blank idempotency keys fail at `.build()` / `.try_build()`.
+Use lower-level builders when call sites should pass explicit `StepKey` and
+`JobType` values.
 
 Do not manually orchestrate ordinary workflows by polling job status, enqueueing
 dependent jobs from parent handlers, encoding dependency state in payload JSON,

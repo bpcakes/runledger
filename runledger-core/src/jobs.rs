@@ -17,9 +17,9 @@ pub use status::{
     JobEventType, JobFailureKind, JobStage, JobStatus, WorkflowRunStatus, WorkflowStepStatus,
 };
 pub use workflow_enqueue::{
-    WorkflowBuildError, WorkflowDagDependencyValidationInput, WorkflowDagStepValidationInput,
-    WorkflowDagValidationError, WorkflowDependencyReleaseMode, WorkflowRunEnqueue,
-    WorkflowRunEnqueueBuilder, WorkflowStepDependencySpec, WorkflowStepEnqueue,
+    WorkflowBuildError, WorkflowDagBuilder, WorkflowDagDependencyValidationInput,
+    WorkflowDagStepValidationInput, WorkflowDagValidationError, WorkflowDependencyReleaseMode,
+    WorkflowRunEnqueue, WorkflowRunEnqueueBuilder, WorkflowStepDependencySpec, WorkflowStepEnqueue,
     WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind, validate_workflow_dag,
     validate_workflow_run_enqueue, validate_workflow_step_append,
 };

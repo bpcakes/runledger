@@ -148,25 +148,12 @@
 //! let classify_payload = serde_json::json!({"profile_id": "p_123"});
 //! let metadata = serde_json::json!({"source": "api"});
 //!
-//! let crawl = WorkflowStepEnqueueBuilder::new(
-//!     StepKey::new("crawl"),
-//!     JobType::new("profiles.crawl"),
-//!     &crawl_payload,
-//! )
-//! .try_build()?;
-//!
-//! let classify = WorkflowStepEnqueueBuilder::new(
-//!     StepKey::new("classify"),
-//!     JobType::new("profiles.classify"),
-//!     &classify_payload,
-//! )
-//! .depends_on_success(&[StepKey::new("crawl")])
-//! .try_build()?;
-//!
-//! let run = WorkflowRunEnqueueBuilder::new(WorkflowType::new("profiles.research"), &metadata)
+//! let run = WorkflowDagBuilder::new("profiles.research", &metadata)
 //!     .idempotency_key("profile:p_123:research")
-//!     .extend_steps([crawl, classify])
-//!     .try_build()?;
+//!     .job("crawl", "profiles.crawl", &crawl_payload)?
+//!     .job("classify", "profiles.classify", &classify_payload)?
+//!     .after_success("classify", ["crawl"])?
+//!     .build()?;
 //!
 //! let _workflow_run = enqueue_workflow_run(&pool, &run).await?;
 //! # Ok(())

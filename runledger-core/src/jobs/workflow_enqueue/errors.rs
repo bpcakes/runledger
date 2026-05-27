@@ -4,47 +4,83 @@ use super::dag_validation::WorkflowDagValidationError;
 
 /// Error returned when building workflow enqueue payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WorkflowBuildError {
+    /// The workflow type was blank.
     BlankWorkflowType,
+    /// The workflow did not include any steps.
     EmptySteps,
+    /// A step key was blank.
     BlankStepKey {
+        /// The step index when the blank key came from a step list.
         step_index: Option<usize>,
     },
+    /// A job step had a blank job type.
     BlankStepJobType {
+        /// The step whose job type was blank.
         step_key: String,
     },
+    /// The workflow idempotency key was blank.
     BlankIdempotencyKey,
+    /// A step max-attempts override was zero or negative.
     NonPositiveStepMaxAttempts {
+        /// The step with the invalid max-attempts override.
         step_key: String,
+        /// The invalid max-attempts value.
         max_attempts: i32,
     },
+    /// A step timeout override was zero or negative.
     NonPositiveStepTimeoutSeconds {
+        /// The step with the invalid timeout override.
         step_key: String,
+        /// The invalid timeout value in seconds.
         timeout_seconds: i32,
     },
+    /// An external step incorrectly supplied a job type.
     ExternalStepJobTypeNotAllowed {
+        /// The external step with a job type.
         step_key: String,
     },
+    /// An external step incorrectly supplied queue execution settings.
     ExternalStepQueueSettingsNotAllowed {
+        /// The external step with queue settings.
         step_key: String,
     },
+    /// A dependency prerequisite step key was blank.
     BlankDependencyStepKey {
+        /// The step that owns the blank dependency.
         step_key: String,
     },
+    /// The workflow declared the same step key more than once.
     DuplicateStepKey {
+        /// The duplicate step key.
         step_key: String,
     },
+    /// Dependencies were attached to a step that has not been added to the builder.
+    UnknownStepKey {
+        /// The missing target step key.
+        step_key: String,
+    },
+    /// A dependency references a prerequisite step that does not exist in the workflow.
     MissingDependency {
+        /// The step that owns the dependency.
         step_key: String,
+        /// The missing prerequisite step key.
         prerequisite_step_key: String,
     },
+    /// A step declares the same prerequisite more than once.
     DuplicateDependency {
+        /// The step that owns the duplicate dependency.
         step_key: String,
+        /// The duplicated prerequisite step key.
         prerequisite_step_key: String,
     },
+    /// A step depends on itself.
     SelfDependency {
+        /// The self-dependent step key.
         step_key: String,
     },
+    /// The workflow dependency graph contains a cycle.
     CycleDetected,
 }
 
@@ -157,6 +193,12 @@ impl fmt::Display for WorkflowBuildError {
             }
             Self::DuplicateStepKey { step_key } => {
                 write!(f, "duplicate step key '{step_key}'")
+            }
+            Self::UnknownStepKey { step_key } => {
+                write!(
+                    f,
+                    "step '{step_key}' must be added before dependencies can be attached"
+                )
             }
             Self::MissingDependency {
                 step_key,

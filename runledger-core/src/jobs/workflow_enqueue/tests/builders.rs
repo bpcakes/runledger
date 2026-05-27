@@ -1,8 +1,8 @@
 use uuid::Uuid;
 
 use super::super::{
-    WorkflowBuildError, WorkflowDependencyReleaseMode, WorkflowRunEnqueueBuilder,
-    WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind,
+    WorkflowBuildError, WorkflowDagBuilder, WorkflowDependencyReleaseMode,
+    WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind,
 };
 use crate::jobs::{JobType, StepKey, WorkflowType};
 
@@ -399,4 +399,313 @@ fn workflow_run_enqueue_builder_extend_steps_appends_steps() {
     assert_eq!(enqueue.steps()[0].step_key(), StepKey::new("step.a"));
     assert_eq!(enqueue.steps()[1].step_key(), StepKey::new("step.b"));
     assert_eq!(enqueue.steps()[2].step_key(), StepKey::new("step.c"));
+}
+
+#[test]
+fn workflow_dag_builder_try_new_rejects_blank_workflow_type() {
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::try_new("   ", &metadata)
+        .expect_err("blank workflow type should be rejected");
+
+    assert_eq!(error, WorkflowBuildError::BlankWorkflowType);
+}
+
+#[test]
+fn workflow_dag_builder_job_rejects_blank_step_key() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("   ", "jobs.test.a", &payload)
+        .expect_err("blank step key should be rejected");
+
+    assert_eq!(error, WorkflowBuildError::BlankStepKey { step_index: None });
+}
+
+#[test]
+fn workflow_dag_builder_job_rejects_blank_job_type() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("step.a", "   ", &payload)
+        .expect_err("blank job type should be rejected");
+
+    assert_eq!(
+        error,
+        WorkflowBuildError::BlankStepJobType {
+            step_key: "step.a".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_dag_builder_try_build_rejects_empty_steps() {
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .try_build()
+        .expect_err("empty workflow should be rejected at build");
+
+    assert_eq!(error, WorkflowBuildError::EmptySteps);
+}
+
+#[test]
+fn workflow_dag_builder_try_build_rejects_blank_workflow_type_from_new() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("   ", &metadata)
+        .job("step.a", "jobs.test.a", &payload)
+        .expect("step.a should be added")
+        .try_build()
+        .expect_err("blank workflow type should be rejected at build");
+
+    assert_eq!(error, WorkflowBuildError::BlankWorkflowType);
+}
+
+#[test]
+fn workflow_dag_builder_try_build_rejects_blank_idempotency_key() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .idempotency_key("   ")
+        .job("step.a", "jobs.test.a", &payload)
+        .expect("step.a should be added")
+        .try_build()
+        .expect_err("blank idempotency key should be rejected at build");
+
+    assert_eq!(error, WorkflowBuildError::BlankIdempotencyKey);
+}
+
+#[test]
+fn workflow_dag_builder_try_build_rejects_self_dependency() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("step.a", "jobs.test.a", &payload)
+        .expect("step.a should be added")
+        .after_success("step.a", ["step.a"])
+        .expect("self dependency should attach before build validation")
+        .try_build()
+        .expect_err("self dependency should be rejected at build");
+
+    assert_eq!(
+        error,
+        WorkflowBuildError::SelfDependency {
+            step_key: "step.a".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_dag_builder_try_build_rejects_duplicate_dependency() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("step.a", "jobs.test.a", &payload)
+        .expect("step.a should be added")
+        .job("step.b", "jobs.test.b", &payload)
+        .expect("step.b should be added")
+        .after_success("step.b", ["step.a", "step.a"])
+        .expect("duplicate dependency should attach before build validation")
+        .try_build()
+        .expect_err("duplicate dependency should be rejected at build");
+
+    assert_eq!(
+        error,
+        WorkflowBuildError::DuplicateDependency {
+            step_key: "step.b".to_owned(),
+            prerequisite_step_key: "step.a".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_dag_builder_builds_success_dependency() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let run = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("crawl", "jobs.test.crawl", &payload)
+        .expect("crawl step should be added")
+        .job("classify", "jobs.test.classify", &payload)
+        .expect("classify step should be added")
+        .after_success("classify", ["crawl"])
+        .expect("success dependency should attach")
+        .try_build()
+        .expect("workflow payload should be valid");
+
+    assert_eq!(run.workflow_type(), WorkflowType::new("workflow.test"));
+    assert_eq!(run.steps().len(), 2);
+    assert_eq!(run.steps()[1].step_key(), StepKey::new("classify"));
+    assert_eq!(run.steps()[1].dependencies().len(), 1);
+    assert_eq!(
+        run.steps()[1].dependencies()[0].release_mode,
+        Some(WorkflowDependencyReleaseMode::OnSuccess)
+    );
+    assert_eq!(
+        run.steps()[1].dependencies()[0].prerequisite_step_key,
+        StepKey::new("crawl")
+    );
+}
+
+#[test]
+fn workflow_dag_builder_builds_terminal_dependency() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let run = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("step.a", "jobs.test.a", &payload)
+        .expect("step.a should be added")
+        .job("step.b", "jobs.test.b", &payload)
+        .expect("step.b should be added")
+        .after_terminal("step.b", ["step.a"])
+        .expect("terminal dependency should attach")
+        .try_build()
+        .expect("workflow payload should be valid");
+
+    assert_eq!(
+        run.steps()[1].dependencies()[0].release_mode,
+        Some(WorkflowDependencyReleaseMode::OnTerminal)
+    );
+}
+
+#[test]
+fn workflow_dag_builder_preserves_scope_and_idempotency() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+    let organization_id = Uuid::now_v7();
+
+    let run = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .organization_id(organization_id)
+        .idempotency_key("idempotency-key")
+        .job("step.a", "jobs.test.a", &payload)
+        .expect("step.a should be added")
+        .try_build()
+        .expect("workflow payload should be valid");
+
+    assert_eq!(run.organization_id(), Some(organization_id));
+    assert_eq!(run.idempotency_key(), Some("idempotency-key"));
+}
+
+#[test]
+fn workflow_dag_builder_rejects_duplicate_step_keys() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("step.a", "jobs.test.a", &payload)
+        .expect("first step.a should be added")
+        .job("step.a", "jobs.test.b", &payload)
+        .expect_err("duplicate step key should be rejected");
+
+    assert_eq!(
+        error,
+        WorkflowBuildError::DuplicateStepKey {
+            step_key: "step.a".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_dag_builder_rejects_unknown_dependency_target() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("crawl", "jobs.test.crawl", &payload)
+        .expect("crawl step should be added")
+        .after_success("classify", ["crawl"])
+        .expect_err("unknown target step should be rejected");
+
+    assert_eq!(
+        error,
+        WorkflowBuildError::UnknownStepKey {
+            step_key: "classify".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_dag_builder_rejects_blank_target_step_key() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("crawl", "jobs.test.crawl", &payload)
+        .expect("crawl step should be added")
+        .after_success("   ", ["crawl"])
+        .expect_err("blank target step key should be rejected");
+
+    assert_eq!(error, WorkflowBuildError::BlankStepKey { step_index: None });
+}
+
+#[test]
+fn workflow_dag_builder_rejects_blank_prerequisite_step_key() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("classify", "jobs.test.classify", &payload)
+        .expect("classify step should be added")
+        .after_success("classify", ["   "])
+        .expect_err("blank prerequisite step key should be rejected");
+
+    assert_eq!(
+        error,
+        WorkflowBuildError::BlankDependencyStepKey {
+            step_key: "classify".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_dag_builder_rejects_missing_prerequisite_on_build() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("step.b", "jobs.test.b", &payload)
+        .expect("step.b should be added")
+        .after_success("step.b", ["missing"])
+        .expect("dependency edge should attach")
+        .try_build()
+        .expect_err("missing prerequisite should be rejected at build");
+
+    assert_eq!(
+        error,
+        WorkflowBuildError::MissingDependency {
+            step_key: "step.b".to_owned(),
+            prerequisite_step_key: "missing".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_dag_builder_detects_cycles_on_build() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "dag-builder-test"});
+
+    let error = WorkflowDagBuilder::new("workflow.test", &metadata)
+        .job("a", "jobs.test.a", &payload)
+        .expect("step a should be added")
+        .job("b", "jobs.test.b", &payload)
+        .expect("step b should be added")
+        .job("c", "jobs.test.c", &payload)
+        .expect("step c should be added")
+        .after_success("a", ["c"])
+        .expect("a -> c dependency should attach")
+        .after_success("b", ["a"])
+        .expect("b -> a dependency should attach")
+        .after_success("c", ["b"])
+        .expect("c -> b dependency should attach")
+        .try_build()
+        .expect_err("cycle should be rejected at build");
+
+    assert_eq!(error, WorkflowBuildError::CycleDetected);
 }

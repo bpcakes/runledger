@@ -6,7 +6,8 @@
 //! - [`jobs::JobContext`], [`jobs::JobProgress`], and [`jobs::JobFailure`] for
 //!   execution-time state
 //! - workflow enqueue builders and validation helpers such as
-//!   [`jobs::WorkflowRunEnqueueBuilder`] and [`jobs::validate_workflow_run_enqueue`]
+//!   [`jobs::WorkflowDagBuilder`], [`jobs::WorkflowRunEnqueueBuilder`], and
+//!   [`jobs::validate_workflow_run_enqueue`]
 //!
 //! Use workflow builders when work has dependencies, fan-out/fan-in, external
 //! gates, or workflow-level idempotency. A single direct job is appropriate only
@@ -61,28 +62,15 @@
 //! ```rust
 //! use runledger_core::prelude::*;
 //!
-//! let first_payload = serde_json::json!({"profile_id": "p_123"});
-//! let second_payload = serde_json::json!({"profile_id": "p_123"});
+//! let crawl_payload = serde_json::json!({"profile_id": "p_123"});
+//! let classify_payload = serde_json::json!({"profile_id": "p_123"});
 //! let metadata = serde_json::json!({"source": "api"});
 //!
-//! let crawl = WorkflowStepEnqueueBuilder::new(
-//!     StepKey::new("crawl"),
-//!     JobType::new("profiles.crawl"),
-//!     &first_payload,
-//! )
-//! .try_build()?;
-//!
-//! let classify = WorkflowStepEnqueueBuilder::new(
-//!     StepKey::new("classify"),
-//!     JobType::new("profiles.classify"),
-//!     &second_payload,
-//! )
-//! .depends_on_success(&[StepKey::new("crawl")])
-//! .try_build()?;
-//!
-//! let run = WorkflowRunEnqueueBuilder::new(WorkflowType::new("profiles.research"), &metadata)
-//!     .extend_steps([crawl, classify])
-//!     .try_build()?;
+//! let run = WorkflowDagBuilder::new("profiles.research", &metadata)
+//!     .job("crawl", "profiles.crawl", &crawl_payload)?
+//!     .job("classify", "profiles.classify", &classify_payload)?
+//!     .after_success("classify", ["crawl"])?
+//!     .build()?;
 //! # Ok::<_, WorkflowBuildError>(())
 //! ```
 
@@ -100,7 +88,7 @@ pub mod prelude {
         IdentifierValidationError, JobContext, JobDeadLetterInfo, JobDeadLetterReason,
         JobEventType, JobFailure, JobFailureKind, JobHandler, JobHandlerRegistry, JobProgress,
         JobStage, JobStatus, JobType, JobTypeName, StepKey, StepKeyName, WorkflowBuildError,
-        WorkflowDagDependencyValidationInput, WorkflowDagStepValidationInput,
+        WorkflowDagBuilder, WorkflowDagDependencyValidationInput, WorkflowDagStepValidationInput,
         WorkflowDagValidationError, WorkflowDependencyReleaseMode, WorkflowRunEnqueue,
         WorkflowRunEnqueueBuilder, WorkflowRunStatus, WorkflowStepDependencySpec,
         WorkflowStepEnqueue, WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind,
