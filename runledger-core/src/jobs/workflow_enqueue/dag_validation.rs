@@ -2,70 +2,128 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::super::identifiers::{JobType, StepKey, WorkflowType};
 use super::super::status::JobStage;
+use super::build_validation::{WorkflowStepBuildValidationError, validate_step_enqueue};
 use super::types::{WorkflowRunEnqueue, WorkflowStepExecutionKind};
 
+/// Dependency input used by [`validate_workflow_dag`].
 #[derive(Debug, Clone, Copy)]
 pub struct WorkflowDagDependencyValidationInput<'a> {
+    /// The prerequisite step that must release before the dependent step can run.
     pub prerequisite_step_key: StepKey<'a>,
 }
 
+/// Step input used by [`validate_workflow_dag`].
+///
+/// This DTO lets callers validate a workflow DAG without first constructing a
+/// full [`WorkflowRunEnqueue`].
 #[derive(Debug, Clone)]
 pub struct WorkflowDagStepValidationInput<'a> {
+    /// Unique key for this step within the workflow.
     pub step_key: StepKey<'a>,
+    /// Whether this step is a queued job or an external gate.
     pub execution_kind: WorkflowStepExecutionKind,
+    /// Job type for queued job steps.
+    ///
+    /// External steps must leave this as `None`.
     pub job_type: Option<JobType<'a>>,
+    /// Optional queue priority override for queued job steps.
     pub priority: Option<i32>,
+    /// Optional max-attempts override for queued job steps.
     pub max_attempts: Option<i32>,
+    /// Optional timeout override, in seconds, for queued job steps.
     pub timeout_seconds: Option<i32>,
+    /// Initial job stage for queued job steps.
     pub stage: Option<JobStage>,
+    /// Dependencies declared by this step.
     pub dependencies: Vec<WorkflowDagDependencyValidationInput<'a>>,
 }
 
+/// Error returned by workflow DAG validation helpers.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WorkflowDagValidationError {
+    /// The workflow did not include any steps.
     EmptySteps,
+    /// The workflow type was blank.
     BlankWorkflowType,
+    /// A step key was blank.
     BlankStepKey {
+        /// Index of the step with the blank key.
         step_index: usize,
     },
+    /// A job step had no usable job type.
     BlankStepJobType {
+        /// The step whose job type was blank or missing.
         step_key: String,
     },
+    /// The workflow idempotency key was blank.
     BlankIdempotencyKey,
+    /// A step max-attempts override was zero or negative.
     NonPositiveStepMaxAttempts {
+        /// The step with the invalid max-attempts override.
         step_key: String,
+        /// The invalid max-attempts value.
         max_attempts: i32,
     },
+    /// A step timeout override was zero or negative.
     NonPositiveStepTimeoutSeconds {
+        /// The step with the invalid timeout override.
         step_key: String,
+        /// The invalid timeout value in seconds.
         timeout_seconds: i32,
     },
+    /// An external step incorrectly supplied a job type.
     ExternalStepJobTypeNotAllowed {
+        /// The external step with a job type.
         step_key: String,
     },
+    /// An external step incorrectly supplied queue execution settings.
     ExternalStepQueueSettingsNotAllowed {
+        /// The external step with queue settings.
         step_key: String,
     },
+    /// A dependency prerequisite step key was blank.
     BlankDependencyStepKey {
+        /// The step that owns the blank dependency.
         step_key: String,
     },
+    /// The workflow declared the same step key more than once.
     DuplicateStepKey {
+        /// The duplicate step key.
         step_key: String,
     },
+    /// A dependency references a prerequisite step that does not exist in the workflow.
     MissingDependency {
+        /// The step that owns the dependency.
         step_key: String,
+        /// The missing prerequisite step key.
         prerequisite_step_key: String,
     },
+    /// A step depends on itself.
     SelfDependency {
+        /// The self-dependent step key.
         step_key: String,
     },
+    /// A step declares the same prerequisite more than once.
     DuplicateDependency {
+        /// The step that owns the duplicate dependency.
         step_key: String,
+        /// The duplicated prerequisite step key.
         prerequisite_step_key: String,
     },
+    /// The workflow dependency graph contains a cycle.
     CycleDetected,
 }
 
+/// Validates a workflow DAG from lightweight validation inputs.
+///
+/// This helper checks workflow shape only. It does not check whether job types
+/// have registered storage definitions or runtime handlers.
+///
+/// # Errors
+/// Returns [`WorkflowDagValidationError`] for blank identifiers, an empty step
+/// list, invalid external-step queue fields, duplicate steps, missing
+/// prerequisites, duplicate dependencies, self-dependencies, or cycles.
 pub fn validate_workflow_dag(
     workflow_type: WorkflowType<'_>,
     steps: &[WorkflowDagStepValidationInput<'_>],
@@ -204,6 +262,15 @@ pub fn validate_workflow_dag(
     Ok(())
 }
 
+/// Validates a complete workflow enqueue payload.
+///
+/// This adapts [`WorkflowRunEnqueue`] into [`WorkflowDagStepValidationInput`]
+/// and then applies [`validate_workflow_dag`]. It also validates the optional
+/// workflow idempotency key.
+///
+/// # Errors
+/// Returns [`WorkflowDagValidationError`] when the payload has a blank
+/// idempotency key or fails DAG validation.
 pub fn validate_workflow_run_enqueue(
     payload: &WorkflowRunEnqueue<'_>,
 ) -> Result<(), WorkflowDagValidationError> {
@@ -238,6 +305,16 @@ pub fn validate_workflow_run_enqueue(
     validate_workflow_dag(payload.workflow_type(), &steps)
 }
 
+/// Validates steps that are about to be appended to an existing workflow.
+///
+/// `existing_step_keys` should contain the step keys already persisted for the
+/// workflow. `new_steps` are checked for valid step enqueue fields, duplicate
+/// keys within the append batch, and collisions with existing keys.
+///
+/// # Errors
+/// Returns [`WorkflowDagValidationError`] when the append batch is empty, any new
+/// step is invalid, a new step key duplicates another new step, or a new step key
+/// already exists in the workflow.
 pub fn validate_workflow_step_append(
     existing_step_keys: &BTreeSet<super::super::identifiers::StepKeyName>,
     new_steps: &[super::types::WorkflowStepEnqueue<'_>],
@@ -248,73 +325,49 @@ pub fn validate_workflow_step_append(
 
     let mut new_step_key_to_index: BTreeMap<&str, usize> = BTreeMap::new();
     for (build_step_index, step) in new_steps.iter().enumerate() {
-        super::build_validation::validate_step_enqueue(step, Some(build_step_index)).map_err(
-            |error| match error {
-                super::errors::WorkflowBuildError::BlankWorkflowType => {
-                    WorkflowDagValidationError::BlankWorkflowType
+        validate_step_enqueue(step, Some(build_step_index)).map_err(|error| match error {
+            WorkflowStepBuildValidationError::BlankStepKey { step_index } => {
+                WorkflowDagValidationError::BlankStepKey {
+                    step_index: step_index.unwrap_or(build_step_index),
                 }
-                super::errors::WorkflowBuildError::EmptySteps => {
-                    WorkflowDagValidationError::EmptySteps
-                }
-                super::errors::WorkflowBuildError::BlankStepKey { step_index } => {
-                    WorkflowDagValidationError::BlankStepKey {
-                        step_index: step_index.unwrap_or(build_step_index),
-                    }
-                }
-                super::errors::WorkflowBuildError::BlankStepJobType { step_key } => {
-                    WorkflowDagValidationError::BlankStepJobType { step_key }
-                }
-                super::errors::WorkflowBuildError::BlankIdempotencyKey => {
-                    WorkflowDagValidationError::BlankIdempotencyKey
-                }
-                super::errors::WorkflowBuildError::NonPositiveStepMaxAttempts {
-                    step_key,
-                    max_attempts,
-                } => WorkflowDagValidationError::NonPositiveStepMaxAttempts {
-                    step_key,
-                    max_attempts,
-                },
-                super::errors::WorkflowBuildError::NonPositiveStepTimeoutSeconds {
-                    step_key,
-                    timeout_seconds,
-                } => WorkflowDagValidationError::NonPositiveStepTimeoutSeconds {
-                    step_key,
-                    timeout_seconds,
-                },
-                super::errors::WorkflowBuildError::ExternalStepJobTypeNotAllowed { step_key } => {
-                    WorkflowDagValidationError::ExternalStepJobTypeNotAllowed { step_key }
-                }
-                super::errors::WorkflowBuildError::ExternalStepQueueSettingsNotAllowed {
-                    step_key,
-                } => WorkflowDagValidationError::ExternalStepQueueSettingsNotAllowed { step_key },
-                super::errors::WorkflowBuildError::BlankDependencyStepKey { step_key } => {
-                    WorkflowDagValidationError::BlankDependencyStepKey { step_key }
-                }
-                super::errors::WorkflowBuildError::DuplicateStepKey { step_key } => {
-                    WorkflowDagValidationError::DuplicateStepKey { step_key }
-                }
-                super::errors::WorkflowBuildError::MissingDependency {
-                    step_key,
-                    prerequisite_step_key,
-                } => WorkflowDagValidationError::MissingDependency {
-                    step_key,
-                    prerequisite_step_key,
-                },
-                super::errors::WorkflowBuildError::DuplicateDependency {
-                    step_key,
-                    prerequisite_step_key,
-                } => WorkflowDagValidationError::DuplicateDependency {
-                    step_key,
-                    prerequisite_step_key,
-                },
-                super::errors::WorkflowBuildError::SelfDependency { step_key } => {
-                    WorkflowDagValidationError::SelfDependency { step_key }
-                }
-                super::errors::WorkflowBuildError::CycleDetected => {
-                    WorkflowDagValidationError::CycleDetected
-                }
+            }
+            WorkflowStepBuildValidationError::BlankStepJobType { step_key } => {
+                WorkflowDagValidationError::BlankStepJobType { step_key }
+            }
+            WorkflowStepBuildValidationError::NonPositiveStepMaxAttempts {
+                step_key,
+                max_attempts,
+            } => WorkflowDagValidationError::NonPositiveStepMaxAttempts {
+                step_key,
+                max_attempts,
             },
-        )?;
+            WorkflowStepBuildValidationError::NonPositiveStepTimeoutSeconds {
+                step_key,
+                timeout_seconds,
+            } => WorkflowDagValidationError::NonPositiveStepTimeoutSeconds {
+                step_key,
+                timeout_seconds,
+            },
+            WorkflowStepBuildValidationError::ExternalStepJobTypeNotAllowed { step_key } => {
+                WorkflowDagValidationError::ExternalStepJobTypeNotAllowed { step_key }
+            }
+            WorkflowStepBuildValidationError::ExternalStepQueueSettingsNotAllowed { step_key } => {
+                WorkflowDagValidationError::ExternalStepQueueSettingsNotAllowed { step_key }
+            }
+            WorkflowStepBuildValidationError::BlankDependencyStepKey { step_key } => {
+                WorkflowDagValidationError::BlankDependencyStepKey { step_key }
+            }
+            WorkflowStepBuildValidationError::DuplicateDependency {
+                step_key,
+                prerequisite_step_key,
+            } => WorkflowDagValidationError::DuplicateDependency {
+                step_key,
+                prerequisite_step_key,
+            },
+            WorkflowStepBuildValidationError::SelfDependency { step_key } => {
+                WorkflowDagValidationError::SelfDependency { step_key }
+            }
+        })?;
 
         let step_key = step.step_key().as_str();
         if existing_step_keys.contains(step_key) {

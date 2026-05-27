@@ -49,7 +49,7 @@ first-class Runledger feature, not something consumers should recreate by
 polling jobs or chaining handlers manually.
 
 For a shorter prompt-facing version, see
-[docs/llms.txt](https://github.com/featherenvy/runledger/blob/master/docs/llms.txt).
+[llms.txt](https://github.com/featherenvy/runledger/blob/master/llms.txt).
 For a slightly longer guide, see
 [docs/downstream-agent-guide.md](https://github.com/featherenvy/runledger/blob/master/docs/downstream-agent-guide.md).
 
@@ -64,8 +64,8 @@ use runledger_runtime::prelude::*;
 | Need | Prefer |
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
-| Multi-step work with dependencies | `WorkflowRunEnqueueBuilder`, `WorkflowStepEnqueueBuilder`, and `enqueue_workflow_run` |
-| Fan-out, fan-in, or ordered stages | Workflow DAG dependencies via `depends_on_success` or `depends_on_terminal` |
+| Multi-step work with dependencies | `WorkflowDagBuilder` (simple DAGs) or `WorkflowRunEnqueueBuilder` / `WorkflowStepEnqueueBuilder` (advanced), then `enqueue_workflow_run` |
+| Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal`, or lower-level `depends_on_success` / `depends_on_terminal` |
 | Human/API approval or another external gate | External workflow steps and `complete_external_workflow_step` |
 | Delayed or recurring entrypoint | `JobScheduleUpsert` and `upsert_job_schedule` |
 | Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
@@ -445,10 +445,7 @@ enqueues root steps, releases dependents when prerequisites finish, and keeps th
 run status coherent with cancellation and external gates.
 
 ```rust
-use runledger_core::jobs::{
-    JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder,
-    WorkflowType,
-};
+use runledger_core::jobs::WorkflowDagBuilder;
 
 let metadata = serde_json::json!({"source": "api"});
 let crawl_payload = serde_json::json!({"profile_id": "p_123"});
@@ -456,47 +453,41 @@ let classify_payload = serde_json::json!({"profile_id": "p_123"});
 let score_payload = serde_json::json!({"profile_id": "p_123"});
 let persist_payload = serde_json::json!({"profile_id": "p_123"});
 
-let crawl = WorkflowStepEnqueueBuilder::new(
-    StepKey::new("crawl"),
-    JobType::new("profiles.crawl"),
-    &crawl_payload,
-)
-.try_build()?;
-
-let classify = WorkflowStepEnqueueBuilder::new(
-    StepKey::new("classify"),
-    JobType::new("profiles.classify"),
-    &classify_payload,
-)
-.depends_on_success(&[StepKey::new("crawl")])
-.try_build()?;
-
-let score = WorkflowStepEnqueueBuilder::new(
-    StepKey::new("score"),
-    JobType::new("profiles.score"),
-    &score_payload,
-)
-.depends_on_success(&[StepKey::new("crawl")])
-.try_build()?;
-
-let persist = WorkflowStepEnqueueBuilder::new(
-    StepKey::new("persist"),
-    JobType::new("profiles.persist"),
-    &persist_payload,
-)
-.depends_on_success(&[StepKey::new("classify"), StepKey::new("score")])
-.try_build()?;
-
-let run = WorkflowRunEnqueueBuilder::new(
-    WorkflowType::new("profiles.research"),
-    &metadata,
-)
-.idempotency_key("profile:p_123:research")
-.extend_steps([crawl, classify, score, persist])
-.try_build()?;
+let run = WorkflowDagBuilder::new("profiles.research", &metadata)
+    .idempotency_key("profile:p_123:research")
+    .job("crawl", "profiles.crawl", &crawl_payload)?
+    .job("classify", "profiles.classify", &classify_payload)?
+    .after_success("classify", ["crawl"])?
+    .job("score", "profiles.score", &score_payload)?
+    .after_success("score", ["crawl"])?
+    .job("persist", "profiles.persist", &persist_payload)?
+    .after_success("persist", ["classify", "score"])?
+    .build()?;
 
 let workflow_run = runledger_postgres::jobs::enqueue_workflow_run(&pool, &run).await?;
 ```
+
+`WorkflowDagBuilder` accepts raw string identifiers for readable call sites. It
+validates the workflow shape before enqueueing, but it does not prove at compile
+time that a job type has a registered job definition or runtime handler. Use
+`WorkflowRunEnqueueBuilder` and `WorkflowStepEnqueueBuilder` when you need
+per-step priority, attempts, timeout, stage, external steps, hand-authored
+dependency specs, or call sites that pass explicit `StepKey` and `JobType`
+values.
+
+Validation timing:
+
+| Call | Fails immediately | Deferred until `.build()` / `.try_build()` |
+| --- | --- | --- |
+| `WorkflowDagBuilder::new(...)` | never | blank workflow type |
+| `WorkflowDagBuilder::try_new(...)` | blank workflow type | empty step list and dependency graph errors |
+| `.job(step, job_type, payload)` | blank step key, blank job type, duplicate step key | job type registration is not checked by this builder |
+| `.after_success(step, prerequisites)` / `.after_terminal(...)` | blank target step key, blank prerequisite step key, unknown target step | missing prerequisite step, self-dependency, duplicate dependency, cycle |
+| `.idempotency_key(...)` | never | blank idempotency key |
+
+The target of `.after_success(...)` or `.after_terminal(...)` must already have
+been added with `.job(...)`. Prerequisite steps may be added later in the chain,
+as long as every referenced step exists before `.build()` succeeds.
 
 See [runledger-postgres/examples/workflow_dag.rs](https://github.com/featherenvy/runledger/blob/master/runledger-postgres/examples/workflow_dag.rs)
 for a compile-checked example that shows a fan-out/fan-in DAG.

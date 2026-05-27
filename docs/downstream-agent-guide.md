@@ -37,10 +37,20 @@ retime the schedule cursor.
 
 If the task requires step dependencies, build a workflow DAG:
 
-1. Create each step with `WorkflowStepEnqueueBuilder`.
-2. Express edges with `depends_on_success` or `depends_on_terminal`.
-3. Build the run with `WorkflowRunEnqueueBuilder`.
-4. Persist it with `runledger_postgres::jobs::enqueue_workflow_run`.
+1. Prefer `WorkflowDagBuilder` with `.job(...)`, `.after_success(...)`, and `.build()`.
+2. Use `WorkflowStepEnqueueBuilder` and `WorkflowRunEnqueueBuilder` for advanced per-step
+   settings, external steps, hand-authored dependency specs, or call sites that
+   pass explicit `StepKey` and `JobType` values.
+3. Persist the run with `runledger_postgres::jobs::enqueue_workflow_run`.
+
+`WorkflowDagBuilder` validates workflow shape, not job registration. `.job(...)`
+rejects blank identifiers and duplicate step keys immediately, but it does not
+prove that a job type has a registered definition or runtime handler.
+`.after_success(...)` and `.after_terminal(...)` reject blank identifiers and an
+unknown target step immediately. Missing prerequisite steps, self-dependencies,
+duplicate dependencies, cycles, blank workflow type from `new(...)`, blank
+idempotency keys, and empty step lists fail when `.build()` / `.try_build()` is
+called.
 
 Do not recreate ordinary workflow orchestration by polling job status,
 enqueueing dependent jobs from parent handlers, storing dependency state in

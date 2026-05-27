@@ -1,6 +1,4 @@
-use runledger_core::jobs::{
-    JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowType,
-};
+use runledger_core::jobs::{JobType, WorkflowDagBuilder};
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{JobDefinitionUpsert, WorkflowRunDbRecord};
 use serde_json::json;
@@ -61,41 +59,16 @@ async fn enqueue_profile_research_workflow(
     let persist_payload = json!({ "profile_id": profile_id });
     let idempotency_key = format!("profile:{profile_id}:research");
 
-    let crawl = WorkflowStepEnqueueBuilder::new(
-        StepKey::new("crawl"),
-        JobType::new("profiles.crawl"),
-        &crawl_payload,
-    )
-    .try_build()?;
-
-    let classify = WorkflowStepEnqueueBuilder::new(
-        StepKey::new("classify"),
-        JobType::new("profiles.classify"),
-        &classify_payload,
-    )
-    .depends_on_success(&[StepKey::new("crawl")])
-    .try_build()?;
-
-    let score = WorkflowStepEnqueueBuilder::new(
-        StepKey::new("score"),
-        JobType::new("profiles.score"),
-        &score_payload,
-    )
-    .depends_on_success(&[StepKey::new("crawl")])
-    .try_build()?;
-
-    let persist = WorkflowStepEnqueueBuilder::new(
-        StepKey::new("persist"),
-        JobType::new("profiles.persist"),
-        &persist_payload,
-    )
-    .depends_on_success(&[StepKey::new("classify"), StepKey::new("score")])
-    .try_build()?;
-
-    let run = WorkflowRunEnqueueBuilder::new(WorkflowType::new("profiles.research"), &metadata)
+    let run = WorkflowDagBuilder::new("profiles.research", &metadata)
         .idempotency_key(&idempotency_key)
-        .extend_steps([crawl, classify, score, persist])
-        .try_build()?;
+        .job("crawl", "profiles.crawl", &crawl_payload)?
+        .job("classify", "profiles.classify", &classify_payload)?
+        .after_success("classify", ["crawl"])?
+        .job("score", "profiles.score", &score_payload)?
+        .after_success("score", ["crawl"])?
+        .job("persist", "profiles.persist", &persist_payload)?
+        .after_success("persist", ["classify", "score"])?
+        .build()?;
 
     let workflow_run = runledger_postgres::jobs::enqueue_workflow_run(pool, &run).await?;
     Ok(workflow_run)

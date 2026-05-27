@@ -66,6 +66,7 @@ pub(crate) fn workflow_dag_validation_error(error: WorkflowDagValidationError) -
             "workflow.invalid_dag_cycle",
             "Workflow dependencies must form an acyclic graph.",
         ),
+        _ => ("workflow.invalid_dag", "Workflow DAG validation failed."),
     };
 
     Error::QueryError(QueryError::from_classified(
