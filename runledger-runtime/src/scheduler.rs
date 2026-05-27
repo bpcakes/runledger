@@ -18,6 +18,22 @@ const ROLLBACK_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL: &str =
 const RELEASE_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL: &str =
     "RELEASE SAVEPOINT materialize_due_schedule";
 
+/// Runs cron schedule materialization until shutdown is requested.
+///
+/// The loop claims due schedules in batches using
+/// [`JobsConfig::claim_batch_size`], materializes each due schedule into a job,
+/// advances the schedule's next UTC fire cursor, then waits for either shutdown
+/// or [`JobsConfig::schedule_poll_interval`] before polling again. Individual
+/// materialization failures are logged and deferred so one bad schedule does not
+/// permanently starve other due schedules.
+///
+/// Shutdown is requested by sending `true` on `shutdown` or by dropping the
+/// watch sender. This function returns [`RuntimeLoopExit::Shutdown`] after the
+/// shutdown signal is observed.
+///
+/// This lower-level loop remains public for custom runtime orchestration.
+/// Prefer [`crate::Supervisor`] for ordinary worker processes so scheduler,
+/// worker, and reaper tasks are started, monitored, and shut down together.
 pub async fn run_scheduler_loop(
     pool: runledger_postgres::DbPool,
     config: JobsConfig,
@@ -149,6 +165,14 @@ async fn materialize_due_schedules_tx(
     let schedules = jobs::claim_due_schedules_tx(tx, now, batch_size)
         .await
         .map_err(|source| SchedulerError::ClaimDueSchedules { source })?;
+    materialize_claimed_schedules_tx(tx, now, schedules).await
+}
+
+async fn materialize_claimed_schedules_tx(
+    tx: &mut runledger_postgres::DbTx<'_>,
+    now: DateTime<Utc>,
+    schedules: Vec<jobs::JobScheduleRecord>,
+) -> Result<()> {
     for schedule in schedules {
         execute_savepoint_sql_tx(tx, CREATE_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL).await?;
 
@@ -161,6 +185,13 @@ async fn materialize_due_schedules_tx(
             );
             execute_savepoint_sql_tx(tx, ROLLBACK_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL).await?;
             execute_savepoint_sql_tx(tx, RELEASE_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL).await?;
+
+            if matches!(
+                error,
+                crate::Error::Scheduler(SchedulerError::ClaimedScheduleMissing { .. })
+            ) {
+                return Err(error);
+            }
 
             // Push failed schedules out of the immediate due window to avoid
             // repeatedly selecting the same failing rows and starving valid schedules.
@@ -180,7 +211,7 @@ async fn defer_failed_schedule_tx(
     schedule_id: uuid::Uuid,
     next_fire_at: DateTime<Utc>,
 ) -> Result<()> {
-    sqlx::query!(
+    let updated = sqlx::query!(
         "UPDATE job_schedules
          SET next_fire_at = $2,
              updated_at = now()
@@ -197,6 +228,14 @@ async fn defer_failed_schedule_tx(
             error,
         ),
     })?;
+
+    if updated.rows_affected() == 0 {
+        return Err(SchedulerError::ClaimedScheduleMissing {
+            schedule_id,
+            operation: "deferring failed schedule",
+        }
+        .into());
+    }
 
     Ok(())
 }
@@ -242,12 +281,22 @@ async fn materialize_schedule_tx(
             source,
         })?;
 
-    jobs::mark_schedule_fired_tx(tx, schedule.id, now, next_fire_at)
+    let marked = jobs::mark_schedule_fired_tx(tx, schedule.id, now, next_fire_at)
         .await
         .map_err(|source| SchedulerError::MarkScheduleFired {
             schedule_id: schedule.id,
             source,
         })?;
+    if !marked {
+        // The enqueue above is still inside the caller's schedule savepoint.
+        // Returning an error lets the caller roll it back instead of producing
+        // work for a schedule row that is no longer present.
+        return Err(SchedulerError::ClaimedScheduleMissing {
+            schedule_id: schedule.id,
+            operation: "marking schedule as fired",
+        }
+        .into());
+    }
     Ok(())
 }
 
@@ -293,7 +342,7 @@ fn compute_next_fire_at_utc(
     max_jitter_seconds: i32,
 ) -> Option<DateTime<Utc>> {
     let schedule = Schedule::from_str(cron_expr).ok()?;
-    let next = schedule.upcoming(Utc).find(|next| *next > from)?;
+    let next = schedule.after(&from).next()?;
     let jitter = schedule_jitter_seconds(schedule_id, next, max_jitter_seconds);
     Some(next + Duration::seconds(jitter))
 }

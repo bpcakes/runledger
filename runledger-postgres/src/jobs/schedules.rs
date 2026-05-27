@@ -32,6 +32,11 @@ struct JobScheduleRow {
 /// [`set_job_schedule_active`] to pause or resume an existing schedule and
 /// [`set_job_schedule_next_fire_at`] to retime it without changing the
 /// definition.
+///
+/// # Errors
+/// Returns an error if a transaction cannot be opened or committed, if
+/// [`JobScheduleUpsert`] validation fails, or if PostgreSQL rejects the upsert,
+/// including when the referenced job definition row does not exist.
 pub async fn upsert_job_schedule(
     pool: &DbPool,
     payload: &JobScheduleUpsert<'_>,
@@ -50,6 +55,11 @@ pub async fn upsert_job_schedule(
 /// Creates or updates a cron-backed job schedule inside an existing transaction.
 ///
 /// This has the same conflict semantics as [`upsert_job_schedule`].
+///
+/// # Errors
+/// Returns an error if [`JobScheduleUpsert`] validation fails or if PostgreSQL
+/// rejects the upsert, including when the referenced job definition row does not
+/// exist.
 pub async fn upsert_job_schedule_tx(
     tx: &mut DbTx<'_>,
     payload: &JobScheduleUpsert<'_>,
@@ -111,6 +121,11 @@ pub async fn upsert_job_schedule_tx(
 /// Activates or deactivates a schedule in its own transaction.
 ///
 /// Returns `true` when a schedule row existed for `name`.
+///
+/// # Errors
+/// Returns an error if `name` is blank or has surrounding whitespace, if a
+/// transaction cannot be opened or committed, or if PostgreSQL rejects the
+/// update.
 pub async fn set_job_schedule_active(pool: &DbPool, name: &str, is_active: bool) -> Result<bool> {
     let mut tx = pool
         .begin()
@@ -126,6 +141,10 @@ pub async fn set_job_schedule_active(pool: &DbPool, name: &str, is_active: bool)
 /// Activates or deactivates a schedule inside an existing transaction.
 ///
 /// Returns `true` when a schedule row existed for `name`.
+///
+/// # Errors
+/// Returns an error if `name` is blank or has surrounding whitespace, or if
+/// PostgreSQL rejects the update.
 pub async fn set_job_schedule_active_tx(
     tx: &mut DbTx<'_>,
     name: &str,
@@ -151,6 +170,11 @@ pub async fn set_job_schedule_active_tx(
 /// Moves a schedule's next fire cursor in its own transaction.
 ///
 /// Returns `true` when a schedule row existed for `name`.
+///
+/// # Errors
+/// Returns an error if `name` is blank or has surrounding whitespace, if a
+/// transaction cannot be opened or committed, or if PostgreSQL rejects the
+/// update.
 pub async fn set_job_schedule_next_fire_at(
     pool: &DbPool,
     name: &str,
@@ -170,6 +194,10 @@ pub async fn set_job_schedule_next_fire_at(
 /// Moves a schedule's next fire cursor inside an existing transaction.
 ///
 /// Returns `true` when a schedule row existed for `name`.
+///
+/// # Errors
+/// Returns an error if `name` is blank or has surrounding whitespace, or if
+/// PostgreSQL rejects the update.
 pub async fn set_job_schedule_next_fire_at_tx(
     tx: &mut DbTx<'_>,
     name: &str,
@@ -192,6 +220,20 @@ pub async fn set_job_schedule_next_fire_at_tx(
     Ok(result.rows_affected() > 0)
 }
 
+/// Claims due schedules for runtime materialization inside an existing transaction.
+///
+/// This is a low-level runtime helper used by `runledger-runtime`'s scheduler
+/// loop. It selects active schedules with `next_fire_at <= now`, ordered by
+/// `next_fire_at`, using `FOR UPDATE SKIP LOCKED` so concurrent scheduler loops
+/// do not materialize the same schedule row.
+///
+/// Most applications should create schedules with [`upsert_job_schedule`] and
+/// run schedule materialization through `runledger_runtime::Supervisor` instead
+/// of calling this helper directly.
+///
+/// # Errors
+/// Returns an error if PostgreSQL rejects the claim query or if a claimed row
+/// cannot be decoded into [`JobScheduleRecord`].
 pub async fn claim_due_schedules_tx(
     tx: &mut DbTx<'_>,
     now: DateTime<Utc>,
@@ -237,13 +279,29 @@ pub async fn claim_due_schedules_tx(
         .collect::<Result<Vec<_>>>()
 }
 
+/// Records a successful schedule materialization inside an existing transaction.
+///
+/// This is a low-level runtime helper used by `runledger-runtime` after a due
+/// schedule has produced its job. It updates `last_fired_at` and advances
+/// `next_fire_at` to the caller-computed UTC cursor.
+///
+/// Pass the [`JobScheduleRecord::id`] returned by [`claim_due_schedules_tx`].
+/// Returns `true` when that schedule row still existed and was updated, and
+/// `false` when no row matched `schedule_id`.
+///
+/// Most applications should let `runledger_runtime::Supervisor` call this as
+/// part of the scheduler loop instead of calling it directly.
+///
+/// # Errors
+/// Returns an error if PostgreSQL rejects the update. A missing schedule row is
+/// reported as `Ok(false)`, not as an error.
 pub async fn mark_schedule_fired_tx(
     tx: &mut DbTx<'_>,
     schedule_id: Uuid,
     fired_at: DateTime<Utc>,
     next_fire_at: DateTime<Utc>,
-) -> Result<()> {
-    sqlx::query!(
+) -> Result<bool> {
+    let result = sqlx::query!(
         "UPDATE job_schedules
          SET last_fired_at = $2,
              next_fire_at = $3,
@@ -257,7 +315,7 @@ pub async fn mark_schedule_fired_tx(
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("mark schedule fired", error))?;
 
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 fn job_schedule_from_row(row: JobScheduleRow) -> Result<JobScheduleRecord> {

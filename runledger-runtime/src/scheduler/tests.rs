@@ -3,12 +3,152 @@ use std::str::FromStr;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use cron::Schedule;
 use runledger_core::jobs::JobType;
-use runledger_postgres::jobs::upsert_job_definition_tx;
+use runledger_postgres::jobs::{claim_due_schedules_tx, upsert_job_definition_tx};
 use serde_json::json;
 use sqlx::types::Uuid;
 
-use super::{compute_next_fire_at_utc, materialize_due_schedules, materialize_due_schedules_tx};
+use super::{
+    compute_next_fire_at_utc, materialize_claimed_schedules_tx, materialize_due_schedules,
+    materialize_due_schedules_tx,
+};
 use crate::test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
+use crate::{Error, SchedulerError};
+
+#[test]
+fn compute_next_fire_at_utc_applies_deterministic_jitter() {
+    let from = DateTime::parse_from_rfc3339("2026-05-26T12:00:00Z")
+        .expect("fixed from timestamp")
+        .with_timezone(&Utc);
+    let schedule_id =
+        Uuid::parse_str("018fa1f8-0000-7000-8000-000000000123").expect("fixed schedule id");
+    let expected = DateTime::parse_from_rfc3339("2026-05-26T12:01:03Z")
+        .expect("fixed expected timestamp")
+        .with_timezone(&Utc);
+
+    let first =
+        compute_next_fire_at_utc("0 * * * * *", from, schedule_id, 30).expect("jittered fire time");
+    let second =
+        compute_next_fire_at_utc("0 * * * * *", from, schedule_id, 30).expect("jittered fire time");
+    let unjittered = compute_next_fire_at_utc("0 * * * * *", from, schedule_id, 0)
+        .expect("unjittered fire time");
+
+    assert_eq!(
+        first, second,
+        "jitter must be stable for the same schedule id and base fire time"
+    );
+    assert_eq!(first, expected, "jitter derivation should remain stable");
+    assert_ne!(
+        first, unjittered,
+        "nonzero jitter must move the next fire time for this fixture"
+    );
+}
+
+#[tokio::test]
+async fn materialize_claimed_schedules_rolls_back_enqueue_when_schedule_missing() {
+    let (pool, database) = setup_ephemeral_pool("jobs_sched_claimed_missing_rollback", 8).await;
+
+    let mut setup_tx = pool.begin().await.expect("begin setup tx");
+    upsert_job_definition_tx(
+        &mut setup_tx,
+        &runledger_postgres::jobs::JobDefinitionUpsert {
+            job_type: JobType::new("jobs.claimed.missing"),
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 60,
+            default_priority: 100,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert claimed-missing definition");
+    setup_tx.commit().await.expect("commit setup tx");
+
+    let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO job_schedules (
+            name,
+            job_type,
+            organization_id,
+            payload_template,
+            cron_expr,
+            next_fire_at
+         )
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6)",
+    )
+    .bind("claimed-missing")
+    .bind("jobs.claimed.missing")
+    .bind::<Option<Uuid>>(None)
+    .bind(json!({"kind": "claimed-missing"}))
+    .bind("*/1 * * * * * *")
+    .bind(now - ChronoDuration::minutes(5))
+    .execute(&pool)
+    .await
+    .expect("insert schedule");
+
+    let mut claim_tx = pool.begin().await.expect("begin claim tx");
+    let schedules = claim_due_schedules_tx(&mut claim_tx, now, 1)
+        .await
+        .expect("claim due schedule");
+    claim_tx.commit().await.expect("commit claim tx");
+
+    assert_eq!(schedules.len(), 1, "expected one claimed schedule");
+    let schedule_id = schedules[0].id;
+
+    sqlx::query("DELETE FROM job_schedules WHERE id = $1")
+        .bind(schedule_id)
+        .execute(&pool)
+        .await
+        .expect("delete claimed schedule");
+
+    let mut materialize_tx = pool.begin().await.expect("begin materialize tx");
+    let error = materialize_claimed_schedules_tx(&mut materialize_tx, now, schedules)
+        .await
+        .expect_err("missing claimed schedule should fail materialization");
+    match error {
+        Error::Scheduler(SchedulerError::ClaimedScheduleMissing {
+            schedule_id: actual_schedule_id,
+            operation,
+        }) => {
+            assert_eq!(actual_schedule_id, schedule_id);
+            assert_eq!(operation, "marking schedule as fired");
+        }
+        other => panic!("expected claimed schedule missing error, got {other:?}"),
+    }
+    materialize_tx
+        .commit()
+        .await
+        .expect("commit materialization tx after savepoint rollback");
+
+    let queued_jobs = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint
+         FROM job_queue
+         WHERE job_type = $1",
+    )
+    .bind("jobs.claimed.missing")
+    .fetch_one(&pool)
+    .await
+    .expect("count enqueued jobs");
+    assert_eq!(
+        queued_jobs, 0,
+        "savepoint rollback should discard the enqueue for the missing schedule"
+    );
+
+    let schedule_rows = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint
+         FROM job_schedules
+         WHERE id = $1",
+    )
+    .bind(schedule_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count schedule rows");
+    assert_eq!(
+        schedule_rows, 0,
+        "test fixture should keep schedule missing"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
 
 #[tokio::test]
 async fn materialize_due_schedules_ignores_disabled_job_definition() {
@@ -133,8 +273,8 @@ async fn materialize_due_schedules_ignores_disabled_job_definition() {
         .expect("jittered schedule");
     let base_schedule = Schedule::from_str("*/1 * * * * * *").expect("schedule parse");
     let base_next = base_schedule
-        .upcoming(Utc)
-        .find(|next| *next > from)
+        .after(&from)
+        .next()
         .expect("base next schedule");
     assert!(jittered_next >= base_next);
     assert!(jittered_next <= base_next + ChronoDuration::seconds(30));

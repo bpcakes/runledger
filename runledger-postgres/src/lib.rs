@@ -103,13 +103,13 @@
 //!
 //! # Create A Scheduled Job Entrypoint
 //!
-//! Use [`JobScheduleUpsert`] to create or update the cron row consumed by the
-//! runtime scheduler. Schedules are UTC-only. Updating an existing schedule
+//! Use [`jobs::JobScheduleUpsert`] to create or update the cron row consumed by
+//! the runtime scheduler. Schedules are UTC-only. Updating an existing schedule
 //! refreshes its definition while preserving `is_active` and `organization_id`;
 //! `next_fire_at` is refreshed when `cron_expr` changes. Cron expressions are
 //! validated with the same parser used by `runledger-runtime`. Use
-//! [`set_job_schedule_active`] to pause or resume a schedule, and
-//! [`set_job_schedule_next_fire_at`] to manually retime its cursor.
+//! [`jobs::set_job_schedule_active`] to pause or resume a schedule, and
+//! [`jobs::set_job_schedule_next_fire_at`] to manually retime its cursor.
 //!
 //! ```rust,no_run
 //! # async fn demo(pool: runledger_postgres::DbPool) -> Result<(), Box<dyn std::error::Error>> {
