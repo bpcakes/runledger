@@ -41,10 +41,13 @@ fn definition_upsert(job_type: &'static str, is_enabled: bool) -> JobDefinitionU
 
 fn assert_definition_sync_validation_error(error: JobDefinitionCatalogSyncError) {
     match error {
-        JobDefinitionCatalogSyncError::ValidationFailure(Error::QueryError(query_error)) => {
-            assert_eq!(query_error.category(), QueryErrorCategory::Validation);
-            assert_eq!(query_error.code(), "job_definition.empty_job_type_list");
-        }
+        JobDefinitionCatalogSyncError::ValidationFailure(source) => match *source {
+            Error::QueryError(query_error) => {
+                assert_eq!(query_error.category(), QueryErrorCategory::Validation);
+                assert_eq!(query_error.code(), "job_definition.empty_job_type_list");
+            }
+            other => panic!("expected validation query error, got {other:?}"),
+        },
         other => panic!("expected validation query error, got {other:?}"),
     }
 }
@@ -133,9 +136,12 @@ async fn definition_disable_schedule_lock_uses_bounded_lock_wait() {
     .expect("schedule lock timeout should be bounded")
     .expect_err("conflicting schedule lock should time out");
     match error {
-        JobDefinitionCatalogSyncError::ScheduleLockFailure(Error::QueryError(query_error)) => {
-            assert_lock_timeout_query_error(&query_error);
-        }
+        JobDefinitionCatalogSyncError::ScheduleLockFailure(source) => match *source {
+            Error::QueryError(query_error) => {
+                assert_lock_timeout_query_error(&query_error);
+            }
+            other => panic!("expected query error, got {other:?}"),
+        },
         other => panic!("expected query error, got {other:?}"),
     }
 
@@ -175,9 +181,12 @@ async fn definition_disable_definition_lock_uses_bounded_lock_wait() {
     .expect("definition lock timeout should be bounded")
     .expect_err("conflicting definition lock should time out");
     match error {
-        JobDefinitionCatalogSyncError::DefinitionLockFailure(Error::QueryError(query_error)) => {
-            assert_lock_timeout_query_error(&query_error);
-        }
+        JobDefinitionCatalogSyncError::DefinitionLockFailure(source) => match *source {
+            Error::QueryError(query_error) => {
+                assert_lock_timeout_query_error(&query_error);
+            }
+            other => panic!("expected query error, got {other:?}"),
+        },
         other => panic!("expected query error, got {other:?}"),
     }
 

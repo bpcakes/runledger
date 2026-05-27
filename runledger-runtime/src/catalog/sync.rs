@@ -33,9 +33,11 @@ impl JobCatalog {
         self.validate_defaults()?;
 
         let mut tx = pool.begin().await.map_err(|error| {
-            CatalogError::SyncFailure(runledger_postgres::Error::from_query_sqlx_with_context(
-                "begin job catalog definition sync",
-                error,
+            CatalogError::SyncFailure(Box::new(
+                runledger_postgres::Error::from_query_sqlx_with_context(
+                    "begin job catalog definition sync",
+                    error,
+                ),
             ))
         })?;
 
@@ -83,9 +85,11 @@ impl JobCatalog {
         self.validate_exact_sync_scope(scope)?;
 
         let mut tx = pool.begin().await.map_err(|error| {
-            CatalogError::SyncFailure(runledger_postgres::Error::from_query_sqlx_with_context(
-                "begin exact job catalog definition sync",
-                error,
+            CatalogError::SyncFailure(Box::new(
+                runledger_postgres::Error::from_query_sqlx_with_context(
+                    "begin exact job catalog definition sync",
+                    error,
+                ),
             ))
         })?;
 

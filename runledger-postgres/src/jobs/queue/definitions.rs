@@ -48,26 +48,26 @@ pub enum JobDefinitionCatalogSyncError {
     /// An active schedule references a catalog definition that would be disabled.
     ActiveScheduleForDisabledJobType(JobScheduleJobTypeReference),
     /// Applying transaction-local statement timeout bounds failed.
-    CriticalSectionTimeoutFailure(Error),
+    CriticalSectionTimeoutFailure(Box<Error>),
     /// Locking `job_schedules` before disabling definitions failed.
-    ScheduleLockFailure(Error),
+    ScheduleLockFailure(Box<Error>),
     /// Locking `job_definitions` before disabling definitions failed.
-    DefinitionLockFailure(Error),
+    DefinitionLockFailure(Box<Error>),
     /// Checking active schedules before disabling definitions failed.
-    ScheduleCheckFailure(Error),
+    ScheduleCheckFailure(Box<Error>),
     /// Sync input failed validation before any catalog writes.
-    ValidationFailure(Error),
+    ValidationFailure(Box<Error>),
     /// Inspecting existing definitions before sync failed.
-    DefinitionInspectFailure(Error),
+    DefinitionInspectFailure(Box<Error>),
     /// Syncing one catalog definition failed.
     DefinitionSyncFailure {
         /// Job type whose definition failed to sync.
         job_type: String,
         /// Persistence-layer failure returned by the definition write.
-        source: Error,
+        source: Box<Error>,
     },
     /// Disabling absent scoped definitions failed.
-    DisableAbsentFailure(Error),
+    DisableAbsentFailure(Box<Error>),
 }
 
 impl fmt::Display for JobDefinitionCatalogSyncError {
@@ -130,7 +130,7 @@ impl StdError for JobDefinitionCatalogSyncError {
             | Self::ValidationFailure(error)
             | Self::DefinitionInspectFailure(error)
             | Self::DefinitionSyncFailure { source: error, .. }
-            | Self::DisableAbsentFailure(error) => Some(error),
+            | Self::DisableAbsentFailure(error) => Some(error.as_ref()),
             Self::ActiveScheduleForAbsentJobType(_) | Self::ActiveScheduleForDisabledJobType(_) => {
                 None
             }
@@ -158,7 +158,9 @@ pub async fn sync_catalog_job_definitions_tx(
         // omitted from the report.
         list_job_types_missing_or_enabled_definitions_tx(tx, &disabled_job_types)
             .await
-            .map_err(JobDefinitionCatalogSyncError::DefinitionInspectFailure)?
+            .map_err(|error| {
+                JobDefinitionCatalogSyncError::DefinitionInspectFailure(Box::new(error))
+            })?
     };
 
     for definition in definitions {
@@ -174,7 +176,7 @@ pub async fn sync_catalog_job_definitions_tx(
         upsert_result.map_err(
             |source| JobDefinitionCatalogSyncError::DefinitionSyncFailure {
                 job_type: definition.job_type.as_str().to_owned(),
-                source,
+                source: Box::new(source),
             },
         )?;
     }
@@ -192,9 +194,9 @@ pub async fn sync_catalog_job_definitions_exact_tx(
 ) -> std::result::Result<JobDefinitionCatalogSyncReport, JobDefinitionCatalogSyncError> {
     let catalog_job_types = definition_job_type_names(definitions.iter())?;
     validate_non_empty_job_types("exact catalog sync job definitions", &catalog_job_types)
-        .map_err(JobDefinitionCatalogSyncError::ValidationFailure)?;
+        .map_err(|error| JobDefinitionCatalogSyncError::ValidationFailure(Box::new(error)))?;
     validate_non_empty_job_types("exact catalog sync scope", scope_job_types)
-        .map_err(JobDefinitionCatalogSyncError::ValidationFailure)?;
+        .map_err(|error| JobDefinitionCatalogSyncError::ValidationFailure(Box::new(error)))?;
 
     let disabled_job_types = definition_job_type_names(
         definitions
@@ -215,7 +217,9 @@ pub async fn sync_catalog_job_definitions_exact_tx(
         reject_active_schedules_for_disabled_job_types_tx(tx, &disabled_job_types).await?;
         list_job_types_missing_or_enabled_definitions_tx(tx, &disabled_job_types)
             .await
-            .map_err(JobDefinitionCatalogSyncError::DefinitionInspectFailure)?
+            .map_err(|error| {
+                JobDefinitionCatalogSyncError::DefinitionInspectFailure(Box::new(error))
+            })?
     };
 
     if has_absent_scope_job_types {
@@ -225,7 +229,7 @@ pub async fn sync_catalog_job_definitions_exact_tx(
             scope_job_types,
         )
         .await
-        .map_err(JobDefinitionCatalogSyncError::ScheduleCheckFailure)?
+        .map_err(|error| JobDefinitionCatalogSyncError::ScheduleCheckFailure(Box::new(error)))?
         {
             return Err(JobDefinitionCatalogSyncError::ActiveScheduleForAbsentJobType(reference));
         }
@@ -239,7 +243,7 @@ pub async fn sync_catalog_job_definitions_exact_tx(
             .map_err(
                 |source| JobDefinitionCatalogSyncError::DefinitionSyncFailure {
                     job_type: definition.job_type.as_str().to_owned(),
-                    source,
+                    source: Box::new(source),
                 },
             )?;
     }
@@ -247,7 +251,7 @@ pub async fn sync_catalog_job_definitions_exact_tx(
     let disabled_absent_job_types = if has_absent_scope_job_types {
         disable_enabled_job_definitions_except_tx(tx, &catalog_job_types, scope_job_types)
             .await
-            .map_err(JobDefinitionCatalogSyncError::DisableAbsentFailure)?
+            .map_err(|error| JobDefinitionCatalogSyncError::DisableAbsentFailure(Box::new(error)))?
     } else {
         Vec::new()
     };
@@ -627,7 +631,9 @@ where
         .into_iter()
         .map(|definition| parse_job_type_name(definition.job_type.as_str().to_owned()))
         .collect::<Result<Vec<_>>>()
-        .map_err(JobDefinitionCatalogSyncError::DefinitionInspectFailure)?;
+        .map_err(|error| {
+            JobDefinitionCatalogSyncError::DefinitionInspectFailure(Box::new(error))
+        })?;
     job_types.sort();
     Ok(job_types)
 }
@@ -642,13 +648,15 @@ async fn prepare_definition_disable_critical_section_tx(
         "set job definition disable statement timeout",
     )
     .await
-    .map_err(JobDefinitionCatalogSyncError::CriticalSectionTimeoutFailure)?;
+    .map_err(|error| {
+        JobDefinitionCatalogSyncError::CriticalSectionTimeoutFailure(Box::new(error))
+    })?;
     lock_job_schedules_for_definition_disable_tx(tx)
         .await
-        .map_err(JobDefinitionCatalogSyncError::ScheduleLockFailure)?;
+        .map_err(|error| JobDefinitionCatalogSyncError::ScheduleLockFailure(Box::new(error)))?;
     lock_job_definitions_for_definition_disable_tx(tx)
         .await
-        .map_err(JobDefinitionCatalogSyncError::DefinitionLockFailure)
+        .map_err(|error| JobDefinitionCatalogSyncError::DefinitionLockFailure(Box::new(error)))
 }
 
 async fn reject_active_schedules_for_disabled_job_types_tx(
@@ -657,7 +665,7 @@ async fn reject_active_schedules_for_disabled_job_types_tx(
 ) -> std::result::Result<(), JobDefinitionCatalogSyncError> {
     if let Some(reference) = find_active_schedule_for_job_types_tx(tx, job_types)
         .await
-        .map_err(JobDefinitionCatalogSyncError::ScheduleCheckFailure)?
+        .map_err(|error| JobDefinitionCatalogSyncError::ScheduleCheckFailure(Box::new(error)))?
     {
         return Err(JobDefinitionCatalogSyncError::ActiveScheduleForDisabledJobType(reference));
     }

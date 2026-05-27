@@ -6,7 +6,7 @@ This repository was extracted from a larger application and scoped down to the R
 
 ## Workspace
 
-The workspace contains four crates:
+The workspace contains five crates:
 
 - `runledger-core`
   Storage-agnostic contracts: job handler traits, runtime types, statuses, identifiers, and workflow enqueue/build validation.
@@ -14,6 +14,8 @@ The workspace contains four crates:
   SQLx-backed PostgreSQL persistence for the queue, job lifecycle, schedules, workflow DAG state machine, runtime configs, logs, and admin reads/mutations.
 - `runledger-runtime`
   Async worker, scheduler, and reaper loops plus runtime configuration and handler registry.
+- `runledger-tui`
+  Read-only terminal UI for monitoring queue metrics, jobs, workflows, and job definitions against a migrated database.
 - `runledger-test-support`
   Published test utilities for ephemeral PostgreSQL databases and scoped environment-variable overrides.
 
@@ -21,7 +23,7 @@ The root workspace manifest is [Cargo.toml](Cargo.toml).
 
 ## What This Repo Includes
 
-- Rust crates for the Runledger contracts, runtime, and PostgreSQL persistence layer
+- Rust crates for the Runledger contracts, runtime, PostgreSQL persistence layer, and operator TUI
 - A Runledger-only SQL migration history in [migrations](migrations)
 - Vendored copies of those migrations in [runledger-postgres/migrations](runledger-postgres/migrations) and [runledger-test-support/migrations](runledger-test-support/migrations) so packaged crates can apply schemas without relying on repo-relative paths
 - Local test support for DB-backed tests using `testcontainers`
@@ -30,7 +32,7 @@ The root workspace manifest is [Cargo.toml](Cargo.toml).
 ## What This Repo Does Not Include
 
 - Application-specific handlers
-- API servers, CLIs, or binaries
+- Application API servers or product web frontends
 - Non-Runledger product schema from the original application
 - Domain models owned by a larger app
 
@@ -246,6 +248,29 @@ Default behavior:
 - interval and concurrency values are clamped to safe minimums
 - lease TTL is clamped to at least `10` seconds
 
+## Operator TUI
+
+`runledger-tui` is a read-only terminal UI for operators and local development. It connects to the same PostgreSQL database as your workers and surfaces dashboard metrics, the job queue, workflow runs, and job definitions using the existing `runledger-postgres` admin read APIs.
+
+By default the UI uses **global** scope (`organization_id = NULL`) so rows from all organizations are visible. Pass `--org <uuid>` at startup, or press `o` at runtime, to scope queries to one organization.
+
+Requirements:
+
+- `DATABASE_URL` must point at a database with the Runledger schema already migrated
+- the binary runs `ensure_schema_compatible_after_idempotency_cutover` on startup unless `--skip-schema-check` is set
+
+Run locally:
+
+```bash
+export DATABASE_URL=postgres://user:pass@localhost/runledger
+cargo run -p runledger-tui
+
+# optional org scope
+cargo run -p runledger-tui -- --org 00000000-0000-0000-0000-000000000001
+```
+
+Keyboard highlights: `1`–`4` or `Tab` switch screens, `j`/`k` move selection, `Enter` open job or workflow detail, `Esc` go back, `r` refresh, `?` help, `q` quit.
+
 ## Building
 
 Common commands:
@@ -256,6 +281,7 @@ cargo test --workspace --no-run
 cargo test -p runledger-core
 cargo test -p runledger-postgres
 cargo test -p runledger-runtime
+cargo check -p runledger-tui
 ./scripts/run-external-consumer-smoke.sh
 ```
 
@@ -604,6 +630,12 @@ sync, exact sync restores catalog entries' enabled state from catalog defaults.
 Catalog helper builders validate catalog membership and catalog defaults only;
 operator-disabled database rows are enforced later by persistence APIs such as
 job enqueue, schedule materialization, and workflow enqueue.
+
+Migration note for 0.3.x: catalog sync error variants that carry persistence
+errors now store those errors in `Box<runledger_postgres::Error>` to keep
+`Result<_, CatalogError>` and `Result<_, JobDefinitionCatalogSyncError>` small.
+Downstream code that pattern-matches those public error variants should
+dereference the boxed source before matching the inner persistence error.
 
 Lower-level `JobEnqueue`, `JobScheduleUpsert`, `WorkflowDagBuilder`, and
 `WorkflowStepEnqueueBuilder` APIs remain available when you do not use a catalog.

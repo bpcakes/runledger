@@ -106,7 +106,7 @@ pub enum CatalogError {
     WorkflowBuild(#[from] WorkflowBuildError),
     /// Starting a catalog sync transaction failed.
     #[error("failed to start job definition sync transaction: {0}")]
-    SyncFailure(#[source] runledger_postgres::Error),
+    SyncFailure(#[source] Box<runledger_postgres::Error>),
     /// A persistence-layer catalog sync failure had no runtime-specific mapping.
     #[error("failed to sync job definitions with an unmapped persistence error: {0}")]
     DefinitionCatalogSyncFailure(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -117,32 +117,32 @@ pub enum CatalogError {
         job_type: String,
         /// Persistence-layer failure that occurred while syncing the definition.
         #[source]
-        source: runledger_postgres::Error,
+        source: Box<runledger_postgres::Error>,
     },
     /// Committing a catalog sync transaction failed.
     #[error("failed to commit job definition sync transaction: {0}")]
     CommitFailure(#[source] sqlx::Error),
     /// Applying the transaction-local bounds for definition-disabling sync failed.
     #[error("failed to bound job definition sync critical section: {0}")]
-    CriticalSectionTimeoutFailure(#[source] runledger_postgres::Error),
+    CriticalSectionTimeoutFailure(#[source] Box<runledger_postgres::Error>),
     /// Catalog definition sync input failed persistence-layer validation.
     #[error("job definition sync input is invalid: {0}")]
-    DefinitionSyncValidationFailure(#[source] runledger_postgres::Error),
+    DefinitionSyncValidationFailure(#[source] Box<runledger_postgres::Error>),
     /// Locking schedules before disabling definitions failed.
     #[error("failed to lock job schedules before disabling job definitions: {0}")]
-    ScheduleLockFailure(#[source] runledger_postgres::Error),
+    ScheduleLockFailure(#[source] Box<runledger_postgres::Error>),
     /// Locking definitions before checking and disabling definitions failed.
     #[error("failed to lock job definitions before disabling job definitions: {0}")]
-    DefinitionLockFailure(#[source] runledger_postgres::Error),
+    DefinitionLockFailure(#[source] Box<runledger_postgres::Error>),
     /// Checking active schedules before disabling definitions failed.
     #[error("failed to check active schedules before disabling job definitions: {0}")]
-    ScheduleCheckFailure(#[source] runledger_postgres::Error),
+    ScheduleCheckFailure(#[source] Box<runledger_postgres::Error>),
     /// Inspecting existing job definitions before sync failed.
     #[error("failed to inspect job definitions before syncing catalog: {0}")]
-    DefinitionInspectFailure(#[source] runledger_postgres::Error),
+    DefinitionInspectFailure(#[source] Box<runledger_postgres::Error>),
     /// Disabling absent job definitions failed.
     #[error("failed to disable absent job definitions: {0}")]
-    DisableAbsentFailure(#[source] runledger_postgres::Error),
+    DisableAbsentFailure(#[source] Box<runledger_postgres::Error>),
 }
 
 impl CatalogError {
