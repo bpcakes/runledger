@@ -28,11 +28,13 @@ pub use admin::{
 };
 pub use logs::{insert_job_log, list_job_logs};
 pub use queue::{
+    JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionCatalogSyncReport,
     claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
     complete_job_failure, complete_job_success, enqueue_job, enqueue_job_tx,
     get_job_definition_by_type, heartbeat_job, insert_job_definition_if_missing_tx,
     list_job_definitions, reap_expired_leases, reap_expired_leases_with_terminal_records,
-    release_unstarted_job_claim, update_job_definition, update_job_progress,
+    release_unstarted_job_claim, sync_catalog_job_definitions_exact_tx,
+    sync_catalog_job_definitions_tx, update_job_definition, update_job_progress,
     upsert_job_definition_tx,
 };
 pub use runtime_configs::{
@@ -49,8 +51,8 @@ pub use types::{
     JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,
     JobEnqueue, JobEventRecord, JobFailureUpdate, JobListFilter, JobLogRecord, JobLogRecordInput,
     JobMetricsRecord, JobProgressUpdate, JobQueueRecord, JobRuntimeConfigListFilter,
-    JobRuntimeConfigRecord, JobRuntimeConfigUpsert, JobScheduleRecord, JobScheduleUpsert,
-    ReapExpiredLeasesResult, ReapedTerminalLeaseRecord,
+    JobRuntimeConfigRecord, JobRuntimeConfigUpsert, JobScheduleJobTypeReference, JobScheduleRecord,
+    JobScheduleUpsert, ReapExpiredLeasesResult, ReapedTerminalLeaseRecord,
 };
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_definitions\n         SET is_enabled = false,\n             updated_at = now()\n         WHERE is_enabled = true\n           AND job_type <> ALL($1::text[])\n           AND job_type = ANY($2::text[])\n         RETURNING job_type",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "db2a106dcf2dcdd29007f47967096c838c2f80c48f3a190330ea28c73c07b90f"
+}

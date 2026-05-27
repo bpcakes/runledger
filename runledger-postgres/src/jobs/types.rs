@@ -27,6 +27,15 @@ pub struct JobDefinitionRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Schedule row that blocks a job-definition catalog sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobScheduleJobTypeReference {
+    /// Active schedule name.
+    pub schedule_name: String,
+    /// Job type referenced by the active schedule.
+    pub job_type: JobTypeName,
+}
+
 #[derive(Debug, Clone)]
 pub struct JobDefinitionListFilter<'a> {
     /// Admin list query input used for escaped `ILIKE` substring matching, not a canonical

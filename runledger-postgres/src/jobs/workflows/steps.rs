@@ -272,9 +272,10 @@ pub(in crate::jobs::workflows) async fn fetch_job_definition_defaults_tx(
 
     let rows = sqlx::query!(
         "SELECT job_type, default_priority, max_attempts, default_timeout_seconds
-         FROM job_definitions
+         FROM job_definitions jd
          WHERE is_enabled = true
-           AND job_type = ANY($1::text[])",
+           AND job_type = ANY($1::text[])
+         FOR SHARE OF jd",
         &job_types,
     )
     .fetch_all(&mut **tx)

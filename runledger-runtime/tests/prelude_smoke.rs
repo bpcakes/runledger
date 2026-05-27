@@ -60,8 +60,7 @@ async fn all_preludes_can_be_glob_imported_together() {
     let pool: DbPool = PgPoolOptions::new()
         .connect_lazy(UNUSED_LAZY_POOL_URL)
         .expect("construct lazy pool");
-    let mut registry = JobRegistry::new();
-    registry.register(PreludeHandler);
+    let catalog = JobCatalog::new().job("jobs.prelude.smoke", PreludeHandler);
 
     let supervisor = Supervisor::builder(
         &pool,
@@ -77,7 +76,7 @@ async fn all_preludes_can_be_glob_imported_together() {
         },
     )
     .expect("supervisor builder has runtime")
-    .with_registry(registry)
+    .with_catalog(&catalog)
     .disable_worker()
     .disable_scheduler()
     .disable_reaper()

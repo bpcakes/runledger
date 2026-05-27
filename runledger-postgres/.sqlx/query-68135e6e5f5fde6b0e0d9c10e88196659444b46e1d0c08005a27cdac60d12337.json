@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_definitions (\n            job_type,\n            version,\n            max_attempts,\n            default_timeout_seconds,\n            default_priority,\n            is_enabled\n         )\n         VALUES ($1, $2, $3, $4, $5, $6)\n         ON CONFLICT (job_type)\n         DO UPDATE\n            SET version = EXCLUDED.version,\n                max_attempts = EXCLUDED.max_attempts,\n                default_timeout_seconds = EXCLUDED.default_timeout_seconds,\n                default_priority = EXCLUDED.default_priority,\n                is_enabled = EXCLUDED.is_enabled,\n                updated_at = now()\n          WHERE job_definitions.version IS DISTINCT FROM EXCLUDED.version\n             OR job_definitions.max_attempts IS DISTINCT FROM EXCLUDED.max_attempts\n             OR job_definitions.default_timeout_seconds IS DISTINCT FROM EXCLUDED.default_timeout_seconds\n             OR job_definitions.default_priority IS DISTINCT FROM EXCLUDED.default_priority\n             OR job_definitions.is_enabled IS DISTINCT FROM EXCLUDED.is_enabled",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "68135e6e5f5fde6b0e0d9c10e88196659444b46e1d0c08005a27cdac60d12337"
+}

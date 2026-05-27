@@ -5,15 +5,20 @@
 //! handlers and `runledger-postgres` storage:
 //! - [`Supervisor`] starts and joins the worker, scheduler, and reaper loops
 //!   for a typical worker process
-//! - [`registry::JobRegistry`] stores the concrete handlers a worker may claim
+//! - [`catalog::JobCatalog`] is the preferred startup API for handler
+//!   registration, definition sync, and catalog-validated enqueue helpers
+//! - [`registry::JobRegistry`] stores concrete handlers directly for advanced
+//!   setups that manage definitions separately
 //! - [`config::JobsConfig`] centralizes poll, lease, and concurrency settings
 //!
 //! A typical service builds a shared PostgreSQL pool, registers handlers in a
-//! [`registry::JobRegistry`], and starts a [`Supervisor`]. Worker processes should
-//! call [`Supervisor::run_until_shutdown`] to observe task failures while still
-//! applying a bounded shutdown deadline. Use [`Supervisor::shutdown_with_timeout`]
-//! when shutdown is signaled externally, or [`Supervisor::shutdown`] when the
-//! caller already has an external shutdown budget or knows all loops will exit promptly.
+//! [`catalog::JobCatalog`], syncs definitions during startup, and starts a
+//! [`Supervisor`] with [`SupervisorBuilder::with_catalog`]. Worker processes
+//! should call [`Supervisor::run_until_shutdown`] to observe task failures while
+//! still applying a bounded shutdown deadline. Use
+//! [`Supervisor::shutdown_with_timeout`] when shutdown is signaled externally, or
+//! [`Supervisor::shutdown`] when the caller already has an external shutdown
+//! budget or knows all loops will exit promptly.
 //!
 //! The lower-level [`worker::run_worker_loop`], [`scheduler::run_scheduler_loop`],
 //! and [`reaper::run_reaper_loop`] functions remain public for custom process
@@ -40,14 +45,29 @@
 //! # Run A Worker Process
 //!
 //! ```rust,no_run
-//! # async fn demo(pool: runledger_postgres::DbPool) -> runledger_runtime::Result<()> {
+//! # async fn demo(
+//! #     pool: runledger_postgres::DbPool,
+//! # ) -> std::result::Result<(), Box<dyn std::error::Error>> {
 //! use std::time::Duration;
 //!
+//! use runledger_core::prelude::*;
 //! use runledger_runtime::prelude::*;
 //!
-//! let registry = JobRegistry::new();
+//! struct MyHandler;
+//! # #[async_trait::async_trait]
+//! # impl JobHandler for MyHandler {
+//! #     fn job_type(&self) -> JobType<'static> { JobType::new("jobs.example") }
+//! #     async fn execute(
+//! #         &self,
+//! #         _context: JobContext,
+//! #         _payload: serde_json::Value,
+//! #     ) -> std::result::Result<(), JobFailure> { Ok(()) }
+//! # }
+//!
+//! let catalog = JobCatalog::new().job("jobs.example", MyHandler);
+//! catalog.sync_definitions(&pool).await?;
 //! let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
-//!     .with_registry(registry)
+//!     .with_catalog(&catalog)
 //!     .build()?;
 //!
 //! supervisor
@@ -62,6 +82,7 @@
 //! bounded shutdown deadline. Use the lower-level loop functions only for custom
 //! process orchestration.
 
+pub mod catalog;
 pub mod config;
 pub mod error;
 pub mod reaper;
@@ -78,6 +99,11 @@ pub use supervisor::{Supervisor, SupervisorBuilder, SupervisorShutdown};
 /// This prelude avoids generic `Result` or `Error` aliases so it can be
 /// glob-imported alongside the core and PostgreSQL preludes.
 pub mod prelude {
+    pub use crate::catalog::{
+        CatalogError, CatalogJobEnqueueInput, CatalogJobScheduleInput, CatalogWorkflowDagBuilder,
+        JobCatalog, JobCatalogDefaults, JobCatalogExactSyncReport, JobCatalogSyncReport,
+        JobCatalogSyncScope,
+    };
     pub use crate::config::JobsConfig;
     pub use crate::error::{ReaperError, RuntimeError, SchedulerError, WorkerError};
     pub use crate::registry::JobRegistry;

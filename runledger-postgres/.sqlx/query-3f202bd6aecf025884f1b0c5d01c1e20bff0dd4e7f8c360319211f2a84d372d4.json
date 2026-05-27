@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT job_schedules.name, job_schedules.job_type\n         FROM job_schedules\n         INNER JOIN job_definitions\n            ON job_definitions.job_type = job_schedules.job_type\n         WHERE job_schedules.is_active = true\n           AND job_schedules.job_type <> ALL($1::text[])\n           AND job_schedules.job_type = ANY($2::text[])\n           AND job_definitions.is_enabled = true\n         ORDER BY job_schedules.name ASC\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "job_type",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "3f202bd6aecf025884f1b0c5d01c1e20bff0dd4e7f8c360319211f2a84d372d4"
+}

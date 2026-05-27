@@ -29,11 +29,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
 
-    let mut registry = JobRegistry::new();
-    registry.register(SendEmail);
+    let catalog = JobCatalog::new().job("jobs.email.send", SendEmail);
+    catalog.sync_definitions(&pool).await?;
 
     let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
-        .with_registry(registry)
+        .with_catalog(&catalog)
         .build()?;
     let shutdown_result = supervisor
         .run_until_shutdown(

@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio::time::Instant;
 use tracing::{Instrument, debug, error, info_span, warn};
 
+use crate::catalog::JobCatalog;
 use crate::config::JobsConfig;
 use crate::reaper::run_reaper_loop;
 use crate::registry::JobRegistry;
@@ -44,13 +46,15 @@ pub struct Supervisor {
 /// Builds a [`Supervisor`] with configurable runtime loops.
 ///
 /// Worker, scheduler, and reaper loops are enabled by default. Call
-/// [`Self::with_registry`] before [`Self::build`] when worker or reaper loops
-/// remain enabled.
+/// [`Self::with_registry`] or [`Self::with_catalog`] before [`Self::build`] when
+/// worker or reaper loops remain enabled.
 #[must_use]
 pub struct SupervisorBuilder<'a> {
     pool: &'a runledger_postgres::DbPool,
     runtime: Handle,
     registry: Option<JobRegistry>,
+    registry_source: Option<RegistrySource>,
+    mixed_registry_sources: bool,
     config: JobsConfig,
     worker_enabled: bool,
     scheduler_enabled: bool,
@@ -67,6 +71,12 @@ pub struct SupervisorShutdown {
 struct RuntimeTask {
     name: &'static str,
     handle: JoinHandle<RuntimeTaskExit>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegistrySource {
+    Registry,
+    Catalog,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,6 +117,8 @@ impl Supervisor {
             pool,
             runtime,
             registry: None,
+            registry_source: None,
+            mixed_registry_sources: false,
             config,
             worker_enabled: true,
             scheduler_enabled: true,
@@ -415,7 +427,29 @@ impl<'a> SupervisorBuilder<'a> {
     /// supervisors can be built without one.
     #[must_use = "builder methods return an updated builder value"]
     pub fn with_registry(mut self, registry: JobRegistry) -> Self {
+        self.mixed_registry_sources |= self.registry_source == Some(RegistrySource::Catalog);
+        self.registry_source = Some(RegistrySource::Registry);
         self.registry = Some(registry);
+        self
+    }
+
+    /// Registers handlers from a [`JobCatalog`].
+    ///
+    /// This does not sync database job definitions. Call
+    /// [`JobCatalog::sync_definitions`] before starting the supervisor or
+    /// creating schedules. Pass `&catalog` when the caller will continue using
+    /// the catalog for schedule, enqueue, or workflow helpers after building the
+    /// supervisor.
+    ///
+    /// # Registry Source
+    ///
+    /// Calling this and [`Self::with_registry`] on the same builder is rejected
+    /// by [`Self::build`]. Choose one registration source per builder.
+    #[must_use = "builder methods return an updated builder value"]
+    pub fn with_catalog(mut self, catalog: impl Borrow<JobCatalog>) -> Self {
+        self.mixed_registry_sources |= self.registry_source == Some(RegistrySource::Registry);
+        self.registry_source = Some(RegistrySource::Catalog);
+        self.registry = Some(catalog.borrow().to_registry());
         self
     }
 
@@ -449,11 +483,17 @@ impl<'a> SupervisorBuilder<'a> {
             pool,
             runtime,
             registry,
+            registry_source: _,
+            mixed_registry_sources,
             config,
             worker_enabled,
             scheduler_enabled,
             reaper_enabled,
         } = self;
+
+        if mixed_registry_sources {
+            return Err(RuntimeError::MixedRegistrySources);
+        }
 
         let registry = match registry {
             Some(registry) => registry,
@@ -941,6 +981,8 @@ mod tests {
         assert!(builder.scheduler_enabled);
         assert!(builder.reaper_enabled);
         assert!(builder.registry.is_none());
+        assert_eq!(builder.registry_source, None);
+        assert!(!builder.mixed_registry_sources);
     }
 
     #[tokio::test]
@@ -949,6 +991,40 @@ mod tests {
         let builder = empty_builder(&pool).with_registry(JobRegistry::new());
 
         assert!(builder.registry.is_some());
+        assert_eq!(builder.registry_source, Some(RegistrySource::Registry));
+        assert!(!builder.mixed_registry_sources);
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_mixed_registry_sources() {
+        let pool = lazy_pool();
+        let registry_then_catalog = empty_builder(&pool)
+            .with_registry(JobRegistry::new())
+            .with_catalog(JobCatalog::new())
+            .disable_worker()
+            .disable_reaper()
+            .build();
+        let Err(registry_then_catalog) = registry_then_catalog else {
+            panic!("mixed registry sources should be rejected");
+        };
+        assert!(matches!(
+            registry_then_catalog,
+            RuntimeError::MixedRegistrySources
+        ));
+
+        let catalog_then_registry = empty_builder(&pool)
+            .with_catalog(JobCatalog::new())
+            .with_registry(JobRegistry::new())
+            .disable_worker()
+            .disable_reaper()
+            .build();
+        let Err(catalog_then_registry) = catalog_then_registry else {
+            panic!("mixed registry sources should be rejected");
+        };
+        assert!(matches!(
+            catalog_then_registry,
+            RuntimeError::MixedRegistrySources
+        ));
     }
 
     #[tokio::test]
