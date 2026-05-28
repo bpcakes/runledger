@@ -5,7 +5,7 @@ pub use self::mutate::{
     list_workflow_step_keys_for_update_tx, update_workflow_step_and_pending_job_payload_tx,
 };
 pub use self::read::{
-    get_latest_workflow_run_by_type, get_workflow_run_by_id,
+    count_workflow_runs, get_latest_workflow_run_by_type, get_workflow_run_by_id,
     get_workflow_run_by_type_and_idempotency_key, get_workflow_run_by_type_and_idempotency_key_tx,
     get_workflow_run_id_for_job, list_workflow_runs, list_workflow_step_dependencies,
     list_workflow_steps,

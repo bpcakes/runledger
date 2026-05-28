@@ -64,6 +64,12 @@ pub struct WorkflowRunListFilter<'a> {
     pub offset: i64,
 }
 
+pub struct WorkflowRunCountFilter<'a> {
+    pub organization_id: Option<Uuid>,
+    pub status: Option<WorkflowRunStatus>,
+    pub workflow_type: Option<&'a str>,
+}
+
 pub struct CompleteExternalWorkflowStepInput<'a> {
     pub workflow_run_id: Uuid,
     pub organization_id: Option<Uuid>,

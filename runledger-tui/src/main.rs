@@ -3,6 +3,7 @@ mod config;
 mod data;
 mod format;
 mod scope;
+mod terminal;
 mod ui;
 
 use clap::Parser;
@@ -19,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
     }
 
-    app::run(pool, config).await?;
+    terminal::run(pool, config).await?;
 
     Ok(())
 }

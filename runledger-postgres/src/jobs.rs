@@ -56,17 +56,17 @@ pub use types::{
 };
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,
-    CompleteExternalWorkflowStepInput, WorkflowRunDbRecord, WorkflowRunListFilter,
-    WorkflowStepDbRecord, WorkflowStepDependencyDbRecord,
+    CompleteExternalWorkflowStepInput, WorkflowRunCountFilter, WorkflowRunDbRecord,
+    WorkflowRunListFilter, WorkflowStepDbRecord, WorkflowStepDependencyDbRecord,
 };
 pub use workflows::{
     append_workflow_steps, append_workflow_steps_tx, cancel_workflow_run_tx,
-    complete_external_workflow_step, complete_external_workflow_step_tx, enqueue_workflow_run,
-    enqueue_workflow_run_tx, get_latest_workflow_run_by_type, get_workflow_run_by_id,
-    get_workflow_run_by_type_and_idempotency_key, get_workflow_run_by_type_and_idempotency_key_tx,
-    get_workflow_run_id_for_job, list_workflow_runs, list_workflow_step_dependencies,
-    list_workflow_step_keys_for_update_tx, list_workflow_steps,
-    update_workflow_step_and_pending_job_payload_tx,
+    complete_external_workflow_step, complete_external_workflow_step_tx, count_workflow_runs,
+    enqueue_workflow_run, enqueue_workflow_run_tx, get_latest_workflow_run_by_type,
+    get_workflow_run_by_id, get_workflow_run_by_type_and_idempotency_key,
+    get_workflow_run_by_type_and_idempotency_key_tx, get_workflow_run_id_for_job,
+    list_workflow_runs, list_workflow_step_dependencies, list_workflow_step_keys_for_update_tx,
+    list_workflow_steps, update_workflow_step_and_pending_job_payload_tx,
 };
 #[cfg(feature = "test-support")]
 pub mod test_support {
