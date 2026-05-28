@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs};
 use runledger_core::jobs::{JobStatus, WorkflowRunStatus, WorkflowStepStatus};
 
-use crate::app::{App, Screen, TopScreen};
+use crate::app::{App, Screen};
 use crate::scope::Scope;
 
 pub const TAB_LABELS: [&str; 4] = ["Dashboard", "Queue", "Workflows", "Definitions"];
@@ -369,24 +369,6 @@ pub fn scope_banner(scope: Scope) -> Line<'static> {
             },
         ),
     ])
-}
-
-pub fn top_screen_from_index(index: usize) -> TopScreen {
-    match index {
-        0 => TopScreen::Dashboard,
-        1 => TopScreen::Queue,
-        2 => TopScreen::Workflows,
-        _ => TopScreen::Definitions,
-    }
-}
-
-pub fn screen_from_top(top: TopScreen) -> Screen {
-    match top {
-        TopScreen::Dashboard => Screen::Dashboard,
-        TopScreen::Queue => Screen::Queue,
-        TopScreen::Workflows => Screen::Workflows,
-        TopScreen::Definitions => Screen::Definitions,
-    }
 }
 
 #[cfg(test)]

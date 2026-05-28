@@ -9,7 +9,7 @@ use super::super::row_decode::{
     parse_workflow_type_name,
 };
 use super::super::workflow_types::{
-    WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowStepDbRecord,
+    WorkflowRunCountFilter, WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowStepDbRecord,
     WorkflowStepDependencyDbRecord,
 };
 
@@ -236,6 +236,26 @@ pub async fn list_workflow_runs(
             })
         })
         .collect()
+}
+
+pub async fn count_workflow_runs(
+    pool: &DbPool,
+    filter: &WorkflowRunCountFilter<'_>,
+) -> Result<i64> {
+    let status_text = filter.status.map(|status| status.as_db_value());
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint
+         FROM workflow_runs
+         WHERE ($1::uuid IS NULL OR organization_id = $1)
+           AND ($2::text IS NULL OR status = $2::text::workflow_run_status)
+           AND ($3::text IS NULL OR workflow_type ILIKE '%' || $3 || '%')",
+    )
+    .bind(filter.organization_id)
+    .bind(status_text)
+    .bind(filter.workflow_type)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| crate::Error::from_query_sqlx_with_context("count workflow runs", error))
 }
 
 pub async fn get_latest_workflow_run_by_type(

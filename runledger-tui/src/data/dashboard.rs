@@ -1,7 +1,7 @@
 use runledger_core::jobs::WorkflowRunStatus;
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    JobMetricsRecord, WorkflowRunListFilter, get_job_metrics, list_workflow_runs,
+    JobMetricsRecord, WorkflowRunCountFilter, count_workflow_runs, get_job_metrics,
 };
 
 use crate::scope::Scope;
@@ -23,34 +23,36 @@ pub async fn fetch(pool: &DbPool, scope: Scope) -> runledger_postgres::Result<Da
             .then_with(|| a.job_type.as_str().cmp(b.job_type.as_str()))
     });
 
-    let failed_workflows = list_workflow_runs(
-        pool,
-        &WorkflowRunListFilter {
-            organization_id: scope.organization_id,
-            status: Some(WorkflowRunStatus::CompletedWithErrors),
-            workflow_type: None,
-            limit: 10_000,
-            offset: 0,
-        },
-    )
-    .await?
-    .len();
-    let external_waits = list_workflow_runs(
-        pool,
-        &WorkflowRunListFilter {
-            organization_id: scope.organization_id,
-            status: Some(WorkflowRunStatus::WaitingForExternal),
-            workflow_type: None,
-            limit: 10_000,
-            offset: 0,
-        },
-    )
-    .await?
-    .len();
+    let failed_workflows = count_to_usize(
+        count_workflow_runs(
+            pool,
+            &WorkflowRunCountFilter {
+                organization_id: scope.organization_id,
+                status: Some(WorkflowRunStatus::CompletedWithErrors),
+                workflow_type: None,
+            },
+        )
+        .await?,
+    );
+    let external_waits = count_to_usize(
+        count_workflow_runs(
+            pool,
+            &WorkflowRunCountFilter {
+                organization_id: scope.organization_id,
+                status: Some(WorkflowRunStatus::WaitingForExternal),
+                workflow_type: None,
+            },
+        )
+        .await?,
+    );
 
     Ok(DashboardData {
         metrics,
         failed_workflows,
         external_waits,
     })
+}
+
+fn count_to_usize(count: i64) -> usize {
+    usize::try_from(count).unwrap_or(usize::MAX)
 }
