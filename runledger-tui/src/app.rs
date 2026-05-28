@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -54,14 +55,40 @@ enum FetchOutcome {
     Definitions(Result<Box<DefinitionsData>, String>),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ViewState {
+    pub list_selection: usize,
+    pub detail_scroll: usize,
+    pub job_detail_pane: JobDetailPane,
+}
+
+impl Default for ViewState {
+    fn default() -> Self {
+        Self {
+            list_selection: 0,
+            detail_scroll: 0,
+            job_detail_pane: JobDetailPane::Summary,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScreenFrame {
+    pub screen: Screen,
+    pub state: ViewState,
+}
+
 pub struct App {
     pub config: Config,
     pub scope: Scope,
     pub screen: Screen,
-    pub screen_stack: Vec<Screen>,
+    pub screen_stack: Vec<ScreenFrame>,
+    pub top_view_states: [ViewState; 4],
     pub list_selection: usize,
     pub detail_scroll: usize,
     pub payload_visible_rows: usize,
+    pub payload_raw: bool,
+    pub payload_wrap: bool,
     pub queue_filter: QueueStatusFilter,
     pub job_type_filter: Option<String>,
     pub workflow_type_filter: Option<String>,
@@ -72,6 +99,12 @@ pub struct App {
     pub show_filter_input: bool,
     pub filter_input: String,
     pub filter_input_workflow: bool,
+    pub show_search_input: bool,
+    pub search_input: String,
+    pub table_search: Option<String>,
+    pub show_command_input: bool,
+    pub command_input: String,
+    pub refresh_paused: bool,
     pub dashboard: Option<DashboardData>,
     pub jobs: Option<JobsData>,
     pub job_detail: Option<JobDetailData>,
@@ -79,7 +112,9 @@ pub struct App {
     pub workflow_detail: Option<WorkflowDetailData>,
     pub definitions: Option<DefinitionsData>,
     pub last_error: Option<String>,
+    pub notice: Option<String>,
     pub last_refresh: Option<Instant>,
+    pub last_fetch_duration: Option<Duration>,
     pub fetching: bool,
     pub should_quit: bool,
     fetch_generation: Arc<AtomicU64>,
@@ -95,9 +130,12 @@ impl App {
             scope,
             screen: Screen::Dashboard,
             screen_stack: Vec::new(),
+            top_view_states: [ViewState::default(); Self::TOP_SCREEN_COUNT],
             list_selection: 0,
             detail_scroll: 0,
             payload_visible_rows: 1,
+            payload_raw: false,
+            payload_wrap: false,
             queue_filter: QueueStatusFilter::All,
             job_type_filter: None,
             workflow_type_filter: None,
@@ -108,6 +146,12 @@ impl App {
             show_filter_input: false,
             filter_input: String::new(),
             filter_input_workflow: false,
+            show_search_input: false,
+            search_input: String::new(),
+            table_search: None,
+            show_command_input: false,
+            command_input: String::new(),
+            refresh_paused: false,
             dashboard: None,
             jobs: None,
             job_detail: None,
@@ -115,7 +159,9 @@ impl App {
             workflow_detail: None,
             definitions: None,
             last_error: None,
+            notice: None,
             last_refresh: None,
+            last_fetch_duration: None,
             fetching: false,
             should_quit: false,
             fetch_generation,
@@ -155,30 +201,132 @@ impl App {
         }
     }
 
-    pub fn status_line(&self) -> String {
-        let scope = self.scope.label();
-        let refresh = self
-            .last_refresh
-            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f32()))
-            .unwrap_or_else(|| "never".to_owned());
-        let fetch = if self.fetching { " | fetching…" } else { "" };
-        let err = self
-            .last_error
-            .as_ref()
-            .map(|e| format!(" | err: {}", truncate_status(e, 40)))
-            .unwrap_or_default();
-        format!(
-            "scope={scope} | screen={} | refresh={refresh}{fetch}{err} | ? help",
-            self.screen_title()
+    fn capture_view_state(&self) -> ViewState {
+        ViewState {
+            list_selection: self.list_selection,
+            detail_scroll: self.detail_scroll,
+            job_detail_pane: self.job_detail_pane,
+        }
+    }
+
+    fn restore_view_state(&mut self, state: ViewState) {
+        self.list_selection = state.list_selection;
+        self.detail_scroll = state.detail_scroll;
+        self.job_detail_pane = state.job_detail_pane;
+        self.clamp_selection();
+    }
+
+    fn save_current_top_view_state(&mut self) {
+        if self.screen_stack.is_empty() && self.is_top_level_screen() {
+            self.top_view_states[self.top_screen_index()] = self.capture_view_state();
+        }
+    }
+
+    fn is_top_level_screen(&self) -> bool {
+        matches!(
+            self.screen,
+            Screen::Dashboard | Screen::Queue | Screen::Workflows | Screen::Definitions
         )
     }
 
+    pub fn status_line(&self) -> String {
+        let rows = self.list_len();
+        let selected = if rows == 0 {
+            "row 0/0".to_owned()
+        } else {
+            format!("row {}/{}", self.list_selection.min(rows - 1) + 1, rows)
+        };
+        let refresh = self.refresh_status_label();
+        let query = self
+            .last_fetch_duration
+            .map(format_duration)
+            .unwrap_or_else(|| "query --".to_owned());
+        let filters = self.filter_status_label();
+        let message = self
+            .notice
+            .as_ref()
+            .or(self.last_error.as_ref())
+            .map(|e| format!(" | {}", truncate_status(e, 52)))
+            .unwrap_or_default();
+        format!(
+            "{} | {} | {} | {} | {}{}",
+            self.screen_title(),
+            selected,
+            filters,
+            refresh,
+            query,
+            message,
+        )
+    }
+
+    pub fn key_hint_line(&self) -> &'static str {
+        match self.screen {
+            Screen::Dashboard => {
+                "Enter queue filter | / search | t type | c clear | p pause | r refresh | ? help | q quit"
+            }
+            Screen::Queue => {
+                "Enter/l open | f status | / search | t type | c clear | y copy id | g/G top/end | p pause"
+            }
+            Screen::JobDetail { .. } => {
+                "h/Esc back | [/] panes | v wrap | R raw | y copy id | . refresh | p pause"
+            }
+            Screen::Workflows => {
+                "Enter/l open | / search | t type | c clear | y copy id | g/G top/end | p pause"
+            }
+            Screen::WorkflowDetail { .. } => {
+                "Enter/l open job | h/Esc back | / search | y copy id | g/G top/end | p pause"
+            }
+            Screen::Definitions => {
+                "/ search | t type | c clear | g/G top/end | p pause | r refresh"
+            }
+        }
+    }
+
+    fn refresh_status_label(&self) -> String {
+        let age = self
+            .last_refresh
+            .map(|t| format_duration_short(t.elapsed()))
+            .unwrap_or_else(|| "never".to_owned());
+        let paused = if self.refresh_paused { " paused" } else { "" };
+        let fetch = if self.fetching { " fetching" } else { "" };
+        format!("refresh {age}{paused}{fetch}")
+    }
+
+    fn filter_status_label(&self) -> String {
+        let search = self
+            .table_search
+            .as_deref()
+            .map(|q| format!(" search='{q}'"))
+            .unwrap_or_default();
+        match self.screen {
+            Screen::Dashboard => format!("scope {}", self.scope.label()) + &search,
+            Screen::Queue | Screen::JobDetail { .. } => format!(
+                "scope {} status {} type {}{}",
+                self.scope.label(),
+                self.queue_filter.label(),
+                self.job_type_filter.as_deref().unwrap_or("any"),
+                search,
+            ),
+            Screen::Workflows | Screen::WorkflowDetail { .. } => format!(
+                "scope {} workflow {}{}",
+                self.scope.label(),
+                self.workflow_type_filter.as_deref().unwrap_or("any"),
+                search,
+            ),
+            Screen::Definitions => format!(
+                "type {}{}",
+                self.job_type_filter.as_deref().unwrap_or("any"),
+                search,
+            ),
+        }
+    }
+
     pub fn navigate_top(&mut self, top: TopScreen) {
+        self.save_current_top_view_state();
         self.screen_stack.clear();
         self.screen = screen_from_top(top);
-        self.list_selection = 0;
-        self.detail_scroll = 0;
-        self.invalidate_cache();
+        self.restore_view_state(self.top_view_states[self.top_screen_index()]);
+        self.bump_fetch_generation();
     }
 
     fn invalidate_cache(&mut self) {
@@ -193,7 +341,10 @@ impl App {
 
     pub fn push_job_detail(&mut self, job_id: Uuid) {
         self.bump_fetch_generation();
-        self.screen_stack.push(self.screen.clone());
+        self.screen_stack.push(ScreenFrame {
+            screen: self.screen.clone(),
+            state: self.capture_view_state(),
+        });
         self.screen = Screen::JobDetail { job_id };
         self.job_detail = None;
         self.list_selection = 0;
@@ -203,7 +354,10 @@ impl App {
 
     pub fn push_workflow_detail(&mut self, run_id: Uuid) {
         self.bump_fetch_generation();
-        self.screen_stack.push(self.screen.clone());
+        self.screen_stack.push(ScreenFrame {
+            screen: self.screen.clone(),
+            state: self.capture_view_state(),
+        });
         self.screen = Screen::WorkflowDetail { run_id };
         self.workflow_detail = None;
         self.list_selection = 0;
@@ -212,31 +366,108 @@ impl App {
     pub fn pop_screen(&mut self) {
         if let Some(prev) = self.screen_stack.pop() {
             self.bump_fetch_generation();
-            self.screen = prev;
-            self.list_selection = 0;
-            self.detail_scroll = 0;
+            self.screen = prev.screen;
+            self.restore_view_state(prev.state);
         }
     }
 
     pub fn list_len(&self) -> usize {
         match &self.screen {
-            Screen::Dashboard => self.dashboard.as_ref().map_or(0, |d| d.metrics.len()),
-            Screen::Queue => self.jobs.as_ref().map_or(0, |d| d.jobs.len()),
+            Screen::Dashboard => self.dashboard.as_ref().map_or(0, |d| {
+                d.metrics
+                    .iter()
+                    .filter(|m| {
+                        self.matches_table_search(vec![
+                            m.job_type.as_str().to_owned(),
+                            m.pending_count.to_string(),
+                            m.leased_count.to_string(),
+                            m.stale_leases.to_string(),
+                            m.dead_lettered_24h.to_string(),
+                        ])
+                    })
+                    .count()
+            }),
+            Screen::Queue => self.jobs.as_ref().map_or(0, |d| {
+                d.jobs.iter().filter(|j| self.job_matches_search(j)).count()
+            }),
             Screen::JobDetail { .. } => match self.job_detail_pane {
-                JobDetailPane::Events => self.job_detail.as_ref().map_or(0, |d| d.events.len()),
-                JobDetailPane::Logs => self.job_detail.as_ref().map_or(0, |d| d.logs.len()),
+                JobDetailPane::Events => self.job_detail.as_ref().map_or(0, |d| {
+                    d.events
+                        .iter()
+                        .filter(|e| {
+                            self.matches_table_search(vec![
+                                e.id.to_string(),
+                                e.event_type.as_db_value().to_owned(),
+                                e.stage.map(|s| s.as_db_value()).unwrap_or("").to_owned(),
+                            ])
+                        })
+                        .count()
+                }),
+                JobDetailPane::Logs => self.job_detail.as_ref().map_or(0, |d| {
+                    d.logs
+                        .iter()
+                        .filter(|l| {
+                            self.matches_table_search(vec![
+                                l.id.to_string(),
+                                l.level.clone(),
+                                l.message.clone(),
+                            ])
+                        })
+                        .count()
+                }),
                 _ => 0,
             },
-            Screen::Workflows => self.workflows.as_ref().map_or(0, |d| d.runs.len()),
-            Screen::WorkflowDetail { .. } => {
-                self.workflow_detail.as_ref().map_or(0, |d| d.steps.len())
-            }
-            Screen::Definitions => self.definitions.as_ref().map_or(0, |d| d.definitions.len()),
+            Screen::Workflows => self.workflows.as_ref().map_or(0, |d| {
+                d.runs
+                    .iter()
+                    .filter(|r| {
+                        self.matches_table_search(vec![
+                            r.id.to_string(),
+                            r.workflow_type.as_str().to_owned(),
+                            crate::format::workflow_run_status_label(r.status).to_owned(),
+                        ])
+                    })
+                    .count()
+            }),
+            Screen::WorkflowDetail { .. } => self.workflow_detail.as_ref().map_or(0, |d| {
+                d.steps
+                    .iter()
+                    .filter(|s| {
+                        self.matches_table_search(vec![
+                            s.step_key.as_str().to_owned(),
+                            crate::format::workflow_step_status_label(s.status).to_owned(),
+                            s.job_type
+                                .as_ref()
+                                .map(|t| t.as_str().to_owned())
+                                .unwrap_or_default(),
+                            s.job_id.map(|id| id.to_string()).unwrap_or_default(),
+                        ])
+                    })
+                    .count()
+            }),
+            Screen::Definitions => self.definitions.as_ref().map_or(0, |d| {
+                d.definitions
+                    .iter()
+                    .filter(|def| {
+                        self.matches_table_search(vec![
+                            def.job_type.as_str().to_owned(),
+                            def.version.to_string(),
+                            if def.is_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                            .to_owned(),
+                        ])
+                    })
+                    .count()
+            }),
         }
     }
 
-    fn apply_fetch(&mut self, outcome: FetchOutcome) {
+    fn apply_fetch(&mut self, outcome: FetchOutcome, duration: Duration) {
         self.fetching = false;
+        self.last_fetch_duration = Some(duration);
         match outcome {
             FetchOutcome::Dashboard(Ok(data)) => {
                 self.dashboard = Some(*data);
@@ -284,10 +515,44 @@ impl App {
             }
             _ => {}
         }
+        self.clamp_selection();
+    }
+
+    fn clamp_selection(&mut self) {
         let len = self.list_len();
-        if len > 0 && self.list_selection >= len {
+        if len == 0 {
+            self.list_selection = 0;
+        } else if self.list_selection >= len {
             self.list_selection = len - 1;
         }
+    }
+
+    pub fn table_search_query(&self) -> Option<&str> {
+        self.table_search.as_deref().filter(|q| !q.is_empty())
+    }
+
+    pub fn matches_table_search<I, S>(&self, fields: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let Some(query) = self.table_search_query() else {
+            return true;
+        };
+        let query = query.to_ascii_lowercase();
+        fields
+            .into_iter()
+            .any(|field| field.as_ref().to_ascii_lowercase().contains(&query))
+    }
+
+    fn job_matches_search(&self, job: &runledger_postgres::jobs::JobQueueRecord) -> bool {
+        self.matches_table_search(vec![
+            job.id.to_string(),
+            job.job_type.as_str().to_owned(),
+            crate::format::job_status_label(job.status).to_owned(),
+            job.stage.as_db_value().to_owned(),
+            job.worker_id.as_deref().unwrap_or("").to_owned(),
+        ])
     }
 
     pub fn update_payload_visible_rows(&mut self, visible_rows: usize) {
@@ -308,6 +573,12 @@ impl App {
         if self.show_filter_input {
             return self.handle_filter_input_key(key);
         }
+        if self.show_search_input {
+            return self.handle_search_input_key(key);
+        }
+        if self.show_command_input {
+            return self.handle_command_input_key(key);
+        }
         if self.show_help && key.code != KeyCode::Char('?') && key.code != KeyCode::Esc {
             return false;
         }
@@ -327,8 +598,20 @@ impl App {
                 }
             }
             KeyCode::Char('r') => {
-                self.invalidate_cache();
+                self.bump_fetch_generation();
                 refresh = true;
+            }
+            KeyCode::Char('.') => {
+                self.bump_fetch_generation();
+                refresh = true;
+            }
+            KeyCode::Char('p') => {
+                self.refresh_paused = !self.refresh_paused;
+                self.notice = Some(if self.refresh_paused {
+                    "Auto-refresh paused".to_owned()
+                } else {
+                    "Auto-refresh resumed".to_owned()
+                });
             }
             KeyCode::Char('o') => {
                 self.show_org_input = true;
@@ -339,15 +622,34 @@ impl App {
                     .unwrap_or_default();
             }
             KeyCode::Char('/') => {
+                self.show_search_input = true;
+                self.search_input = self.table_search.clone().unwrap_or_default();
+            }
+            KeyCode::Char('t') => {
                 self.show_filter_input = true;
-                self.filter_input_workflow = false;
-                self.filter_input = self.job_type_filter.clone().unwrap_or_default();
+                self.filter_input_workflow = matches!(
+                    self.screen,
+                    Screen::Workflows | Screen::WorkflowDetail { .. }
+                );
+                self.filter_input = if self.filter_input_workflow {
+                    self.workflow_type_filter.clone().unwrap_or_default()
+                } else {
+                    self.job_type_filter.clone().unwrap_or_default()
+                };
             }
             KeyCode::Char('w') if matches!(self.screen, Screen::Workflows) => {
                 self.show_filter_input = true;
                 self.filter_input_workflow = true;
                 self.filter_input = self.workflow_type_filter.clone().unwrap_or_default();
             }
+            KeyCode::Char(':') => {
+                self.show_command_input = true;
+                self.command_input.clear();
+            }
+            KeyCode::Char('c') => {
+                refresh = self.clear_context_filters();
+            }
+            KeyCode::Char('y') => self.copy_selected_identifier(),
             KeyCode::Char('f') if matches!(self.screen, Screen::Queue) => {
                 self.bump_fetch_generation();
                 self.queue_filter = self.queue_filter.next();
@@ -385,6 +687,43 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
+            KeyCode::Char('g') | KeyCode::Home => self.move_to_start(),
+            KeyCode::Char('G') | KeyCode::End => self.move_to_end(),
+            KeyCode::PageDown => self.move_selection(10),
+            KeyCode::PageUp => self.move_selection(-10),
+            KeyCode::Char('h') => {
+                if !self.screen_stack.is_empty() {
+                    self.pop_screen();
+                    refresh = true;
+                }
+            }
+            KeyCode::Char('v')
+                if matches!(
+                    (&self.screen, self.job_detail_pane),
+                    (Screen::JobDetail { .. }, JobDetailPane::Payload)
+                ) =>
+            {
+                self.payload_wrap = !self.payload_wrap;
+                self.notice = Some(if self.payload_wrap {
+                    "Payload wrap enabled".to_owned()
+                } else {
+                    "Payload wrap disabled".to_owned()
+                });
+            }
+            KeyCode::Char('R')
+                if matches!(
+                    (&self.screen, self.job_detail_pane),
+                    (Screen::JobDetail { .. }, JobDetailPane::Payload)
+                ) =>
+            {
+                self.payload_raw = !self.payload_raw;
+                self.detail_scroll = 0;
+                self.notice = Some(if self.payload_raw {
+                    "Payload raw mode".to_owned()
+                } else {
+                    "Payload pretty mode".to_owned()
+                });
+            }
             KeyCode::Char(']') | KeyCode::Right
                 if matches!(self.screen, Screen::JobDetail { .. }) =>
             {
@@ -399,7 +738,7 @@ impl App {
                 self.detail_scroll = 0;
                 self.list_selection = 0;
             }
-            KeyCode::Enter => {
+            KeyCode::Char('l') | KeyCode::Enter => {
                 let before = self.screen.clone();
                 self.activate_selection();
                 if self.screen != before {
@@ -475,6 +814,47 @@ impl App {
         refresh
     }
 
+    fn handle_search_input_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => self.show_search_input = false,
+            KeyCode::Enter => {
+                let trimmed = self.search_input.trim();
+                self.table_search = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                };
+                self.show_search_input = false;
+                self.list_selection = 0;
+                self.clamp_selection();
+            }
+            KeyCode::Backspace => {
+                self.search_input.pop();
+            }
+            KeyCode::Char(c) => self.search_input.push(c),
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_command_input_key(&mut self, key: KeyEvent) -> bool {
+        let mut refresh = false;
+        match key.code {
+            KeyCode::Esc => self.show_command_input = false,
+            KeyCode::Enter => {
+                let command = self.command_input.trim().to_owned();
+                refresh = self.execute_command(&command);
+                self.show_command_input = false;
+            }
+            KeyCode::Backspace => {
+                self.command_input.pop();
+            }
+            KeyCode::Char(c) => self.command_input.push(c),
+            _ => {}
+        }
+        refresh
+    }
+
     fn move_selection(&mut self, delta: i32) {
         if matches!(
             (&self.screen, self.job_detail_pane),
@@ -497,43 +877,265 @@ impl App {
         if len == 0 {
             return;
         }
+        let step = delta.unsigned_abs() as usize;
         let next = if delta.is_positive() {
-            self.list_selection.saturating_add(1)
+            self.list_selection.saturating_add(step)
         } else {
-            self.list_selection.saturating_sub(1)
+            self.list_selection.saturating_sub(step)
         };
         self.list_selection = next.min(len - 1);
+    }
+
+    fn move_to_start(&mut self) {
+        if matches!(
+            (&self.screen, self.job_detail_pane),
+            (Screen::JobDetail { .. }, JobDetailPane::Payload)
+        ) {
+            self.detail_scroll = 0;
+        } else {
+            self.list_selection = 0;
+        }
+    }
+
+    fn move_to_end(&mut self) {
+        if matches!(
+            (&self.screen, self.job_detail_pane),
+            (Screen::JobDetail { .. }, JobDetailPane::Payload)
+        ) {
+            self.detail_scroll = self.payload_scroll_max();
+            return;
+        }
+        let len = self.list_len();
+        if len > 0 {
+            self.list_selection = len - 1;
+        }
     }
 
     fn payload_scroll_max(&self) -> usize {
         let Some(detail) = &self.job_detail else {
             return 0;
         };
-        let lines = crate::format::job_payload_lines(&detail.job.payload);
+        let lines = if self.payload_raw {
+            crate::format::job_payload_raw_lines(&detail.job.payload)
+        } else {
+            crate::format::job_payload_lines(&detail.job.payload)
+        };
         crate::format::job_payload_scroll_max(lines.len(), self.payload_visible_rows)
     }
 
     fn activate_selection(&mut self) {
         match &self.screen {
+            Screen::Dashboard => {
+                if let Some(job_type) = self.selected_dashboard_job_type() {
+                    self.job_type_filter = Some(job_type);
+                    self.queue_filter = QueueStatusFilter::All;
+                    self.navigate_top(TopScreen::Queue);
+                }
+            }
             Screen::Queue => {
-                if let Some(job) = self
-                    .jobs
-                    .as_ref()
-                    .and_then(|d| d.jobs.get(self.list_selection))
-                {
-                    self.push_job_detail(job.id);
+                if let Some(job_id) = self.selected_job_id() {
+                    self.push_job_detail(job_id);
                 }
             }
             Screen::Workflows => {
-                if let Some(run) = self
-                    .workflows
-                    .as_ref()
-                    .and_then(|d| d.runs.get(self.list_selection))
-                {
-                    self.push_workflow_detail(run.id);
+                if let Some(run_id) = self.selected_workflow_run_id() {
+                    self.push_workflow_detail(run_id);
+                }
+            }
+            Screen::WorkflowDetail { .. } => {
+                if let Some(job_id) = self.selected_workflow_step_job_id() {
+                    self.push_job_detail(job_id);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn selected_dashboard_job_type(&self) -> Option<String> {
+        self.dashboard
+            .as_ref()?
+            .metrics
+            .iter()
+            .filter(|m| {
+                self.matches_table_search(vec![
+                    m.job_type.as_str().to_owned(),
+                    m.pending_count.to_string(),
+                    m.leased_count.to_string(),
+                    m.stale_leases.to_string(),
+                    m.dead_lettered_24h.to_string(),
+                ])
+            })
+            .nth(self.list_selection)
+            .map(|m| m.job_type.as_str().to_owned())
+    }
+
+    fn selected_job_id(&self) -> Option<Uuid> {
+        self.jobs
+            .as_ref()?
+            .jobs
+            .iter()
+            .filter(|j| self.job_matches_search(j))
+            .nth(self.list_selection)
+            .map(|j| j.id)
+    }
+
+    fn selected_workflow_run_id(&self) -> Option<Uuid> {
+        self.workflows
+            .as_ref()?
+            .runs
+            .iter()
+            .filter(|r| {
+                self.matches_table_search(vec![
+                    r.id.to_string(),
+                    r.workflow_type.as_str().to_owned(),
+                    crate::format::workflow_run_status_label(r.status).to_owned(),
+                ])
+            })
+            .nth(self.list_selection)
+            .map(|r| r.id)
+    }
+
+    fn selected_workflow_step_job_id(&self) -> Option<Uuid> {
+        self.workflow_detail
+            .as_ref()?
+            .steps
+            .iter()
+            .filter(|s| {
+                self.matches_table_search(vec![
+                    s.step_key.as_str().to_owned(),
+                    crate::format::workflow_step_status_label(s.status).to_owned(),
+                    s.job_type
+                        .as_ref()
+                        .map(|t| t.as_str().to_owned())
+                        .unwrap_or_default(),
+                    s.job_id.map(|id| id.to_string()).unwrap_or_default(),
+                ])
+            })
+            .nth(self.list_selection)
+            .and_then(|s| s.job_id)
+    }
+
+    fn selected_identifier(&self) -> Option<String> {
+        match self.screen {
+            Screen::Dashboard => self.selected_dashboard_job_type(),
+            Screen::Queue => self.selected_job_id().map(|id| id.to_string()),
+            Screen::JobDetail { job_id } => Some(job_id.to_string()),
+            Screen::Workflows => self.selected_workflow_run_id().map(|id| id.to_string()),
+            Screen::WorkflowDetail { run_id } => self
+                .selected_workflow_step_job_id()
+                .map(|id| id.to_string())
+                .or_else(|| Some(run_id.to_string())),
+            Screen::Definitions => self
+                .definitions
+                .as_ref()?
+                .definitions
+                .iter()
+                .filter(|def| {
+                    self.matches_table_search(vec![
+                        def.job_type.as_str().to_owned(),
+                        def.version.to_string(),
+                        if def.is_enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                        .to_owned(),
+                    ])
+                })
+                .nth(self.list_selection)
+                .map(|def| def.job_type.as_str().to_owned()),
+        }
+    }
+
+    fn copy_selected_identifier(&mut self) {
+        let Some(value) = self.selected_identifier() else {
+            self.notice = Some("Nothing selected to copy".to_owned());
+            return;
+        };
+        match copy_to_terminal_clipboard(&value) {
+            Ok(()) => self.notice = Some(format!("Copied {value}")),
+            Err(error) => self.notice = Some(format!("Copy failed: {error}")),
+        }
+    }
+
+    fn clear_context_filters(&mut self) -> bool {
+        let mut refresh = false;
+        self.table_search = None;
+        match self.screen {
+            Screen::Queue | Screen::JobDetail { .. } => {
+                if self.queue_filter != QueueStatusFilter::All || self.job_type_filter.is_some() {
+                    self.queue_filter = QueueStatusFilter::All;
+                    self.job_type_filter = None;
+                    self.jobs = None;
+                    self.definitions = None;
+                    self.bump_fetch_generation();
+                    refresh = true;
+                }
+            }
+            Screen::Workflows | Screen::WorkflowDetail { .. } => {
+                if self.workflow_type_filter.is_some() {
+                    self.workflow_type_filter = None;
+                    self.workflows = None;
+                    self.bump_fetch_generation();
+                    refresh = true;
+                }
+            }
+            Screen::Definitions => {
+                if self.job_type_filter.is_some() {
+                    self.job_type_filter = None;
+                    self.definitions = None;
+                    self.bump_fetch_generation();
+                    refresh = true;
+                }
+            }
+            Screen::Dashboard => {}
+        }
+        self.list_selection = 0;
+        self.notice = Some("Cleared filters".to_owned());
+        refresh
+    }
+
+    fn execute_command(&mut self, command: &str) -> bool {
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        match parts.as_slice() {
+            [] => false,
+            ["scope", "global"] => {
+                self.scope = Scope::global();
+                self.invalidate_cache();
+                self.notice = Some("Scope set to global".to_owned());
+                true
+            }
+            ["filter", "status", status] => {
+                let Some(filter) = QueueStatusFilter::from_command(status) else {
+                    self.notice = Some(format!("Unknown status filter: {status}"));
+                    return false;
+                };
+                self.queue_filter = filter;
+                self.jobs = None;
+                self.bump_fetch_generation();
+                self.navigate_top(TopScreen::Queue);
+                true
+            }
+            ["refresh", value] => {
+                if let Some(ms) = parse_refresh_ms(value) {
+                    self.config.refresh_ms = ms;
+                    self.notice = Some(format!(
+                        "Refresh interval set to {}",
+                        format_duration_short(self.config.refresh_interval())
+                    ));
+                } else {
+                    self.notice = Some(format!("Invalid refresh interval: {value}"));
+                }
+                false
+            }
+            ["copy", "id"] => {
+                self.copy_selected_identifier();
+                false
+            }
+            _ => {
+                self.notice = Some(format!("Unknown command: {command}"));
+                false
+            }
         }
     }
 }
@@ -567,6 +1169,61 @@ fn truncate_status(value: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &value[..end])
+}
+
+fn format_duration(duration: Duration) -> String {
+    format!("query {:.0}ms", duration.as_secs_f64() * 1000.0)
+}
+
+fn format_duration_short(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 3600)
+    }
+}
+
+fn parse_refresh_ms(value: &str) -> Option<u64> {
+    if let Some(raw) = value.strip_suffix("ms") {
+        return raw.parse().ok();
+    }
+    if let Some(raw) = value.strip_suffix('s') {
+        return raw.parse::<u64>().ok().map(|seconds| seconds * 1000);
+    }
+    value.parse().ok()
+}
+
+fn copy_to_terminal_clipboard(value: &str) -> std::io::Result<()> {
+    let encoded = base64_encode(value.as_bytes());
+    let mut stdout = std::io::stdout();
+    write!(stdout, "\x1b]52;c;{encoded}\x07")?;
+    stdout.flush()
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 struct FetchRequest {
@@ -648,7 +1305,9 @@ pub async fn run(pool: DbPool, config: Config) -> std::io::Result<()> {
     let fetch_generation_bg = fetch_generation.clone();
     let fetch_worker = tokio::spawn(async move {
         while let Some((generation, req)) = fetch_rx.recv().await {
+            let started_at = Instant::now();
             let outcome = execute_fetch(&pool_bg, req).await;
+            let fetch_duration = started_at.elapsed();
             if fetch_generation_bg.load(Ordering::Acquire) != generation {
                 in_flight_bg.store(false, Ordering::Release);
                 let mut guard = app_fetch.lock().await;
@@ -656,12 +1315,11 @@ pub async fn run(pool: DbPool, config: Config) -> std::io::Result<()> {
                 continue;
             }
             let mut guard = app_fetch.lock().await;
-            guard.apply_fetch(outcome);
+            guard.apply_fetch(outcome, fetch_duration);
             in_flight_bg.store(false, Ordering::Release);
         }
     });
 
-    let refresh_every = config.refresh_interval();
     let mut next_refresh = Instant::now();
 
     let mut need_fetch = true;
@@ -717,8 +1375,20 @@ pub async fn run(pool: DbPool, config: Config) -> std::io::Result<()> {
         }
 
         if Instant::now() >= next_refresh {
-            need_fetch = true;
-            next_refresh = Instant::now() + refresh_every;
+            let refresh_every = {
+                let guard = app.lock().await;
+                if guard.refresh_paused {
+                    None
+                } else {
+                    Some(guard.config.refresh_interval())
+                }
+            };
+            if let Some(refresh_every) = refresh_every {
+                need_fetch = true;
+                next_refresh = Instant::now() + refresh_every;
+            } else {
+                next_refresh = Instant::now() + Duration::from_millis(250);
+            }
         }
     }
 
@@ -802,5 +1472,47 @@ mod tests {
 
         app.move_selection(-1);
         assert_eq!(app.detail_scroll, max_scroll - 1);
+    }
+
+    #[test]
+    fn top_navigation_preserves_selection_for_cached_screens() {
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        app.screen = Screen::Queue;
+        app.jobs = Some(JobsData {
+            jobs: vec![
+                job_record_with_payload(Uuid::new_v4(), serde_json::json!({"i": 0})),
+                job_record_with_payload(Uuid::new_v4(), serde_json::json!({"i": 1})),
+                job_record_with_payload(Uuid::new_v4(), serde_json::json!({"i": 2})),
+            ],
+        });
+        app.list_selection = 2;
+
+        app.navigate_top(TopScreen::Dashboard);
+        assert_eq!(app.screen, Screen::Dashboard);
+
+        app.navigate_top(TopScreen::Queue);
+        assert_eq!(app.screen, Screen::Queue);
+        assert_eq!(app.list_selection, 2);
+    }
+
+    #[test]
+    fn popping_detail_restores_parent_selection() {
+        let job_ids = [Uuid::new_v4(), Uuid::new_v4()];
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        app.screen = Screen::Queue;
+        app.jobs = Some(JobsData {
+            jobs: vec![
+                job_record_with_payload(job_ids[0], serde_json::json!({"i": 0})),
+                job_record_with_payload(job_ids[1], serde_json::json!({"i": 1})),
+            ],
+        });
+        app.list_selection = 1;
+
+        app.push_job_detail(job_ids[1]);
+        assert_eq!(app.list_selection, 0);
+
+        app.pop_screen();
+        assert_eq!(app.screen, Screen::Queue);
+        assert_eq!(app.list_selection, 1);
     }
 }

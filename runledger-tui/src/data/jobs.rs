@@ -34,6 +34,19 @@ impl QueueStatusFilter {
     }
 
     #[must_use]
+    pub fn from_command(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "all" | "any" => Some(Self::All),
+            "pending" | "pend" => Some(Self::Pending),
+            "leased" | "lease" | "running" => Some(Self::Leased),
+            "dlq" | "dead" | "dead-letter" | "dead-lettered" | "deadlettered" => {
+                Some(Self::DeadLettered)
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn status(self) -> Option<JobStatus> {
         match self {
             Self::All => None,
