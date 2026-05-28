@@ -1,14 +1,17 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::widgets::{Paragraph, Row};
+use ratatui::widgets::Paragraph;
 
 use crate::app::App;
 use crate::data::{WorkflowDetailData, WorkflowsData};
 use crate::format::{
-    format_optional_timestamp, format_timestamp, short_uuid, truncate_str,
+    format_optional_timestamp, format_relative_timestamp, short_uuid, truncate_str,
     workflow_run_status_label, workflow_step_status_label,
 };
-use crate::ui::render::{draw_table, draw_table_unselected, scope_banner};
+use crate::ui::render::{
+    CellAlign, TableColumn, TableRow, draw_table, draw_table_unselected, scope_banner, table_cell,
+    workflow_run_status_style, workflow_step_status_style,
+};
 
 pub fn draw_runs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &WorkflowsData) {
     let chunks = Layout::default()
@@ -27,17 +30,31 @@ pub fn draw_runs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &W
     );
     f.render_widget(Paragraph::new(filter_line), chunks[1]);
 
-    let headers = vec!["ID", "Type", "Status", "Started", "Finished"];
-    let rows: Vec<Row> = data
+    let columns = [
+        TableColumn::left("ID", Constraint::Length(15)),
+        TableColumn::left("Type", Constraint::Min(28)),
+        TableColumn::left("Status", Constraint::Length(8)),
+        TableColumn::right("Started", Constraint::Length(10)).optional(1),
+        TableColumn::right("Finished", Constraint::Length(19)).optional(2),
+    ];
+    let rows: Vec<TableRow> = data
         .runs
         .iter()
-        .map(|r| {
-            Row::new(vec![
-                short_uuid(r.id),
-                truncate_str(r.workflow_type.as_str(), 28),
+        .filter(|r| {
+            app.matches_table_search(vec![
+                r.id.to_string(),
+                r.workflow_type.as_str().to_owned(),
                 workflow_run_status_label(r.status).to_owned(),
-                format_timestamp(r.started_at),
-                format_optional_timestamp(r.finished_at),
+            ])
+        })
+        .map(|r| {
+            TableRow::new(vec![
+                table_cell(short_uuid(r.id), CellAlign::Left),
+                table_cell(truncate_str(r.workflow_type.as_str(), 48), CellAlign::Left),
+                table_cell(workflow_run_status_label(r.status), CellAlign::Left)
+                    .style(workflow_run_status_style(r.status)),
+                table_cell(format_relative_timestamp(r.started_at), CellAlign::Right),
+                table_cell(format_optional_timestamp(r.finished_at), CellAlign::Right),
             ])
         })
         .collect();
@@ -46,9 +63,10 @@ pub fn draw_runs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &W
         f,
         chunks[2],
         " Workflow runs ",
-        headers,
+        &columns,
         rows,
         app.list_selection,
+        "No workflow runs match the current scope and filters.",
     );
 }
 
@@ -79,23 +97,61 @@ pub fn draw_detail(
     );
     f.render_widget(Paragraph::new(header), chunks[1]);
 
-    let step_headers = vec!["Step", "Status", "Job", "Deps pend", "Job ID"];
-    let step_rows: Vec<Row> = data
+    let step_columns = [
+        TableColumn::left("Step", Constraint::Min(18)),
+        TableColumn::left("Status", Constraint::Length(8)),
+        TableColumn::left("Job", Constraint::Min(18)).optional(1),
+        TableColumn::right("Deps", Constraint::Length(8)).optional(1),
+        TableColumn::left("Job ID", Constraint::Length(15)).optional(2),
+    ];
+    let filtered_steps: Vec<_> = data
         .steps
         .iter()
-        .map(|s| {
-            Row::new(vec![
+        .filter(|s| {
+            app.matches_table_search(vec![
                 s.step_key.as_str().to_owned(),
                 workflow_step_status_label(s.status).to_owned(),
                 s.job_type
                     .as_ref()
-                    .map(|t| truncate_str(t.as_str(), 20))
-                    .unwrap_or_else(|| "—".to_owned()),
-                format!(
-                    "{}/{}",
-                    s.dependency_count_pending, s.dependency_count_total
+                    .map(|t| t.as_str().to_owned())
+                    .unwrap_or_default(),
+                s.job_id.map(|id| id.to_string()).unwrap_or_default(),
+            ])
+        })
+        .collect();
+    let selected_step_id = filtered_steps
+        .get(
+            app.list_selection
+                .min(filtered_steps.len().saturating_sub(1)),
+        )
+        .map(|s| s.id);
+    let step_rows: Vec<TableRow> = data
+        .steps
+        .iter()
+        .filter(|s| filtered_steps.iter().any(|filtered| filtered.id == s.id))
+        .map(|s| {
+            TableRow::new(vec![
+                table_cell(s.step_key.as_str(), CellAlign::Left),
+                table_cell(workflow_step_status_label(s.status), CellAlign::Left)
+                    .style(workflow_step_status_style(s.status)),
+                table_cell(
+                    s.job_type
+                        .as_ref()
+                        .map(|t| truncate_str(t.as_str(), 32))
+                        .unwrap_or_else(|| "—".to_owned()),
+                    CellAlign::Left,
                 ),
-                s.job_id.map(short_uuid).unwrap_or_else(|| "—".to_owned()),
+                table_cell(
+                    format!(
+                        "{}/{}",
+                        s.dependency_count_pending, s.dependency_count_total
+                    ),
+                    CellAlign::Right,
+                ),
+                table_cell(
+                    s.job_id.map(short_uuid).unwrap_or_else(|| "—".to_owned()),
+                    CellAlign::Left,
+                ),
             ])
         })
         .collect();
@@ -103,35 +159,67 @@ pub fn draw_detail(
         f,
         chunks[2],
         " Steps ",
-        step_headers,
+        &step_columns,
         step_rows,
         app.list_selection,
+        "No workflow steps match the current search.",
     );
 
-    let dep_headers = vec!["Prereq step", "Dependent step", "Mode"];
+    let dep_columns = [
+        TableColumn::left("Direction", Constraint::Length(10)),
+        TableColumn::left("Prereq step", Constraint::Percentage(35)),
+        TableColumn::left("Dependent step", Constraint::Percentage(35)),
+        TableColumn::left("Mode", Constraint::Percentage(20)).optional(1),
+    ];
     let step_key_by_id: std::collections::HashMap<_, _> = data
         .steps
         .iter()
         .map(|s| (s.id, s.step_key.as_str()))
         .collect();
-    let dep_rows: Vec<Row> = data
+    let dep_rows: Vec<TableRow> = data
         .dependencies
         .iter()
+        .filter(|d| {
+            selected_step_id.is_none_or(|selected| {
+                d.prerequisite_step_id == selected || d.dependent_step_id == selected
+            })
+        })
         .map(|d| {
-            Row::new(vec![
-                step_key_by_id
-                    .get(&d.prerequisite_step_id)
-                    .copied()
-                    .unwrap_or("?")
-                    .to_owned(),
-                step_key_by_id
-                    .get(&d.dependent_step_id)
-                    .copied()
-                    .unwrap_or("?")
-                    .to_owned(),
-                format!("{:?}", d.release_mode),
+            let direction = selected_step_id.map_or("all", |selected| {
+                if d.prerequisite_step_id == selected {
+                    "downstream"
+                } else {
+                    "upstream"
+                }
+            });
+            TableRow::new(vec![
+                table_cell(direction, CellAlign::Left),
+                table_cell(
+                    step_key_by_id
+                        .get(&d.prerequisite_step_id)
+                        .copied()
+                        .unwrap_or("?")
+                        .to_owned(),
+                    CellAlign::Left,
+                ),
+                table_cell(
+                    step_key_by_id
+                        .get(&d.dependent_step_id)
+                        .copied()
+                        .unwrap_or("?")
+                        .to_owned(),
+                    CellAlign::Left,
+                ),
+                table_cell(format!("{:?}", d.release_mode), CellAlign::Left),
             ])
         })
         .collect();
-    draw_table_unselected(f, chunks[3], " Dependencies ", dep_headers, dep_rows);
+    draw_table_unselected(
+        f,
+        chunks[3],
+        " Dependencies for selected step ",
+        &dep_columns,
+        dep_rows,
+        "The selected step has no direct dependencies.",
+    );
 }

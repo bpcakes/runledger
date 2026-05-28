@@ -30,6 +30,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
+    if app.show_search_input {
+        render::draw_top_chrome_underlay(f, app);
+        draw_search_input(f, app);
+        return;
+    }
+
+    if app.show_command_input {
+        render::draw_top_chrome_underlay(f, app);
+        draw_command_input(f, app);
+        return;
+    }
+
     render::draw_top_chrome(f, app);
 }
 
@@ -58,6 +70,36 @@ fn draw_filter_input(f: &mut Frame, app: &App) {
     let block = ratatui::widgets::Paragraph::new(text).block(
         ratatui::widgets::Block::default()
             .title(" Filter ")
+            .borders(ratatui::widgets::Borders::ALL),
+    );
+    f.render_widget(block, area);
+}
+
+fn draw_search_input(f: &mut Frame, app: &App) {
+    let area = centered_popup(f.area(), 60, 20);
+    f.render_widget(ratatui::widgets::Clear, area);
+    let text = format!(
+        "Search current table (empty = clear)\n\n/ {}",
+        app.search_input
+    );
+    let block = ratatui::widgets::Paragraph::new(text).block(
+        ratatui::widgets::Block::default()
+            .title(" Search ")
+            .borders(ratatui::widgets::Borders::ALL),
+    );
+    f.render_widget(block, area);
+}
+
+fn draw_command_input(f: &mut Frame, app: &App) {
+    let area = centered_popup(f.area(), 70, 20);
+    f.render_widget(ratatui::widgets::Clear, area);
+    let text = format!(
+        "Commands: filter status dlq | scope global | refresh 5s | copy id\n\n: {}",
+        app.command_input
+    );
+    let block = ratatui::widgets::Paragraph::new(text).block(
+        ratatui::widgets::Block::default()
+            .title(" Command ")
             .borders(ratatui::widgets::Borders::ALL),
     );
     f.render_widget(block, area);

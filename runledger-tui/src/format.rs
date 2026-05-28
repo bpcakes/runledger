@@ -61,6 +61,21 @@ pub fn format_optional_timestamp(ts: Option<DateTime<Utc>>) -> String {
 }
 
 #[must_use]
+pub fn format_relative_timestamp(ts: DateTime<Utc>) -> String {
+    let delta = Utc::now().signed_duration_since(ts);
+    let seconds = delta.num_seconds().max(0);
+    if seconds < 60 {
+        format!("{seconds}s ago")
+    } else if seconds < 3600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
+    }
+}
+
+#[must_use]
 pub fn truncate_str(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_owned();
@@ -78,6 +93,12 @@ pub fn job_payload_lines(payload: &Value) -> Vec<String> {
     let pretty = serde_json::to_string_pretty(payload).unwrap_or_else(|_| "{}".to_owned());
     let raw: Vec<String> = pretty.lines().map(ToOwned::to_owned).collect();
     truncate_lines(&raw, JOB_PAYLOAD_MAX_LINES).0
+}
+
+#[must_use]
+pub fn job_payload_raw_lines(payload: &Value) -> Vec<String> {
+    let raw = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_owned());
+    truncate_lines(&[raw], JOB_PAYLOAD_MAX_LINES).0
 }
 
 #[must_use]
@@ -134,6 +155,14 @@ mod tests {
         let lines = job_payload_lines(&payload);
         assert!(!lines.is_empty());
         assert!(lines.len() <= JOB_PAYLOAD_MAX_LINES);
+    }
+
+    #[test]
+    fn job_payload_raw_lines_uses_compact_json() {
+        let payload = serde_json::json!({"a": 0, "b": [1, 2]});
+        let lines = job_payload_raw_lines(&payload);
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains('\n'));
     }
 
     #[test]

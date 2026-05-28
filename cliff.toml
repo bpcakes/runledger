@@ -1,0 +1,70 @@
+# git-cliff configuration for Runledger.
+# Generate with: git cliff --output CHANGELOG.md
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this workspace are documented here.
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% if previous.version %}\
+[Compare changes](https://github.com/bpcakes/runledger/compare/{{ previous.version }}...{{ version }})
+{% endif %}\
+{% else %}\
+## Unreleased
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+
+{% for commit in commits -%}
+{% set message_parts = commit.message | split(pat="\n\n") -%}
+{% set subject = message_parts | first -%}
+{% set details = message_parts | slice(start=1) | join(sep="\n\n") | trim -%}
+- {{ subject | upper_first }}
+{% if details %}
+
+  {{ details | replace(from="\n", to="\n  ") }}
+{% endif -%}
+{% endfor %}
+{% endfor %}
+"""
+trim = false
+render_always = true
+postprocessors = [
+    { pattern = "documented here\\.\\n##", replace = "documented here.\n\n##" },
+    { pattern = "\\n{3,}", replace = "\n\n" },
+]
+
+[git]
+conventional_commits = false
+filter_unconventional = false
+filter_commits = true
+protect_breaking_commits = true
+sort_commits = "oldest"
+topo_order = false
+topo_order_commits = true
+
+commit_preprocessors = [
+    { pattern = "(?m)^Co-authored-by:.*\\n?", replace = "" },
+    { pattern = "(?m)^Signed-off-by:.*\\n?", replace = "" },
+    { pattern = "^Merge pull request #[0-9]+ from .*$", replace = "" },
+    { pattern = "^Merge remote-tracking branch .*$", replace = "" },
+]
+
+commit_parsers = [
+    { message = "^$", skip = true },
+    { message = "(?s)^Merge pull request #[0-9]+ from .*$", skip = true },
+    { message = "(?s)^Merge remote-tracking branch .*$", skip = true },
+    { message = "^Release [0-9]+\\.[0-9]+\\.[0-9]+$", skip = true },
+    { message = "^Bump version to [0-9]+\\.[0-9]+\\.[0-9]+$", skip = true },
+
+    { message = "^.*docs?.*", group = "<!-- 3 -->Documentation" },
+    { message = "^.*examples?.*", group = "<!-- 3 -->Documentation" },
+    { message = "^.*CI.*", group = "<!-- 4 -->CI" },
+    { message = "^(Add|Expose|Publish)", group = "<!-- 0 -->Added" },
+    { message = "^(Fix|Restore|Bound)", group = "<!-- 1 -->Fixed" },
+    { message = "^(Improve|Refactor|Address|Enforce|Implement|Initialize|Refresh)", group = "<!-- 2 -->Changed" },
+]

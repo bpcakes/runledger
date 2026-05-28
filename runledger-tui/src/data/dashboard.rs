@@ -1,11 +1,16 @@
+use runledger_core::jobs::WorkflowRunStatus;
 use runledger_postgres::DbPool;
-use runledger_postgres::jobs::{JobMetricsRecord, get_job_metrics};
+use runledger_postgres::jobs::{
+    JobMetricsRecord, WorkflowRunListFilter, get_job_metrics, list_workflow_runs,
+};
 
 use crate::scope::Scope;
 
 #[derive(Debug, Clone)]
 pub struct DashboardData {
     pub metrics: Vec<JobMetricsRecord>,
+    pub failed_workflows: usize,
+    pub external_waits: usize,
 }
 
 pub async fn fetch(pool: &DbPool, scope: Scope) -> runledger_postgres::Result<DashboardData> {
@@ -17,5 +22,35 @@ pub async fn fetch(pool: &DbPool, scope: Scope) -> runledger_postgres::Result<Da
             .cmp(&a_load)
             .then_with(|| a.job_type.as_str().cmp(b.job_type.as_str()))
     });
-    Ok(DashboardData { metrics })
+
+    let failed_workflows = list_workflow_runs(
+        pool,
+        &WorkflowRunListFilter {
+            organization_id: scope.organization_id,
+            status: Some(WorkflowRunStatus::CompletedWithErrors),
+            workflow_type: None,
+            limit: 10_000,
+            offset: 0,
+        },
+    )
+    .await?
+    .len();
+    let external_waits = list_workflow_runs(
+        pool,
+        &WorkflowRunListFilter {
+            organization_id: scope.organization_id,
+            status: Some(WorkflowRunStatus::WaitingForExternal),
+            workflow_type: None,
+            limit: 10_000,
+            offset: 0,
+        },
+    )
+    .await?
+    .len();
+
+    Ok(DashboardData {
+        metrics,
+        failed_workflows,
+        external_waits,
+    })
 }
