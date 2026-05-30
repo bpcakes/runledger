@@ -19,10 +19,6 @@ pub struct JobCatalogDefaults {
     /// Default queue priority written for catalog jobs.
     pub default_priority: i32,
     /// Whether catalog jobs should be synced as enabled.
-    ///
-    /// This flag applies to every job in the catalog. Use separate catalogs or
-    /// lower-level definition APIs if different job types need different enabled
-    /// states at startup.
     pub is_enabled: bool,
 }
 
@@ -79,6 +75,108 @@ impl JobCatalogDefaults {
         self.is_enabled = is_enabled;
         self
     }
+
+    pub(super) fn validate(self) -> Result<(), &'static str> {
+        if self.version <= 0 {
+            return Err("version");
+        }
+        if self.max_attempts <= 0 {
+            return Err("max_attempts");
+        }
+        if self.default_timeout_seconds <= 0 {
+            return Err("default_timeout_seconds");
+        }
+        // default_priority intentionally accepts zero and negative values.
+        Ok(())
+    }
+}
+
+/// Per-job definition values that override [`JobCatalogDefaults`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobCatalogDefinitionOverrides {
+    /// Optional definition version override.
+    version: Option<i32>,
+    /// Optional maximum-attempts override.
+    max_attempts: Option<i32>,
+    /// Optional execution timeout override, in seconds.
+    default_timeout_seconds: Option<i32>,
+    /// Optional queue priority override.
+    default_priority: Option<i32>,
+    /// Optional enabled-state override.
+    is_enabled: Option<bool>,
+}
+
+impl JobCatalogDefinitionOverrides {
+    /// Creates empty job-specific definition overrides.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Overrides the definition version written for this job.
+    #[must_use]
+    pub fn version(mut self, version: i32) -> Self {
+        self.version = Some(version);
+        self
+    }
+
+    /// Overrides the default maximum attempts written for this job.
+    #[must_use]
+    pub fn max_attempts(mut self, max_attempts: i32) -> Self {
+        self.max_attempts = Some(max_attempts);
+        self
+    }
+
+    /// Overrides the default execution timeout, in seconds, written for this job.
+    #[must_use]
+    pub fn timeout_seconds(mut self, default_timeout_seconds: i32) -> Self {
+        self.default_timeout_seconds = Some(default_timeout_seconds);
+        self
+    }
+
+    /// Overrides the default queue priority written for this job.
+    #[must_use]
+    pub fn priority(mut self, default_priority: i32) -> Self {
+        self.default_priority = Some(default_priority);
+        self
+    }
+
+    /// Overrides whether this job should be synced as enabled.
+    #[must_use]
+    pub fn enabled(mut self, is_enabled: bool) -> Self {
+        self.is_enabled = Some(is_enabled);
+        self
+    }
+
+    pub(super) fn validate(self) -> Result<(), &'static str> {
+        if matches!(self.version, Some(version) if version <= 0) {
+            return Err("version");
+        }
+        if matches!(self.max_attempts, Some(max_attempts) if max_attempts <= 0) {
+            return Err("max_attempts");
+        }
+        if matches!(
+            self.default_timeout_seconds,
+            Some(default_timeout_seconds) if default_timeout_seconds <= 0
+        ) {
+            return Err("default_timeout_seconds");
+        }
+        // default_priority intentionally accepts zero and negative values.
+        Ok(())
+    }
+
+    pub(super) fn apply_to(self, defaults: JobCatalogDefaults) -> JobCatalogDefaults {
+        JobCatalogDefaults {
+            version: self.version.unwrap_or(defaults.version),
+            max_attempts: self.max_attempts.unwrap_or(defaults.max_attempts),
+            default_timeout_seconds: self
+                .default_timeout_seconds
+                .unwrap_or(defaults.default_timeout_seconds),
+            default_priority: self.default_priority.unwrap_or(defaults.default_priority),
+            is_enabled: self.is_enabled.unwrap_or(defaults.is_enabled),
+        }
+    }
 }
 
 /// Single-source registry of job handlers, definition defaults, and enqueue helpers.
@@ -92,6 +190,7 @@ pub struct JobCatalog {
 pub(super) struct CatalogJob {
     pub(super) job_type: JobType<'static>,
     pub(super) handler: Arc<dyn JobHandler>,
+    pub(super) definition_overrides: JobCatalogDefinitionOverrides,
     pub(super) retry_delay_overrides: BTreeMap<&'static str, i32>,
 }
 
@@ -99,6 +198,7 @@ impl fmt::Debug for CatalogJob {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CatalogJob")
             .field("job_type", &self.job_type)
+            .field("definition_overrides", &self.definition_overrides)
             .field("retry_delay_overrides", &self.retry_delay_overrides)
             .finish_non_exhaustive()
     }
@@ -114,8 +214,9 @@ pub struct JobCatalogSyncScope {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobCatalogSyncReport {
-    /// Catalog job types that this additive sync forced disabled through catalog
-    /// defaults. Already-disabled catalog rows are not included.
+    /// Catalog job types that this additive sync forced disabled through
+    /// effective catalog definition values. Already-disabled catalog rows are
+    /// not included.
     pub disabled_catalog_job_types: Vec<JobTypeName>,
 }
 
@@ -126,10 +227,10 @@ pub struct JobCatalogExactSyncReport {
     /// Enabled definitions inside the exact-sync scope that were absent from the
     /// catalog and changed to disabled by this sync.
     pub disabled_absent_job_types: Vec<JobTypeName>,
-    /// Catalog job types that this sync forced disabled through catalog
-    /// defaults, including both newly inserted disabled rows and existing
-    /// enabled rows changed to disabled. Already-disabled catalog rows are not
-    /// included.
+    /// Catalog job types that this sync forced disabled through effective
+    /// catalog definition values, including both newly inserted disabled rows
+    /// and existing enabled rows changed to disabled. Already-disabled catalog
+    /// rows are not included.
     pub disabled_catalog_job_types: Vec<JobTypeName>,
 }
 

@@ -44,6 +44,14 @@ pub enum CatalogError {
         /// Name of the invalid defaults field.
         field: &'static str,
     },
+    /// A job-specific catalog definition override failed validation.
+    #[error("catalog definition for job type {job_type} is invalid: {field} must be positive")]
+    InvalidJobDefinitionValue {
+        /// Job type whose effective definition values are invalid.
+        job_type: String,
+        /// Name of the invalid definition field.
+        field: &'static str,
+    },
     /// Retry-delay override failure codes must be non-empty.
     #[error("failure code must be non-empty")]
     InvalidFailureCode,
@@ -95,7 +103,7 @@ pub enum CatalogError {
         /// Missing job type.
         job_type: String,
     },
-    /// The requested job type is disabled in catalog defaults.
+    /// The requested job type is disabled by effective catalog definition values.
     #[error("job type {job_type} is disabled in the catalog")]
     DisabledJobType {
         /// Disabled job type.

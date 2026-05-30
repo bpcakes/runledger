@@ -6,9 +6,8 @@
 //! helpers to build enqueue, schedule, and workflow inputs with job-type
 //! validation at the call site.
 //!
-//! Catalog defaults apply to every registered entry. This includes
-//! [`JobCatalogDefaults::is_enabled`]; per-job enabled overrides are not modeled
-//! by the catalog API yet.
+//! Catalog defaults apply to every registered entry unless a job is registered
+//! with job-specific definition overrides.
 
 mod error;
 mod inputs;
@@ -20,8 +19,8 @@ mod workflow;
 pub use error::CatalogError;
 pub use inputs::{CatalogJobEnqueueInput, CatalogJobScheduleInput};
 pub use types::{
-    JobCatalog, JobCatalogDefaults, JobCatalogExactSyncReport, JobCatalogSyncReport,
-    JobCatalogSyncScope,
+    JobCatalog, JobCatalogDefaults, JobCatalogDefinitionOverrides, JobCatalogExactSyncReport,
+    JobCatalogSyncReport, JobCatalogSyncScope,
 };
 pub use workflow::CatalogWorkflowDagBuilder;
 
@@ -223,6 +222,144 @@ mod tests {
             })
             .expect_err("disabled job type");
         assert!(matches!(error, CatalogError::DisabledJobType { .. }));
+    }
+
+    #[test]
+    fn job_enqueue_rejects_disabled_job_definition_overrides() {
+        let catalog = JobCatalog::new().job_with_definition_overrides(
+            "jobs.test",
+            StaticHandler("jobs.test"),
+            JobCatalogDefinitionOverrides::new().enabled(false),
+        );
+        let error = catalog
+            .job_enqueue(&CatalogJobEnqueueInput {
+                job_type: "jobs.test",
+                organization_id: None,
+                payload: &json!({}),
+                priority: None,
+                max_attempts: None,
+                timeout_seconds: None,
+                next_run_at: None,
+                idempotency_key: None,
+                stage: None,
+            })
+            .expect_err("disabled job type");
+        assert!(matches!(error, CatalogError::DisabledJobType { .. }));
+    }
+
+    #[test]
+    fn job_definition_overrides_take_precedence_over_disabled_catalog_defaults() {
+        let catalog = JobCatalog::new()
+            .job_with_definition_overrides(
+                "jobs.test",
+                StaticHandler("jobs.test"),
+                JobCatalogDefinitionOverrides::new().enabled(true),
+            )
+            .defaults(JobCatalogDefaults::new().enabled(false));
+        let payload = json!({});
+        let enqueue = catalog
+            .job_enqueue(&CatalogJobEnqueueInput {
+                job_type: "jobs.test",
+                organization_id: None,
+                payload: &payload,
+                priority: None,
+                max_attempts: None,
+                timeout_seconds: None,
+                next_run_at: None,
+                idempotency_key: None,
+                stage: None,
+            })
+            .expect("job-specific enabled override should win");
+        assert_eq!(enqueue.job_type.as_str(), "jobs.test");
+    }
+
+    #[test]
+    fn job_schedule_accepts_enabled_job_definition_override() {
+        let catalog = JobCatalog::new()
+            .job_with_definition_overrides(
+                "jobs.test",
+                StaticHandler("jobs.test"),
+                JobCatalogDefinitionOverrides::new().enabled(true),
+            )
+            .defaults(JobCatalogDefaults::new().enabled(false));
+        let payload = json!({});
+        let schedule = catalog
+            .job_schedule(&CatalogJobScheduleInput {
+                name: "jobs.test.schedule",
+                job_type: "jobs.test",
+                organization_id: None,
+                payload_template: &payload,
+                cron_expr: "0 * * * * *",
+                is_active: true,
+                next_fire_at: chrono::Utc::now(),
+                max_jitter_seconds: 0,
+            })
+            .expect("job-specific enabled override should win");
+        assert_eq!(schedule.job_type.as_str(), "jobs.test");
+    }
+
+    #[test]
+    fn definition_overrides_apply_after_job_registration() {
+        let catalog = JobCatalog::new()
+            .job("jobs.test", StaticHandler("jobs.test"))
+            .definition_overrides(
+                "jobs.test",
+                JobCatalogDefinitionOverrides::new().enabled(true),
+            )
+            .defaults(JobCatalogDefaults::new().enabled(false));
+        let payload = json!({});
+        let enqueue = catalog
+            .job_enqueue(&CatalogJobEnqueueInput {
+                job_type: "jobs.test",
+                organization_id: None,
+                payload: &payload,
+                priority: None,
+                max_attempts: None,
+                timeout_seconds: None,
+                next_run_at: None,
+                idempotency_key: None,
+                stage: None,
+            })
+            .expect("post-registration override should apply");
+        assert_eq!(enqueue.job_type.as_str(), "jobs.test");
+    }
+
+    #[test]
+    fn definition_overrides_reject_unknown_job_type() {
+        let error = JobCatalog::new()
+            .try_definition_overrides(
+                "jobs.missing",
+                JobCatalogDefinitionOverrides::new().enabled(true),
+            )
+            .expect_err("unknown job type");
+        assert!(matches!(error, CatalogError::UnknownJobType { .. }));
+    }
+
+    #[test]
+    fn definition_overrides_reject_invalid_job_type() {
+        let error = JobCatalog::new()
+            .job("jobs.test", StaticHandler("jobs.test"))
+            .try_definition_overrides("   ", JobCatalogDefinitionOverrides::new().enabled(true))
+            .expect_err("invalid job type");
+        assert!(matches!(error, CatalogError::InvalidJobType { .. }));
+    }
+
+    #[test]
+    fn try_definition_overrides_reject_invalid_values() {
+        let error = JobCatalog::new()
+            .job("jobs.test", StaticHandler("jobs.test"))
+            .try_definition_overrides(
+                "jobs.test",
+                JobCatalogDefinitionOverrides::new().max_attempts(0),
+            )
+            .expect_err("invalid override");
+        assert!(matches!(
+            error,
+            CatalogError::InvalidJobDefinitionValue {
+                job_type,
+                field: "max_attempts",
+            } if job_type == "jobs.test"
+        ));
     }
 
     #[test]
