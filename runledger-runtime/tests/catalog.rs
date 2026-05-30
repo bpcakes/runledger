@@ -13,7 +13,7 @@ use runledger_postgres::jobs::{
 use runledger_runtime::Supervisor;
 use runledger_runtime::catalog::{
     CatalogError, CatalogJobEnqueueInput, CatalogJobScheduleInput, JobCatalog, JobCatalogDefaults,
-    JobCatalogSyncScope,
+    JobCatalogDefinitionOverrides, JobCatalogSyncScope,
 };
 use runledger_runtime::config::JobsConfig;
 use runledger_runtime::registry::JobHandler;
@@ -153,6 +153,62 @@ async fn job_before_defaults_uses_later_defaults_on_sync() {
 }
 
 #[tokio::test]
+async fn sync_definitions_uses_job_specific_definition_overrides() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_job_defaults", 4).await;
+
+    let catalog = JobCatalog::new()
+        .defaults(
+            JobCatalogDefaults::new()
+                .version(10)
+                .max_attempts(10)
+                .timeout_seconds(10)
+                .priority(10),
+        )
+        .job_with_definition_overrides(
+            CATALOG_TEST_JOB,
+            CountingHandler {
+                runs: Arc::new(AtomicUsize::new(0)),
+            },
+            JobCatalogDefinitionOverrides::new()
+                .timeout_seconds(60)
+                .priority(11),
+        )
+        .job_with_definition_overrides(
+            CATALOG_OTHER_JOB,
+            HandlerReturningOtherType,
+            JobCatalogDefinitionOverrides::new()
+                .version(3)
+                .max_attempts(7)
+                .timeout_seconds(600)
+                .priority(22),
+        );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+
+    let test_definition = get_job_definition_by_type(&pool, JobType::new(CATALOG_TEST_JOB))
+        .await
+        .expect("load test definition")
+        .expect("test definition exists");
+    assert_eq!(test_definition.version, 10);
+    assert_eq!(test_definition.max_attempts, 10);
+    assert_eq!(test_definition.default_timeout_seconds, 60);
+    assert_eq!(test_definition.default_priority, 11);
+
+    let other_definition = get_job_definition_by_type(&pool, JobType::new(CATALOG_OTHER_JOB))
+        .await
+        .expect("load other definition")
+        .expect("other definition exists");
+    assert_eq!(other_definition.version, 3);
+    assert_eq!(other_definition.max_attempts, 7);
+    assert_eq!(other_definition.default_timeout_seconds, 600);
+    assert_eq!(other_definition.default_priority, 22);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn sync_definitions_is_idempotent() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_idempotent", 4).await;
 
@@ -276,6 +332,54 @@ async fn sync_definitions_preserves_operator_enabled_state_on_resync() {
 }
 
 #[tokio::test]
+async fn sync_definitions_preserves_operator_disabled_state_for_enabled_job_override() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_override_preserve_disabled", 4).await;
+
+    let catalog = JobCatalog::new()
+        .defaults(JobCatalogDefaults::new().enabled(false))
+        .job_with_definition_overrides(
+            CATALOG_TEST_JOB,
+            CountingHandler {
+                runs: Arc::new(AtomicUsize::new(0)),
+            },
+            JobCatalogDefinitionOverrides::new().enabled(true),
+        );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync enabled override");
+    update_job_definition(
+        &pool,
+        JobType::new(CATALOG_TEST_JOB),
+        &JobDefinitionUpdate {
+            max_attempts: None,
+            default_timeout_seconds: None,
+            default_priority: None,
+            is_enabled: Some(false),
+        },
+    )
+    .await
+    .expect("operator disable");
+
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("resync enabled override");
+
+    let definition = get_job_definition_by_type(&pool, JobType::new(CATALOG_TEST_JOB))
+        .await
+        .expect("load definition")
+        .expect("definition exists");
+    assert!(
+        !definition.is_enabled,
+        "enabled job override should still preserve operator-disabled rows"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn sync_definitions_writes_disabled_catalog_definition_without_active_schedules() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_disabled_additive", 4).await;
 
@@ -304,6 +408,148 @@ async fn sync_definitions_writes_disabled_catalog_definition_without_active_sche
     assert!(
         !definition.is_enabled,
         "disabled catalog default should write a disabled definition"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_definitions_writes_disabled_job_override_without_active_schedules() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_disabled_override_additive", 4).await;
+
+    let catalog = JobCatalog::new().job_with_definition_overrides(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+        JobCatalogDefinitionOverrides::new().enabled(false),
+    );
+    let report = catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync disabled override");
+    assert_eq!(
+        report.disabled_catalog_job_types,
+        vec![CATALOG_TEST_JOB],
+        "disabled additive sync should report newly disabled job overrides"
+    );
+
+    let definition = get_job_definition_by_type(&pool, JobType::new(CATALOG_TEST_JOB))
+        .await
+        .expect("load definition")
+        .expect("definition exists");
+    assert!(
+        !definition.is_enabled,
+        "disabled job override should write a disabled definition"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_definitions_disables_existing_enabled_job_override_without_active_schedules() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_disable_existing_override_additive", 4).await;
+
+    let enabled_catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    enabled_catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync enabled definition");
+
+    let disabled_catalog = JobCatalog::new().job_with_definition_overrides(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+        JobCatalogDefinitionOverrides::new().enabled(false),
+    );
+    let report = disabled_catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync disabled override");
+    assert_eq!(
+        report.disabled_catalog_job_types,
+        vec![CATALOG_TEST_JOB],
+        "disabled additive sync should report enabled rows changed to disabled"
+    );
+
+    let definition = get_job_definition_by_type(&pool, JobType::new(CATALOG_TEST_JOB))
+        .await
+        .expect("load definition")
+        .expect("definition exists");
+    assert!(
+        !definition.is_enabled,
+        "disabled job override should disable an existing enabled definition"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_definitions_handles_mixed_enabled_and_disabled_overrides() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_mixed_override_additive", 4).await;
+
+    let catalog = JobCatalog::new()
+        .defaults(JobCatalogDefaults::new().enabled(false))
+        .job_with_definition_overrides(
+            CATALOG_TEST_JOB,
+            CountingHandler {
+                runs: Arc::new(AtomicUsize::new(0)),
+            },
+            JobCatalogDefinitionOverrides::new().enabled(true),
+        )
+        .job(CATALOG_OTHER_JOB, HandlerReturningOtherType);
+    let report = catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync mixed effective enabled states");
+    assert_eq!(
+        report.disabled_catalog_job_types,
+        vec![CATALOG_OTHER_JOB],
+        "effectively disabled jobs should be reported when first written disabled"
+    );
+
+    update_job_definition(
+        &pool,
+        JobType::new(CATALOG_TEST_JOB),
+        &JobDefinitionUpdate {
+            max_attempts: None,
+            default_timeout_seconds: None,
+            default_priority: None,
+            is_enabled: Some(false),
+        },
+    )
+    .await
+    .expect("operator disable enabled override");
+
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("resync mixed effective enabled states");
+
+    let enabled_override = get_job_definition_by_type(&pool, JobType::new(CATALOG_TEST_JOB))
+        .await
+        .expect("load enabled override definition")
+        .expect("enabled override definition exists");
+    assert!(
+        !enabled_override.is_enabled,
+        "effectively enabled job should preserve operator-disabled state"
+    );
+
+    let disabled_default = get_job_definition_by_type(&pool, JobType::new(CATALOG_OTHER_JOB))
+        .await
+        .expect("load disabled default definition")
+        .expect("disabled default definition exists");
+    assert!(
+        !disabled_default.is_enabled,
+        "effectively disabled job should remain disabled"
     );
 
     teardown_ephemeral_pool(pool, database).await;
@@ -674,6 +920,59 @@ async fn sync_definitions_exact_restores_operator_disabled_catalog_jobs() {
 }
 
 #[tokio::test]
+async fn sync_definitions_exact_restores_enabled_job_override() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_exact_restores_enabled_override", 4).await;
+
+    let catalog = JobCatalog::new()
+        .defaults(JobCatalogDefaults::new().enabled(false))
+        .job_with_definition_overrides(
+            CATALOG_TEST_JOB,
+            CountingHandler {
+                runs: Arc::new(AtomicUsize::new(0)),
+            },
+            JobCatalogDefinitionOverrides::new().enabled(true),
+        );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync enabled override");
+    update_job_definition(
+        &pool,
+        JobType::new(CATALOG_TEST_JOB),
+        &JobDefinitionUpdate {
+            max_attempts: None,
+            default_timeout_seconds: None,
+            default_priority: None,
+            is_enabled: Some(false),
+        },
+    )
+    .await
+    .expect("operator disables definition");
+
+    let report = catalog
+        .sync_definitions_exact(
+            &pool,
+            &JobCatalogSyncScope::job_type(CATALOG_TEST_JOB).expect("valid scope"),
+        )
+        .await
+        .expect("exact sync restores enabled override");
+    assert!(report.disabled_absent_job_types.is_empty());
+    assert!(report.disabled_catalog_job_types.is_empty());
+
+    let definition = get_job_definition_by_type(&pool, JobType::new(CATALOG_TEST_JOB))
+        .await
+        .expect("load definition")
+        .expect("definition exists");
+    assert!(
+        definition.is_enabled,
+        "exact sync should restore enabled state from job-specific overrides"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn sync_definitions_rejects_disabled_catalog_job_with_active_schedule() {
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_disabled_active_schedule", 4).await;
@@ -730,6 +1029,67 @@ async fn sync_definitions_rejects_disabled_catalog_job_with_active_schedule() {
     assert!(
         definition.is_enabled,
         "blocked disabled sync should leave definition enabled"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_definitions_rejects_disabled_job_override_with_active_schedule() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_disabled_override_active_schedule", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync enabled definition");
+
+    let schedule_payload = json!({});
+    let schedule = catalog
+        .job_schedule(&CatalogJobScheduleInput {
+            name: "catalog-disabled-override-schedule",
+            job_type: CATALOG_TEST_JOB,
+            organization_id: None,
+            payload_template: &schedule_payload,
+            cron_expr: "0 * * * * *",
+            is_active: true,
+            next_fire_at: Utc::now(),
+            max_jitter_seconds: 0,
+        })
+        .expect("schedule input");
+    upsert_job_schedule(&pool, &schedule)
+        .await
+        .expect("upsert schedule");
+
+    let disabled_catalog = JobCatalog::new().job_with_definition_overrides(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+        JobCatalogDefinitionOverrides::new().enabled(false),
+    );
+    let error = disabled_catalog
+        .sync_definitions(&pool)
+        .await
+        .expect_err("active schedule should block disabled override sync");
+    assert!(matches!(
+        error,
+        CatalogError::ActiveScheduleForDisabledJobType { .. }
+    ));
+
+    let definition = get_job_definition_by_type(&pool, JobType::new(CATALOG_TEST_JOB))
+        .await
+        .expect("load definition")
+        .expect("definition exists");
+    assert!(
+        definition.is_enabled,
+        "blocked disabled override sync should leave definition enabled"
     );
 
     teardown_ephemeral_pool(pool, database).await;
@@ -889,6 +1249,54 @@ async fn sync_definitions_exact_can_disable_catalog_jobs_without_active_schedule
 }
 
 #[tokio::test]
+async fn sync_definitions_exact_writes_disabled_job_override_without_active_schedules() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_exact_disabled_override", 4).await;
+
+    let old_catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    old_catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync enabled definition");
+
+    let disabled_catalog = JobCatalog::new().job_with_definition_overrides(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+        JobCatalogDefinitionOverrides::new().enabled(false),
+    );
+    let report = disabled_catalog
+        .sync_definitions_exact(
+            &pool,
+            &JobCatalogSyncScope::job_type(CATALOG_TEST_JOB).expect("valid scope"),
+        )
+        .await
+        .expect("exact sync disabled override without active schedules");
+    assert!(report.disabled_absent_job_types.is_empty());
+    assert_eq!(
+        report.disabled_catalog_job_types,
+        vec![CATALOG_TEST_JOB],
+        "exact sync should report enabled rows changed to disabled by job overrides"
+    );
+
+    let definition = get_job_definition_by_type(&pool, JobType::new(CATALOG_TEST_JOB))
+        .await
+        .expect("load definition")
+        .expect("definition exists");
+    assert!(
+        !definition.is_enabled,
+        "exact sync should write disabled state from job-specific overrides"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn sync_definitions_rejects_invalid_defaults_before_database_write() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_invalid_defaults", 4).await;
 
@@ -917,6 +1325,58 @@ async fn sync_definitions_rejects_invalid_defaults_before_database_write() {
     assert!(definition.is_none(), "invalid sync should not write rows");
 
     teardown_ephemeral_pool(pool, database).await;
+}
+
+#[test]
+fn try_job_with_definition_overrides_rejects_invalid_timeout_override() {
+    let error = try_catalog_with_definition_overrides(
+        JobCatalogDefinitionOverrides::new().timeout_seconds(0),
+    );
+    assert!(matches!(
+        error,
+        CatalogError::InvalidJobDefinitionValue {
+            job_type,
+            field: "default_timeout_seconds"
+        } if job_type == CATALOG_TEST_JOB
+    ));
+}
+
+#[test]
+fn try_job_with_definition_overrides_rejects_invalid_version_override() {
+    let error =
+        try_catalog_with_definition_overrides(JobCatalogDefinitionOverrides::new().version(0));
+    assert!(matches!(
+        error,
+        CatalogError::InvalidJobDefinitionValue {
+            job_type,
+            field: "version"
+        } if job_type == CATALOG_TEST_JOB
+    ));
+}
+
+#[test]
+fn try_job_with_definition_overrides_rejects_invalid_max_attempts_override() {
+    let error =
+        try_catalog_with_definition_overrides(JobCatalogDefinitionOverrides::new().max_attempts(0));
+    assert!(matches!(
+        error,
+        CatalogError::InvalidJobDefinitionValue {
+            job_type,
+            field: "max_attempts"
+        } if job_type == CATALOG_TEST_JOB
+    ));
+}
+
+fn try_catalog_with_definition_overrides(overrides: JobCatalogDefinitionOverrides) -> CatalogError {
+    JobCatalog::new()
+        .try_job_with_definition_overrides(
+            CATALOG_TEST_JOB,
+            CountingHandler {
+                runs: Arc::new(AtomicUsize::new(0)),
+            },
+            overrides,
+        )
+        .expect_err("invalid definition overrides")
 }
 
 #[tokio::test]

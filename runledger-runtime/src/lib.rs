@@ -101,8 +101,8 @@ pub use supervisor::{Supervisor, SupervisorBuilder, SupervisorShutdown};
 pub mod prelude {
     pub use crate::catalog::{
         CatalogError, CatalogJobEnqueueInput, CatalogJobScheduleInput, CatalogWorkflowDagBuilder,
-        JobCatalog, JobCatalogDefaults, JobCatalogExactSyncReport, JobCatalogSyncReport,
-        JobCatalogSyncScope,
+        JobCatalog, JobCatalogDefaults, JobCatalogDefinitionOverrides, JobCatalogExactSyncReport,
+        JobCatalogSyncReport, JobCatalogSyncScope,
     };
     pub use crate::config::JobsConfig;
     pub use crate::error::{ReaperError, RuntimeError, SchedulerError, WorkerError};

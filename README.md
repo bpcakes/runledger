@@ -617,17 +617,41 @@ runledger_postgres::jobs::upsert_job_schedule(&pool, &schedule).await?;
 ```
 
 Catalog sync owns the definition fields it writes: `version`, retry limits,
-timeout, and priority are restored to catalog defaults on each startup sync.
+timeout, and priority are restored to effective catalog definition values on
+each startup sync.
+Use `job_with_definition_overrides` or `definition_overrides` when individual job
+types need different synced definition values:
+
+```rust
+let catalog = JobCatalog::new()
+    .job_with_definition_overrides(
+        "documents.extract",
+        ExtractDocuments,
+        JobCatalogDefinitionOverrides::new()
+            .timeout_seconds(600)
+            .priority(20),
+    )
+    .job_with_definition_overrides(
+        "auth.cleanup",
+        CleanupAuth,
+        JobCatalogDefinitionOverrides::new()
+            .timeout_seconds(60)
+            .priority(0),
+    );
+```
+
 Enabled catalog sync preserves an existing disabled row so operator pauses
-survive worker restarts; a catalog with `enabled(false)` explicitly disables its
-registered definitions. `sync_definitions` is additive: removed catalog entries
-are not deleted or disabled. Use `sync_definitions_exact` with a
+survive worker restarts; a catalog default or job-specific override with
+`enabled(false)` explicitly disables its definitions. `sync_definitions` is
+additive: removed catalog entries are not deleted or disabled. Use
+`sync_definitions_exact` with a
 `JobCatalogSyncScope` when deployment startup should also disable enabled
 `job_definitions` rows that are absent from the catalog but inside an explicit
 owned job-type set. Exact sync returns the disabled job types and refuses to
 disable definitions while active schedules still reference them. Unlike additive
-sync, exact sync restores catalog entries' enabled state from catalog defaults.
-Catalog helper builders validate catalog membership and catalog defaults only;
+sync, exact sync restores catalog entries' enabled state from effective catalog
+defaults.
+Catalog helper builders validate catalog membership and effective enabled state;
 operator-disabled database rows are enforced later by persistence APIs such as
 job enqueue, schedule materialization, and workflow enqueue.
 

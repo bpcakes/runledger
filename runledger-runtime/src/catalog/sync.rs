@@ -13,16 +13,17 @@ impl JobCatalog {
     ///
     /// The catalog owns the synced definition fields: repeated syncs overwrite
     /// `version`, `max_attempts`, `default_timeout_seconds`, and
-    /// `default_priority` for registered jobs. Enabled catalogs preserve an
-    /// existing disabled row so operator pauses survive worker restarts; disabled
-    /// catalogs explicitly write `is_enabled = false`.
+    /// `default_priority` for registered jobs. Effectively enabled catalog jobs
+    /// preserve an existing disabled row so operator pauses survive worker
+    /// restarts; effectively disabled catalog jobs explicitly write
+    /// `is_enabled = false`.
     /// Safe to call repeatedly. Does not delete or disable definitions absent from the catalog.
     /// Use [`Self::sync_definitions_exact`] with an explicit scope when removed
     /// catalog entries should be disabled.
     ///
-    /// Disabled catalog sync briefly locks `job_schedules` and `job_definitions`
-    /// so active schedule checks and definition disables are evaluated against a
-    /// stable write boundary.
+    /// Syncs that disable catalog jobs briefly lock `job_schedules` and
+    /// `job_definitions` so active schedule checks and definition disables are
+    /// evaluated against a stable write boundary.
     ///
     /// # Errors
     /// Returns [`CatalogError`] when defaults are invalid or persistence fails.
@@ -42,11 +43,7 @@ impl JobCatalog {
         })?;
 
         let definitions = self.catalog_definitions();
-        let mode = if self.defaults.is_enabled {
-            JobDefinitionCatalogSyncMode::PreserveExistingEnabledForEnabledDefinitions
-        } else {
-            JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState
-        };
+        let mode = JobDefinitionCatalogSyncMode::PreserveExistingEnabledForEnabledDefinitions;
         let report = sync_catalog_job_definitions_tx(&mut tx, &definitions, mode)
             .await
             .map_err(CatalogError::from_definition_catalog_sync_error)?;
@@ -66,7 +63,8 @@ impl JobCatalog {
     /// never operates outside the supplied owned job-type set, and rejects active
     /// schedules that still reference a job type it would disable. Unlike
     /// [`Self::sync_definitions`], exact sync restores catalog entries'
-    /// `is_enabled` value from catalog defaults.
+    /// effective `is_enabled` value from catalog defaults and job-specific
+    /// overrides.
     ///
     /// Exact sync briefly locks `job_schedules` and `job_definitions` before it
     /// checks active schedules or disables definitions, so it is heavier than the

@@ -59,8 +59,8 @@ impl JobCatalog {
     ///
     /// This checks catalog configuration only. Operator-disabled database rows
     /// are still enforced by `runledger-postgres` when the job is enqueued.
-    /// Catalog defaults' enabled flag applies to every catalog entry; per-job
-    /// enabled overrides are not modeled yet.
+    /// Job-specific definition overrides take precedence over the catalog
+    /// default enabled flag when present.
     pub fn job_enqueue<'a>(
         &self,
         input: &CatalogJobEnqueueInput<'a>,
@@ -84,8 +84,8 @@ impl JobCatalog {
     /// This checks catalog configuration only. Operator-disabled database rows
     /// are still enforced by `runledger-postgres` when schedule-created jobs are
     /// materialized.
-    /// Catalog defaults' enabled flag applies to every catalog entry; per-job
-    /// enabled overrides are not modeled yet.
+    /// Job-specific definition overrides take precedence over the catalog
+    /// default enabled flag when present.
     pub fn job_schedule<'a>(
         &self,
         input: &CatalogJobScheduleInput<'a>,

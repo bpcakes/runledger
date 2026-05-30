@@ -7,7 +7,10 @@ use runledger_postgres::jobs::JobDefinitionUpsert;
 use crate::registry::JobRegistry;
 
 use super::types::CatalogJob;
-use super::{CatalogError, JobCatalog, JobCatalogDefaults, JobCatalogSyncScope};
+use super::{
+    CatalogError, JobCatalog, JobCatalogDefaults, JobCatalogDefinitionOverrides,
+    JobCatalogSyncScope,
+};
 
 impl JobCatalog {
     /// Creates an empty catalog with default definition values.
@@ -58,6 +61,7 @@ impl JobCatalog {
             CatalogJob {
                 job_type: declared,
                 handler: Arc::new(handler),
+                definition_overrides: JobCatalogDefinitionOverrides::new(),
                 retry_delay_overrides: BTreeMap::new(),
             },
         );
@@ -73,6 +77,80 @@ impl JobCatalog {
         self.try_job(job_type, handler).unwrap_or_else(|error| {
             panic!("invalid job catalog registration for {job_type:?}: {error}");
         })
+    }
+
+    /// Registers a handler with job-specific definition overrides.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError`] when job types are blank, mismatched, or duplicated.
+    pub fn try_job_with_definition_overrides<H>(
+        self,
+        job_type: &'static str,
+        handler: H,
+        overrides: JobCatalogDefinitionOverrides,
+    ) -> Result<Self, CatalogError>
+    where
+        H: JobHandler + 'static,
+    {
+        self.try_job(job_type, handler)?
+            .try_definition_overrides(job_type, overrides)
+    }
+
+    /// Registers a handler with job-specific definition overrides, panicking
+    /// when validation fails.
+    #[must_use]
+    pub fn job_with_definition_overrides<H>(
+        self,
+        job_type: &'static str,
+        handler: H,
+        overrides: JobCatalogDefinitionOverrides,
+    ) -> Self
+    where
+        H: JobHandler + 'static,
+    {
+        self.try_job_with_definition_overrides(job_type, handler, overrides)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "invalid job catalog registration with definition overrides for {job_type:?}: {error}"
+                );
+            })
+    }
+
+    /// Replaces the definition overrides for one registered catalog job.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError::UnknownJobType`] when the job type is not registered.
+    pub fn try_definition_overrides(
+        mut self,
+        job_type: &str,
+        overrides: JobCatalogDefinitionOverrides,
+    ) -> Result<Self, CatalogError> {
+        let key = self.require_job_key(job_type)?;
+        overrides
+            .validate()
+            .map_err(|field| CatalogError::InvalidJobDefinitionValue {
+                job_type: job_type.to_owned(),
+                field,
+            })?;
+        self.jobs
+            .get_mut(&key)
+            .expect("job key validated")
+            .definition_overrides = overrides;
+        Ok(self)
+    }
+
+    /// Replaces the definition overrides for one registered catalog job,
+    /// panicking when validation fails.
+    #[must_use]
+    pub fn definition_overrides(
+        self,
+        job_type: &str,
+        overrides: JobCatalogDefinitionOverrides,
+    ) -> Self {
+        self.try_definition_overrides(job_type, overrides)
+            .unwrap_or_else(|error| {
+                panic!("invalid definition overrides for job type {job_type:?}: {error}");
+            })
     }
 
     /// Registers a retry-delay override for a catalog job type.
@@ -114,7 +192,7 @@ impl JobCatalog {
 
     /// Converts the catalog into a runtime [`JobRegistry`].
     ///
-    /// Disabled catalog defaults still register handlers so workers can process
+    /// Disabled catalog jobs still register handlers so workers can process
     /// already-queued work and dead-letter hooks.
     #[must_use]
     pub fn to_registry(&self) -> JobRegistry {
@@ -151,8 +229,8 @@ impl JobCatalog {
     ///
     /// This checks catalog configuration only. It does not read `job_definitions`;
     /// operator-disabled database rows are enforced later by persistence APIs.
-    /// Catalog defaults' enabled flag applies to every catalog entry; per-job
-    /// enabled overrides are not modeled yet.
+    /// Job-specific definition overrides take precedence over the catalog
+    /// default enabled flag when present.
     ///
     /// # Errors
     /// Returns [`CatalogError::UnknownJobType`] or [`CatalogError::DisabledJobType`].
@@ -160,30 +238,30 @@ impl JobCatalog {
         &self,
         job_type: &str,
     ) -> Result<JobType<'static>, CatalogError> {
-        let job_type = self.require_job_type(job_type)?;
-        if !self.defaults.is_enabled {
+        let key = self.require_job_key(job_type)?;
+        let entry = self.jobs.get(&key).expect("job key validated");
+        if !self.effective_defaults(entry).is_enabled {
             return Err(CatalogError::DisabledJobType {
-                job_type: job_type.as_str().to_owned(),
+                job_type: entry.job_type.as_str().to_owned(),
             });
         }
-        Ok(job_type)
+        Ok(entry.job_type)
     }
 
     pub(super) fn validate_defaults(&self) -> Result<(), CatalogError> {
-        if self.defaults.version <= 0 {
-            return Err(CatalogError::InvalidDefinitionValue { field: "version" });
+        self.defaults
+            .validate()
+            .map_err(|field| CatalogError::InvalidDefinitionValue { field })?;
+
+        for entry in self.jobs.values() {
+            self.effective_defaults(entry).validate().map_err(|field| {
+                CatalogError::InvalidJobDefinitionValue {
+                    job_type: entry.job_type.as_str().to_owned(),
+                    field,
+                }
+            })?;
         }
-        if self.defaults.max_attempts <= 0 {
-            return Err(CatalogError::InvalidDefinitionValue {
-                field: "max_attempts",
-            });
-        }
-        if self.defaults.default_timeout_seconds <= 0 {
-            return Err(CatalogError::InvalidDefinitionValue {
-                field: "default_timeout_seconds",
-            });
-        }
-        // default_priority intentionally accepts zero and negative values.
+
         Ok(())
     }
 
@@ -210,14 +288,19 @@ impl JobCatalog {
         &self,
         entry: &CatalogJob,
     ) -> JobDefinitionUpsert<'static> {
+        let defaults = self.effective_defaults(entry);
         JobDefinitionUpsert {
             job_type: entry.job_type,
-            version: self.defaults.version,
-            max_attempts: self.defaults.max_attempts,
-            default_timeout_seconds: self.defaults.default_timeout_seconds,
-            default_priority: self.defaults.default_priority,
-            is_enabled: self.defaults.is_enabled,
+            version: defaults.version,
+            max_attempts: defaults.max_attempts,
+            default_timeout_seconds: defaults.default_timeout_seconds,
+            default_priority: defaults.default_priority,
+            is_enabled: defaults.is_enabled,
         }
+    }
+
+    pub(super) fn effective_defaults(&self, entry: &CatalogJob) -> JobCatalogDefaults {
+        entry.definition_overrides.apply_to(self.defaults)
     }
 
     pub(super) fn require_job_key(&self, job_type: &str) -> Result<JobTypeName, CatalogError> {
