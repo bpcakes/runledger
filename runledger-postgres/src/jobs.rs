@@ -43,16 +43,19 @@ pub use runtime_configs::{
     list_job_runtime_configs, upsert_job_runtime_config, upsert_job_runtime_config_tx,
 };
 pub use schedules::{
-    claim_due_schedules_tx, mark_schedule_fired_tx, set_job_schedule_active,
-    set_job_schedule_active_tx, set_job_schedule_next_fire_at, set_job_schedule_next_fire_at_tx,
-    upsert_job_schedule, upsert_job_schedule_tx,
+    claim_due_schedules_tx, deactivate_schedules_absent_from_names_tx, get_job_schedule_by_name,
+    mark_schedule_fired_tx, prepare_schedule_exact_sync_critical_section_tx,
+    set_job_schedule_active, set_job_schedule_active_tx, set_job_schedule_next_fire_at,
+    set_job_schedule_next_fire_at_tx, sync_catalog_job_schedules_tx, upsert_job_schedule,
+    upsert_job_schedule_tx,
 };
 pub use types::{
-    JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,
-    JobEnqueue, JobEventRecord, JobFailureUpdate, JobListFilter, JobLogRecord, JobLogRecordInput,
-    JobMetricsRecord, JobProgressUpdate, JobQueueRecord, JobRuntimeConfigListFilter,
-    JobRuntimeConfigRecord, JobRuntimeConfigUpsert, JobScheduleJobTypeReference, JobScheduleRecord,
-    JobScheduleUpsert, ReapExpiredLeasesResult, ReapedTerminalLeaseRecord,
+    JOB_SCHEDULE_MAX_JITTER_SECONDS, JobDefinitionListFilter, JobDefinitionRecord,
+    JobDefinitionUpdate, JobDefinitionUpsert, JobEnqueue, JobEventRecord, JobFailureUpdate,
+    JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord, JobProgressUpdate,
+    JobQueueRecord, JobRuntimeConfigListFilter, JobRuntimeConfigRecord, JobRuntimeConfigUpsert,
+    JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport, JobScheduleJobTypeReference,
+    JobScheduleRecord, JobScheduleUpsert, ReapExpiredLeasesResult, ReapedTerminalLeaseRecord,
 };
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,

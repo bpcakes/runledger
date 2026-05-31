@@ -100,8 +100,9 @@ pub use supervisor::{Supervisor, SupervisorBuilder, SupervisorShutdown};
 /// glob-imported alongside the core and PostgreSQL preludes.
 pub mod prelude {
     pub use crate::catalog::{
-        CatalogError, CatalogJobEnqueueInput, CatalogJobScheduleInput, CatalogWorkflowDagBuilder,
-        JobCatalog, JobCatalogDefaults, JobCatalogDefinitionOverrides, JobCatalogExactSyncReport,
+        CatalogError, CatalogJobEnqueueInput, CatalogJobScheduleInput, CatalogJobScheduleSpec,
+        CatalogWorkflowDagBuilder, JobCatalog, JobCatalogDefaults, JobCatalogDefinitionOverrides,
+        JobCatalogExactSyncReport, JobCatalogScheduleSyncReport, JobCatalogScheduleSyncScope,
         JobCatalogSyncReport, JobCatalogSyncScope,
     };
     pub use crate::config::JobsConfig;

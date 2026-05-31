@@ -179,11 +179,12 @@ impl JobCatalogDefinitionOverrides {
     }
 }
 
-/// Single-source registry of job handlers, definition defaults, and enqueue helpers.
+/// Single-source registry of job handlers, definition defaults, schedules, and enqueue helpers.
 #[derive(Debug, Clone)]
 pub struct JobCatalog {
     pub(super) defaults: JobCatalogDefaults,
     pub(super) jobs: BTreeMap<JobTypeName, CatalogJob>,
+    pub(super) schedules: Vec<super::schedule_spec::StoredCatalogJobScheduleSpec>,
 }
 
 #[derive(Clone)]
@@ -232,6 +233,109 @@ pub struct JobCatalogExactSyncReport {
     /// and existing enabled rows changed to disabled. Already-disabled catalog
     /// rows are not included.
     pub disabled_catalog_job_types: Vec<JobTypeName>,
+}
+
+/// Explicit owned schedule-name scope used by exact catalog schedule sync.
+///
+/// Exact sync only deactivates schedules whose names are in this scope, and it
+/// rejects synced specs whose names are outside the scope. Use this to describe
+/// the deployment-owned schedule names that may be made inactive when omitted
+/// from the current catalog.
+///
+/// # Example
+/// ```rust
+/// use runledger_runtime::catalog::JobCatalogScheduleSyncScope;
+///
+/// let scope = JobCatalogScheduleSyncScope::schedule_names([
+///     "profiles.refresh.hourly",
+///     "profiles.refresh.daily",
+/// ])?;
+///
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobCatalogScheduleSyncScope {
+    pub(super) schedule_names: BTreeSet<String>,
+}
+
+/// Result returned by catalog schedule sync methods.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobCatalogScheduleSyncReport {
+    /// Schedule names upserted and active state applied during this sync, in the
+    /// order they were supplied by the catalog or caller.
+    pub synced_schedule_names: Vec<String>,
+    /// Enabled schedules inside the exact-sync scope that were absent from the
+    /// synced spec set and changed to inactive by this sync. Empty for additive
+    /// sync methods. Names are returned in sorted order.
+    pub deactivated_absent_schedule_names: Vec<String>,
+}
+
+impl JobCatalogScheduleSyncScope {
+    /// Builds a scope containing one owned schedule name.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError::InvalidExactScheduleSyncScopeName`] when `name`
+    /// is blank or has surrounding whitespace.
+    pub fn schedule_name(name: impl Into<String>) -> Result<Self, CatalogError> {
+        Self::schedule_names([name])
+    }
+
+    /// Builds a scope containing one or more owned schedule names.
+    ///
+    /// Duplicate names are rejected instead of silently coalesced so callers can
+    /// catch ownership-list mistakes during startup.
+    /// Whitespace-only names are reported as invalid names rather than as an
+    /// empty scope.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError::InvalidExactScheduleSyncScope`] when no schedule
+    /// name is provided, or [`CatalogError::InvalidExactScheduleSyncScopeName`]
+    /// when any name is blank or has surrounding whitespace.
+    pub fn schedule_names<I, S>(schedule_names: I) -> Result<Self, CatalogError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut parsed = BTreeSet::new();
+        for name in schedule_names {
+            let name = name.into();
+            Self::validate_schedule_name(&name)?;
+            if !parsed.insert(name.clone()) {
+                return Err(CatalogError::DuplicateExactScheduleSyncScopeName { name });
+            }
+        }
+
+        if parsed.is_empty() {
+            return Err(CatalogError::InvalidExactScheduleSyncScope);
+        }
+
+        Ok(Self {
+            schedule_names: parsed,
+        })
+    }
+
+    pub(super) fn schedule_names_for_storage(&self) -> Vec<String> {
+        self.schedule_names.iter().cloned().collect()
+    }
+
+    pub(super) fn contains(&self, schedule_name: &str) -> bool {
+        self.schedule_names.contains(schedule_name)
+    }
+
+    fn validate_schedule_name(name: &str) -> Result<(), CatalogError> {
+        if name.trim().is_empty() {
+            return Err(CatalogError::InvalidExactScheduleSyncScopeName {
+                name: name.to_owned(),
+            });
+        }
+        if name != name.trim() {
+            return Err(CatalogError::InvalidExactScheduleSyncScopeName {
+                name: name.to_owned(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl JobCatalogSyncScope {

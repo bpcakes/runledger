@@ -6,6 +6,7 @@ use runledger_postgres::jobs::JobDefinitionUpsert;
 
 use crate::registry::JobRegistry;
 
+use super::schedule_spec::{CatalogJobScheduleSpec, StoredCatalogJobScheduleSpec};
 use super::types::CatalogJob;
 use super::{
     CatalogError, JobCatalog, JobCatalogDefaults, JobCatalogDefinitionOverrides,
@@ -19,6 +20,7 @@ impl JobCatalog {
         Self {
             defaults: JobCatalogDefaults::default(),
             jobs: BTreeMap::new(),
+            schedules: Vec::new(),
         }
     }
 
@@ -188,6 +190,45 @@ impl JobCatalog {
                     "invalid retry delay override for job type {job_type:?}, failure code {failure_code:?}: {error}"
                 );
             })
+    }
+
+    /// Registers a catalog-owned schedule after validating its shape and job type.
+    ///
+    /// Registered schedules are used by [`Self::sync_schedules`] and
+    /// [`Self::sync_schedules_exact`]. The referenced job must already be
+    /// registered on this builder and effectively enabled.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError`] when the schedule spec is invalid, the job type
+    /// is unknown or disabled, or the schedule name is already registered.
+    pub fn try_schedule(mut self, spec: CatalogJobScheduleSpec<'_>) -> Result<Self, CatalogError> {
+        spec.validate_shape()
+            .map_err(|field| CatalogError::InvalidScheduleSpec {
+                name: spec.name.to_owned(),
+                field,
+            })?;
+        self.require_catalog_enabled_job_type(spec.job_type)?;
+
+        if self.schedules.iter().any(|stored| stored.name == spec.name) {
+            return Err(CatalogError::DuplicateScheduleName {
+                name: spec.name.to_owned(),
+            });
+        }
+
+        self.schedules
+            .push(StoredCatalogJobScheduleSpec::from(&spec));
+        Ok(self)
+    }
+
+    /// Registers a catalog-owned schedule, panicking when validation fails.
+    ///
+    /// Use [`Self::try_schedule`] when registration data is not static or should
+    /// be reported as a recoverable startup error.
+    #[must_use]
+    pub fn schedule(self, spec: CatalogJobScheduleSpec<'_>) -> Self {
+        self.try_schedule(spec).unwrap_or_else(|error| {
+            panic!("invalid job catalog schedule registration: {error}");
+        })
     }
 
     /// Converts the catalog into a runtime [`JobRegistry`].
