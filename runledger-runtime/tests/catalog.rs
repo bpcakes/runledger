@@ -1,19 +1,21 @@
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use runledger_core::jobs::{
     JobContext, JobFailure, JobStage, JobStatus, JobType, WorkflowBuildError,
 };
 use runledger_postgres::jobs::{
     JobDefinitionUpdate, enqueue_job, get_job_by_id, get_job_definition_by_type,
-    update_job_definition, upsert_job_schedule,
+    get_job_schedule_by_name, update_job_definition, upsert_job_schedule,
 };
 use runledger_runtime::Supervisor;
 use runledger_runtime::catalog::{
-    CatalogError, CatalogJobEnqueueInput, CatalogJobScheduleInput, JobCatalog, JobCatalogDefaults,
-    JobCatalogDefinitionOverrides, JobCatalogSyncScope,
+    CatalogError, CatalogJobEnqueueInput, CatalogJobScheduleInput, CatalogJobScheduleSpec,
+    JobCatalog, JobCatalogDefaults, JobCatalogDefinitionOverrides, JobCatalogScheduleSyncScope,
+    JobCatalogSyncScope,
 };
 use runledger_runtime::config::JobsConfig;
 use runledger_runtime::registry::JobHandler;
@@ -1830,4 +1832,586 @@ fn workflow_dag_helper_propagates_build_errors() {
         empty_workflow,
         CatalogError::WorkflowBuild(WorkflowBuildError::EmptySteps)
     ));
+}
+
+static CATALOG_SYNC_PAYLOAD: LazyLock<Value> =
+    LazyLock::new(|| json!({ "source": "catalog-sync" }));
+
+fn fixed_utc(input: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(input)
+        .expect("valid fixed timestamp")
+        .with_timezone(&Utc)
+}
+
+async fn read_schedule_state(
+    pool: &runledger_postgres::DbPool,
+    name: &str,
+) -> (bool, DateTime<Utc>) {
+    let schedule = get_job_schedule_by_name(pool, name)
+        .await
+        .expect("read schedule state")
+        .expect("schedule exists");
+    (schedule.is_active, schedule.next_fire_at)
+}
+
+fn catalog_schedule_spec(name: &'static str, is_active: bool) -> CatalogJobScheduleSpec<'static> {
+    CatalogJobScheduleSpec {
+        name,
+        job_type: CATALOG_TEST_JOB,
+        cron_expr: "0 * * * * *",
+        payload_template: &CATALOG_SYNC_PAYLOAD,
+        is_active,
+        organization_id: None,
+        max_jitter_seconds: 0,
+        next_fire_at: None,
+    }
+}
+
+#[tokio::test]
+async fn sync_schedules_with_activates_schedule_after_definitions_sync() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_schedules", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+
+    let spec = catalog_schedule_spec("catalog-sync-schedule", true);
+    catalog
+        .sync_schedules_with(&pool, &[spec])
+        .await
+        .expect("sync schedules");
+
+    let (is_active, _) = read_schedule_state(&pool, "catalog-sync-schedule").await;
+    assert!(is_active);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_uses_catalog_registered_specs() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_registered", 4).await;
+
+    let catalog = JobCatalog::new()
+        .job(
+            CATALOG_TEST_JOB,
+            CountingHandler {
+                runs: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+        .schedule(catalog_schedule_spec("catalog-registered-schedule", true));
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+    let report = catalog
+        .sync_schedules(&pool)
+        .await
+        .expect("sync registered schedules");
+    assert_eq!(
+        report.synced_schedule_names,
+        vec!["catalog-registered-schedule"]
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_exact_uses_registered_specs_and_derived_scope() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_registered_exact", 4).await;
+
+    let catalog = JobCatalog::new()
+        .job(
+            CATALOG_TEST_JOB,
+            CountingHandler {
+                runs: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+        .schedule(catalog_schedule_spec(
+            "catalog-registered-exact-schedule",
+            true,
+        ));
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+
+    let scope = catalog
+        .schedule_sync_scope()
+        .expect("derive registered schedule scope");
+    let report = catalog
+        .sync_schedules_exact(&pool, &scope)
+        .await
+        .expect("exact sync registered schedules");
+    assert_eq!(
+        report.synced_schedule_names,
+        vec!["catalog-registered-exact-schedule"]
+    );
+    assert!(report.deactivated_absent_schedule_names.is_empty());
+
+    let (is_active, _) = read_schedule_state(&pool, "catalog-registered-exact-schedule").await;
+    assert!(is_active);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_exact_with_rejects_dynamic_specs_outside_derived_scope() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_sync_derived_scope_extra_spec", 4).await;
+
+    let catalog = JobCatalog::new()
+        .job(
+            CATALOG_TEST_JOB,
+            CountingHandler {
+                runs: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+        .schedule(catalog_schedule_spec(
+            "catalog-registered-scope-schedule",
+            true,
+        ));
+
+    let scope = catalog
+        .schedule_sync_scope()
+        .expect("derive registered schedule scope");
+    let error = catalog
+        .sync_schedules_exact_with(
+            &pool,
+            &scope,
+            &[
+                catalog_schedule_spec("catalog-registered-scope-schedule", true),
+                catalog_schedule_spec("catalog-dynamic-outside-derived-scope", true),
+            ],
+        )
+        .await
+        .expect_err("dynamic spec outside derived scope");
+
+    assert!(matches!(
+        error,
+        CatalogError::ScheduleNameOutsideExactSyncScope {
+            name
+        } if name == "catalog-dynamic-outside-derived-scope"
+    ));
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_with_rejects_unknown_job_type_before_database() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_unknown_job", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    let payload = json!({});
+    let error = catalog
+        .sync_schedules_with(
+            &pool,
+            &[CatalogJobScheduleSpec {
+                name: "missing-job-schedule",
+                job_type: "jobs.missing",
+                cron_expr: "0 * * * * *",
+                payload_template: &payload,
+                is_active: true,
+                organization_id: None,
+                max_jitter_seconds: 0,
+                next_fire_at: None,
+            }],
+        )
+        .await
+        .expect_err("unknown job type");
+    assert!(matches!(error, CatalogError::UnknownJobType { .. }));
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_with_rejects_disabled_job_type_before_database() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_disabled_job", 4).await;
+
+    let catalog = JobCatalog::new()
+        .job(
+            CATALOG_TEST_JOB,
+            CountingHandler {
+                runs: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+        .defaults(JobCatalogDefaults::new().enabled(false));
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+
+    let error = catalog
+        .sync_schedules_with(
+            &pool,
+            &[catalog_schedule_spec("disabled-job-schedule", true)],
+        )
+        .await
+        .expect_err("disabled job type");
+    assert!(matches!(error, CatalogError::DisabledJobType { .. }));
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_rejects_duplicate_names_in_sync_batch() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_duplicate_batch", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    let first = catalog_schedule_spec("duplicate-batch-schedule", true);
+    let second = catalog_schedule_spec("duplicate-batch-schedule", false);
+    let error = catalog
+        .sync_schedules_with(&pool, &[first, second])
+        .await
+        .expect_err("duplicate schedule name in sync batch");
+    assert!(matches!(
+        error,
+        CatalogError::DuplicateScheduleNameInSyncBatch { .. }
+    ));
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[test]
+fn sync_schedules_rejects_duplicate_names_on_catalog() {
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    let spec = catalog_schedule_spec("duplicate-schedule", true);
+    let error = catalog
+        .try_schedule(spec)
+        .and_then(|catalog| {
+            catalog.try_schedule(catalog_schedule_spec("duplicate-schedule", false))
+        })
+        .expect_err("duplicate schedule name on catalog");
+    assert!(matches!(error, CatalogError::DuplicateScheduleName { .. }));
+}
+
+#[tokio::test]
+async fn sync_schedules_exact_deactivates_absent_scoped_schedules() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_schedules_exact", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+
+    catalog
+        .sync_schedules_with(
+            &pool,
+            &[
+                catalog_schedule_spec("catalog-present-schedule", true),
+                catalog_schedule_spec("catalog-absent-schedule", true),
+            ],
+        )
+        .await
+        .expect("seed schedules");
+
+    let scope = JobCatalogScheduleSyncScope::schedule_names([
+        "catalog-present-schedule",
+        "catalog-absent-schedule",
+    ])
+    .expect("schedule scope");
+    let report = catalog
+        .sync_schedules_exact_with(
+            &pool,
+            &scope,
+            &[catalog_schedule_spec("catalog-present-schedule", true)],
+        )
+        .await
+        .expect("exact schedule sync");
+    assert_eq!(
+        report.deactivated_absent_schedule_names,
+        vec!["catalog-absent-schedule"]
+    );
+
+    let (is_active, _) = read_schedule_state(&pool, "catalog-absent-schedule").await;
+    assert!(!is_active);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_exact_waits_for_schedule_table_lock() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_sync_schedule_exact_lock", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    let scope = JobCatalogScheduleSyncScope::schedule_name("catalog-lock-schedule")
+        .expect("schedule scope");
+
+    let mut blocker = pool.begin().await.expect("begin blocker transaction");
+    sqlx::query("LOCK TABLE job_schedules IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold conflicting schedule table lock");
+
+    let blocked = timeout(
+        Duration::from_millis(150),
+        catalog.sync_schedules_exact_with(&pool, &scope, &[]),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "exact schedule sync should wait for the schedule table lock"
+    );
+
+    blocker.rollback().await.expect("release blocker lock");
+    timeout(
+        Duration::from_secs(5),
+        catalog.sync_schedules_exact_with(&pool, &scope, &[]),
+    )
+    .await
+    .expect("exact schedule sync should complete promptly after releasing blocker")
+    .expect("exact schedule sync after releasing blocker");
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_exact_with_empty_specs_deactivates_scope() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_sync_schedules_exact_empty_specs", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+    catalog
+        .sync_schedules_with(
+            &pool,
+            &[
+                catalog_schedule_spec("catalog-empty-exact-b", true),
+                catalog_schedule_spec("catalog-empty-exact-a", true),
+            ],
+        )
+        .await
+        .expect("seed schedules");
+
+    let scope = JobCatalogScheduleSyncScope::schedule_names([
+        "catalog-empty-exact-a",
+        "catalog-empty-exact-b",
+    ])
+    .expect("schedule scope");
+    let report = catalog
+        .sync_schedules_exact_with(&pool, &scope, &[])
+        .await
+        .expect("exact schedule sync");
+    assert_eq!(
+        report.deactivated_absent_schedule_names,
+        vec!["catalog-empty-exact-a", "catalog-empty-exact-b"]
+    );
+
+    let (first_active, _) = read_schedule_state(&pool, "catalog-empty-exact-a").await;
+    let (second_active, _) = read_schedule_state(&pool, "catalog-empty-exact-b").await;
+    assert!(!first_active);
+    assert!(!second_active);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_exact_rejects_specs_outside_scope() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_schedules_scope", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    let scope = JobCatalogScheduleSyncScope::schedule_name("catalog-present-schedule")
+        .expect("schedule scope");
+    let error = catalog
+        .sync_schedules_exact_with(
+            &pool,
+            &scope,
+            &[catalog_schedule_spec("catalog-out-of-scope-schedule", true)],
+        )
+        .await
+        .expect_err("out-of-scope schedule");
+    assert!(matches!(
+        error,
+        CatalogError::ScheduleNameOutsideExactSyncScope { .. }
+    ));
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_reports_failing_schedule_name() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_sync_schedule_error_name", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    let error = catalog
+        .sync_schedules_with(
+            &pool,
+            &[catalog_schedule_spec(
+                "catalog-missing-definition-schedule",
+                true,
+            )],
+        )
+        .await
+        .expect_err("missing database definition");
+
+    match error {
+        CatalogError::ScheduleSyncEntryFailure { name, .. } => {
+            assert_eq!(name, "catalog-missing-definition-schedule");
+        }
+        other => panic!("expected schedule entry sync failure, got {other:?}"),
+    }
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_preserves_next_fire_at_when_cron_is_unchanged() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_sync_schedules_preserve_cursor", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+
+    let mut spec = catalog_schedule_spec("catalog-cursor-schedule", true);
+    spec.next_fire_at = Some(fixed_utc("2026-05-26T12:00:00Z"));
+    catalog
+        .sync_schedules_with(&pool, std::slice::from_ref(&spec))
+        .await
+        .expect("first schedule sync");
+
+    spec.next_fire_at = Some(fixed_utc("2026-05-26T13:00:00Z"));
+    catalog
+        .sync_schedules_with(&pool, std::slice::from_ref(&spec))
+        .await
+        .expect("second schedule sync");
+
+    let (_, next_fire_at) = read_schedule_state(&pool, "catalog-cursor-schedule").await;
+    assert_eq!(next_fire_at, fixed_utc("2026-05-26T12:00:00Z"));
+
+    spec.cron_expr = "0 30 * * * *";
+    spec.next_fire_at = Some(fixed_utc("2026-05-26T13:00:00Z"));
+    catalog
+        .sync_schedules_with(&pool, std::slice::from_ref(&spec))
+        .await
+        .expect("third schedule sync");
+
+    let (_, next_fire_at) = read_schedule_state(&pool, "catalog-cursor-schedule").await;
+    assert_eq!(next_fire_at, fixed_utc("2026-05-26T13:00:00Z"));
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_is_idempotent() {
+    let (pool, database) =
+        setup_ephemeral_pool("runtime_catalog_sync_schedules_idempotent", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+
+    let spec = catalog_schedule_spec("catalog-idempotent-schedule", true);
+    catalog
+        .sync_schedules_with(&pool, std::slice::from_ref(&spec))
+        .await
+        .expect("first schedule sync");
+    catalog
+        .sync_schedules_with(&pool, std::slice::from_ref(&spec))
+        .await
+        .expect("second schedule sync");
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_schedules_with_applies_is_active_false() {
+    let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_schedules_inactive", 4).await;
+
+    let catalog = JobCatalog::new().job(
+        CATALOG_TEST_JOB,
+        CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        },
+    );
+    catalog
+        .sync_definitions(&pool)
+        .await
+        .expect("sync definitions");
+
+    catalog
+        .sync_schedules_with(
+            &pool,
+            &[catalog_schedule_spec("catalog-flagged-schedule", true)],
+        )
+        .await
+        .expect("activate schedule");
+    catalog
+        .sync_schedules_with(
+            &pool,
+            &[catalog_schedule_spec("catalog-flagged-schedule", false)],
+        )
+        .await
+        .expect("deactivate schedule");
+
+    let (is_active, _) = read_schedule_state(&pool, "catalog-flagged-schedule").await;
+    assert!(!is_active);
+
+    teardown_ephemeral_pool(pool, database).await;
 }

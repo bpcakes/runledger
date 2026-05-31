@@ -151,6 +151,68 @@ pub enum CatalogError {
     /// Disabling absent job definitions failed.
     #[error("failed to disable absent job definitions: {0}")]
     DisableAbsentFailure(#[source] Box<runledger_postgres::Error>),
+    /// Exact schedule sync requires a non-empty owned schedule-name scope.
+    #[error("exact schedule sync scope must include at least one schedule name")]
+    InvalidExactScheduleSyncScope,
+    /// Exact schedule sync scope construction received an invalid schedule name.
+    #[error("exact schedule sync scope schedule name {name:?} is invalid")]
+    InvalidExactScheduleSyncScopeName {
+        /// Invalid schedule name supplied for the exact-sync scope.
+        name: String,
+    },
+    /// Exact schedule sync scope construction received a duplicate schedule name.
+    #[error("exact schedule sync scope schedule name {name} is duplicated")]
+    DuplicateExactScheduleSyncScopeName {
+        /// Duplicate schedule name supplied for the exact-sync scope.
+        name: String,
+    },
+    /// A catalog schedule was not included in the exact-sync scope.
+    #[error("catalog schedule {name} is outside the exact schedule sync scope")]
+    ScheduleNameOutsideExactSyncScope {
+        /// Catalog schedule name missing from the exact-sync scope.
+        name: String,
+    },
+    /// The catalog already contains the requested schedule name.
+    #[error("schedule name {name} is already registered in the catalog")]
+    DuplicateScheduleName {
+        /// Duplicate schedule name.
+        name: String,
+    },
+    /// A catalog schedule spec failed validation.
+    #[error("catalog schedule {name:?} is invalid: {field}")]
+    InvalidScheduleSpec {
+        /// Schedule name from the invalid spec.
+        name: String,
+        /// Name of the invalid schedule field.
+        field: &'static str,
+    },
+    /// Duplicate schedule names were supplied in one sync batch.
+    #[error("schedule sync batch contains duplicate schedule name {name}")]
+    DuplicateScheduleNameInSyncBatch {
+        /// Duplicate schedule name in the sync batch.
+        name: String,
+    },
+    /// Starting a catalog schedule sync transaction failed.
+    #[error("failed to start job catalog schedule sync transaction: {0}")]
+    ScheduleSyncFailure(#[source] Box<runledger_postgres::Error>),
+    /// Applying the transaction-local bounds for exact schedule sync failed.
+    #[error("failed to bound exact schedule sync critical section: {0}")]
+    ScheduleSyncCriticalSectionFailure(#[source] Box<runledger_postgres::Error>),
+    /// Syncing a specific catalog schedule failed.
+    #[error("failed to sync schedule {name}: {source}")]
+    ScheduleSyncEntryFailure {
+        /// Schedule name whose sync failed.
+        name: String,
+        /// Persistence-layer failure that occurred while syncing the schedule.
+        #[source]
+        source: Box<runledger_postgres::Error>,
+    },
+    /// Deactivating absent catalog schedules failed.
+    #[error("failed to deactivate absent catalog schedules: {0}")]
+    DeactivateAbsentSchedulesFailure(#[source] Box<runledger_postgres::Error>),
+    /// Committing a catalog schedule sync transaction failed.
+    #[error("failed to commit job catalog schedule sync transaction: {0}")]
+    ScheduleSyncCommitFailure(#[source] Box<runledger_postgres::Error>),
 }
 
 impl CatalogError {

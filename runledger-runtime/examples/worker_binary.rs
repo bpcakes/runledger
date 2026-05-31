@@ -30,7 +30,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
 
     let catalog = JobCatalog::new().job("jobs.email.send", SendEmail);
+    // Optional catalog-owned schedules. Register schedules on the builder
+    // before calling sync_schedules or schedule_sync_scope. Uncomment the whole
+    // shadowing binding so later startup code uses the scheduled catalog.
+    // use runledger_runtime::catalog::CatalogJobScheduleSpec;
+    // let catalog = catalog.schedule(CatalogJobScheduleSpec {
+    //     name: "jobs.email.send.hourly",
+    //     job_type: "jobs.email.send",
+    //     cron_expr: "0 0 * * * *",
+    //     payload_template: &serde_json::json!({}),
+    //     is_active: true,
+    //     organization_id: None,
+    //     max_jitter_seconds: 0,
+    //     next_fire_at: None,
+    // });
+
     catalog.sync_definitions(&pool).await?;
+    // let scope = catalog.schedule_sync_scope()?;
+    // catalog.sync_schedules_exact(&pool, &scope).await?;
+    // For additive schedule sync, use:
+    // catalog.sync_schedules(&pool).await?;
 
     let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
         .with_catalog(&catalog)

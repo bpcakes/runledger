@@ -8,19 +8,55 @@
 //!
 //! Catalog defaults apply to every registered entry unless a job is registered
 //! with job-specific definition overrides.
+//!
+//! ## Schedule APIs
+//!
+//! Choose a schedule API by who owns the schedule definition:
+//!
+//! - Use [`JobCatalog::schedule`] plus [`JobCatalog::sync_schedules`] for static
+//!   schedules registered in the worker catalog next to their handler.
+//! - Use [`JobCatalog::sync_schedules_with`] for schedule specs assembled at
+//!   startup from config, feature flags, tenants, or another source outside the
+//!   builder chain.
+//! - Use [`JobCatalog::sync_schedules_exact`] or
+//!   [`JobCatalog::sync_schedules_exact_with`] when this deployment owns a
+//!   bounded schedule-name scope and missing schedules in that scope should be
+//!   deactivated. Exact sync takes a bounded table lock so overlapping startup
+//!   syncs do not interleave their active sets; scheduler claims and
+//!   fire-cursor updates can briefly wait behind the same lock. During rolling
+//!   deploys, keep scopes narrow enough that old and new workers do not
+//!   deactivate each other's schedules unintentionally, and keep owned scopes
+//!   deployment-stable. Feature-flagged schedules should usually remain
+//!   registered with `is_active: false` rather than disappear from the scope.
+//! - Use [`JobCatalog::job_schedule`] plus
+//!   [`runledger_postgres::jobs::upsert_job_schedule`] for one-off setup,
+//!   migrations, admin tools, or schedules that should not be catalog-owned.
+//!   Call [`runledger_postgres::jobs::set_job_schedule_active`] separately to
+//!   change active state on an existing lower-level schedule.
+//!
+//! [`JobCatalog::schedule_sync_scope`] derives an exact-sync scope from
+//! schedules registered on the catalog, so startup code does not need to repeat
+//! those names. If a deployment needs both registered schedules and dynamic
+//! startup specs in one exact source-of-truth set, build one explicit spec list
+//! and scope for [`JobCatalog::sync_schedules_exact_with`]; Runledger does not
+//! provide an implicit union helper because that can hide ownership mistakes.
 
 mod error;
 mod inputs;
 mod registration;
+mod schedule_spec;
 mod sync;
+mod sync_schedules;
 mod types;
 mod workflow;
 
 pub use error::CatalogError;
 pub use inputs::{CatalogJobEnqueueInput, CatalogJobScheduleInput};
+pub use schedule_spec::CatalogJobScheduleSpec;
 pub use types::{
     JobCatalog, JobCatalogDefaults, JobCatalogDefinitionOverrides, JobCatalogExactSyncReport,
-    JobCatalogSyncReport, JobCatalogSyncScope,
+    JobCatalogScheduleSyncReport, JobCatalogScheduleSyncScope, JobCatalogSyncReport,
+    JobCatalogSyncScope,
 };
 pub use workflow::CatalogWorkflowDagBuilder;
 
@@ -296,6 +332,101 @@ mod tests {
             })
             .expect("job-specific enabled override should win");
         assert_eq!(schedule.job_type.as_str(), "jobs.test");
+    }
+
+    #[test]
+    fn try_schedule_rejects_invalid_cron_before_database() {
+        let catalog = JobCatalog::new().job("jobs.test", StaticHandler("jobs.test"));
+        let payload = json!({});
+        let error = catalog
+            .try_schedule(CatalogJobScheduleSpec {
+                name: "jobs.test.schedule",
+                job_type: "jobs.test",
+                cron_expr: "not a cron expression",
+                payload_template: &payload,
+                is_active: true,
+                organization_id: None,
+                max_jitter_seconds: 0,
+                next_fire_at: None,
+            })
+            .expect_err("invalid cron");
+        assert!(matches!(
+            error,
+            CatalogError::InvalidScheduleSpec {
+                field: "cron_expr",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn try_schedule_rejects_excessive_jitter_before_database() {
+        let catalog = JobCatalog::new().job("jobs.test", StaticHandler("jobs.test"));
+        let payload = json!({});
+        let error = catalog
+            .try_schedule(CatalogJobScheduleSpec {
+                name: "jobs.test.schedule",
+                job_type: "jobs.test",
+                cron_expr: "0 * * * * *",
+                payload_template: &payload,
+                is_active: true,
+                organization_id: None,
+                max_jitter_seconds: 86_401,
+                next_fire_at: None,
+            })
+            .expect_err("excessive jitter");
+        assert!(matches!(
+            error,
+            CatalogError::InvalidScheduleSpec {
+                field: "max_jitter_seconds",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn schedule_sync_scope_uses_registered_schedule_names() {
+        let payload = json!({});
+        let catalog = JobCatalog::new()
+            .job("jobs.test", StaticHandler("jobs.test"))
+            .schedule(CatalogJobScheduleSpec {
+                name: "jobs.test.hourly",
+                job_type: "jobs.test",
+                cron_expr: "0 0 * * * *",
+                payload_template: &payload,
+                is_active: true,
+                organization_id: None,
+                max_jitter_seconds: 0,
+                next_fire_at: None,
+            })
+            .schedule(CatalogJobScheduleSpec {
+                name: "jobs.test.daily",
+                job_type: "jobs.test",
+                cron_expr: "0 0 0 * * *",
+                payload_template: &payload,
+                is_active: true,
+                organization_id: None,
+                max_jitter_seconds: 0,
+                next_fire_at: None,
+            });
+
+        let scope = catalog
+            .schedule_sync_scope()
+            .expect("registered schedules should build scope");
+        assert_eq!(
+            scope,
+            JobCatalogScheduleSyncScope::schedule_names(["jobs.test.daily", "jobs.test.hourly"])
+                .expect("expected scope")
+        );
+    }
+
+    #[test]
+    fn schedule_sync_scope_rejects_empty_registered_schedule_set() {
+        let error = JobCatalog::new()
+            .job("jobs.test", StaticHandler("jobs.test"))
+            .schedule_sync_scope()
+            .expect_err("empty schedule scope");
+        assert!(matches!(error, CatalogError::InvalidExactScheduleSyncScope));
     }
 
     #[test]

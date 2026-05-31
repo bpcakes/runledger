@@ -29,7 +29,15 @@ pub struct CatalogJobEnqueueInput<'a> {
     pub stage: Option<JobStage>,
 }
 
-/// Input for building a [`JobScheduleUpsert`] from a catalog-backed job type.
+/// Input for building a one-off [`JobScheduleUpsert`] from a catalog-backed job type.
+///
+/// Prefer [`JobCatalog::schedule`](super::JobCatalog::schedule) plus
+/// [`JobCatalog::sync_schedules`](super::JobCatalog::sync_schedules) for
+/// catalog-owned schedules, or
+/// [`JobCatalog::sync_schedules_with`](super::JobCatalog::sync_schedules_with)
+/// for startup-provided catalog-owned specs. Use this lower-level input for
+/// migrations, admin tools, and schedules that should not be owned by catalog
+/// sync.
 #[derive(Debug, Clone)]
 pub struct CatalogJobScheduleInput<'a> {
     /// Unique schedule name.
@@ -79,7 +87,12 @@ impl JobCatalog {
         })
     }
 
-    /// Builds a [`JobScheduleUpsert`] after validating the job type is registered and enabled.
+    /// Builds a one-off [`JobScheduleUpsert`] after validating the job type is
+    /// registered and enabled.
+    ///
+    /// This helper does not make the schedule catalog-owned. It is intended for
+    /// lower-level setup flows that will call
+    /// `runledger_postgres::jobs::upsert_job_schedule` directly.
     ///
     /// This checks catalog configuration only. Operator-disabled database rows
     /// are still enforced by `runledger-postgres` when schedule-created jobs are

@@ -2,9 +2,12 @@ use chrono::{DateTime, Utc};
 use runledger_core::jobs::{JobType, JobTypeName, WorkflowDagBuilder};
 use runledger_postgres::jobs::{
     JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionUpsert, JobEnqueue,
-    JobScheduleUpsert, enqueue_job, enqueue_workflow_run, get_job_definition_by_type,
-    mark_schedule_fired_tx, set_job_schedule_active, sync_catalog_job_definitions_exact_tx,
-    sync_catalog_job_definitions_tx, upsert_job_definition_tx, upsert_job_schedule,
+    JobScheduleCatalogSyncEntry, JobScheduleUpsert, claim_due_schedules_tx,
+    deactivate_schedules_absent_from_names_tx, enqueue_job, enqueue_workflow_run,
+    get_job_definition_by_type, get_job_schedule_by_name, mark_schedule_fired_tx,
+    prepare_schedule_exact_sync_critical_section_tx, set_job_schedule_active,
+    sync_catalog_job_definitions_exact_tx, sync_catalog_job_definitions_tx,
+    sync_catalog_job_schedules_tx, upsert_job_definition_tx, upsert_job_schedule,
 };
 use runledger_postgres::{Error, QueryError, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -22,6 +25,17 @@ fn fixed_utc(input: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(input)
         .expect("valid fixed timestamp")
         .with_timezone(&Utc)
+}
+
+async fn read_schedule_state(
+    pool: &runledger_postgres::DbPool,
+    name: &str,
+) -> (bool, DateTime<Utc>) {
+    let schedule = get_job_schedule_by_name(pool, name)
+        .await
+        .expect("read schedule state")
+        .expect("schedule exists");
+    (schedule.is_active, schedule.next_fire_at)
 }
 
 fn disabled_definition_upsert() -> JobDefinitionUpsert<'static> {
@@ -402,6 +416,391 @@ async fn schedule_upsert_returns_active_state_preserved_on_conflict() {
         paused_after_conflict.next_fire_at, second_next_fire_at,
         "same-cron upsert should not retime the schedule cursor"
     );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn get_job_schedule_by_name_reads_schedule_without_mutation() {
+    let (pool, database) = setup_ephemeral_pool("postgres_schedule_get_by_name", 4).await;
+
+    let mut tx = pool.begin().await.expect("begin job definition tx");
+    upsert_job_definition_tx(&mut tx, &definition_upsert(SCHEDULE_JOB, true))
+        .await
+        .expect("upsert job definition");
+    tx.commit().await.expect("commit job definition tx");
+
+    let payload = json!({ "version": 1 });
+    let next_fire_at = fixed_utc("2026-05-26T12:00:00Z");
+    upsert_job_schedule(
+        &pool,
+        &JobScheduleUpsert {
+            name: SCHEDULE_NAME,
+            job_type: JobType::new(SCHEDULE_JOB),
+            organization_id: None,
+            payload_template: &payload,
+            cron_expr: "0 0 * * * *",
+            is_active: false,
+            next_fire_at,
+            max_jitter_seconds: 7,
+        },
+    )
+    .await
+    .expect("insert schedule");
+
+    let schedule = get_job_schedule_by_name(&pool, SCHEDULE_NAME)
+        .await
+        .expect("read schedule")
+        .expect("schedule exists");
+    assert_eq!(schedule.name, SCHEDULE_NAME);
+    assert_eq!(schedule.job_type.as_str(), SCHEDULE_JOB);
+    assert_eq!(schedule.payload_template, payload);
+    assert_eq!(schedule.cron_expr, "0 0 * * * *");
+    assert!(!schedule.is_active);
+    assert_eq!(schedule.next_fire_at, next_fire_at);
+    assert_eq!(schedule.max_jitter_seconds, 7);
+
+    let missing = get_job_schedule_by_name(&pool, "schedule-missing")
+        .await
+        .expect("read missing schedule");
+    assert!(missing.is_none());
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_catalog_job_schedules_tx_applies_is_active_on_conflict() {
+    let (pool, database) = setup_ephemeral_pool("postgres_schedule_catalog_sync_active", 4).await;
+
+    let mut tx = pool.begin().await.expect("begin job definition tx");
+    upsert_job_definition_tx(
+        &mut tx,
+        &JobDefinitionUpsert {
+            job_type: JobType::new(SCHEDULE_JOB),
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 300,
+            default_priority: 0,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert job definition");
+    tx.commit().await.expect("commit job definition tx");
+
+    let payload = json!({ "version": 1 });
+    let next_fire_at = fixed_utc("2026-05-26T12:00:00Z");
+    let inserted = upsert_job_schedule(
+        &pool,
+        &JobScheduleUpsert {
+            name: SCHEDULE_NAME,
+            job_type: JobType::new(SCHEDULE_JOB),
+            organization_id: None,
+            payload_template: &payload,
+            cron_expr: "0 0 * * * *",
+            is_active: false,
+            next_fire_at,
+            max_jitter_seconds: 0,
+        },
+    )
+    .await
+    .expect("insert inactive schedule");
+    assert!(!inserted.is_active);
+
+    let mut tx = pool.begin().await.expect("begin schedule sync tx");
+    sync_catalog_job_schedules_tx(
+        &mut tx,
+        &[JobScheduleCatalogSyncEntry {
+            upsert: JobScheduleUpsert {
+                name: SCHEDULE_NAME,
+                job_type: JobType::new(SCHEDULE_JOB),
+                organization_id: None,
+                payload_template: &payload,
+                cron_expr: "0 0 * * * *",
+                is_active: true,
+                next_fire_at,
+                max_jitter_seconds: 0,
+            },
+        }],
+    )
+    .await
+    .expect("sync catalog schedule");
+    tx.commit().await.expect("commit schedule sync tx");
+
+    let (active_after_sync, _) = read_schedule_state(&pool, SCHEDULE_NAME).await;
+    assert!(
+        active_after_sync,
+        "catalog schedule sync should activate an existing inactive schedule"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn sync_catalog_job_schedules_tx_deactivates_when_is_active_is_false() {
+    let (pool, database) = setup_ephemeral_pool("postgres_schedule_catalog_sync_inactive", 4).await;
+
+    let mut tx = pool.begin().await.expect("begin job definition tx");
+    upsert_job_definition_tx(
+        &mut tx,
+        &JobDefinitionUpsert {
+            job_type: JobType::new(SCHEDULE_JOB),
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 300,
+            default_priority: 0,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert job definition");
+    tx.commit().await.expect("commit job definition tx");
+
+    let payload = json!({ "version": 1 });
+    let next_fire_at = fixed_utc("2026-05-26T12:00:00Z");
+    upsert_job_schedule(
+        &pool,
+        &JobScheduleUpsert {
+            name: SCHEDULE_NAME,
+            job_type: JobType::new(SCHEDULE_JOB),
+            organization_id: None,
+            payload_template: &payload,
+            cron_expr: "0 0 * * * *",
+            is_active: true,
+            next_fire_at,
+            max_jitter_seconds: 0,
+        },
+    )
+    .await
+    .expect("insert active schedule");
+
+    let mut tx = pool.begin().await.expect("begin schedule sync tx");
+    sync_catalog_job_schedules_tx(
+        &mut tx,
+        &[JobScheduleCatalogSyncEntry {
+            upsert: JobScheduleUpsert {
+                name: SCHEDULE_NAME,
+                job_type: JobType::new(SCHEDULE_JOB),
+                organization_id: None,
+                payload_template: &payload,
+                cron_expr: "0 0 * * * *",
+                is_active: false,
+                next_fire_at,
+                max_jitter_seconds: 0,
+            },
+        }],
+    )
+    .await
+    .expect("sync catalog schedule inactive");
+    tx.commit().await.expect("commit schedule sync tx");
+
+    let (inactive_after_sync, _) = read_schedule_state(&pool, SCHEDULE_NAME).await;
+    assert!(
+        !inactive_after_sync,
+        "catalog schedule sync should deactivate an existing active schedule"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn deactivate_schedules_absent_from_names_tx_is_scope_bound() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_schedule_catalog_exact_deactivate", 4).await;
+
+    let mut tx = pool.begin().await.expect("begin job definition tx");
+    upsert_job_definition_tx(
+        &mut tx,
+        &JobDefinitionUpsert {
+            job_type: JobType::new(SCHEDULE_JOB),
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 300,
+            default_priority: 0,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert job definition");
+    tx.commit().await.expect("commit job definition tx");
+
+    let payload = json!({ "version": 1 });
+    let next_fire_at = fixed_utc("2026-05-26T12:00:00Z");
+    for name in ["schedule-in-scope", "schedule-out-of-scope"] {
+        upsert_job_schedule(
+            &pool,
+            &JobScheduleUpsert {
+                name,
+                job_type: JobType::new(SCHEDULE_JOB),
+                organization_id: None,
+                payload_template: &payload,
+                cron_expr: "0 0 * * * *",
+                is_active: true,
+                next_fire_at,
+                max_jitter_seconds: 0,
+            },
+        )
+        .await
+        .expect("insert active schedule");
+    }
+
+    let mut tx = pool.begin().await.expect("begin exact deactivate tx");
+    let deactivated = deactivate_schedules_absent_from_names_tx(
+        &mut tx,
+        &["schedule-in-scope".to_owned()],
+        &["schedule-in-scope".to_owned()],
+    )
+    .await
+    .expect("deactivate absent schedules");
+    tx.commit().await.expect("commit exact deactivate tx");
+
+    assert!(
+        deactivated.is_empty(),
+        "present in-scope schedules should not be deactivated"
+    );
+
+    let mut tx = pool.begin().await.expect("begin exact deactivate tx");
+    let deactivated =
+        deactivate_schedules_absent_from_names_tx(&mut tx, &["schedule-in-scope".to_owned()], &[])
+            .await
+            .expect("deactivate absent in-scope schedule");
+    tx.commit().await.expect("commit exact deactivate tx");
+
+    assert_eq!(deactivated, vec!["schedule-in-scope".to_owned()]);
+
+    let (in_scope, _) = read_schedule_state(&pool, "schedule-in-scope").await;
+    assert!(!in_scope);
+
+    let (out_of_scope, _) = read_schedule_state(&pool, "schedule-out-of-scope").await;
+    assert!(
+        out_of_scope,
+        "schedules outside the exact-sync scope should remain active"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn deactivate_schedules_absent_from_names_tx_returns_names_sorted() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_schedule_catalog_exact_deactivate_sorted", 4).await;
+
+    let mut tx = pool.begin().await.expect("begin job definition tx");
+    upsert_job_definition_tx(&mut tx, &definition_upsert(SCHEDULE_JOB, true))
+        .await
+        .expect("upsert job definition");
+    tx.commit().await.expect("commit job definition tx");
+
+    let payload = json!({ "version": 1 });
+    let next_fire_at = fixed_utc("2026-05-26T12:00:00Z");
+    for name in [
+        "schedule-sorted-z",
+        "schedule-sorted-a",
+        "schedule-sorted-m",
+    ] {
+        upsert_job_schedule(
+            &pool,
+            &JobScheduleUpsert {
+                name,
+                job_type: JobType::new(SCHEDULE_JOB),
+                organization_id: None,
+                payload_template: &payload,
+                cron_expr: "0 0 * * * *",
+                is_active: true,
+                next_fire_at,
+                max_jitter_seconds: 0,
+            },
+        )
+        .await
+        .expect("insert active schedule");
+    }
+
+    let mut tx = pool.begin().await.expect("begin exact deactivate tx");
+    let deactivated = deactivate_schedules_absent_from_names_tx(
+        &mut tx,
+        &[
+            "schedule-sorted-z".to_owned(),
+            "schedule-sorted-a".to_owned(),
+            "schedule-sorted-m".to_owned(),
+        ],
+        &[],
+    )
+    .await
+    .expect("deactivate absent schedules");
+    tx.commit().await.expect("commit exact deactivate tx");
+
+    assert_eq!(
+        deactivated,
+        vec![
+            "schedule-sorted-a".to_owned(),
+            "schedule-sorted-m".to_owned(),
+            "schedule-sorted-z".to_owned()
+        ]
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn claim_due_schedules_waits_for_exact_sync_lock() {
+    let (pool, database) = setup_ephemeral_pool("postgres_schedule_claim_exact_lock", 4).await;
+
+    let mut tx = pool.begin().await.expect("begin job definition tx");
+    upsert_job_definition_tx(&mut tx, &definition_upsert(SCHEDULE_JOB, true))
+        .await
+        .expect("upsert job definition");
+    tx.commit().await.expect("commit job definition tx");
+
+    let payload = json!({ "version": 1 });
+    let next_fire_at = fixed_utc("2026-05-26T12:00:00Z");
+    upsert_job_schedule(
+        &pool,
+        &JobScheduleUpsert {
+            name: "schedule-claim-exact-lock",
+            job_type: JobType::new(SCHEDULE_JOB),
+            organization_id: None,
+            payload_template: &payload,
+            cron_expr: "0 0 * * * *",
+            is_active: true,
+            next_fire_at,
+            max_jitter_seconds: 0,
+        },
+    )
+    .await
+    .expect("insert due schedule");
+
+    let mut exact_sync_tx = pool.begin().await.expect("begin exact sync tx");
+    prepare_schedule_exact_sync_critical_section_tx(&mut exact_sync_tx)
+        .await
+        .expect("hold exact sync lock");
+
+    let claim_pool = pool.clone();
+    let mut claim_task = tokio::spawn(async move {
+        let mut tx = claim_pool.begin().await.expect("begin claim tx");
+        let schedules =
+            claim_due_schedules_tx(&mut tx, fixed_utc("2026-05-26T12:00:01Z"), 1).await?;
+        tx.commit()
+            .await
+            .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        Ok::<_, Error>(schedules)
+    });
+
+    timeout(Duration::from_millis(150), &mut claim_task)
+        .await
+        .expect_err("claim should wait for exact sync lock before row claims");
+
+    exact_sync_tx
+        .rollback()
+        .await
+        .expect("release exact sync lock");
+    let claimed = timeout(Duration::from_secs(5), claim_task)
+        .await
+        .expect("claim should finish after exact sync releases the table lock")
+        .expect("claim task should not panic")
+        .expect("claim due schedules");
+
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].name, "schedule-claim-exact-lock");
 
     teardown_ephemeral_pool(pool, database).await;
 }

@@ -5,6 +5,12 @@ use runledger_core::jobs::{
 use serde_json::Value;
 use sqlx::types::Uuid;
 
+/// Maximum accepted schedule jitter, in seconds.
+///
+/// The scheduler treats jitter as a deterministic spread applied to future fire
+/// cursors, and the persistence layer rejects larger values.
+pub const JOB_SCHEDULE_MAX_JITTER_SECONDS: i32 = 86_400;
+
 #[derive(Debug, Clone)]
 pub struct JobDefinitionUpsert<'a> {
     pub job_type: JobType<'a>,
@@ -108,7 +114,7 @@ pub struct JobScheduleRecord {
     /// `set_job_schedule_active` to pause or resume a schedule intentionally.
     pub is_active: bool,
     /// Maximum deterministic jitter, in seconds, applied when computing the next
-    /// fire cursor.
+    /// fire cursor. Must not exceed [`JOB_SCHEDULE_MAX_JITTER_SECONDS`].
     pub max_jitter_seconds: i32,
     /// Next UTC instant at which this schedule is due for materialization.
     pub next_fire_at: DateTime<Utc>,
@@ -126,7 +132,7 @@ pub struct JobScheduleRecord {
 /// `cron::Schedule::from_str`, the same parser used by `runledger-runtime` when
 /// materializing due schedules. The upsert validator rejects blank or padded
 /// schedule names, blank or padded cron expressions, invalid cron expressions,
-/// negative jitter, and jitter above 86,400 seconds.
+/// negative jitter, and jitter above [`JOB_SCHEDULE_MAX_JITTER_SECONDS`].
 ///
 /// This input does not encode a compile-time job catalog. The PostgreSQL schema
 /// requires a matching job-definition row for `job_type`, but this API does not
@@ -150,8 +156,25 @@ pub struct JobScheduleUpsert<'a> {
     /// Initial fire cursor for the scheduler, also used when changing cron syntax.
     pub next_fire_at: DateTime<Utc>,
     /// Maximum deterministic jitter applied when materializing a due schedule,
-    /// capped at 86,400 seconds.
+    /// capped at [`JOB_SCHEDULE_MAX_JITTER_SECONDS`].
     pub max_jitter_seconds: i32,
+}
+
+/// One catalog-owned schedule sync entry.
+#[derive(Debug, Clone)]
+pub struct JobScheduleCatalogSyncEntry<'a> {
+    /// Schedule definition fields to upsert. Unlike plain schedule upserts,
+    /// catalog sync treats `is_active` as the authoritative desired active state
+    /// for both inserts and conflicts.
+    pub upsert: JobScheduleUpsert<'a>,
+}
+
+/// Result returned by [`super::schedules::sync_catalog_job_schedules_tx`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobScheduleCatalogSyncReport {
+    /// Schedule names upserted and active state applied during this sync.
+    pub synced_schedule_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
