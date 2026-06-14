@@ -30,6 +30,11 @@ pub async fn run_reaper_loop(
     config: JobsConfig,
     mut shutdown: watch::Receiver<bool>,
 ) -> RuntimeLoopExit {
+    if let Err(error) = config.validate_reaper_loop() {
+        warn!(%error, "invalid jobs config; stopping reaper loop");
+        return RuntimeLoopExit::InvalidConfig(error);
+    }
+
     let registry = Arc::new(registry);
 
     loop {

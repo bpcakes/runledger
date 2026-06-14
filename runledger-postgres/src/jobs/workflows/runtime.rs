@@ -17,6 +17,7 @@ use super::super::row_decode::{
 use super::super::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowStepDbRecord};
 use super::errors::{
     workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
+    workflow_external_completion_metadata_conflict_error,
     workflow_external_completion_output_conflict_error,
     workflow_external_completion_output_invalid_error, workflow_external_step_not_external_error,
     workflow_external_step_not_found_error, workflow_external_step_not_waiting_error,
@@ -120,6 +121,15 @@ fn validate_terminal_transition_status(terminal_status: WorkflowStepStatus) -> R
     }
 
     Ok(())
+}
+
+fn external_completion_metadata_matches(
+    step: &WorkflowStepDbRecord,
+    input: &CompleteExternalWorkflowStepInput<'_>,
+) -> bool {
+    step.status_reason.as_deref() == input.status_reason
+        && step.last_error_code.as_deref() == input.last_error_code
+        && step.last_error_message.as_deref() == input.last_error_message
 }
 
 async fn jsonb_values_match_tx(
@@ -449,6 +459,12 @@ pub async fn complete_external_workflow_step_tx(
                 && !jsonb_values_match_tx(tx, stored_output.as_ref(), input.output).await?
             {
                 return Err(workflow_external_completion_output_conflict_error(
+                    step.step_key.as_str(),
+                ));
+            }
+
+            if !external_completion_metadata_matches(&step, input) {
+                return Err(workflow_external_completion_metadata_conflict_error(
                     step.step_key.as_str(),
                 ));
             }

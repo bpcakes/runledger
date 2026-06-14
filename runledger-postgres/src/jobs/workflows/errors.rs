@@ -136,6 +136,19 @@ pub(in crate::jobs::workflows) fn workflow_external_completion_output_conflict_e
     ))
 }
 
+pub(in crate::jobs::workflows) fn workflow_external_completion_metadata_conflict_error(
+    step_key: &str,
+) -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Conflict,
+        "workflow.external_step_conflicting_completion_retry",
+        "External workflow step was already completed with a different result.",
+        format!(
+            "workflow step '{step_key}' was already completed with different completion metadata"
+        ),
+    ))
+}
+
 pub(in crate::jobs::workflows) fn workflow_run_not_found_error() -> Error {
     Error::QueryError(QueryError::from_classified(
         QueryErrorCategory::Validation,

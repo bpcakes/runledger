@@ -29,10 +29,11 @@ can be imported together.
 | Human/API approval or another external gate | External workflow steps |
 | Delayed or recurring entrypoint | `upsert_job_schedule` with `JobScheduleUpsert` |
 | Worker process lifecycle | `Supervisor::run_until_shutdown` |
-| Admin/status views | `get_*` and `list_*` APIs in `runledger_postgres::jobs` |
+| Admin/status views | `get_*` / `list_*` APIs and `count_workflow_runs` in `runledger_postgres::jobs` |
 
 Use `set_job_schedule_active` to pause/resume schedules and
 `set_job_schedule_next_fire_at` to retime a schedule cursor.
+Use `count_workflow_runs` with `WorkflowRunCountFilter` for workflow counters.
 
 ## Workflow DAG Rule
 
@@ -48,13 +49,23 @@ let run = WorkflowDagBuilder::new("workflow.example", &metadata)
 enqueue_workflow_run(&pool, &run).await?;
 ```
 
-For workflows that should return a durable JSON result, declare one initial DAG
-step as the result step with `.result_step(...)` or `.try_result_step_key(...)`,
+For workflows that should return a durable JSON result, declare one DAG step as
+the result step with `.result_step(...)` or `.try_result_step_key(...)`,
 enqueue with `enqueue_workflow_run_handle`, and wait/read through
-`WorkflowRunHandle::get_result`. Handler success returns `JobCompletion`; use
-`JobCompletion::with_output(...)` for compact result metadata. Prefer explicit
-wait timeouts in production. The default waits up to five minutes. `timeout: None`
-opts into unbounded waits and may hold a PostgreSQL listener connection.
+`WorkflowRunHandle::get_status`, `get_run`, or `get_result`. Handler success
+returns `JobCompletion`; use `JobCompletion::with_output(...)` for compact result
+metadata. Prefer explicit wait timeouts in production. The default waits up to
+five minutes. `timeout: None` opts into unbounded waits and may hold a
+PostgreSQL listener connection. Result error codes include
+`workflow.handle_storage_error`, `workflow.run_not_found`,
+`workflow.result_not_declared`, `workflow.result_missing`,
+`workflow.result_unsuccessful_terminal`, and `workflow.result_wait_timeout`.
+External step output is valid only with successful external completion; failed or
+canceled external completions must not provide output. Retrying completion for a
+terminal external step requires matching terminal status and completion metadata;
+changed metadata returns `workflow.external_step_conflicting_completion_retry`.
+For successful completions, changed output returns
+`workflow.external_step_conflicting_output_retry`.
 
 Use `WorkflowRunEnqueueBuilder` and `WorkflowStepEnqueueBuilder` for advanced per-step
 settings, external steps, or hand-authored dependency specs.
@@ -71,6 +82,19 @@ Use lower-level builders when call sites should pass explicit `StepKey` and
 Do not manually orchestrate ordinary workflows by polling job status, enqueueing
 dependent jobs from parent handlers, encoding dependency state in payload JSON,
 or adding app-owned workflow edge tables.
+Do not call `requeue_job` on workflow-managed jobs; it returns
+`job.workflow_requeue_not_supported`.
+Use `update_job_payload_uuid_array_field` only for direct pending jobs; inspect
+`JobPayloadUuidArrayFieldUpdate` for `Updated`, `NotFound`, or rejected updates.
+
+## Catalog Rule
+
+Use `JobCatalogDefinitionOverrides` for per-job definition differences from
+catalog defaults. Overrides win for fields they set; version, attempts, and
+timeout must be positive. Catalog schedule sync owns `is_active` on every sync;
+use lower-level schedule APIs when admin pause/resume should own active state.
+Active schedules require enabled job definitions. Scheduler catch-up materializes
+at most one stale fire, then advances the cursor to the first future fire.
 
 ## Worker Runtime Rule
 
@@ -88,6 +112,8 @@ supervisor
 
 Use `worker::run_worker_loop`, `scheduler::run_scheduler_loop`, and
 `reaper::run_reaper_loop` only for custom runtime orchestration.
+If constructing `JobsConfig` directly, validate it; invalid configs can surface
+as `RuntimeError::InvalidJobsConfig` or `RuntimeLoopExit::InvalidConfig`.
 
 ## Error Handling
 

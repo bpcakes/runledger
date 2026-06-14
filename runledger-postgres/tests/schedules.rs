@@ -1,13 +1,14 @@
 use chrono::{DateTime, Utc};
 use runledger_core::jobs::{JobType, JobTypeName, WorkflowDagBuilder};
 use runledger_postgres::jobs::{
-    JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionUpsert, JobEnqueue,
-    JobScheduleCatalogSyncEntry, JobScheduleUpsert, claim_due_schedules_tx,
-    deactivate_schedules_absent_from_names_tx, enqueue_job, enqueue_workflow_run,
-    get_job_definition_by_type, get_job_schedule_by_name, mark_schedule_fired_tx,
-    prepare_schedule_exact_sync_critical_section_tx, set_job_schedule_active,
-    sync_catalog_job_definitions_exact_tx, sync_catalog_job_definitions_tx,
-    sync_catalog_job_schedules_tx, upsert_job_definition_tx, upsert_job_schedule,
+    JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionUpdate,
+    JobDefinitionUpsert, JobEnqueue, JobScheduleCatalogSyncEntry, JobScheduleUpsert,
+    claim_due_schedules_tx, deactivate_schedules_absent_from_names_tx, enqueue_job,
+    enqueue_workflow_run, get_job_definition_by_type, get_job_schedule_by_name,
+    mark_schedule_fired_tx, prepare_schedule_exact_sync_critical_section_tx,
+    set_job_schedule_active, sync_catalog_job_definitions_exact_tx,
+    sync_catalog_job_definitions_tx, sync_catalog_job_schedules_tx, update_job_definition,
+    upsert_job_definition_tx, upsert_job_schedule, upsert_job_schedule_tx,
 };
 use runledger_postgres::{Error, QueryError, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -208,6 +209,230 @@ async fn definition_disable_definition_lock_uses_bounded_lock_wait() {
         .await
         .expect("rollback timed-out lock transaction");
     blocker.rollback().await.expect("release blocker lock");
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn active_schedule_upsert_rejects_disabled_job_definition() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_schedule_rejects_disabled_definition", 4).await;
+
+    let mut tx = pool.begin().await.expect("begin disabled definition tx");
+    upsert_job_definition_tx(&mut tx, &definition_upsert(DEFINITION_DISABLE_JOB, false))
+        .await
+        .expect("upsert disabled job definition");
+    tx.commit().await.expect("commit disabled definition tx");
+
+    let payload = json!({ "disabled": true });
+    let next_fire_at = fixed_utc("2026-05-26T12:00:00Z");
+    let active_schedule = JobScheduleUpsert {
+        name: "schedule-disabled-definition-active",
+        job_type: JobType::new(DEFINITION_DISABLE_JOB),
+        organization_id: None,
+        payload_template: &payload,
+        cron_expr: "0 0 * * * *",
+        is_active: true,
+        next_fire_at,
+        max_jitter_seconds: 0,
+    };
+    let mut tx = pool.begin().await.expect("begin schedule upsert tx");
+    assert_validation_code(
+        upsert_job_schedule_tx(&mut tx, &active_schedule)
+            .await
+            .expect_err("active schedule should require enabled definition"),
+        "job_schedule.definition_not_found_or_disabled",
+    );
+    tx.rollback()
+        .await
+        .expect("rollback rejected schedule upsert tx");
+
+    let missing = get_job_schedule_by_name(&pool, "schedule-disabled-definition-active")
+        .await
+        .expect("read rejected schedule");
+    assert!(
+        missing.is_none(),
+        "rejected active schedule should not be persisted"
+    );
+
+    let inactive_schedule = JobScheduleUpsert {
+        name: "schedule-disabled-definition-inactive",
+        is_active: false,
+        ..active_schedule
+    };
+    let inserted = upsert_job_schedule(&pool, &inactive_schedule)
+        .await
+        .expect("inactive schedule may reference a disabled definition");
+    assert!(
+        !inserted.is_active,
+        "inactive schedule should stay inactive"
+    );
+
+    assert_validation_code(
+        set_job_schedule_active(&pool, "schedule-disabled-definition-inactive", true)
+            .await
+            .expect_err("activating schedule should require enabled definition"),
+        "job_schedule.definition_not_found_or_disabled",
+    );
+    let (is_active, _) = read_schedule_state(&pool, "schedule-disabled-definition-inactive").await;
+    assert!(
+        !is_active,
+        "failed activation should leave the schedule inactive"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn update_job_definition_rejects_disable_with_active_schedule() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_definition_update_active_schedule", 4).await;
+
+    let mut tx = pool.begin().await.expect("begin enabled definition tx");
+    upsert_job_definition_tx(&mut tx, &definition_upsert(DEFINITION_DISABLE_JOB, true))
+        .await
+        .expect("upsert enabled job definition");
+    tx.commit().await.expect("commit enabled definition tx");
+
+    let payload = json!({ "active": true });
+    upsert_job_schedule(
+        &pool,
+        &JobScheduleUpsert {
+            name: "schedule-blocks-definition-disable",
+            job_type: JobType::new(DEFINITION_DISABLE_JOB),
+            organization_id: None,
+            payload_template: &payload,
+            cron_expr: "0 0 * * * *",
+            is_active: true,
+            next_fire_at: fixed_utc("2026-05-26T12:00:00Z"),
+            max_jitter_seconds: 0,
+        },
+    )
+    .await
+    .expect("insert active schedule");
+
+    let disable = JobDefinitionUpdate {
+        max_attempts: None,
+        default_timeout_seconds: None,
+        default_priority: None,
+        is_enabled: Some(false),
+    };
+    assert_validation_code(
+        update_job_definition(&pool, JobType::new(DEFINITION_DISABLE_JOB), &disable)
+            .await
+            .expect_err("active schedule should block definition disable"),
+        "job_definition.active_schedule_exists",
+    );
+
+    let definition = get_job_definition_by_type(&pool, JobType::new(DEFINITION_DISABLE_JOB))
+        .await
+        .expect("load definition")
+        .expect("definition exists");
+    assert!(
+        definition.is_enabled,
+        "rejected disable should leave definition enabled"
+    );
+
+    assert!(
+        set_job_schedule_active(&pool, "schedule-blocks-definition-disable", false)
+            .await
+            .expect("deactivate schedule"),
+        "schedule should exist"
+    );
+    let disabled = update_job_definition(&pool, JobType::new(DEFINITION_DISABLE_JOB), &disable)
+        .await
+        .expect("inactive schedule should allow definition disable")
+        .expect("definition exists");
+    assert!(
+        !disabled.is_enabled,
+        "definition should be disabled after active schedules are gone"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn public_upsert_job_definition_rejects_disable_with_active_schedule() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_definition_upsert_active_schedule", 4).await;
+
+    let mut tx = pool.begin().await.expect("begin enabled definition tx");
+    upsert_job_definition_tx(&mut tx, &definition_upsert(DEFINITION_DISABLE_JOB, true))
+        .await
+        .expect("upsert enabled job definition");
+    tx.commit().await.expect("commit enabled definition tx");
+
+    let payload = json!({ "active": true });
+    upsert_job_schedule(
+        &pool,
+        &JobScheduleUpsert {
+            name: "schedule-blocks-definition-upsert-disable",
+            job_type: JobType::new(DEFINITION_DISABLE_JOB),
+            organization_id: None,
+            payload_template: &payload,
+            cron_expr: "0 0 * * * *",
+            is_active: true,
+            next_fire_at: fixed_utc("2026-05-26T12:00:00Z"),
+            max_jitter_seconds: 0,
+        },
+    )
+    .await
+    .expect("insert active schedule");
+
+    let mut disable_tx = pool.begin().await.expect("begin disabled definition tx");
+    assert_validation_code(
+        upsert_job_definition_tx(
+            &mut disable_tx,
+            &definition_upsert(DEFINITION_DISABLE_JOB, false),
+        )
+        .await
+        .expect_err("active schedule should block public definition upsert disable"),
+        "job_definition.active_schedule_exists",
+    );
+    disable_tx
+        .rollback()
+        .await
+        .expect("rollback rejected disable upsert tx");
+
+    let definition = get_job_definition_by_type(&pool, JobType::new(DEFINITION_DISABLE_JOB))
+        .await
+        .expect("load definition")
+        .expect("definition exists");
+    assert!(
+        definition.is_enabled,
+        "rejected public upsert disable should leave definition enabled"
+    );
+
+    assert!(
+        set_job_schedule_active(&pool, "schedule-blocks-definition-upsert-disable", false)
+            .await
+            .expect("deactivate schedule"),
+        "schedule should exist"
+    );
+
+    let mut disable_tx = pool
+        .begin()
+        .await
+        .expect("begin allowed disabled definition tx");
+    upsert_job_definition_tx(
+        &mut disable_tx,
+        &definition_upsert(DEFINITION_DISABLE_JOB, false),
+    )
+    .await
+    .expect("inactive schedule should allow public definition upsert disable");
+    disable_tx
+        .commit()
+        .await
+        .expect("commit allowed disable upsert tx");
+
+    let definition = get_job_definition_by_type(&pool, JobType::new(DEFINITION_DISABLE_JOB))
+        .await
+        .expect("load disabled definition")
+        .expect("definition exists");
+    assert!(
+        !definition.is_enabled,
+        "definition should be disabled after active schedules are gone"
+    );
+
     teardown_ephemeral_pool(pool, database).await;
 }
 

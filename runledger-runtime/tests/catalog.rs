@@ -815,9 +815,33 @@ async fn sync_definitions_exact_allows_active_schedules_for_already_disabled_abs
             max_jitter_seconds: 0,
         })
         .expect("old schedule input");
-    upsert_job_schedule(&pool, &old_schedule)
-        .await
-        .expect("upsert old schedule");
+    // Set up legacy state that the public schedule API now rejects: an active
+    // schedule pointing at an already-disabled definition.
+    sqlx::query(
+        "INSERT INTO job_schedules (
+            name,
+            job_type,
+            organization_id,
+            payload_template,
+            cron_expr,
+            timezone,
+            is_active,
+            next_fire_at,
+            max_jitter_seconds
+         )
+         VALUES ($1, $2, $3, $4::jsonb, $5, 'UTC', $6, $7, $8)",
+    )
+    .bind(old_schedule.name)
+    .bind(old_schedule.job_type.as_str())
+    .bind(old_schedule.organization_id)
+    .bind(old_schedule.payload_template)
+    .bind(old_schedule.cron_expr)
+    .bind(old_schedule.is_active)
+    .bind(old_schedule.next_fire_at)
+    .bind(old_schedule.max_jitter_seconds)
+    .execute(&pool)
+    .await
+    .expect("insert legacy active schedule");
 
     let catalog = JobCatalog::new().job(
         CATALOG_TEST_JOB,

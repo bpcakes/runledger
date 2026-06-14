@@ -13,6 +13,28 @@ use super::row_decode::{
 use super::types::{JobEventRecord, JobListFilter, JobMetricsRecord, JobQueueRecord};
 use super::workflows::on_terminal;
 
+const JOB_PAYLOAD_UUID_ARRAY_FIELD_UPDATE_LOCK_TIMEOUT: &str = "1s";
+const JOB_PAYLOAD_UUID_ARRAY_FIELD_UPDATE_LOCK_TIMEOUT_MS: i64 = 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "callers must inspect Updated/NotFound/Rejected"]
+#[non_exhaustive]
+pub enum JobPayloadUuidArrayFieldUpdate {
+    Updated,
+    NotFound,
+    Rejected {
+        reason: JobPayloadUuidArrayFieldUpdateRejection,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum JobPayloadUuidArrayFieldUpdateRejection {
+    WorkflowManaged,
+    IdempotentRequestSnapshot,
+    NotPendingOrClaimed,
+}
+
 async fn rollback_and_classify_missing_job_mutation(
     tx: DbTx<'_>,
     pool: &DbPool,
@@ -85,6 +107,16 @@ struct JobQueueRecordRow {
     last_error_message: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct JobPayloadUuidArrayFieldUpdateCandidate {
+    status: String,
+    worker_id: Option<String>,
+    lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    workflow_step_id: Option<Uuid>,
+    idempotency_key: Option<String>,
+    enqueue_request: Option<Value>,
 }
 
 fn job_queue_record_from_row(row: JobQueueRecordRow) -> Result<JobQueueRecord> {
@@ -341,6 +373,11 @@ pub async fn get_latest_job_payload_for_run(
     Ok(row.map(|row| (row.id, row.payload)))
 }
 
+/// Updates one UUID-array payload field on a direct, unclaimed pending job.
+///
+/// Returns a classified rejection when the row is already claimed or terminal,
+/// belongs to a workflow step, or has an idempotency request snapshot that this
+/// API cannot keep consistent.
 pub async fn update_job_payload_uuid_array_field(
     pool: &DbPool,
     organization_id: Uuid,
@@ -348,8 +385,91 @@ pub async fn update_job_payload_uuid_array_field(
     job_type: JobType<'_>,
     payload_field: &str,
     values: &[Uuid],
-) -> Result<bool> {
-    let result = sqlx::query!(
+) -> Result<JobPayloadUuidArrayFieldUpdate> {
+    let mut tx = pool.begin().await.map_err(|error| {
+        Error::from_query_sqlx_with_context(
+            "begin job payload uuid array update transaction",
+            error,
+        )
+    })?;
+
+    let previous_lock_timeout =
+        cap_job_payload_uuid_array_field_update_lock_timeout_tx(&mut tx).await?;
+
+    let row_result = sqlx::query_as::<_, JobPayloadUuidArrayFieldUpdateCandidate>(
+        "SELECT
+             status::text AS status,
+             worker_id,
+             lease_expires_at,
+             workflow_step_id,
+             idempotency_key,
+             enqueue_request
+           FROM job_queue
+           WHERE id = $1
+             AND organization_id = $2
+             AND job_type = $3
+           FOR UPDATE",
+    )
+    .bind(job_id)
+    .bind(organization_id)
+    .bind(job_type)
+    .fetch_optional(&mut *tx)
+    .await;
+
+    let row = match row_result {
+        Ok(row) => {
+            set_local_lock_timeout_tx(
+                &mut tx,
+                &previous_lock_timeout,
+                "restore job payload uuid array update lock timeout",
+            )
+            .await?;
+            row
+        }
+        Err(error) => {
+            return Err(Error::from_query_sqlx_with_context(
+                "classify job payload uuid array update",
+                error,
+            ));
+        }
+    };
+
+    let Some(row) = row else {
+        tx.commit().await.map_err(|error| {
+            Error::from_query_sqlx_with_context(
+                "commit job payload uuid array update transaction",
+                error,
+            )
+        })?;
+        return Ok(JobPayloadUuidArrayFieldUpdate::NotFound);
+    };
+
+    // Order matters: workflow-managed jobs can also carry request snapshots, so
+    // return the ownership rejection before the snapshot-consistency rejection.
+    let rejection = if row.workflow_step_id.is_some() {
+        Some(JobPayloadUuidArrayFieldUpdateRejection::WorkflowManaged)
+    } else if row.idempotency_key.is_some() || row.enqueue_request.is_some() {
+        Some(JobPayloadUuidArrayFieldUpdateRejection::IdempotentRequestSnapshot)
+    } else if row.status != JobStatus::Pending.as_db_value()
+        || row.worker_id.is_some()
+        || row.lease_expires_at.is_some()
+    {
+        Some(JobPayloadUuidArrayFieldUpdateRejection::NotPendingOrClaimed)
+    } else {
+        None
+    };
+
+    if let Some(reason) = rejection {
+        tx.commit().await.map_err(|error| {
+            Error::from_query_sqlx_with_context(
+                "commit job payload uuid array update transaction",
+                error,
+            )
+        })?;
+        return Ok(JobPayloadUuidArrayFieldUpdate::Rejected { reason });
+    }
+
+    sqlx::query!(
         "UPDATE job_queue
          SET
              payload = jsonb_set(
@@ -368,13 +488,67 @@ pub async fn update_job_payload_uuid_array_field(
         payload_field,
         values,
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|error| {
         Error::from_query_sqlx_with_context("update job payload uuid array field", error)
     })?;
 
-    Ok(result.rows_affected() > 0)
+    tx.commit().await.map_err(|error| {
+        Error::from_query_sqlx_with_context(
+            "commit job payload uuid array update transaction",
+            error,
+        )
+    })?;
+    Ok(JobPayloadUuidArrayFieldUpdate::Updated)
+}
+
+async fn cap_job_payload_uuid_array_field_update_lock_timeout_tx(
+    tx: &mut DbTx<'_>,
+) -> Result<String> {
+    sqlx::query_scalar::<_, String>(
+        "WITH previous AS MATERIALIZED (
+             SELECT
+                current_setting('lock_timeout') AS lock_timeout,
+                setting::bigint AS lock_timeout_ms
+             FROM pg_settings
+             WHERE name = 'lock_timeout'
+         )
+         SELECT previous.lock_timeout
+         FROM previous,
+              LATERAL (
+                SELECT set_config(
+                    'lock_timeout',
+                    CASE
+                        WHEN previous.lock_timeout_ms = 0 THEN $1
+                        WHEN previous.lock_timeout_ms <= $2 THEN previous.lock_timeout
+                        ELSE $1
+                    END,
+                    true
+                )
+              ) AS applied",
+    )
+    .bind(JOB_PAYLOAD_UUID_ARRAY_FIELD_UPDATE_LOCK_TIMEOUT)
+    .bind(JOB_PAYLOAD_UUID_ARRAY_FIELD_UPDATE_LOCK_TIMEOUT_MS)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("set job payload uuid array update lock timeout", error)
+    })
+}
+
+async fn set_local_lock_timeout_tx(
+    tx: &mut DbTx<'_>,
+    lock_timeout: &str,
+    context: &'static str,
+) -> Result<()> {
+    sqlx::query_scalar::<_, String>("SELECT set_config('lock_timeout', $1, true)")
+        .bind(lock_timeout)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| Error::from_query_sqlx_with_context(context, error))?;
+
+    Ok(())
 }
 
 pub async fn list_job_events(
