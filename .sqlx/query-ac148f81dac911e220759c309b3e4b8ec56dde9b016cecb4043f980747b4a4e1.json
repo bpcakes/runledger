@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workflow_steps\n         SET status = 'RUNNING',\n             started_at = COALESCE(started_at, now()),\n             output = NULL,\n             updated_at = now()\n         WHERE job_id = $1\n           AND status IN ('ENQUEUED', 'RUNNING')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ac148f81dac911e220759c309b3e4b8ec56dde9b016cecb4043f980747b4a4e1"
+}

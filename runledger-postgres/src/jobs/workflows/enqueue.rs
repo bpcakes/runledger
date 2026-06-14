@@ -9,7 +9,7 @@ use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::row_decode::{
-    parse_job_stage, parse_job_type_name, parse_workflow_run_status,
+    parse_job_stage, parse_job_type_name, parse_step_key_name, parse_workflow_run_status,
     parse_workflow_step_execution_kind, parse_workflow_type_name,
 };
 use super::super::workflow_types::WorkflowRunDbRecord;
@@ -39,6 +39,7 @@ struct WorkflowRunRow {
     organization_id: Option<Uuid>,
     status: String,
     idempotency_key: Option<String>,
+    result_step_key: Option<String>,
     metadata: JsonValue,
     enqueue_request_matches: Option<bool>,
     started_at: chrono::DateTime<chrono::Utc>,
@@ -50,6 +51,8 @@ struct WorkflowRunRow {
 #[derive(Serialize)]
 struct CanonicalWorkflowRunEnqueueRequest<'a> {
     metadata: &'a JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_step_key: Option<&'a str>,
     steps: Vec<CanonicalWorkflowStep<'a>>,
 }
 
@@ -178,11 +181,12 @@ async fn insert_workflow_run_record_tx(
             organization_id,
             status,
             idempotency_key,
+            result_step_key,
             metadata,
             enqueue_request,
             started_at
          )
-         VALUES ($1, $2, 'RUNNING', $3, $4::jsonb, $5::jsonb, now())
+         VALUES ($1, $2, 'RUNNING', $3, $4, $5::jsonb, $6::jsonb, now())
          {}
          RETURNING
             id,
@@ -190,6 +194,7 @@ async fn insert_workflow_run_record_tx(
             organization_id,
             status::text AS status,
             idempotency_key,
+            result_step_key,
             metadata,
             NULL::boolean AS enqueue_request_matches,
             started_at,
@@ -202,6 +207,7 @@ async fn insert_workflow_run_record_tx(
         .bind(payload.workflow_type())
         .bind(payload.organization_id())
         .bind(payload.idempotency_key())
+        .bind(payload.result_step_key().map(|step_key| step_key.as_str()))
         .bind(payload.metadata())
         .bind(enqueue_request.as_ref())
         .fetch_optional(&mut **tx)
@@ -243,6 +249,10 @@ fn workflow_run_record_from_row(run_row: WorkflowRunRow) -> Result<WorkflowRunDb
         organization_id: run_row.organization_id,
         status: parse_workflow_run_status(run_row.status)?,
         idempotency_key: run_row.idempotency_key,
+        result_step_key: run_row
+            .result_step_key
+            .map(parse_step_key_name)
+            .transpose()?,
         metadata: run_row.metadata,
         started_at: run_row.started_at,
         finished_at: run_row.finished_at,
@@ -269,6 +279,7 @@ async fn load_existing_idempotent_workflow_run_tx(
                 organization_id,
                 status::text AS "status!",
                 idempotency_key,
+                result_step_key,
                 metadata,
                 enqueue_request = $4::jsonb AS "enqueue_request_matches?",
                 started_at,
@@ -297,6 +308,7 @@ async fn load_existing_idempotent_workflow_run_tx(
                 organization_id,
                 status::text AS "status!",
                 idempotency_key,
+                result_step_key,
                 metadata,
                 enqueue_request = $3::jsonb AS "enqueue_request_matches?",
                 started_at,
@@ -403,6 +415,7 @@ fn canonical_workflow_enqueue_request(payload: &WorkflowRunEnqueue<'_>) -> Resul
 
     serde_json::to_value(CanonicalWorkflowRunEnqueueRequest {
         metadata: payload.metadata(),
+        result_step_key: payload.result_step_key().map(|step_key| step_key.as_str()),
         steps,
     })
     .map_err(|error| {
@@ -540,5 +553,30 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn canonical_workflow_enqueue_request_includes_result_step_key_when_present() {
+        let metadata = json!({});
+        let payload = json!({"step": "result"});
+        let result = WorkflowStepEnqueueBuilder::new(
+            StepKey::new("result"),
+            JobType::new("jobs.test.result"),
+            &payload,
+        )
+        .try_build()
+        .expect("build result step");
+        let workflow =
+            WorkflowRunEnqueueBuilder::new(WorkflowType::new("workflow.test.result"), &metadata)
+                .step(result)
+                .try_result_step_key("result")
+                .expect("set result step key")
+                .try_build()
+                .expect("build workflow");
+
+        let canonical =
+            canonical_workflow_enqueue_request(&workflow).expect("canonicalize workflow enqueue");
+
+        assert_eq!(canonical.get("result_step_key"), Some(&json!("result")));
     }
 }

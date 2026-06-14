@@ -3,7 +3,7 @@
 //!
 //! Use this crate for the storage-agnostic pieces of the job system:
 //! - [`jobs::JobHandler`] and [`jobs::JobHandlerRegistry`] for handler contracts
-//! - [`jobs::JobContext`], [`jobs::JobProgress`], and [`jobs::JobFailure`] for
+//! - [`jobs::JobContext`], [`jobs::JobCompletion`], and [`jobs::JobFailure`] for
 //!   execution-time state
 //! - workflow enqueue builders and validation helpers such as
 //!   [`jobs::WorkflowDagBuilder`], [`jobs::WorkflowRunEnqueueBuilder`], and
@@ -51,8 +51,12 @@
 //!         JobType::new("jobs.email.send")
 //!     }
 //!
-//!     async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-//!         Ok(())
+//!     async fn execute(
+//!         &self,
+//!         _context: JobContext,
+//!         _payload: Value,
+//!     ) -> Result<JobCompletion, JobFailure> {
+//!         Ok(JobCompletion::success())
 //!     }
 //! }
 //! ```
@@ -85,14 +89,14 @@ pub mod prelude {
     pub use async_trait::async_trait;
 
     pub use crate::jobs::{
-        IdentifierValidationError, JobContext, JobDeadLetterInfo, JobDeadLetterReason,
-        JobEventType, JobFailure, JobFailureKind, JobHandler, JobHandlerRegistry, JobProgress,
-        JobStage, JobStatus, JobType, JobTypeName, StepKey, StepKeyName, WorkflowBuildError,
-        WorkflowDagBuilder, WorkflowDagDependencyValidationInput, WorkflowDagStepValidationInput,
-        WorkflowDagValidationError, WorkflowDependencyReleaseMode, WorkflowRunEnqueue,
-        WorkflowRunEnqueueBuilder, WorkflowRunStatus, WorkflowStepDependencySpec,
-        WorkflowStepEnqueue, WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind,
-        WorkflowStepStatus, WorkflowType, WorkflowTypeName, validate_workflow_dag,
-        validate_workflow_run_enqueue, validate_workflow_step_append,
+        IdentifierValidationError, JobCompletion, JobContext, JobDeadLetterInfo,
+        JobDeadLetterReason, JobEventType, JobFailure, JobFailureKind, JobHandler,
+        JobHandlerRegistry, JobStage, JobStatus, JobType, JobTypeName, StepKey, StepKeyName,
+        WorkflowBuildError, WorkflowDagBuilder, WorkflowDagDependencyValidationInput,
+        WorkflowDagStepValidationInput, WorkflowDagValidationError, WorkflowDependencyReleaseMode,
+        WorkflowRunEnqueue, WorkflowRunEnqueueBuilder, WorkflowRunStatus,
+        WorkflowStepDependencySpec, WorkflowStepEnqueue, WorkflowStepEnqueueBuilder,
+        WorkflowStepExecutionKind, WorkflowStepStatus, WorkflowType, WorkflowTypeName,
+        validate_workflow_dag, validate_workflow_run_enqueue, validate_workflow_step_append,
     };
 }

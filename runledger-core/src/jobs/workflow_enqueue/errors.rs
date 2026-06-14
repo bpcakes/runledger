@@ -22,6 +22,13 @@ pub enum WorkflowBuildError {
     },
     /// The workflow idempotency key was blank.
     BlankIdempotencyKey,
+    /// The workflow result step key was blank.
+    BlankResultStepKey,
+    /// The workflow result step key does not match a step in the workflow.
+    UnknownResultStepKey {
+        /// The missing result step key.
+        step_key: String,
+    },
     /// A step max-attempts override was zero or negative.
     NonPositiveStepMaxAttempts {
         /// The step with the invalid max-attempts override.
@@ -96,6 +103,10 @@ impl From<WorkflowDagValidationError> for WorkflowBuildError {
                 Self::BlankStepJobType { step_key }
             }
             WorkflowDagValidationError::BlankIdempotencyKey => Self::BlankIdempotencyKey,
+            WorkflowDagValidationError::BlankResultStepKey => Self::BlankResultStepKey,
+            WorkflowDagValidationError::UnknownResultStepKey { step_key } => {
+                Self::UnknownResultStepKey { step_key }
+            }
             WorkflowDagValidationError::NonPositiveStepMaxAttempts {
                 step_key,
                 max_attempts,
@@ -161,6 +172,10 @@ impl fmt::Display for WorkflowBuildError {
                 write!(f, "job_type for step '{step_key}' must be non-empty")
             }
             Self::BlankIdempotencyKey => write!(f, "idempotency_key must be non-empty"),
+            Self::BlankResultStepKey => write!(f, "result_step_key must be non-empty"),
+            Self::UnknownResultStepKey { step_key } => {
+                write!(f, "result step '{step_key}' must exist in the workflow")
+            }
             Self::NonPositiveStepMaxAttempts {
                 step_key,
                 max_attempts,

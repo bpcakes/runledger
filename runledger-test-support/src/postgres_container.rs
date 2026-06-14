@@ -10,6 +10,7 @@ const DEFAULT_POSTGRES_IMAGE: &str = "postgres:18";
 const POSTGRES_USER: &str = "runledger";
 const POSTGRES_PASSWORD: &str = "runledger";
 const POSTGRES_DB: &str = "postgres";
+const TEST_ADMIN_DATABASE_URL_ENV: &str = "RUNLEDGER_TEST_ADMIN_DATABASE_URL";
 const MAX_POSTGRES_BOOTSTRAP_ATTEMPTS: u8 = 40;
 const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
 
@@ -28,6 +29,16 @@ async fn shared_admin_database_url() -> &'static str {
     let _init_guard = SHARED_HARNESS_INIT_LOCK.lock().await;
     if let Some(admin_url) = SHARED_ADMIN_URL.get() {
         return admin_url;
+    }
+
+    if let Ok(admin_url) = std::env::var(TEST_ADMIN_DATABASE_URL_ENV) {
+        wait_for_postgres(&admin_url).await;
+        SHARED_ADMIN_URL
+            .set(admin_url)
+            .expect("shared postgres admin URL must be set once");
+        return SHARED_ADMIN_URL
+            .get()
+            .expect("shared postgres admin URL must be initialized");
     }
 
     let image_ref =

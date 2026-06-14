@@ -63,6 +63,7 @@ pub struct WorkflowDagBuilder<'a> {
     organization_id: Option<Uuid>,
     metadata: &'a serde_json::Value,
     idempotency_key: Option<&'a str>,
+    result_step_key: Option<StepKey<'a>>,
     steps: Vec<StepSlot<'a>>,
 }
 
@@ -78,6 +79,7 @@ impl<'a> WorkflowDagBuilder<'a> {
             organization_id: None,
             metadata,
             idempotency_key: None,
+            result_step_key: None,
             steps: Vec::new(),
         }
     }
@@ -97,6 +99,7 @@ impl<'a> WorkflowDagBuilder<'a> {
             organization_id: None,
             metadata,
             idempotency_key: None,
+            result_step_key: None,
             steps: Vec::new(),
         })
     }
@@ -126,6 +129,23 @@ impl<'a> WorkflowDagBuilder<'a> {
     #[must_use]
     pub fn clear_idempotency_key(mut self) -> Self {
         self.idempotency_key = None;
+        self
+    }
+
+    /// Declares the step whose successful output becomes the workflow result.
+    ///
+    /// # Errors
+    /// Returns [`WorkflowBuildError::BlankResultStepKey`] when the step key is blank.
+    pub fn result_step(mut self, step_key: &'a str) -> Result<Self, WorkflowBuildError> {
+        self.result_step_key =
+            Some(StepKey::try_new(step_key).map_err(|_| WorkflowBuildError::BlankResultStepKey)?);
+        Ok(self)
+    }
+
+    /// Clears any previously configured result step.
+    #[must_use]
+    pub fn clear_result_step(mut self) -> Self {
+        self.result_step_key = None;
         self
     }
 
@@ -299,6 +319,9 @@ impl<'a> WorkflowDagBuilder<'a> {
         }
         if let Some(idempotency_key) = self.idempotency_key {
             run_builder = run_builder.idempotency_key(idempotency_key);
+        }
+        if let Some(result_step_key) = self.result_step_key {
+            run_builder = run_builder.result_step_key(result_step_key);
         }
 
         run_builder.extend_steps(built_steps).try_build()

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use runledger_core::jobs::{JobContext, JobFailure, JobStatus, JobType};
+use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobStatus, JobType};
 use runledger_postgres::jobs::{
     JobDefinitionUpsert, JobEnqueue, enqueue_job, get_job_by_id, upsert_job_definition_tx,
 };
@@ -29,9 +29,13 @@ impl JobHandler for CountingHandler {
         JobType::new(SUPERVISOR_TEST_JOB)
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(JobCompletion::success())
     }
 }
 

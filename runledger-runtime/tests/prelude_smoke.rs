@@ -16,8 +16,12 @@ impl JobHandler for PreludeHandler {
         JobType::new("jobs.prelude.smoke")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-        Ok(())
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        Ok(JobCompletion::success())
     }
 }
 

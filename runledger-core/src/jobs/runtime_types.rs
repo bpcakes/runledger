@@ -3,14 +3,52 @@ use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{JobFailureKind, JobStage};
+use super::JobFailureKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JobProgress {
-    pub stage: JobStage,
+pub struct JobCompletion {
     pub progress_done: Option<i64>,
     pub progress_total: Option<i64>,
     pub checkpoint: Option<serde_json::Value>,
+    pub output: Option<serde_json::Value>,
+}
+
+impl JobCompletion {
+    #[must_use]
+    pub fn success() -> Self {
+        Self {
+            progress_done: None,
+            progress_total: None,
+            checkpoint: None,
+            output: None,
+        }
+    }
+
+    /// Sets the final JSON output for this job.
+    ///
+    /// Workflow result steps persist this value on the job, step, and workflow
+    /// run rows, so keep it to compact metadata and store large artifacts
+    /// externally.
+    #[must_use]
+    pub fn with_output(output: serde_json::Value) -> Self {
+        Self {
+            output: Some(output),
+            ..Self::success()
+        }
+    }
+
+    #[must_use]
+    pub fn progress(mut self, progress_done: i64, progress_total: i64) -> Self {
+        self.progress_done = Some(progress_done);
+        self.progress_total = Some(progress_total);
+        self
+    }
+
+    #[must_use]
+    pub fn checkpoint(mut self, checkpoint: serde_json::Value) -> Self {
+        self.checkpoint = Some(checkpoint);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

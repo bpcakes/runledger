@@ -103,7 +103,7 @@ worker:
 ```rust
 use std::time::Duration;
 
-use runledger_core::jobs::{JobContext, JobFailure, JobType};
+use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobType};
 use runledger_core::prelude::async_trait;
 use runledger_runtime::Supervisor;
 use runledger_runtime::catalog::JobCatalog;
@@ -120,9 +120,9 @@ impl JobHandler for SendEmail {
         JobType::new("jobs.email.send")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<JobCompletion, JobFailure> {
         // do the work
-        Ok(())
+        Ok(JobCompletion::success())
     }
 }
 
@@ -220,6 +220,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
 | Multi-step work with dependencies | `WorkflowDagBuilder` (simple DAGs), or `WorkflowRunEnqueueBuilder` / `WorkflowStepEnqueueBuilder` (advanced), then `enqueue_workflow_run` |
+| Multi-step work with a durable JSON result | Declare a result step, enqueue with `enqueue_workflow_run_handle`, then call `WorkflowRunHandle::get_result` |
 | Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal` (or lower-level `depends_on_success` / `depends_on_terminal`) |
 | Human/API approval or another external gate | External workflow steps and `complete_external_workflow_step` |
 | Delayed or recurring entrypoint | `JobScheduleUpsert` and `upsert_job_schedule` (or catalog schedules) |
@@ -282,6 +283,45 @@ the rest at `.build()` / `.try_build()`:
 | `.job(step, job_type, payload)` | blank step key, blank job type, duplicate step key | job-type registration is not checked here |
 | `.after_success(step, prereqs)` / `.after_terminal(...)` | blank target/prerequisite key, unknown target step | missing prerequisite, self-dependency, duplicate dependency, cycle |
 | `.idempotency_key(...)` | never | blank idempotency key |
+
+### Workflow results and handles
+
+Workflows can declare one initial DAG step as the durable result step. A handler
+returns a compact JSON result with `JobCompletion::with_output(...)`; when the
+run reaches `SUCCEEDED`, Runledger materializes that step output as the workflow
+result.
+
+```rust
+let run = WorkflowDagBuilder::new("profiles.research", &metadata)
+    .idempotency_key("profile:p_123:research")
+    .job("crawl", "profiles.crawl", &crawl_payload)?
+    .job("persist", "profiles.persist", &persist_payload)?
+    .after_success("persist", ["crawl"])?
+    .result_step("persist")?
+    .build()?;
+
+let handle = runledger_postgres::jobs::enqueue_workflow_run_handle(&pool, &run).await?;
+let result = handle.get_result(Default::default()).await?;
+```
+
+The handle is scoped when created or retrieved: organization workflows use
+`WorkflowRunHandleScope::Organization`, global workflows use `Global`, and
+trusted operator surfaces can use `Admin`. Notifications wake waiters quickly,
+but polling remains the correctness path. `WorkflowRunWaitOptions::default()`
+waits up to five minutes by default; set `timeout: None` only when the caller
+intentionally wants to wait indefinitely. Each active waiter may hold a
+PostgreSQL `LISTEN` connection until the result is ready, so size pools
+accordingly and use shorter explicit timeouts for high fan-out callers.
+Keep outputs compact: result JSON is persisted on the job, step, and workflow
+run rows; store large artifacts externally and return references. Workflows
+without a declared result still run normally; `get_result` returns
+`workflow.result_not_declared`.
+
+Breaking API note: `JobHandler::execute` returns
+`Result<JobCompletion, JobFailure>`. The old stage-bearing `JobProgress`
+completion type was removed; use `JobCompletion::success()` or
+`JobCompletion::with_output(...)`. In-flight progress reporting still uses
+`JobProgressUpdate`.
 
 The target of `.after_success(...)` / `.after_terminal(...)` must already have
 been added with `.job(...)`; prerequisite steps may be added later in the chain,
@@ -489,6 +529,9 @@ forward migrations:
   the original request instead of mutable runtime state.
 - `202605220001_enforce_enqueue_request_snapshots` — blocks new keyed rows
   without snapshots; startup validation rejects pre-cutover legacy rows.
+- `202606030001_workflow_results` — adds job/step output storage and workflow
+  result handles. Absent result steps are omitted from canonical workflow
+  idempotency snapshots so existing no-result snapshots keep matching.
 
 Treat the flattened baseline as a from-scratch schema definition, not an
 in-place upgrade from the older multi-file standalone history; apply later

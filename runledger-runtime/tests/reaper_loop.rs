@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use runledger_core::jobs::{JobContext, JobDeadLetterInfo, JobFailure, JobStatus, JobType};
+use runledger_core::jobs::{
+    JobCompletion, JobContext, JobDeadLetterInfo, JobFailure, JobStatus, JobType,
+};
 use runledger_postgres::jobs::{
     JobDefinitionUpsert, JobEnqueue, JobProgressUpdate, claim_jobs_for_types, enqueue_job,
     get_job_by_id, update_job_progress, upsert_job_definition_tx,
@@ -31,8 +33,12 @@ impl JobHandler for ShutdownAwareTerminalHookHandler {
         JobType::new("jobs.test.reaper.hook.shutdown.persist")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-        Ok(())
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        Ok(JobCompletion::success())
     }
 
     async fn on_dead_letter(

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT $1::jsonb IS NOT DISTINCT FROM $2::jsonb AS \"matches!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "matches!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "041f1e0df471863657e3105a0d2bc493f4f62aeba1699dce8b9c0ec85a11377e"
+}

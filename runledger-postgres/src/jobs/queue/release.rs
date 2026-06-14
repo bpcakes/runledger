@@ -80,6 +80,7 @@ async fn release_unstarted_job_queue_row_tx(
              status_reason = NULL,
              last_error_code = NULL,
              last_error_message = NULL,
+             output = NULL,
              updated_at = now()
          WHERE id = $1
            AND run_number = $2

@@ -24,6 +24,7 @@ can be imported together.
 | --- | --- |
 | One independent retried unit of work | `enqueue_job` with `JobEnqueue` |
 | Multi-step work with dependencies | `WorkflowDagBuilder` (simple) or workflow run/step builders (advanced) |
+| Multi-step work with a durable JSON result | Declare a result step and use workflow handle APIs |
 | Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal` |
 | Human/API approval or another external gate | External workflow steps |
 | Delayed or recurring entrypoint | `upsert_job_schedule` with `JobScheduleUpsert` |
@@ -46,6 +47,14 @@ let run = WorkflowDagBuilder::new("workflow.example", &metadata)
 
 enqueue_workflow_run(&pool, &run).await?;
 ```
+
+For workflows that should return a durable JSON result, declare one initial DAG
+step as the result step with `.result_step(...)` or `.try_result_step_key(...)`,
+enqueue with `enqueue_workflow_run_handle`, and wait/read through
+`WorkflowRunHandle::get_result`. Handler success returns `JobCompletion`; use
+`JobCompletion::with_output(...)` for compact result metadata. Prefer explicit
+wait timeouts in production. The default waits up to five minutes. `timeout: None`
+opts into unbounded waits and may hold a PostgreSQL listener connection.
 
 Use `WorkflowRunEnqueueBuilder` and `WorkflowStepEnqueueBuilder` for advanced per-step
 settings, external steps, or hand-authored dependency specs.

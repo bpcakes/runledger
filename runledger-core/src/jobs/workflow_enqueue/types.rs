@@ -79,6 +79,7 @@ pub struct WorkflowRunEnqueue<'a> {
     pub(super) organization_id: Option<Uuid>,
     pub(super) metadata: &'a serde_json::Value,
     pub(super) idempotency_key: Option<&'a str>,
+    pub(super) result_step_key: Option<StepKey<'a>>,
     pub(super) steps: Vec<WorkflowStepEnqueue<'a>>,
 }
 
@@ -101,6 +102,11 @@ impl<'a> WorkflowRunEnqueue<'a> {
     #[must_use]
     pub const fn idempotency_key(&self) -> Option<&'a str> {
         self.idempotency_key
+    }
+
+    #[must_use]
+    pub const fn result_step_key(&self) -> Option<StepKey<'a>> {
+        self.result_step_key
     }
 
     #[must_use]

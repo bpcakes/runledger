@@ -19,6 +19,7 @@ struct WorkflowRunLookupRow {
     organization_id: Option<Uuid>,
     status: String,
     idempotency_key: Option<String>,
+    result_step_key: Option<String>,
     metadata: serde_json::Value,
     started_at: chrono::DateTime<chrono::Utc>,
     finished_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -26,18 +27,38 @@ struct WorkflowRunLookupRow {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+fn workflow_run_db_record_from_lookup_row(
+    row: WorkflowRunLookupRow,
+) -> Result<WorkflowRunDbRecord> {
+    Ok(WorkflowRunDbRecord {
+        id: row.id,
+        workflow_type: parse_workflow_type_name(row.workflow_type)?,
+        organization_id: row.organization_id,
+        status: parse_workflow_run_status(row.status)?,
+        idempotency_key: row.idempotency_key,
+        result_step_key: row.result_step_key.map(parse_step_key_name).transpose()?,
+        metadata: row.metadata,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
 pub async fn get_workflow_run_by_id(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     workflow_run_id: Uuid,
 ) -> Result<Option<WorkflowRunDbRecord>> {
-    let row = sqlx::query!(
+    let row = sqlx::query_as!(
+        WorkflowRunLookupRow,
         "SELECT
             id,
             workflow_type,
             organization_id,
             status::text AS \"status!\",
             idempotency_key,
+            result_step_key,
             metadata,
             started_at,
             finished_at,
@@ -54,21 +75,7 @@ pub async fn get_workflow_run_by_id(
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context("get workflow run by id", error))?;
 
-    row.map(|row| {
-        Ok(WorkflowRunDbRecord {
-            id: row.id,
-            workflow_type: parse_workflow_type_name(row.workflow_type)?,
-            organization_id: row.organization_id,
-            status: parse_workflow_run_status(row.status)?,
-            idempotency_key: row.idempotency_key,
-            metadata: row.metadata,
-            started_at: row.started_at,
-            finished_at: row.finished_at,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        })
-    })
-    .transpose()
+    row.map(workflow_run_db_record_from_lookup_row).transpose()
 }
 
 pub(in crate::jobs::workflows) async fn load_workflow_run_by_id_tx(
@@ -84,6 +91,7 @@ pub(in crate::jobs::workflows) async fn load_workflow_run_by_id_tx(
             organization_id,
             status::text AS \"status!\",
             idempotency_key,
+            result_step_key,
             metadata,
             started_at,
             finished_at,
@@ -97,18 +105,7 @@ pub(in crate::jobs::workflows) async fn load_workflow_run_by_id_tx(
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context(context, error))?;
 
-    Ok(WorkflowRunDbRecord {
-        id: run_row.id,
-        workflow_type: parse_workflow_type_name(run_row.workflow_type)?,
-        organization_id: run_row.organization_id,
-        status: parse_workflow_run_status(run_row.status)?,
-        idempotency_key: run_row.idempotency_key,
-        metadata: run_row.metadata,
-        started_at: run_row.started_at,
-        finished_at: run_row.finished_at,
-        created_at: run_row.created_at,
-        updated_at: run_row.updated_at,
-    })
+    workflow_run_db_record_from_lookup_row(run_row)
 }
 
 pub async fn list_workflow_steps(
@@ -140,6 +137,7 @@ pub async fn list_workflow_steps(
             ws.status_reason,
             ws.last_error_code,
             ws.last_error_message,
+            ws.output,
             ws.created_at,
             ws.updated_at
          FROM workflow_steps ws
@@ -179,6 +177,7 @@ pub async fn list_workflow_steps(
                 status_reason: row.status_reason,
                 last_error_code: row.last_error_code,
                 last_error_message: row.last_error_message,
+                output: row.output,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             })
@@ -192,13 +191,15 @@ pub async fn list_workflow_runs(
 ) -> Result<Vec<WorkflowRunDbRecord>> {
     let status_text = filter.status.map(|status| status.as_db_value());
 
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as!(
+        WorkflowRunLookupRow,
         "SELECT
             id,
             workflow_type,
             organization_id,
             status::text AS \"status!\",
             idempotency_key,
+            result_step_key,
             metadata,
             started_at,
             finished_at,
@@ -221,20 +222,7 @@ pub async fn list_workflow_runs(
     .map_err(|error| crate::Error::from_query_sqlx_with_context("list workflow runs", error))?;
 
     rows.into_iter()
-        .map(|row| {
-            Ok(WorkflowRunDbRecord {
-                id: row.id,
-                workflow_type: parse_workflow_type_name(row.workflow_type)?,
-                organization_id: row.organization_id,
-                status: parse_workflow_run_status(row.status)?,
-                idempotency_key: row.idempotency_key,
-                metadata: row.metadata,
-                started_at: row.started_at,
-                finished_at: row.finished_at,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            })
-        })
+        .map(workflow_run_db_record_from_lookup_row)
         .collect()
 }
 
@@ -263,13 +251,15 @@ pub async fn get_latest_workflow_run_by_type(
     organization_id: Option<Uuid>,
     workflow_type: WorkflowType<'_>,
 ) -> Result<Option<WorkflowRunDbRecord>> {
-    let row = sqlx::query!(
+    let row = sqlx::query_as!(
+        WorkflowRunLookupRow,
         "SELECT
             id,
             workflow_type,
             organization_id,
             status::text AS \"status!\",
             idempotency_key,
+            result_step_key,
             metadata,
             started_at,
             finished_at,
@@ -293,18 +283,7 @@ pub async fn get_latest_workflow_run_by_type(
         return Ok(None);
     };
 
-    Ok(Some(WorkflowRunDbRecord {
-        id: row.id,
-        workflow_type: parse_workflow_type_name(row.workflow_type)?,
-        organization_id: row.organization_id,
-        status: parse_workflow_run_status(row.status)?,
-        idempotency_key: row.idempotency_key,
-        metadata: row.metadata,
-        started_at: row.started_at,
-        finished_at: row.finished_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    }))
+    Ok(Some(workflow_run_db_record_from_lookup_row(row)?))
 }
 
 pub async fn list_workflow_step_dependencies(
@@ -398,6 +377,7 @@ pub async fn get_workflow_run_by_type_and_idempotency_key_tx(
                 organization_id,
                 status::text AS \"status!\",
                 idempotency_key,
+                result_step_key,
                 metadata,
                 started_at,
                 finished_at,
@@ -423,6 +403,7 @@ pub async fn get_workflow_run_by_type_and_idempotency_key_tx(
                 organization_id,
                 status::text AS \"status!\",
                 idempotency_key,
+                result_step_key,
                 metadata,
                 started_at,
                 finished_at,
@@ -446,19 +427,5 @@ pub async fn get_workflow_run_by_type_and_idempotency_key_tx(
         )
     })?;
 
-    row.map(|row| {
-        Ok(WorkflowRunDbRecord {
-            id: row.id,
-            workflow_type: parse_workflow_type_name(row.workflow_type)?,
-            organization_id: row.organization_id,
-            status: parse_workflow_run_status(row.status)?,
-            idempotency_key: row.idempotency_key,
-            metadata: row.metadata,
-            started_at: row.started_at,
-            finished_at: row.finished_at,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        })
-    })
-    .transpose()
+    row.map(workflow_run_db_record_from_lookup_row).transpose()
 }

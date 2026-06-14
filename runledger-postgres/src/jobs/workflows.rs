@@ -1,4 +1,7 @@
 pub use self::enqueue::{enqueue_workflow_run, enqueue_workflow_run_tx};
+pub use self::handles::{
+    enqueue_workflow_run_handle, retrieve_workflow_run_handle, workflow_run_handle,
+};
 pub(crate) use self::hooks::{on_claim_released, on_claimed, on_retry_scheduled, on_terminal};
 pub use self::mutate::{
     append_workflow_steps, append_workflow_steps_tx, cancel_workflow_run_tx,
@@ -14,6 +17,7 @@ pub use self::runtime::{complete_external_workflow_step, complete_external_workf
 
 mod enqueue;
 mod errors;
+mod handles;
 mod hooks;
 mod locking;
 mod mutate;

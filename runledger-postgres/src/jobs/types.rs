@@ -200,6 +200,7 @@ pub struct JobQueueRecord {
     pub progress_total: Option<i64>,
     pub progress_pct: Option<f64>,
     pub checkpoint: Option<Value>,
+    pub output: Option<Value>,
     pub idempotency_key: Option<String>,
     pub status_reason: Option<String>,
     pub last_error_code: Option<String>,
@@ -282,6 +283,14 @@ pub struct JobProgressUpdate<'a> {
     pub progress_done: Option<i64>,
     pub progress_total: Option<i64>,
     pub checkpoint: Option<&'a Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JobCompletionUpdate<'a> {
+    pub progress_done: Option<i64>,
+    pub progress_total: Option<i64>,
+    pub checkpoint: Option<&'a Value>,
+    pub output: Option<&'a Value>,
 }
 
 #[derive(Debug, Clone)]

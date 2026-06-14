@@ -201,6 +201,14 @@ impl WorkflowRunStatus {
             Self::Canceled => "CANCELED",
         }
     }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::CompletedWithErrors | Self::Canceled
+        )
+    }
 }
 
 impl FromStr for WorkflowRunStatus {

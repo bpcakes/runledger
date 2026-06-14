@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workflow_steps\n         SET status = 'ENQUEUED',\n             finished_at = NULL,\n             status_reason = $2,\n             last_error_code = $3,\n             last_error_message = $4,\n             output = NULL,\n             updated_at = now()\n         WHERE job_id = $1\n           AND status = 'RUNNING'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7b9dcf20078795a5d5475f7de11a16144921b89febd06d7d557ab66be2f846cf"
+}

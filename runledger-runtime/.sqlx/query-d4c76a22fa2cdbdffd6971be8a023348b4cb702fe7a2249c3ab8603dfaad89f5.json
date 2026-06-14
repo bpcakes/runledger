@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_queue\n         SET status = 'DEAD_LETTERED',\n             lease_expires_at = NULL,\n             last_heartbeat_at = NULL,\n             worker_id = NULL,\n             finished_at = now(),\n             output = NULL,\n             status_reason = 'LEASE_EXPIRED',\n             last_error_code = 'job.lease_expired',\n             last_error_message = 'Job lease expired before completion.',\n             updated_at = now()\n         WHERE id = $1\n           AND run_number = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d4c76a22fa2cdbdffd6971be8a023348b4cb702fe7a2249c3ab8603dfaad89f5"
+}

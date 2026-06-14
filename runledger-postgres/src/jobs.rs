@@ -50,26 +50,30 @@ pub use schedules::{
     upsert_job_schedule_tx,
 };
 pub use types::{
-    JOB_SCHEDULE_MAX_JITTER_SECONDS, JobDefinitionListFilter, JobDefinitionRecord,
-    JobDefinitionUpdate, JobDefinitionUpsert, JobEnqueue, JobEventRecord, JobFailureUpdate,
-    JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord, JobProgressUpdate,
-    JobQueueRecord, JobRuntimeConfigListFilter, JobRuntimeConfigRecord, JobRuntimeConfigUpsert,
-    JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport, JobScheduleJobTypeReference,
-    JobScheduleRecord, JobScheduleUpsert, ReapExpiredLeasesResult, ReapedTerminalLeaseRecord,
+    JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate, JobDefinitionListFilter,
+    JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert, JobEnqueue, JobEventRecord,
+    JobFailureUpdate, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
+    JobProgressUpdate, JobQueueRecord, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
+    JobRuntimeConfigUpsert, JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport,
+    JobScheduleJobTypeReference, JobScheduleRecord, JobScheduleUpsert, ReapExpiredLeasesResult,
+    ReapedTerminalLeaseRecord,
 };
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,
-    CompleteExternalWorkflowStepInput, WorkflowRunCountFilter, WorkflowRunDbRecord,
-    WorkflowRunListFilter, WorkflowStepDbRecord, WorkflowStepDependencyDbRecord,
+    CompleteExternalWorkflowStepInput, DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT, WorkflowRunCountFilter,
+    WorkflowRunDbRecord, WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunHandleScope,
+    WorkflowRunListFilter, WorkflowRunResultRecord, WorkflowRunWaitOptions, WorkflowStepDbRecord,
+    WorkflowStepDependencyDbRecord,
 };
 pub use workflows::{
     append_workflow_steps, append_workflow_steps_tx, cancel_workflow_run_tx,
     complete_external_workflow_step, complete_external_workflow_step_tx, count_workflow_runs,
-    enqueue_workflow_run, enqueue_workflow_run_tx, get_latest_workflow_run_by_type,
-    get_workflow_run_by_id, get_workflow_run_by_type_and_idempotency_key,
-    get_workflow_run_by_type_and_idempotency_key_tx, get_workflow_run_id_for_job,
-    list_workflow_runs, list_workflow_step_dependencies, list_workflow_step_keys_for_update_tx,
-    list_workflow_steps, update_workflow_step_and_pending_job_payload_tx,
+    enqueue_workflow_run, enqueue_workflow_run_handle, enqueue_workflow_run_tx,
+    get_latest_workflow_run_by_type, get_workflow_run_by_id,
+    get_workflow_run_by_type_and_idempotency_key, get_workflow_run_by_type_and_idempotency_key_tx,
+    get_workflow_run_id_for_job, list_workflow_runs, list_workflow_step_dependencies,
+    list_workflow_step_keys_for_update_tx, list_workflow_steps, retrieve_workflow_run_handle,
+    update_workflow_step_and_pending_job_payload_tx, workflow_run_handle,
 };
 #[cfg(feature = "test-support")]
 pub mod test_support {

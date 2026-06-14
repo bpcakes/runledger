@@ -1,17 +1,33 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::postgres_container::admin_database_url;
 
+const TEST_DB_CONNECTION_BUDGET_ENV: &str = "RUNLEDGER_TEST_DB_CONNECTION_BUDGET";
+const DEFAULT_TEST_DB_CONNECTION_BUDGET: usize = 64;
+const DEFAULT_CREATE_DATABASE_PERMITS: u32 = 9;
+
 static DATABASE_COUNTER: AtomicU64 = AtomicU64::new(1);
+static EPHEMERAL_DB_CONNECTION_BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static EPHEMERAL_DB_PERMITS: OnceLock<Mutex<HashMap<String, OwnedSemaphorePermit>>> =
+    OnceLock::new();
+
+#[derive(Debug)]
+pub struct TestDbConnectionBudgetPermit {
+    _permit: OwnedSemaphorePermit,
+}
 
 pub async fn setup_ephemeral_pool(
     prefix: &str,
     max_connections: u32,
 ) -> (PgPool, EphemeralDatabase) {
-    let database = create_ephemeral_database(prefix)
+    let permit = acquire_ephemeral_db_permit(max_connections.saturating_add(1)).await;
+    let database = create_ephemeral_database_with_permit(prefix, permit)
         .await
         .expect("create ephemeral database");
     let pool = PgPoolOptions::new()
@@ -37,6 +53,8 @@ pub async fn teardown_ephemeral_pool(pool: PgPool, database: EphemeralDatabase) 
     drop_database(&database.name)
         .await
         .expect("drop ephemeral database");
+    release_ephemeral_db_permit(&database.name);
+    std::mem::forget(database);
 }
 
 #[derive(Debug)]
@@ -47,9 +65,11 @@ pub struct EphemeralDatabase {
 
 impl Drop for EphemeralDatabase {
     fn drop(&mut self) {
+        let name = self.name.clone();
+        let permit = take_ephemeral_db_permit(&name);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let name = self.name.clone();
             handle.spawn(async move {
+                let _permit = permit;
                 let _ = drop_database(&name).await;
             });
         }
@@ -57,6 +77,14 @@ impl Drop for EphemeralDatabase {
 }
 
 pub async fn create_ephemeral_database(prefix: &str) -> Result<EphemeralDatabase, sqlx::Error> {
+    let permit = acquire_ephemeral_db_permit(DEFAULT_CREATE_DATABASE_PERMITS).await;
+    create_ephemeral_database_with_permit(prefix, permit).await
+}
+
+async fn create_ephemeral_database_with_permit(
+    prefix: &str,
+    permit: OwnedSemaphorePermit,
+) -> Result<EphemeralDatabase, sqlx::Error> {
     let admin_url = admin_database_url().await;
     let name = build_database_name(prefix);
     let admin_pool = connect_admin_pool(admin_url).await?;
@@ -64,11 +92,74 @@ pub async fn create_ephemeral_database(prefix: &str) -> Result<EphemeralDatabase
     let create_sql = format!("CREATE DATABASE {name}");
     sqlx::raw_sql(&create_sql).execute(&admin_pool).await?;
     admin_pool.close().await;
+    retain_ephemeral_db_permit(&name, permit);
 
     Ok(EphemeralDatabase {
         url: with_database_name(admin_url, &name),
         name,
     })
+}
+
+pub async fn acquire_test_db_connection_budget(
+    requested_permits: u32,
+) -> TestDbConnectionBudgetPermit {
+    TestDbConnectionBudgetPermit {
+        _permit: acquire_ephemeral_db_permit(requested_permits).await,
+    }
+}
+
+async fn acquire_ephemeral_db_permit(requested_permits: u32) -> OwnedSemaphorePermit {
+    let budget = ephemeral_db_connection_budget();
+    let budget_size = ephemeral_db_connection_budget_size();
+    let permits = requested_permits.max(1);
+    assert!(
+        permits as usize <= budget_size,
+        "ephemeral database requested {permits} connection permits, exceeding {TEST_DB_CONNECTION_BUDGET_ENV}={budget_size}"
+    );
+    budget
+        .acquire_many_owned(permits)
+        .await
+        .expect("ephemeral database connection budget should not be closed")
+}
+
+fn ephemeral_db_connection_budget() -> Arc<Semaphore> {
+    EPHEMERAL_DB_CONNECTION_BUDGET
+        .get_or_init(|| Arc::new(Semaphore::new(ephemeral_db_connection_budget_size())))
+        .clone()
+}
+
+fn ephemeral_db_connection_budget_size() -> usize {
+    std::env::var(TEST_DB_CONNECTION_BUDGET_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_TEST_DB_CONNECTION_BUDGET)
+}
+
+fn retain_ephemeral_db_permit(database_name: &str, permit: OwnedSemaphorePermit) {
+    let previous = ephemeral_db_permits()
+        .lock()
+        .expect("ephemeral database permit registry should not be poisoned")
+        .insert(database_name.to_owned(), permit);
+    debug_assert!(
+        previous.is_none(),
+        "ephemeral database names should be unique"
+    );
+}
+
+fn release_ephemeral_db_permit(database_name: &str) {
+    let _permit = take_ephemeral_db_permit(database_name);
+}
+
+fn take_ephemeral_db_permit(database_name: &str) -> Option<OwnedSemaphorePermit> {
+    ephemeral_db_permits()
+        .lock()
+        .expect("ephemeral database permit registry should not be poisoned")
+        .remove(database_name)
+}
+
+fn ephemeral_db_permits() -> &'static Mutex<HashMap<String, OwnedSemaphorePermit>> {
+    EPHEMERAL_DB_PERMITS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub async fn drop_database(database_name: &str) -> Result<(), sqlx::Error> {

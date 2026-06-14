@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use runledger_core::jobs::{
     WorkflowDependencyReleaseMode, WorkflowRunStatus, WorkflowStepExecutionKind, WorkflowStepStatus,
 };
+use serde_json::Value;
 use sqlx::types::Uuid;
 
 use crate::jobs::transaction_isolation::ensure_read_committed_tx;
@@ -11,20 +12,23 @@ use crate::{DbTx, Error, Result};
 
 use super::super::row_decode::{
     parse_job_stage, parse_job_type_name, parse_step_key_name, parse_workflow_release_mode,
-    parse_workflow_step_execution_kind, parse_workflow_step_status,
+    parse_workflow_run_status, parse_workflow_step_execution_kind, parse_workflow_step_status,
 };
 use super::super::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowStepDbRecord};
 use super::errors::{
     workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
-    workflow_external_step_not_external_error, workflow_external_step_not_found_error,
-    workflow_external_step_not_waiting_error, workflow_internal_state_error,
-    workflow_release_conflict_error,
+    workflow_external_completion_output_conflict_error,
+    workflow_external_completion_output_invalid_error, workflow_external_step_not_external_error,
+    workflow_external_step_not_found_error, workflow_external_step_not_waiting_error,
+    workflow_internal_state_error, workflow_release_conflict_error,
 };
 use super::locking::{
     lock_workflow_run_release_shared_tx, lock_workflow_step_rows_for_update_tx,
     try_lock_workflow_run_release_shared_tx,
 };
 use super::release::{StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx};
+
+pub(crate) const WORKFLOW_RUN_TERMINAL_CHANNEL: &str = "runledger_workflow_run_terminal";
 
 #[derive(sqlx::FromRow)]
 struct WorkflowStepRow {
@@ -50,6 +54,7 @@ struct WorkflowStepRow {
     status_reason: Option<String>,
     last_error_code: Option<String>,
     last_error_message: Option<String>,
+    output: Option<Value>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -78,6 +83,7 @@ fn workflow_step_db_record_from_row(row: WorkflowStepRow) -> Result<WorkflowStep
         status_reason: row.status_reason,
         last_error_code: row.last_error_code,
         last_error_message: row.last_error_message,
+        output: row.output,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
@@ -93,6 +99,19 @@ fn validate_external_completion_status(terminal_status: WorkflowStepStatus) -> R
     ))
 }
 
+fn validate_external_completion_output(
+    terminal_status: WorkflowStepStatus,
+    output: Option<&Value>,
+) -> Result<()> {
+    if output.is_none() || terminal_status == WorkflowStepStatus::Succeeded {
+        return Ok(());
+    }
+
+    Err(workflow_external_completion_output_invalid_error(
+        terminal_status,
+    ))
+}
+
 fn validate_terminal_transition_status(terminal_status: WorkflowStepStatus) -> Result<()> {
     if !terminal_status.is_terminal() {
         return Err(workflow_internal_state_error(
@@ -103,6 +122,25 @@ fn validate_terminal_transition_status(terminal_status: WorkflowStepStatus) -> R
     Ok(())
 }
 
+async fn jsonb_values_match_tx(
+    tx: &mut DbTx<'_>,
+    left: Option<&Value>,
+    right: Option<&Value>,
+) -> Result<bool> {
+    let matches = sqlx::query_scalar!(
+        "SELECT $1::jsonb IS NOT DISTINCT FROM $2::jsonb AS \"matches!\"",
+        left,
+        right,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("compare workflow external step output", error)
+    })?;
+
+    Ok(matches)
+}
+
 pub(crate) async fn mark_workflow_step_running_for_claim_tx(
     tx: &mut DbTx<'_>,
     job_id: Uuid,
@@ -111,6 +149,7 @@ pub(crate) async fn mark_workflow_step_running_for_claim_tx(
         "UPDATE workflow_steps
          SET status = 'RUNNING',
              started_at = COALESCE(started_at, now()),
+             output = NULL,
              updated_at = now()
          WHERE job_id = $1
            AND status IN ('ENQUEUED', 'RUNNING')",
@@ -141,6 +180,7 @@ pub(crate) async fn mark_workflow_step_enqueued_for_claim_release_tx(
              status_reason = NULL,
              last_error_code = NULL,
              last_error_message = NULL,
+             output = NULL,
              updated_at = now()
          WHERE job_id = $1
            AND status = 'RUNNING'",
@@ -168,21 +208,22 @@ pub(crate) async fn mark_workflow_step_enqueued_for_retry_tx(
     // rows are intentionally left alone: non-workflow jobs have no matching
     // step, and concurrent cancellation or terminal handling must win over
     // putting a step back into ENQUEUED.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE workflow_steps
          SET status = 'ENQUEUED',
              finished_at = NULL,
              status_reason = $2,
              last_error_code = $3,
              last_error_message = $4,
+             output = NULL,
              updated_at = now()
          WHERE job_id = $1
            AND status = 'RUNNING'",
+        job_id,
+        status_reason,
+        last_error_code,
+        last_error_message,
     )
-    .bind(job_id)
-    .bind(status_reason)
-    .bind(last_error_code)
-    .bind(last_error_message)
     .execute(&mut **tx)
     .await
     .map_err(|error| {
@@ -199,6 +240,7 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
     status_reason: Option<&str>,
     last_error_code: Option<&str>,
     last_error_message: Option<&str>,
+    output: Option<&Value>,
 ) -> Result<()> {
     // Lifecycle callers already hold the job_queue row lock for `job_id`, so
     // the lookup below is reentrant. Cancellation follows the same job-row-first
@@ -282,6 +324,10 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
              status_reason = $3,
              last_error_code = $4,
              last_error_message = $5,
+             output = CASE
+                WHEN $2::text::workflow_step_status = 'SUCCEEDED' THEN $6::jsonb
+                ELSE NULL
+             END,
              updated_at = now()
          WHERE id = $1",
         step_id,
@@ -289,6 +335,7 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
         status_reason,
         last_error_code,
         last_error_message,
+        output,
     )
     .execute(&mut **tx)
     .await
@@ -333,6 +380,7 @@ pub async fn complete_external_workflow_step_tx(
     input: &CompleteExternalWorkflowStepInput<'_>,
 ) -> Result<WorkflowStepDbRecord> {
     validate_external_completion_status(input.terminal_status)?;
+    validate_external_completion_output(input.terminal_status, input.output)?;
     ensure_read_committed_tx(
         tx,
         "workflow external step completion",
@@ -342,12 +390,13 @@ pub async fn complete_external_workflow_step_tx(
     .await?;
     lock_workflow_step_rows_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;
 
-    let row = sqlx::query_as::<_, WorkflowStepRow>(
+    let row = sqlx::query_as!(
+        WorkflowStepRow,
         "SELECT
             ws.id,
             ws.workflow_run_id,
             ws.step_key,
-            ws.execution_kind::text AS execution_kind,
+            ws.execution_kind::text AS \"execution_kind!\",
             ws.job_type,
             ws.organization_id,
             ws.payload,
@@ -355,7 +404,7 @@ pub async fn complete_external_workflow_step_tx(
             ws.max_attempts,
             ws.timeout_seconds,
             ws.stage,
-            ws.status::text AS status,
+            ws.status::text AS \"status!\",
             ws.job_id,
             ws.released_at,
             ws.started_at,
@@ -366,6 +415,7 @@ pub async fn complete_external_workflow_step_tx(
             ws.status_reason,
             ws.last_error_code,
             ws.last_error_message,
+            ws.output,
             ws.created_at,
             ws.updated_at
          FROM workflow_steps ws
@@ -374,10 +424,10 @@ pub async fn complete_external_workflow_step_tx(
            AND ws.step_key = $2
            AND ($3::uuid IS NULL OR wr.organization_id = $3)
          FOR UPDATE",
+        input.workflow_run_id,
+        input.step_key.as_str(),
+        input.organization_id,
     )
-    .bind(input.workflow_run_id)
-    .bind(input.step_key.as_str())
-    .bind(input.organization_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| {
@@ -385,6 +435,7 @@ pub async fn complete_external_workflow_step_tx(
     })?
     .ok_or_else(workflow_external_step_not_found_error)?;
 
+    let stored_output = row.output.clone();
     let step = workflow_step_db_record_from_row(row)?;
     if step.execution_kind != WorkflowStepExecutionKind::External {
         return Err(workflow_external_step_not_external_error(
@@ -394,6 +445,14 @@ pub async fn complete_external_workflow_step_tx(
 
     if step.status.is_terminal() {
         if step.status == input.terminal_status {
+            if step.status == WorkflowStepStatus::Succeeded
+                && !jsonb_values_match_tx(tx, stored_output.as_ref(), input.output).await?
+            {
+                return Err(workflow_external_completion_output_conflict_error(
+                    step.step_key.as_str(),
+                ));
+            }
+
             return Ok(step);
         }
 
@@ -415,20 +474,25 @@ pub async fn complete_external_workflow_step_tx(
         return Err(workflow_release_conflict_error(step.workflow_run_id));
     }
 
-    let updated = sqlx::query_as::<_, WorkflowStepRow>(
+    let updated = sqlx::query_as!(
+        WorkflowStepRow,
         "UPDATE workflow_steps
          SET status = $2::text::workflow_step_status,
              finished_at = COALESCE(finished_at, now()),
              status_reason = $3,
              last_error_code = $4,
              last_error_message = $5,
+             output = CASE
+                WHEN $2::text::workflow_step_status = 'SUCCEEDED' THEN $6::jsonb
+                ELSE NULL
+             END,
              updated_at = now()
          WHERE id = $1
          RETURNING
             id,
             workflow_run_id,
             step_key,
-            execution_kind::text AS execution_kind,
+            execution_kind::text AS \"execution_kind!\",
             job_type,
             organization_id,
             payload,
@@ -436,7 +500,7 @@ pub async fn complete_external_workflow_step_tx(
             max_attempts,
             timeout_seconds,
             stage,
-            status::text AS status,
+            status::text AS \"status!\",
             job_id,
             released_at,
             started_at,
@@ -447,14 +511,16 @@ pub async fn complete_external_workflow_step_tx(
             status_reason,
             last_error_code,
             last_error_message,
+            output,
             created_at,
             updated_at",
+        step.id,
+        input.terminal_status.as_db_value(),
+        input.status_reason,
+        input.last_error_code,
+        input.last_error_message,
+        input.output,
     )
-    .bind(step.id)
-    .bind(input.terminal_status.as_db_value())
-    .bind(input.status_reason)
-    .bind(input.last_error_code)
-    .bind(input.last_error_message)
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| {
@@ -568,13 +634,14 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                 continue;
             }
 
-            let canceled_row = sqlx::query!(
+            let canceled_row = sqlx::query_scalar!(
                 "UPDATE workflow_steps
                  SET status = 'CANCELED',
                      finished_at = COALESCE(finished_at, now()),
                      status_reason = 'workflow.dependency_unsatisfied',
                      last_error_code = 'workflow.dependency_unsatisfied',
                      last_error_message = 'Step dependency requirements were not satisfied.',
+                     output = NULL,
                      updated_at = now()
                  WHERE id = $1
                    AND status = 'BLOCKED'
@@ -587,13 +654,36 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                 Error::from_query_sqlx_with_context("cancel blocked workflow step", error)
             })?;
 
-            if let Some(canceled_row) = canceled_row {
-                let workflow_run_id: Uuid = canceled_row.workflow_run_id;
+            if let Some(workflow_run_id) = canceled_row {
                 touched_run_ids.insert(workflow_run_id);
                 terminal_queue.push_back((candidate.id(), WorkflowStepStatus::Canceled));
             }
         }
     }
+
+    Ok(())
+}
+
+pub(crate) async fn notify_workflow_run_terminal_tx(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    status: WorkflowRunStatus,
+) -> Result<()> {
+    sqlx::query!(
+        "SELECT pg_notify(
+            $1,
+            json_build_object(
+                'workflow_run_id', $2::uuid::text,
+                'status', $3::text
+            )::text
+         )",
+        WORKFLOW_RUN_TERMINAL_CHANNEL,
+        workflow_run_id,
+        status.as_db_value(),
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("notify workflow run terminal", error))?;
 
     Ok(())
 }
@@ -605,8 +695,11 @@ pub(crate) async fn recompute_workflow_run_statuses_tx(
     for workflow_run_id in touched_run_ids {
         // Serialize status recomputation per run so concurrent step completions do not
         // leave the run stuck in RUNNING due to snapshot races.
-        sqlx::query!(
-            "SELECT id FROM workflow_runs WHERE id = $1 FOR UPDATE",
+        let run_status = sqlx::query!(
+            "SELECT status::text AS \"status!\"
+             FROM workflow_runs
+             WHERE id = $1
+             FOR UPDATE",
             *workflow_run_id
         )
         .fetch_optional(&mut **tx)
@@ -614,6 +707,10 @@ pub(crate) async fn recompute_workflow_run_statuses_tx(
         .map_err(|error| {
             Error::from_query_sqlx_with_context("lock workflow run for status recompute", error)
         })?;
+        let Some(run_status) = run_status else {
+            continue;
+        };
+        let previous_status = parse_workflow_run_status(run_status.status)?;
 
         let row = sqlx::query!(
             "SELECT
@@ -650,13 +747,30 @@ pub(crate) async fn recompute_workflow_run_statuses_tx(
             WorkflowRunStatus::Succeeded
         };
 
-        sqlx::query!(
+        if previous_status == next_status && next_status.is_terminal() {
+            continue;
+        }
+
+        let updated = sqlx::query!(
             "UPDATE workflow_runs
              SET status = $2::text::workflow_run_status,
                  finished_at = CASE
                     WHEN $2::text::workflow_run_status IN ('RUNNING', 'WAITING_FOR_EXTERNAL')
                         THEN NULL
                     ELSE COALESCE(finished_at, now())
+                 END,
+                 result = CASE
+                    WHEN $2::text::workflow_run_status = 'SUCCEEDED' THEN (
+                        SELECT ws.output
+                        FROM workflow_steps ws
+                        WHERE ws.workflow_run_id = workflow_runs.id
+                          AND ws.step_key = workflow_runs.result_step_key
+                          AND ws.status = 'SUCCEEDED'
+                        LIMIT 1
+                    )
+                    WHEN $2::text::workflow_run_status IN ('COMPLETED_WITH_ERRORS', 'CANCELED')
+                        THEN NULL
+                    ELSE result
                  END,
                  updated_at = now()
              WHERE id = $1
@@ -669,6 +783,13 @@ pub(crate) async fn recompute_workflow_run_statuses_tx(
         .map_err(|error| {
             Error::from_query_sqlx_with_context("update workflow run recomputed status", error)
         })?;
+
+        if updated.rows_affected() > 0
+            && next_status.is_terminal()
+            && !previous_status.is_terminal()
+        {
+            notify_workflow_run_terminal_tx(tx, *workflow_run_id, next_status).await?;
+        }
     }
 
     Ok(())

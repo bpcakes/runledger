@@ -16,8 +16,8 @@ use super::super::locking::{
 };
 use super::super::read::load_workflow_run_by_id_tx;
 use super::super::runtime::{
-    complete_external_workflow_step_tx, recompute_workflow_run_statuses_tx,
-    resolve_terminal_step_queue_tx,
+    complete_external_workflow_step_tx, notify_workflow_run_terminal_tx,
+    recompute_workflow_run_statuses_tx, resolve_terminal_step_queue_tx,
 };
 
 pub async fn cancel_workflow_run_tx(
@@ -55,11 +55,11 @@ pub async fn cancel_workflow_run_tx(
     let workflow_run =
         lock_workflow_run_for_update_tx(tx, workflow_run_id, organization_id).await?;
 
-    if workflow_run.status == WorkflowRunStatus::Canceled {
+    if workflow_run.status.is_terminal() {
         return load_workflow_run_by_id_tx(
             tx,
             workflow_run.id,
-            "load already-canceled workflow run",
+            "load already-terminal workflow run for cancel",
         )
         .await;
     }
@@ -71,6 +71,7 @@ pub async fn cancel_workflow_run_tx(
         "UPDATE workflow_runs
          SET status = 'CANCELED',
              finished_at = COALESCE(finished_at, now()),
+             result = NULL,
              updated_at = now()
          WHERE id = $1",
         workflow_run.id,
@@ -78,6 +79,7 @@ pub async fn cancel_workflow_run_tx(
     .execute(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("mark workflow run canceled", error))?;
+    notify_workflow_run_terminal_tx(tx, workflow_run.id, WorkflowRunStatus::Canceled).await?;
 
     let mut touched_run_ids = BTreeSet::from([workflow_run.id]);
     let mut pending_steps = locked_steps;
@@ -218,6 +220,7 @@ async fn cancel_nonterminal_workflow_step_tx(
                     status_reason: reason,
                     last_error_code,
                     last_error_message,
+                    output: None,
                 },
             )
             .await?;
@@ -249,13 +252,14 @@ async fn cancel_blocked_workflow_step_tx(
     last_error_message: Option<&str>,
     touched_run_ids: &mut BTreeSet<Uuid>,
 ) -> Result<bool> {
-    let canceled = sqlx::query!(
+    let canceled = sqlx::query_scalar!(
         "UPDATE workflow_steps
                          SET status = 'CANCELED',
                              finished_at = COALESCE(finished_at, now()),
                              status_reason = $2,
                              last_error_code = $3,
                              last_error_message = $4,
+                             output = NULL,
                              updated_at = now()
                          WHERE id = $1
                            AND status = 'BLOCKED'

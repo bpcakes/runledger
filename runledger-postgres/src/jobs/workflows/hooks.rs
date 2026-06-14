@@ -1,4 +1,5 @@
 use runledger_core::jobs::WorkflowStepStatus;
+use serde_json::Value;
 use sqlx::types::Uuid;
 
 use crate::{DbTx, Result};
@@ -44,6 +45,7 @@ pub(crate) async fn on_terminal(
     status_reason: Option<&str>,
     last_error_code: Option<&str>,
     last_error_message: Option<&str>,
+    output: Option<&Value>,
 ) -> Result<()> {
     process_workflow_step_terminal_by_job_id_tx(
         tx,
@@ -52,6 +54,7 @@ pub(crate) async fn on_terminal(
         status_reason,
         last_error_code,
         last_error_message,
+        output,
     )
     .await
 }

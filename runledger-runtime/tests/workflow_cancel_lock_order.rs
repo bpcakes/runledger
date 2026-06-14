@@ -173,6 +173,7 @@ async fn external_workflow_completion_rejects_non_read_committed_transaction() {
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
+            output: None,
         },
     )
     .await
@@ -422,6 +423,7 @@ async fn workflow_step_release_proceeds_while_another_release_holds_shared_lock(
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
+            output: None,
         },
     )
     .await
@@ -489,6 +491,7 @@ async fn job_completion_waits_for_release_lock_and_releases_after_rollback() {
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
+            output: None,
         },
     )
     .await
@@ -708,6 +711,7 @@ async fn external_completion_release_conflict_can_be_committed_without_partial_m
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
+            output: None,
         },
     )
     .await
@@ -784,6 +788,7 @@ async fn job_completion_after_cancel_commit_does_not_reenqueue_dependents() {
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
+            output: None,
         },
     )
     .await
@@ -990,6 +995,7 @@ async fn external_completion_waits_for_ordered_step_locks_before_locking_gate() 
                 status_reason: None,
                 last_error_code: None,
                 last_error_message: None,
+                output: None,
             },
         )
         .await;
@@ -1110,6 +1116,7 @@ async fn external_completion_conflicts_when_cancel_waits_on_step_rows() {
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
+            output: None,
         },
     )
     .await

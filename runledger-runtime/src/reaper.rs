@@ -428,7 +428,7 @@ mod tests {
     use std::time::Duration;
 
     use runledger_core::jobs::{
-        JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobFailure, JobType,
+        JobCompletion, JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobFailure, JobType,
     };
     use runledger_postgres::jobs::ReapedTerminalLeaseRecord;
     use serde_json::{Value, json};
@@ -457,8 +457,12 @@ mod tests {
             JobType::new("jobs.test.reaper.hook.hang")
         }
 
-        async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-            Ok(())
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::success())
         }
 
         async fn on_dead_letter(
@@ -477,8 +481,12 @@ mod tests {
             JobType::new("jobs.test.reaper.hook.controlled")
         }
 
-        async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-            Ok(())
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::success())
         }
 
         async fn on_dead_letter(
@@ -499,8 +507,12 @@ mod tests {
             JobType::new("jobs.test.reaper.dead_letter.record")
         }
 
-        async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-            Ok(())
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::success())
         }
 
         async fn on_dead_letter(

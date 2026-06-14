@@ -61,7 +61,7 @@
 //! #         &self,
 //! #         _context: JobContext,
 //! #         _payload: serde_json::Value,
-//! #     ) -> std::result::Result<(), JobFailure> { Ok(()) }
+//! #     ) -> std::result::Result<JobCompletion, JobFailure> { Ok(JobCompletion::success()) }
 //! # }
 //!
 //! let catalog = JobCatalog::new().job("jobs.example", MyHandler);

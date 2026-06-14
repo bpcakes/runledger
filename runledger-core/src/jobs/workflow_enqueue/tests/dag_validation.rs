@@ -267,6 +267,7 @@ fn validate_workflow_run_enqueue_returns_dag_errors() {
         organization_id: None,
         metadata: &metadata,
         idempotency_key: None,
+        result_step_key: None,
         steps: vec![WorkflowStepEnqueue {
             step_key: StepKey::new("a"),
             execution_kind: WorkflowStepExecutionKind::Job,
@@ -287,6 +288,69 @@ fn validate_workflow_run_enqueue_returns_dag_errors() {
     let result = validate_workflow_run_enqueue(&enqueue);
 
     assert_eq!(result, Err(WorkflowDagValidationError::BlankWorkflowType));
+}
+
+#[test]
+fn validate_workflow_run_enqueue_rejects_blank_result_step_key() {
+    let metadata = serde_json::json!({"source": "test"});
+    let payload = serde_json::json!({"ok": true});
+    let enqueue = WorkflowRunEnqueue {
+        workflow_type: WorkflowType::new("workflow.test"),
+        organization_id: None,
+        metadata: &metadata,
+        idempotency_key: None,
+        result_step_key: Some(StepKey::new(" ")),
+        steps: vec![WorkflowStepEnqueue {
+            step_key: StepKey::new("a"),
+            execution_kind: WorkflowStepExecutionKind::Job,
+            job_type: Some(JobType::new("jobs.test.a")),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            stage: Some(JobStage::Queued),
+            dependencies: Vec::new(),
+        }],
+    };
+
+    let result = validate_workflow_run_enqueue(&enqueue);
+
+    assert_eq!(result, Err(WorkflowDagValidationError::BlankResultStepKey));
+}
+
+#[test]
+fn validate_workflow_run_enqueue_rejects_unknown_result_step_key() {
+    let metadata = serde_json::json!({"source": "test"});
+    let payload = serde_json::json!({"ok": true});
+    let enqueue = WorkflowRunEnqueue {
+        workflow_type: WorkflowType::new("workflow.test"),
+        organization_id: None,
+        metadata: &metadata,
+        idempotency_key: None,
+        result_step_key: Some(StepKey::new("missing")),
+        steps: vec![WorkflowStepEnqueue {
+            step_key: StepKey::new("a"),
+            execution_kind: WorkflowStepExecutionKind::Job,
+            job_type: Some(JobType::new("jobs.test.a")),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            stage: Some(JobStage::Queued),
+            dependencies: Vec::new(),
+        }],
+    };
+
+    let result = validate_workflow_run_enqueue(&enqueue);
+
+    assert_eq!(
+        result,
+        Err(WorkflowDagValidationError::UnknownResultStepKey {
+            step_key: "missing".to_owned(),
+        })
+    );
 }
 
 #[test]

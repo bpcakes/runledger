@@ -117,6 +117,7 @@ async fn apply_terminal_failure(
         Some(outcome.kind_db_value),
         Some(outcome.code),
         Some(outcome.message),
+        None,
     )
     .await?;
 
@@ -133,12 +134,13 @@ async fn mark_dead_lettered_job_queue_for_failure_tx(
          SET status = 'DEAD_LETTERED',
              lease_expires_at = NULL,
              last_heartbeat_at = NULL,
-            worker_id = NULL,
-            finished_at = now(),
-            status_reason = $5,
-            last_error_code = $6,
-            last_error_message = $7,
-            updated_at = now()
+             worker_id = NULL,
+             finished_at = now(),
+             output = NULL,
+             status_reason = $5,
+             last_error_code = $6,
+             last_error_message = $7,
+             updated_at = now()
          WHERE id = $1
            AND run_number = $2
            AND attempt = $3
@@ -326,6 +328,7 @@ async fn mark_retryable_job_queue_for_failure_tx(
              last_heartbeat_at = NULL,
              worker_id = NULL,
              next_run_at = now() + ($5::bigint * interval '1 millisecond'),
+             output = NULL,
              status_reason = $6,
              last_error_code = $7,
              last_error_message = $8,

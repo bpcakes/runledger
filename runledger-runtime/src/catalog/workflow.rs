@@ -55,6 +55,25 @@ impl<'a, 'catalog> CatalogWorkflowDagBuilder<'a, 'catalog> {
         self
     }
 
+    /// Declares the step whose successful output becomes the workflow result.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError::WorkflowBuild`] when the step key is blank.
+    pub fn result_step(mut self, step_key: &'a str) -> Result<Self, CatalogError> {
+        self.inner = self
+            .inner
+            .result_step(step_key)
+            .map_err(CatalogError::WorkflowBuild)?;
+        Ok(self)
+    }
+
+    /// Clears the workflow result step.
+    #[must_use]
+    pub fn clear_result_step(mut self) -> Self {
+        self.inner = self.inner.clear_result_step();
+        self
+    }
+
     /// Adds a job step after validating `job_type_name` against enabled catalog entries.
     ///
     /// # Errors

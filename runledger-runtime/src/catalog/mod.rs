@@ -64,7 +64,9 @@ pub use workflow::CatalogWorkflowDagBuilder;
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use runledger_core::jobs::{JobContext, JobFailure, JobHandler, JobType, WorkflowBuildError};
+    use runledger_core::jobs::{
+        JobCompletion, JobContext, JobFailure, JobHandler, JobType, WorkflowBuildError,
+    };
     use serde_json::Value;
     use serde_json::json;
 
@@ -76,8 +78,12 @@ mod tests {
             JobType::new(self.0)
         }
 
-        async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-            Ok(())
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::success())
         }
     }
 
@@ -89,8 +95,12 @@ mod tests {
             JobType::new("   ")
         }
 
-        async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-            Ok(())
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::success())
         }
     }
 
@@ -102,8 +112,12 @@ mod tests {
             JobType::new("jobs.other")
         }
 
-        async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-            Ok(())
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::success())
         }
     }
 

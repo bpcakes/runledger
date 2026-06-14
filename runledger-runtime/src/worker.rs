@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use futures_util::FutureExt;
 use runledger_core::jobs::{
-    JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobFailure, JobFailureKind, JobProgress,
+    JobCompletion, JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobFailure, JobFailureKind,
 };
-use runledger_postgres::jobs::{self, JobFailureUpdate, JobProgressUpdate};
+use runledger_postgres::jobs::{self, JobCompletionUpdate, JobFailureUpdate, JobProgressUpdate};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant, MissedTickBehavior, sleep, sleep_until};
@@ -206,12 +206,12 @@ async fn process_claimed_job(
         )
         .await
         {
-            Ok(progress) => {
-                let completion = JobProgressUpdate {
-                    stage: Some(progress.stage),
-                    progress_done: progress.progress_done,
-                    progress_total: progress.progress_total,
-                    checkpoint: progress.checkpoint.as_ref(),
+            Ok(completion) => {
+                let completion_update = JobCompletionUpdate {
+                    progress_done: completion.progress_done,
+                    progress_total: completion.progress_total,
+                    checkpoint: completion.checkpoint.as_ref(),
+                    output: completion.output.as_ref(),
                 };
                 if let Err(error) = jobs::complete_job_success(
                     &pool,
@@ -219,7 +219,7 @@ async fn process_claimed_job(
                     job.run_number,
                     job.attempt,
                     &context.worker_id,
-                    Some(&completion),
+                    Some(&completion_update),
                 )
                 .await
                 {
@@ -430,7 +430,7 @@ async fn execute_job_handler(
     registry: Arc<JobRegistry>,
     context: &JobContext,
     job: &jobs::JobQueueRecord,
-) -> Result<JobProgress, JobFailure> {
+) -> Result<JobCompletion, JobFailure> {
     let Some(handler) = registry.get(job.job_type.as_borrowed()) else {
         return Err(JobFailure::terminal(
             "job.handler_not_registered",
@@ -438,16 +438,7 @@ async fn execute_job_handler(
         ));
     };
 
-    handler
-        .execute(context.clone(), job.payload.clone())
-        .await?;
-
-    Ok(JobProgress {
-        stage: runledger_core::jobs::JobStage::Completed,
-        progress_done: None,
-        progress_total: None,
-        checkpoint: None,
-    })
+    handler.execute(context.clone(), job.payload.clone()).await
 }
 
 async fn execute_job_handler_with_heartbeats(
@@ -456,7 +447,7 @@ async fn execute_job_handler_with_heartbeats(
     context: &JobContext,
     job: &jobs::JobQueueRecord,
     lease_ttl_seconds: i32,
-) -> Result<JobProgress, JobFailure> {
+) -> Result<JobCompletion, JobFailure> {
     let mut execution =
         Box::pin(AssertUnwindSafe(execute_job_handler(registry, context, job)).catch_unwind());
     let timeout_deadline = Instant::now() + Duration::from_secs(job.timeout_seconds.max(1) as u64);
