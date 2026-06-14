@@ -1,6 +1,8 @@
 use std::str::FromStr;
 use std::time::Duration;
 
+use thiserror::Error;
+
 const DEFAULT_POLL_INTERVAL_MS: u64 = 500;
 const DEFAULT_CLAIM_BATCH_SIZE: i64 = 16;
 const DEFAULT_LEASE_TTL_SECONDS: i32 = 60;
@@ -19,6 +21,27 @@ pub struct JobsConfig {
     pub reaper_interval: Duration,
     pub schedule_poll_interval: Duration,
     pub reaper_retry_delay_ms: i32,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Error, Eq, PartialEq)]
+pub enum JobsConfigValidationError {
+    #[error("jobs config worker_id must not be empty")]
+    EmptyWorkerId,
+    #[error("jobs config poll_interval must be greater than zero")]
+    ZeroPollInterval,
+    #[error("jobs config claim_batch_size must be at least 1, got {actual}")]
+    InvalidClaimBatchSize { actual: i64 },
+    #[error("jobs config lease_ttl_seconds must be at least 1, got {actual}")]
+    InvalidLeaseTtlSeconds { actual: i32 },
+    #[error("jobs config max_global_concurrency must be at least 1")]
+    InvalidMaxGlobalConcurrency,
+    #[error("jobs config reaper_interval must be greater than zero")]
+    ZeroReaperInterval,
+    #[error("jobs config schedule_poll_interval must be greater than zero")]
+    ZeroSchedulePollInterval,
+    #[error("jobs config reaper_retry_delay_ms must be at least 1, got {actual}")]
+    InvalidReaperRetryDelayMs { actual: i32 },
 }
 
 impl JobsConfig {
@@ -60,6 +83,96 @@ impl JobsConfig {
             )
             .max(1_000),
         }
+    }
+
+    pub fn validate(&self) -> Result<(), JobsConfigValidationError> {
+        if self.worker_id.trim().is_empty() {
+            return Err(JobsConfigValidationError::EmptyWorkerId);
+        }
+        if self.poll_interval.is_zero() {
+            return Err(JobsConfigValidationError::ZeroPollInterval);
+        }
+        if self.claim_batch_size < 1 {
+            return Err(JobsConfigValidationError::InvalidClaimBatchSize {
+                actual: self.claim_batch_size,
+            });
+        }
+        if self.lease_ttl_seconds < 1 {
+            return Err(JobsConfigValidationError::InvalidLeaseTtlSeconds {
+                actual: self.lease_ttl_seconds,
+            });
+        }
+        if self.max_global_concurrency < 1 {
+            return Err(JobsConfigValidationError::InvalidMaxGlobalConcurrency);
+        }
+        if self.reaper_interval.is_zero() {
+            return Err(JobsConfigValidationError::ZeroReaperInterval);
+        }
+        if self.schedule_poll_interval.is_zero() {
+            return Err(JobsConfigValidationError::ZeroSchedulePollInterval);
+        }
+        if self.reaper_retry_delay_ms < 1 {
+            return Err(JobsConfigValidationError::InvalidReaperRetryDelayMs {
+                actual: self.reaper_retry_delay_ms,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_worker_loop(&self) -> Result<(), JobsConfigValidationError> {
+        if self.worker_id.trim().is_empty() {
+            return Err(JobsConfigValidationError::EmptyWorkerId);
+        }
+        if self.poll_interval.is_zero() {
+            return Err(JobsConfigValidationError::ZeroPollInterval);
+        }
+        if self.claim_batch_size < 1 {
+            return Err(JobsConfigValidationError::InvalidClaimBatchSize {
+                actual: self.claim_batch_size,
+            });
+        }
+        if self.lease_ttl_seconds < 1 {
+            return Err(JobsConfigValidationError::InvalidLeaseTtlSeconds {
+                actual: self.lease_ttl_seconds,
+            });
+        }
+        if self.max_global_concurrency < 1 {
+            return Err(JobsConfigValidationError::InvalidMaxGlobalConcurrency);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_scheduler_loop(&self) -> Result<(), JobsConfigValidationError> {
+        if self.claim_batch_size < 1 {
+            return Err(JobsConfigValidationError::InvalidClaimBatchSize {
+                actual: self.claim_batch_size,
+            });
+        }
+        if self.schedule_poll_interval.is_zero() {
+            return Err(JobsConfigValidationError::ZeroSchedulePollInterval);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_reaper_loop(&self) -> Result<(), JobsConfigValidationError> {
+        if self.claim_batch_size < 1 {
+            return Err(JobsConfigValidationError::InvalidClaimBatchSize {
+                actual: self.claim_batch_size,
+            });
+        }
+        if self.reaper_interval.is_zero() {
+            return Err(JobsConfigValidationError::ZeroReaperInterval);
+        }
+        if self.reaper_retry_delay_ms < 1 {
+            return Err(JobsConfigValidationError::InvalidReaperRetryDelayMs {
+                actual: self.reaper_retry_delay_ms,
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -127,6 +240,88 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    fn test_config() -> JobsConfig {
+        JobsConfig {
+            worker_id: "config-test-worker".to_string(),
+            poll_interval: Duration::from_millis(1),
+            claim_batch_size: 1,
+            lease_ttl_seconds: 1,
+            max_global_concurrency: 1,
+            reaper_interval: Duration::from_millis(1),
+            schedule_poll_interval: Duration::from_millis(1),
+            reaper_retry_delay_ms: 1,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_minimum_direct_config_values() {
+        test_config()
+            .validate()
+            .expect("minimum direct config should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_direct_config_values() {
+        let cases = [
+            {
+                let mut config = test_config();
+                config.worker_id = "  ".to_string();
+                (config, JobsConfigValidationError::EmptyWorkerId)
+            },
+            {
+                let mut config = test_config();
+                config.poll_interval = Duration::ZERO;
+                (config, JobsConfigValidationError::ZeroPollInterval)
+            },
+            {
+                let mut config = test_config();
+                config.claim_batch_size = 0;
+                (
+                    config,
+                    JobsConfigValidationError::InvalidClaimBatchSize { actual: 0 },
+                )
+            },
+            {
+                let mut config = test_config();
+                config.lease_ttl_seconds = 0;
+                (
+                    config,
+                    JobsConfigValidationError::InvalidLeaseTtlSeconds { actual: 0 },
+                )
+            },
+            {
+                let mut config = test_config();
+                config.max_global_concurrency = 0;
+                (
+                    config,
+                    JobsConfigValidationError::InvalidMaxGlobalConcurrency,
+                )
+            },
+            {
+                let mut config = test_config();
+                config.reaper_interval = Duration::ZERO;
+                (config, JobsConfigValidationError::ZeroReaperInterval)
+            },
+            {
+                let mut config = test_config();
+                config.schedule_poll_interval = Duration::ZERO;
+                (config, JobsConfigValidationError::ZeroSchedulePollInterval)
+            },
+            {
+                let mut config = test_config();
+                config.reaper_retry_delay_ms = 0;
+                (
+                    config,
+                    JobsConfigValidationError::InvalidReaperRetryDelayMs { actual: 0 },
+                )
+            },
+        ];
+
+        for (config, expected) in cases {
+            assert_eq!(config.validate(), Err(expected));
         }
     }
 

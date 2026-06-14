@@ -82,6 +82,7 @@ enum RegistrySource {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeTaskExit {
     Completed,
+    InvalidConfig(crate::config::JobsConfigValidationError),
     Shutdown,
 }
 
@@ -491,6 +492,10 @@ impl<'a> SupervisorBuilder<'a> {
             reaper_enabled,
         } = self;
 
+        config
+            .validate()
+            .map_err(|source| RuntimeError::InvalidJobsConfig { source })?;
+
         if mixed_registry_sources {
             return Err(RuntimeError::MixedRegistrySources);
         }
@@ -627,6 +632,7 @@ impl From<RuntimeLoopExit> for RuntimeTaskExit {
     fn from(exit: RuntimeLoopExit) -> Self {
         match exit {
             RuntimeLoopExit::Shutdown => Self::Shutdown,
+            RuntimeLoopExit::InvalidConfig(source) => Self::InvalidConfig(source),
             RuntimeLoopExit::Completed => Self::Completed,
         }
     }
@@ -830,6 +836,13 @@ fn classify_task_result(task: &'static str, result: RuntimeTaskJoinResult) -> Op
         Ok(RuntimeTaskExit::Completed) => {
             debug!(task, "supervised runtime task exited before shutdown");
             Some(RuntimeError::TaskExitedUnexpectedly { task })
+        }
+        Ok(RuntimeTaskExit::InvalidConfig(source)) => {
+            debug!(
+                task,
+                "supervised runtime task rejected invalid config after build validation"
+            );
+            Some(RuntimeError::InvalidJobsConfig { source })
         }
         Err(source) => {
             debug!(
@@ -1040,6 +1053,56 @@ mod tests {
             missing_registry_flags(empty_builder(&pool).disable_worker().disable_scheduler()),
             (false, true)
         );
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_invalid_direct_config_values_before_spawning_loops() {
+        let cases = [
+            {
+                let mut config = test_config();
+                config.max_global_concurrency = 0;
+                (
+                    config,
+                    crate::config::JobsConfigValidationError::InvalidMaxGlobalConcurrency,
+                )
+            },
+            {
+                let mut config = test_config();
+                config.claim_batch_size = 0;
+                (
+                    config,
+                    crate::config::JobsConfigValidationError::InvalidClaimBatchSize { actual: 0 },
+                )
+            },
+            {
+                let mut config = test_config();
+                config.lease_ttl_seconds = 0;
+                (
+                    config,
+                    crate::config::JobsConfigValidationError::InvalidLeaseTtlSeconds { actual: 0 },
+                )
+            },
+        ];
+
+        for (config, expected) in cases {
+            let pool = lazy_pool();
+            let result = Supervisor::builder(&pool, config)
+                .expect("supervisor builder has runtime")
+                .disable_worker()
+                .disable_scheduler()
+                .disable_reaper()
+                .build();
+            let Err(error) = result else {
+                panic!("invalid direct config should be rejected");
+            };
+
+            match error {
+                RuntimeError::InvalidJobsConfig { source } => {
+                    assert_eq!(source, expected);
+                }
+                other => panic!("expected invalid jobs config error, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1517,6 +1580,29 @@ mod tests {
                 assert_eq!(task, "test-loop");
             }
             other => panic!("expected unexpected task exit, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_config_task_exit_preserves_validation_source() {
+        let expected =
+            crate::config::JobsConfigValidationError::InvalidClaimBatchSize { actual: 0 };
+        let supervisor = Supervisor::from_tasks_for_tests(vec![test_task_with_exit(
+            "invalid-config-loop",
+            RuntimeTaskExit::InvalidConfig(expected),
+            async {},
+        )]);
+
+        let error = supervisor
+            .join()
+            .await
+            .expect_err("invalid config task exit should fail");
+
+        match error {
+            Error::Runtime(RuntimeError::InvalidJobsConfig { source }) => {
+                assert_eq!(source, expected);
+            }
+            other => panic!("expected invalid jobs config error, got {other:?}"),
         }
     }
 

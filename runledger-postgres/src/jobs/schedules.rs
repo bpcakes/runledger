@@ -6,6 +6,7 @@ use std::str::FromStr;
 use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
 use super::row_decode::parse_job_type_name;
+use super::schedule_definition_guard::{self, GuardLockContext};
 use super::types::{
     JOB_SCHEDULE_MAX_JITTER_SECONDS, JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport,
     JobScheduleRecord, JobScheduleUpsert,
@@ -15,6 +16,8 @@ const SCHEDULE_EXACT_SYNC_LOCK_TIMEOUT: &str = "5s";
 const SCHEDULE_EXACT_SYNC_LOCK_TIMEOUT_MS: i64 = 5_000;
 const SCHEDULE_EXACT_SYNC_STATEMENT_TIMEOUT: &str = "30s";
 const SCHEDULE_EXACT_SYNC_STATEMENT_TIMEOUT_MS: i64 = 30_000;
+const SCHEDULE_DUE_CLAIM_LOCK_TIMEOUT: &str = "1s";
+const SCHEDULE_DUE_CLAIM_LOCK_TIMEOUT_MS: i64 = 1_000;
 
 #[derive(sqlx::FromRow)]
 struct JobScheduleRow {
@@ -42,7 +45,9 @@ struct JobScheduleRow {
 /// # Errors
 /// Returns an error if a transaction cannot be opened or committed, if
 /// [`JobScheduleUpsert`] validation fails, or if PostgreSQL rejects the upsert,
-/// including when the referenced job definition row does not exist.
+/// including when the referenced job definition row does not exist. Returns a
+/// validation error when the upsert would leave the schedule active for a
+/// disabled job definition.
 pub async fn upsert_job_schedule(
     pool: &DbPool,
     payload: &JobScheduleUpsert<'_>,
@@ -65,12 +70,31 @@ pub async fn upsert_job_schedule(
 /// # Errors
 /// Returns an error if [`JobScheduleUpsert`] validation fails or if PostgreSQL
 /// rejects the upsert, including when the referenced job definition row does not
-/// exist.
+/// exist. Returns a validation error when the upsert would leave the schedule
+/// active for a disabled job definition.
 pub async fn upsert_job_schedule_tx(
     tx: &mut DbTx<'_>,
     payload: &JobScheduleUpsert<'_>,
 ) -> Result<JobScheduleRecord> {
     validate_job_schedule_upsert(payload)?;
+
+    schedule_definition_guard::lock_job_schedules_for_guard_tx(
+        tx,
+        GuardLockContext::ActiveScheduleWrite,
+    )
+    .await?;
+    if schedule_active_after_plain_upsert_tx(tx, payload.name, payload.is_active).await? {
+        schedule_definition_guard::lock_job_definitions_for_guard_tx(
+            tx,
+            GuardLockContext::ActiveScheduleWrite,
+        )
+        .await?;
+        schedule_definition_guard::reject_unavailable_definition_for_active_schedule_tx(
+            tx,
+            payload.job_type.as_str(),
+        )
+        .await?;
+    }
 
     let row = sqlx::query_as::<_, JobScheduleRow>(
         "INSERT INTO job_schedules (
@@ -166,7 +190,8 @@ pub async fn get_job_schedule_by_name(
 /// # Errors
 /// Returns an error if `name` is blank or has surrounding whitespace, if a
 /// transaction cannot be opened or committed, or if PostgreSQL rejects the
-/// update.
+/// update. Returns a validation error when activating a schedule whose job
+/// definition is disabled.
 pub async fn set_job_schedule_active(pool: &DbPool, name: &str, is_active: bool) -> Result<bool> {
     let mut tx = pool
         .begin()
@@ -185,13 +210,34 @@ pub async fn set_job_schedule_active(pool: &DbPool, name: &str, is_active: bool)
 ///
 /// # Errors
 /// Returns an error if `name` is blank or has surrounding whitespace, or if
-/// PostgreSQL rejects the update.
+/// PostgreSQL rejects the update. Returns a validation error when activating a
+/// schedule whose job definition is disabled.
 pub async fn set_job_schedule_active_tx(
     tx: &mut DbTx<'_>,
     name: &str,
     is_active: bool,
 ) -> Result<bool> {
     validate_job_schedule_name(name)?;
+
+    if is_active {
+        schedule_definition_guard::lock_job_schedules_for_guard_tx(
+            tx,
+            GuardLockContext::ActiveScheduleWrite,
+        )
+        .await?;
+        let Some(job_type) = job_schedule_job_type_by_name_tx(tx, name).await? else {
+            return Ok(false);
+        };
+        schedule_definition_guard::lock_job_definitions_for_guard_tx(
+            tx,
+            GuardLockContext::ActiveScheduleWrite,
+        )
+        .await?;
+        schedule_definition_guard::reject_unavailable_definition_for_active_schedule_tx(
+            tx, &job_type,
+        )
+        .await?;
+    }
 
     let result = sqlx::query(
         "UPDATE job_schedules
@@ -272,6 +318,20 @@ async fn upsert_catalog_job_schedule_tx(
     payload: &JobScheduleUpsert<'_>,
 ) -> Result<JobScheduleRecord> {
     validate_job_schedule_upsert(payload)?;
+
+    if payload.is_active {
+        schedule_definition_guard::lock_schedules_then_definitions_tx(
+            tx,
+            GuardLockContext::ActiveScheduleWrite,
+        )
+        .await
+        .map_err(schedule_definition_guard::ScheduleDefinitionLockError::into_error)?;
+        schedule_definition_guard::reject_unavailable_definition_for_active_schedule_tx(
+            tx,
+            payload.job_type.as_str(),
+        )
+        .await?;
+    }
 
     let row = sqlx::query_as::<_, JobScheduleRow>(
         "INSERT INTO job_schedules (
@@ -397,6 +457,42 @@ async fn lock_job_schedules_for_schedule_exact_sync_tx(tx: &mut DbTx<'_>) -> Res
             ))
         }
     }
+}
+
+async fn schedule_active_after_plain_upsert_tx(
+    tx: &mut DbTx<'_>,
+    name: &str,
+    insert_is_active: bool,
+) -> Result<bool> {
+    // Plain upserts preserve stored is_active on conflict; only inserts use the
+    // payload value. Keep this aligned with upsert_job_schedule_tx.
+    let stored_is_active = sqlx::query_scalar::<_, bool>(
+        "SELECT is_active
+         FROM job_schedules
+         WHERE name = $1",
+    )
+    .bind(name)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("read schedule active state before upsert", error)
+    })?;
+
+    Ok(stored_is_active.unwrap_or(insert_is_active))
+}
+
+async fn job_schedule_job_type_by_name_tx(tx: &mut DbTx<'_>, name: &str) -> Result<Option<String>> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT job_type
+         FROM job_schedules
+         WHERE name = $1",
+    )
+    .bind(name)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("read schedule job type before activation", error)
+    })
 }
 
 async fn cap_local_lock_timeout_tx(
@@ -604,17 +700,35 @@ pub async fn claim_due_schedules_tx(
 }
 
 async fn lock_job_schedules_for_due_schedule_claim_tx(tx: &mut DbTx<'_>) -> Result<()> {
-    sqlx::query("LOCK TABLE job_schedules IN ROW EXCLUSIVE MODE")
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| {
-            Error::from_query_sqlx_with_context(
-                "lock job schedules before claiming due schedules",
-                error,
-            )
-        })?;
+    // The runtime scheduler cannot observe shutdown while this table lock is
+    // pending, so cap only lock acquisition and restore the caller's setting
+    // after the lock is held.
+    let previous_lock_timeout = cap_local_lock_timeout_tx(
+        tx,
+        SCHEDULE_DUE_CLAIM_LOCK_TIMEOUT,
+        SCHEDULE_DUE_CLAIM_LOCK_TIMEOUT_MS,
+        "set due schedule claim lock timeout",
+    )
+    .await?;
 
-    Ok(())
+    let lock_result = sqlx::query("LOCK TABLE job_schedules IN ROW EXCLUSIVE MODE")
+        .execute(&mut **tx)
+        .await;
+
+    match lock_result {
+        Ok(_) => {
+            set_local_lock_timeout_tx(
+                tx,
+                &previous_lock_timeout,
+                "restore due schedule claim lock timeout",
+            )
+            .await
+        }
+        Err(error) => Err(Error::from_query_sqlx_with_context(
+            "lock job schedules before claiming due schedules",
+            error,
+        )),
+    }
 }
 
 /// Records a successful schedule materialization inside an existing transaction.

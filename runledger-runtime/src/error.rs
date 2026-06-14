@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::config::JobsConfigValidationError;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
@@ -122,7 +124,20 @@ pub enum ReaperError {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RuntimeError {
+    /// The supervisor builder received an invalid [`JobsConfig`] value. This
+    /// usually means the config was constructed directly instead of through
+    /// [`JobsConfig::from_env`]. Validation is strict for the whole supervisor
+    /// config, even if the loop that would use an invalid field is disabled.
+    ///
+    /// [`JobsConfig`]: crate::config::JobsConfig
+    /// [`JobsConfig::from_env`]: crate::config::JobsConfig::from_env
+    #[error("invalid jobs runtime configuration: {source}")]
+    InvalidJobsConfig {
+        #[source]
+        source: JobsConfigValidationError,
+    },
     /// The supervisor builder received both direct registry and catalog
     /// registration sources. Choose either [`SupervisorBuilder::with_registry`]
     /// or [`SupervisorBuilder::with_catalog`] for a single builder.

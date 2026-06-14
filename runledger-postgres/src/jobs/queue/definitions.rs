@@ -4,15 +4,13 @@ use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 use runledger_core::jobs::{JobType, JobTypeName};
 
 use super::super::row_decode::parse_job_type_name;
+use super::super::schedule_definition_guard::{
+    self, GuardLockContext, ScheduleDefinitionLockError,
+};
 use super::super::types::{
     JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,
     JobScheduleJobTypeReference,
 };
-
-const DEFINITION_DISABLE_LOCK_TIMEOUT: &str = "5s";
-const DEFINITION_DISABLE_LOCK_TIMEOUT_MS: i64 = 5_000;
-const DEFINITION_DISABLE_STATEMENT_TIMEOUT: &str = "30s";
-const DEFINITION_DISABLE_STATEMENT_TIMEOUT_MS: i64 = 30_000;
 
 /// Summary of definition rows changed by a catalog sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,7 +168,7 @@ pub async fn sync_catalog_job_definitions_tx(
             }
             (JobDefinitionCatalogSyncMode::PreserveExistingEnabledForEnabledDefinitions, false)
             | (JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState, _) => {
-                upsert_job_definition_tx(tx, definition).await
+                apply_job_definition_upsert_tx(tx, definition).await
             }
         };
         upsert_result.map_err(
@@ -223,13 +221,14 @@ pub async fn sync_catalog_job_definitions_exact_tx(
     };
 
     if has_absent_scope_job_types {
-        if let Some(reference) = find_active_schedule_for_enabled_absent_job_types_tx(
-            tx,
-            &catalog_job_types,
-            scope_job_types,
-        )
-        .await
-        .map_err(|error| JobDefinitionCatalogSyncError::ScheduleCheckFailure(Box::new(error)))?
+        if let Some(reference) =
+            schedule_definition_guard::find_active_schedule_for_enabled_absent_job_types_tx(
+                tx,
+                &catalog_job_types,
+                scope_job_types,
+            )
+            .await
+            .map_err(|error| JobDefinitionCatalogSyncError::ScheduleCheckFailure(Box::new(error)))?
         {
             return Err(JobDefinitionCatalogSyncError::ActiveScheduleForAbsentJobType(reference));
         }
@@ -238,7 +237,7 @@ pub async fn sync_catalog_job_definitions_exact_tx(
     // Re-enabling catalog definitions does not need the disable guard because it
     // cannot orphan active schedules or authorize work for a row being disabled.
     for definition in definitions {
-        upsert_job_definition_tx(tx, definition)
+        apply_job_definition_upsert_tx(tx, definition)
             .await
             .map_err(
                 |source| JobDefinitionCatalogSyncError::DefinitionSyncFailure {
@@ -262,7 +261,25 @@ pub async fn sync_catalog_job_definitions_exact_tx(
     })
 }
 
+/// Creates or updates a job definition inside an existing transaction.
+///
+/// # Errors
+/// Returns an error if PostgreSQL rejects the upsert, or if disabling the
+/// definition would leave an active schedule referencing this job type.
 pub async fn upsert_job_definition_tx(
+    tx: &mut DbTx<'_>,
+    payload: &JobDefinitionUpsert<'_>,
+) -> Result<()> {
+    if !payload.is_enabled {
+        prepare_definition_disable_update_guard_tx(tx).await?;
+        reject_active_schedule_for_disabled_job_type_update_tx(tx, payload.job_type.as_str())
+            .await?;
+    }
+
+    apply_job_definition_upsert_tx(tx, payload).await
+}
+
+async fn apply_job_definition_upsert_tx(
     tx: &mut DbTx<'_>,
     payload: &JobDefinitionUpsert<'_>,
 ) -> Result<()> {
@@ -348,130 +365,6 @@ async fn upsert_job_definition_preserving_enabled_tx(
     })?;
 
     Ok(())
-}
-
-async fn lock_job_schedules_for_definition_disable_tx(tx: &mut DbTx<'_>) -> Result<()> {
-    let previous_lock_timeout = cap_local_lock_timeout_tx(
-        tx,
-        DEFINITION_DISABLE_LOCK_TIMEOUT,
-        DEFINITION_DISABLE_LOCK_TIMEOUT_MS,
-        "set job definition disable schedule lock timeout",
-    )
-    .await?;
-
-    let lock_result = sqlx::query!("LOCK TABLE job_schedules IN SHARE ROW EXCLUSIVE MODE")
-        .execute(&mut **tx)
-        .await;
-
-    match lock_result {
-        Ok(_) => {
-            set_local_lock_timeout_tx(
-                tx,
-                &previous_lock_timeout,
-                "restore job definition disable schedule lock timeout",
-            )
-            .await
-        }
-        Err(error) => {
-            // No restore is needed on the error path: the caller rolls back the
-            // transaction and PostgreSQL discards the SET LOCAL lock_timeout.
-            Err(Error::from_query_sqlx_with_context(
-                "lock job schedules before disabling job definitions",
-                error,
-            ))
-        }
-    }
-}
-
-async fn lock_job_definitions_for_definition_disable_tx(tx: &mut DbTx<'_>) -> Result<()> {
-    let previous_lock_timeout = cap_local_lock_timeout_tx(
-        tx,
-        DEFINITION_DISABLE_LOCK_TIMEOUT,
-        DEFINITION_DISABLE_LOCK_TIMEOUT_MS,
-        "set job definition disable definition lock timeout",
-    )
-    .await?;
-
-    let lock_result = sqlx::query("LOCK TABLE job_definitions IN SHARE ROW EXCLUSIVE MODE")
-        .execute(&mut **tx)
-        .await;
-
-    match lock_result {
-        Ok(_) => {
-            set_local_lock_timeout_tx(
-                tx,
-                &previous_lock_timeout,
-                "restore job definition disable definition lock timeout",
-            )
-            .await
-        }
-        Err(error) => {
-            // No restore is needed on the error path: the caller rolls back the
-            // transaction and PostgreSQL discards the SET LOCAL lock_timeout.
-            Err(Error::from_query_sqlx_with_context(
-                "lock job definitions before disabling job definitions",
-                error,
-            ))
-        }
-    }
-}
-
-async fn find_active_schedule_for_job_types_tx(
-    tx: &mut DbTx<'_>,
-    job_types: &[JobTypeName],
-) -> Result<Option<JobScheduleJobTypeReference>> {
-    let job_types = job_type_strings(job_types);
-    let row = sqlx::query!(
-        "SELECT name, job_type
-         FROM job_schedules
-         WHERE is_active = true
-           AND job_type = ANY($1::text[])
-         ORDER BY name ASC
-         LIMIT 1",
-        job_types.as_slice(),
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("find active schedule for job definitions", error)
-    })?;
-
-    row.map(|row| parse_schedule_job_type_reference(row.name, row.job_type))
-        .transpose()
-}
-
-async fn find_active_schedule_for_enabled_absent_job_types_tx(
-    tx: &mut DbTx<'_>,
-    catalog_job_types: &[JobTypeName],
-    scope_job_types: &[JobTypeName],
-) -> Result<Option<JobScheduleJobTypeReference>> {
-    let catalog_job_types = job_type_strings(catalog_job_types);
-    let scope_job_types = job_type_strings(scope_job_types);
-    let row = sqlx::query!(
-        "SELECT job_schedules.name, job_schedules.job_type
-         FROM job_schedules
-         INNER JOIN job_definitions
-            ON job_definitions.job_type = job_schedules.job_type
-         WHERE job_schedules.is_active = true
-           AND job_schedules.job_type <> ALL($1::text[])
-           AND job_schedules.job_type = ANY($2::text[])
-           AND job_definitions.is_enabled = true
-         ORDER BY job_schedules.name ASC
-         LIMIT 1",
-        catalog_job_types.as_slice(),
-        scope_job_types.as_slice(),
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context(
-            "find active schedule for enabled absent job definitions",
-            error,
-        )
-    })?;
-
-    row.map(|row| parse_schedule_job_type_reference(row.name, row.job_type))
-        .transpose()
 }
 
 async fn list_job_types_missing_or_enabled_definitions_tx(
@@ -641,31 +534,34 @@ where
 async fn prepare_definition_disable_critical_section_tx(
     tx: &mut DbTx<'_>,
 ) -> std::result::Result<(), JobDefinitionCatalogSyncError> {
-    cap_local_statement_timeout_tx(
+    schedule_definition_guard::cap_definition_disable_statement_timeout_tx(tx)
+        .await
+        .map_err(|error| {
+            JobDefinitionCatalogSyncError::CriticalSectionTimeoutFailure(Box::new(error))
+        })?;
+    schedule_definition_guard::lock_schedules_then_definitions_tx(
         tx,
-        DEFINITION_DISABLE_STATEMENT_TIMEOUT,
-        DEFINITION_DISABLE_STATEMENT_TIMEOUT_MS,
-        "set job definition disable statement timeout",
+        GuardLockContext::DefinitionDisable,
     )
     .await
-    .map_err(|error| {
-        JobDefinitionCatalogSyncError::CriticalSectionTimeoutFailure(Box::new(error))
-    })?;
-    lock_job_schedules_for_definition_disable_tx(tx)
-        .await
-        .map_err(|error| JobDefinitionCatalogSyncError::ScheduleLockFailure(Box::new(error)))?;
-    lock_job_definitions_for_definition_disable_tx(tx)
-        .await
-        .map_err(|error| JobDefinitionCatalogSyncError::DefinitionLockFailure(Box::new(error)))
+    .map_err(|error| match error {
+        ScheduleDefinitionLockError::Schedule(error) => {
+            JobDefinitionCatalogSyncError::ScheduleLockFailure(Box::new(error))
+        }
+        ScheduleDefinitionLockError::Definition(error) => {
+            JobDefinitionCatalogSyncError::DefinitionLockFailure(Box::new(error))
+        }
+    })
 }
 
 async fn reject_active_schedules_for_disabled_job_types_tx(
     tx: &mut DbTx<'_>,
     job_types: &[JobTypeName],
 ) -> std::result::Result<(), JobDefinitionCatalogSyncError> {
-    if let Some(reference) = find_active_schedule_for_job_types_tx(tx, job_types)
-        .await
-        .map_err(|error| JobDefinitionCatalogSyncError::ScheduleCheckFailure(Box::new(error)))?
+    if let Some(reference) =
+        schedule_definition_guard::find_active_schedule_for_job_types_tx(tx, job_types)
+            .await
+            .map_err(|error| JobDefinitionCatalogSyncError::ScheduleCheckFailure(Box::new(error)))?
     {
         return Err(JobDefinitionCatalogSyncError::ActiveScheduleForDisabledJobType(reference));
     }
@@ -673,14 +569,29 @@ async fn reject_active_schedules_for_disabled_job_types_tx(
     Ok(())
 }
 
-fn parse_schedule_job_type_reference(
-    schedule_name: String,
-    job_type: String,
-) -> Result<JobScheduleJobTypeReference> {
-    Ok(JobScheduleJobTypeReference {
-        schedule_name,
-        job_type: parse_job_type_name(job_type)?,
-    })
+async fn prepare_definition_disable_update_guard_tx(tx: &mut DbTx<'_>) -> Result<()> {
+    schedule_definition_guard::cap_definition_disable_statement_timeout_tx(tx).await?;
+    schedule_definition_guard::lock_schedules_then_definitions_tx(
+        tx,
+        GuardLockContext::DefinitionDisable,
+    )
+    .await
+    .map_err(ScheduleDefinitionLockError::into_error)
+}
+
+async fn reject_active_schedule_for_disabled_job_type_update_tx(
+    tx: &mut DbTx<'_>,
+    job_type: &str,
+) -> Result<()> {
+    if let Some(reference) =
+        schedule_definition_guard::find_active_schedule_for_job_type_tx(tx, job_type).await?
+    {
+        return Err(
+            schedule_definition_guard::active_schedule_for_disabled_definition_error(&reference),
+        );
+    }
+
+    Ok(())
 }
 
 fn parse_job_type_rows(rows: Vec<String>) -> Result<Vec<JobTypeName>> {
@@ -701,95 +612,6 @@ fn validate_non_empty_job_types(context: &'static str, job_types: &[JobTypeName]
             format!("{context}: job type list must not be empty"),
         )));
     }
-    Ok(())
-}
-
-async fn cap_local_lock_timeout_tx(
-    tx: &mut DbTx<'_>,
-    lock_timeout: &str,
-    lock_timeout_ms: i64,
-    context: &'static str,
-) -> Result<String> {
-    // Preserve PostgreSQL's reported GUC text so restore keeps units and special
-    // values such as "0" exactly as the connection reported them.
-    sqlx::query_scalar::<_, String>(
-        "WITH previous AS MATERIALIZED (
-             SELECT
-                current_setting('lock_timeout') AS lock_timeout,
-                setting::bigint AS lock_timeout_ms
-             FROM pg_settings
-             WHERE name = 'lock_timeout'
-         )
-         SELECT previous.lock_timeout
-         FROM previous,
-              LATERAL (
-                SELECT set_config(
-                    'lock_timeout',
-                    CASE
-                        WHEN previous.lock_timeout_ms = 0 THEN $1
-                        WHEN previous.lock_timeout_ms <= $2 THEN previous.lock_timeout
-                        ELSE $1
-                    END,
-                    true
-                )
-              ) AS applied",
-    )
-    .bind(lock_timeout)
-    .bind(lock_timeout_ms)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context(context, error))
-}
-
-async fn cap_local_statement_timeout_tx(
-    tx: &mut DbTx<'_>,
-    statement_timeout: &str,
-    statement_timeout_ms: i64,
-    context: &'static str,
-) -> Result<String> {
-    // Cap statement_timeout while the transaction holds definition-disable locks
-    // so a stalled check, upsert, or disable statement cannot hold table locks
-    // indefinitely. Preserve stricter caller settings.
-    sqlx::query_scalar::<_, String>(
-        "WITH previous AS MATERIALIZED (
-             SELECT
-                current_setting('statement_timeout') AS statement_timeout,
-                setting::bigint AS statement_timeout_ms
-             FROM pg_settings
-             WHERE name = 'statement_timeout'
-         )
-         SELECT previous.statement_timeout
-         FROM previous,
-              LATERAL (
-                SELECT set_config(
-                    'statement_timeout',
-                    CASE
-                        WHEN previous.statement_timeout_ms = 0 THEN $1
-                        WHEN previous.statement_timeout_ms <= $2 THEN previous.statement_timeout
-                        ELSE $1
-                    END,
-                    true
-                )
-              ) AS applied",
-    )
-    .bind(statement_timeout)
-    .bind(statement_timeout_ms)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context(context, error))
-}
-
-async fn set_local_lock_timeout_tx(
-    tx: &mut DbTx<'_>,
-    lock_timeout: &str,
-    context: &'static str,
-) -> Result<()> {
-    sqlx::query_scalar::<_, String>("SELECT set_config('lock_timeout', $1, true)")
-        .bind(lock_timeout)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|error| Error::from_query_sqlx_with_context(context, error))?;
-
     Ok(())
 }
 
@@ -831,8 +653,38 @@ pub async fn get_job_definition_by_type(
     .transpose()
 }
 
+/// Updates mutable operator-owned fields on a job definition.
+///
+/// Returns `Ok(None)` when no definition exists for `job_type`.
+///
+/// # Errors
+/// Returns an error if a transaction cannot be opened or committed, if
+/// PostgreSQL rejects the update, or if disabling the definition would leave an
+/// active schedule referencing this job type.
 pub async fn update_job_definition(
     pool: &DbPool,
+    job_type: JobType<'_>,
+    payload: &JobDefinitionUpdate,
+) -> Result<Option<JobDefinitionRecord>> {
+    let mut tx = pool.begin().await.map_err(|error| {
+        Error::from_query_sqlx_with_context("begin job definition update transaction", error)
+    })?;
+
+    if payload.is_enabled == Some(false) {
+        prepare_definition_disable_update_guard_tx(&mut tx).await?;
+        reject_active_schedule_for_disabled_job_type_update_tx(&mut tx, job_type.as_str()).await?;
+    }
+
+    let record = apply_job_definition_update_tx(&mut tx, job_type, payload).await?;
+    tx.commit().await.map_err(|error| {
+        Error::from_query_sqlx_with_context("commit job definition update transaction", error)
+    })?;
+
+    Ok(record)
+}
+
+async fn apply_job_definition_update_tx(
+    tx: &mut DbTx<'_>,
     job_type: JobType<'_>,
     payload: &JobDefinitionUpdate,
 ) -> Result<Option<JobDefinitionRecord>> {
@@ -859,7 +711,7 @@ pub async fn update_job_definition(
         payload.default_priority,
         payload.is_enabled,
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("update job definition", error))?;
 

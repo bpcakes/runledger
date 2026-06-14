@@ -225,7 +225,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | Human/API approval or another external gate | External workflow steps and `complete_external_workflow_step` |
 | Delayed or recurring entrypoint | `JobScheduleUpsert` and `upsert_job_schedule` (or catalog schedules) |
 | Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
-| Admin/status views | `runledger_postgres::jobs` read/list APIs |
+| Admin/status views | `runledger_postgres::jobs` read/list/count APIs, including `count_workflow_runs` |
 
 For ordinary dependent work, **do not** poll `get_job_by_id` in a loop, enqueue
 dependent jobs from parent handlers, encode dependency state in payload JSON, or
@@ -286,7 +286,7 @@ the rest at `.build()` / `.try_build()`:
 
 ### Workflow results and handles
 
-Workflows can declare one initial DAG step as the durable result step. A handler
+Workflows can declare one DAG step as the durable result step. A handler
 returns a compact JSON result with `JobCompletion::with_output(...)`; when the
 run reaches `SUCCEEDED`, Runledger materializes that step output as the workflow
 result.
@@ -306,16 +306,54 @@ let result = handle.get_result(Default::default()).await?;
 
 The handle is scoped when created or retrieved: organization workflows use
 `WorkflowRunHandleScope::Organization`, global workflows use `Global`, and
-trusted operator surfaces can use `Admin`. Notifications wake waiters quickly,
-but polling remains the correctness path. `WorkflowRunWaitOptions::default()`
-waits up to five minutes by default; set `timeout: None` only when the caller
-intentionally wants to wait indefinitely. Each active waiter may hold a
-PostgreSQL `LISTEN` connection until the result is ready, so size pools
-accordingly and use shorter explicit timeouts for high fan-out callers.
+trusted operator surfaces can use `Admin`. Use `get_status` for a cheap status
+probe, `get_run` to load the scoped run record, and `get_result` to wait for or
+read the declared result. Notifications wake waiters quickly, but polling
+remains the correctness path. `WorkflowRunWaitOptions::default()` waits up to
+five minutes by default; set `timeout: None` only when the caller intentionally
+wants to wait indefinitely. Each active waiter may hold a PostgreSQL `LISTEN`
+connection until the result is ready, so size pools accordingly and use shorter
+explicit timeouts for high fan-out callers.
 Keep outputs compact: result JSON is persisted on the job, step, and workflow
 run rows; store large artifacts externally and return references. Workflows
 without a declared result still run normally; `get_result` returns
-`workflow.result_not_declared`.
+`workflow.result_not_declared`. Other handle error codes include
+`workflow.handle_storage_error`, `workflow.run_not_found`,
+`workflow.result_missing`, `workflow.result_unsuccessful_terminal`, and
+`workflow.result_wait_timeout`.
+
+External workflow steps can also provide result output when completed
+successfully:
+
+```rust
+use runledger_core::jobs::{StepKey, WorkflowStepStatus};
+use runledger_postgres::jobs::CompleteExternalWorkflowStepInput;
+
+let approval_output = serde_json::json!({ "approved_by": "ops" });
+
+runledger_postgres::jobs::complete_external_workflow_step(
+    &pool,
+    &CompleteExternalWorkflowStepInput {
+        workflow_run_id,
+        organization_id: None,
+        step_key: StepKey::new("approval"),
+        terminal_status: WorkflowStepStatus::Succeeded,
+        status_reason: Some("approved"),
+        last_error_code: None,
+        last_error_message: None,
+        output: Some(&approval_output),
+    },
+)
+.await?;
+```
+
+`output` is valid only with `WorkflowStepStatus::Succeeded`; failed or canceled
+external completions must pass `None`. Retrying completion for an already
+terminal external step is idempotent only when the terminal status,
+`status_reason`, `last_error_code`, and `last_error_message` match; changed
+metadata returns `workflow.external_step_conflicting_completion_retry`. For
+successful completions, output must also match, or Runledger returns
+`workflow.external_step_conflicting_output_retry`.
 
 Breaking API note: `JobHandler::execute` returns
 `Result<JobCompletion, JobFailure>`. The old stage-bearing `JobProgress`
@@ -381,6 +419,15 @@ catalog spec still says `is_active: true`. Use the lower-level `job_schedule` +
 admin pause/resume workflows; that path sets `is_active` on first insert, then
 preserves the stored active state on conflict.
 
+Active schedules require enabled job definitions. Creating, syncing, or
+activating a schedule for a missing or disabled definition returns
+`job_schedule.definition_not_found_or_disabled`; disabling a job definition that
+still has active schedules returns `job_definition.active_schedule_exists`.
+During scheduler catch-up after downtime, Runledger materializes at most one
+stale fire with its original `scheduled_for` metadata, then coalesces
+`next_fire_at` to the first future cron fire instead of replaying every missed
+tick.
+
 For exact sync of registered schedules, derive the owned scope from the catalog
 to avoid repeating names:
 
@@ -429,6 +476,15 @@ let catalog = JobCatalog::new()
     );
 ```
 
+Overrides take precedence over `JobCatalogDefaults` for only the fields they set:
+`version`, `max_attempts`, `timeout_seconds`, `priority`, and `enabled`. Version,
+attempts, and timeout values must be positive; priority may be zero or negative.
+An `enabled(true)` override can keep one job effectively enabled under disabled
+catalog defaults, while `enabled(false)` disables that job during sync. Additive
+sync still preserves an already-disabled database row for effectively enabled
+jobs so operator pauses survive restarts; exact sync restores enabled state from
+the effective catalog value.
+
 Catalog helper builders validate catalog membership and effective enabled state;
 operator-disabled database rows are enforced later by persistence APIs (job
 enqueue, schedule materialization, workflow enqueue). The lower-level
@@ -445,6 +501,23 @@ Each example is compile-checked:
 - [Append workflow steps](runledger-postgres/examples/append_workflow_steps.rs)
 - [Scheduled job entrypoint](runledger-postgres/examples/schedule_job.rs)
 - [Worker binary skeleton](runledger-runtime/examples/worker_binary.rs)
+
+## Admin reads
+
+The `runledger_postgres::jobs` admin surface exposes job/workflow detail, list,
+and count helpers for operator UIs and service-owned dashboards. Use
+`list_workflow_runs` with `WorkflowRunListFilter` when rendering workflow tables,
+and `count_workflow_runs` with `WorkflowRunCountFilter` for status counters such
+as failed workflows or runs waiting for external completion. These helpers use
+the same optional organization scope and workflow-type substring filtering as
+the TUI.
+
+`update_job_payload_uuid_array_field` is intentionally narrow: it mutates one
+UUID-array payload field only for direct jobs that are still pending and
+unclaimed. It returns `JobPayloadUuidArrayFieldUpdate::Updated`, `NotFound`, or
+`Rejected` with a reason. Rejections distinguish workflow-managed jobs,
+idempotent request snapshots that cannot be kept consistent, and jobs that are
+already claimed or terminal.
 
 ## Operator TUI
 
@@ -469,9 +542,15 @@ cargo run -p runledger-tui -- --org 00000000-0000-0000-0000-000000000001
 migrated. The binary runs `ensure_schema_compatible_after_idempotency_cutover`
 on startup unless `--skip-schema-check` is set.
 
-Keys: `1`–`4` or `Tab` switch screens · `j`/`k` move selection · `Enter` open
-job/workflow detail · `Esc` back · `r` refresh · `o` org scope · `?` help ·
-`q` quit.
+Keys: `1`–`4` or `Tab` switch screens · `Shift+Tab` moves backward · `j`/`k`
+or Up/Down move selection · `g`/`G` jump to first/last row · `PgUp`/`PgDn` page
+selection · `Enter`/`l` open job/workflow detail · `h`/`Esc` go back · `[`/`]`
+or Left/Right switch job-detail panes · `/` searches the current table · `t`
+edits the job/workflow type filter · `w` edits the workflow type filter from the
+workflows screen · `f` cycles queue status filters · `c` clears contextual
+filters · `v` toggles payload wrapping · `R` toggles raw/pretty payload mode ·
+`y` copies the selected ID · `p` pauses auto-refresh · `:` opens the command
+palette · `r`/`.` refresh · `o` edits org scope · `?` help · `q` quit.
 
 ## Configuration
 
@@ -491,6 +570,10 @@ job/workflow detail · `Esc` back · `r` refresh · `o` org scope · `?` help ·
 | `JOBS_REAPER_RETRY_DELAY_MS` | Delay before reaped jobs become claimable |
 
 Interval and concurrency values are clamped to safe minimums.
+`JobsConfig::from_env()` produces a valid config; if you construct `JobsConfig`
+directly, call `validate()` before starting runtime loops. Supervisor builders
+reject invalid configs with `RuntimeError::InvalidJobsConfig`, and low-level
+loops can return `RuntimeLoopExit::InvalidConfig`.
 
 ## Database schema and migrations
 
@@ -600,6 +683,10 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   transient `workflow.release_conflict`. Append and external-step release paths
   may still return `workflow.release_conflict` while cancellation holds the
   exclusive release lock.
+- **Workflow-managed jobs.** Jobs created for workflow steps cannot be requeued
+  directly with `requeue_job`; that returns `job.workflow_requeue_not_supported`
+  so the workflow DAG cannot be bypassed. Use workflow cancellation, external
+  completion, or append APIs for workflow-level recovery.
 - **Stable error codes.** Conflicts such as `workflow.append_conflicting_retry`
   are conflict-category errors; branch on the stable code rather than the broad
   category.
@@ -724,34 +811,50 @@ final push.
 
 Observable contract changes to call out in release notes for this line:
 
-- Published crates require Rust 1.88+.
-- `runledger-runtime` adds `Supervisor`; low-level loops now return
-  `RuntimeLoopExit`.
-- `runledger-postgres` adds `JobScheduleUpsert`, `upsert_job_schedule`,
-  `get_job_schedule_by_name`, `set_job_schedule_active`, and
-  `set_job_schedule_next_fire_at`. Conflict updates refresh the schedule
-  definition while preserving `is_active` and `organization_id`, refresh
-  `next_fire_at` when cron syntax changes, and validate cron syntax plus
-  name/jitter bounds. `JOB_SCHEDULE_MAX_JITTER_SECONDS` exposes the shared
-  jitter cap.
-- `runledger-runtime` schedule-sync commit failures now surface
-  `CatalogError::ScheduleSyncCommitFailure(Box<runledger_postgres::Error>)`.
-- `mark_schedule_fired_tx` now returns `Result<bool>` so internals can
-  distinguish a cursor advance from a missing schedule row.
-- `JobScheduleRecord` exposes `is_active` so setup code can observe preserved
-  pause/resume state after upserts.
-- Schedules are UTC-only (`timezone = 'UTC'`), using the same cron parser as
-  `runledger-runtime`.
-- `QueryError::Display` now returns client-safe messages.
-- Expired leases have no owner grace period; `job.lease_owner_mismatch` now
-  covers time-based loss of ownership.
-- Success completion rejects non-`Completed` stages.
-- Workflow-backed job completion waits on in-flight cancellation instead of
-  returning `workflow.release_conflict`; append/external release can still
-  return it.
-- Workflow append mutations require read-committed isolation.
-- Idempotent enqueue adds new conflict/isolation error codes;
-  `workflow.append_conflicting_retry` is now a conflict-category error.
+- Breaking: `JobHandler::execute` returns `JobCompletion`; use
+  `JobCompletion::success()` or `JobCompletion::with_output(...)`.
+- Breaking: low-level completion structs expose output fields, and public read
+  DTOs expose job/step output plus workflow `result_step_key`.
+- Workflow result handles add result-step builders,
+  `enqueue_workflow_run_handle`, `retrieve_workflow_run_handle`,
+  `workflow_run_handle`, `WorkflowRunHandle`, `WorkflowRunHandleScope`,
+  `WorkflowRunHandle::get_status`, `WorkflowRunHandle::get_run`,
+  `WorkflowRunHandle::get_result`, `WorkflowRunWaitOptions`, and
+  `DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT`.
+- `WorkflowRunWaitOptions::default()` waits up to five minutes; `timeout: None`
+  opts into unbounded waits that may hold a PostgreSQL listener connection.
+- External workflow step completion accepts output only for successful
+  completions. Idempotent retry requires matching terminal status and completion
+  metadata; changed metadata returns
+  `workflow.external_step_conflicting_completion_retry`, and changed successful
+  output returns `workflow.external_step_conflicting_output_retry`.
+- `cancel_workflow_run_tx` is a no-op for any already-terminal run.
+- `requeue_job` rejects workflow-managed jobs with
+  `job.workflow_requeue_not_supported`.
+- `update_job_payload_uuid_array_field` returns
+  `JobPayloadUuidArrayFieldUpdate` instead of `bool`, with rejection reasons for
+  workflow-managed jobs, idempotent request snapshots, and jobs that are no
+  longer pending/unclaimed.
+- `count_workflow_runs` and `WorkflowRunCountFilter` are available for admin
+  counters.
+- `JobsConfig::validate`, `RuntimeError::InvalidJobsConfig`, and
+  `RuntimeLoopExit::InvalidConfig` expose runtime config validation for directly
+  constructed configs.
+- Active schedules now require enabled job definitions; schedule writes can
+  return `job_schedule.definition_not_found_or_disabled`, and definition
+  disables can return `job_definition.active_schedule_exists`.
+- Scheduler catch-up after downtime materializes at most one stale fire, then
+  advances the schedule cursor to the first future fire.
+- Catalog definition overrides add `JobCatalogDefinitionOverrides`,
+  `job_with_definition_overrides`, and `definition_overrides`.
+- Catalog schedule sync adds `CatalogJobScheduleSpec`,
+  `JobCatalog::schedule`, `sync_schedules`, `sync_schedules_with`,
+  `sync_schedules_exact`, `sync_schedules_exact_with`, and
+  `JobCatalogScheduleSyncScope`. Catalog sync owns `is_active`; lower-level
+  schedule upserts preserve stored active state on conflict.
+- `runledger-tui` adds interactive search, type filters, command palette,
+  paging, payload view toggles, copy-ID, auto-refresh pause, and expanded
+  navigation keys.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

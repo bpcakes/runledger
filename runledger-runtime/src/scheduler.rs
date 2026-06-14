@@ -12,6 +12,8 @@ use crate::config::JobsConfig;
 use crate::{Result, RuntimeLoopExit, SchedulerError};
 
 const FAILED_SCHEDULE_RETRY_DELAY_SECONDS: i64 = 30;
+const SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT: usize =
+    jobs::JOB_SCHEDULE_MAX_JITTER_SECONDS as usize + 2;
 const CREATE_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL: &str = "SAVEPOINT materialize_due_schedule";
 const ROLLBACK_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL: &str =
     "ROLLBACK TO SAVEPOINT materialize_due_schedule";
@@ -27,6 +29,11 @@ const RELEASE_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL: &str =
 /// materialization failures are logged and deferred so one bad schedule does not
 /// permanently starve other due schedules.
 ///
+/// When a schedule is stale, one missed fire is materialized with its original
+/// `scheduled_for` metadata and the cursor is then coalesced to the first future
+/// fire after the scheduler's current clock. This bounds outage catch-up instead
+/// of replaying every missed cron tick.
+///
 /// Shutdown is requested by sending `true` on `shutdown` or by dropping the
 /// watch sender. This function returns [`RuntimeLoopExit::Shutdown`] after the
 /// shutdown signal is observed.
@@ -39,6 +46,11 @@ pub async fn run_scheduler_loop(
     config: JobsConfig,
     mut shutdown: watch::Receiver<bool>,
 ) -> RuntimeLoopExit {
+    if let Err(error) = config.validate_scheduler_loop() {
+        warn!(%error, "invalid jobs config; stopping scheduler loop");
+        return RuntimeLoopExit::InvalidConfig(error);
+    }
+
     loop {
         if shutdown_requested_or_closed(&shutdown) {
             return scheduler_shutdown_complete();
@@ -245,8 +257,10 @@ async fn materialize_schedule_tx(
     schedule: &jobs::JobScheduleRecord,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    let next_fire_at = compute_next_fire_at_utc(
+    let scheduled_for = schedule.next_fire_at;
+    let next_fire_at = compute_next_fire_at_with_stale_coalescing_utc(
         &schedule.cron_expr,
+        scheduled_for,
         now,
         schedule.id,
         schedule.max_jitter_seconds,
@@ -254,12 +268,7 @@ async fn materialize_schedule_tx(
     .ok_or_else(|| invalid_schedule_cron_error(schedule))?;
 
     let mut payload = schedule.payload_template.clone();
-    merge_schedule_metadata(
-        &mut payload,
-        schedule.id,
-        &schedule.name,
-        schedule.next_fire_at,
-    );
+    merge_schedule_metadata(&mut payload, schedule.id, &schedule.name, scheduled_for);
 
     let enqueue_payload = JobEnqueue {
         job_type: schedule.job_type.as_borrowed(),
@@ -300,6 +309,25 @@ async fn materialize_schedule_tx(
     Ok(())
 }
 
+/// Materializes at most one missed fire for a stale schedule, then coalesces the
+/// cursor to the first future fire so an outage cannot create unbounded replay.
+fn compute_next_fire_at_with_stale_coalescing_utc(
+    cron_expr: &str,
+    scheduled_for: DateTime<Utc>,
+    now: DateTime<Utc>,
+    schedule_id: uuid::Uuid,
+    max_jitter_seconds: i32,
+) -> Option<DateTime<Utc>> {
+    let schedule = Schedule::from_str(cron_expr).ok()?;
+    let next_after_scheduled =
+        next_jittered_fire_after_utc(&schedule, scheduled_for, schedule_id, max_jitter_seconds)?;
+    if next_after_scheduled <= now {
+        compute_coalesced_next_fire_after_now_utc(&schedule, now, schedule_id, max_jitter_seconds)
+    } else {
+        Some(next_after_scheduled)
+    }
+}
+
 fn invalid_schedule_cron_error(schedule: &jobs::JobScheduleRecord) -> SchedulerError {
     SchedulerError::InvalidCronExpression {
         schedule_id: schedule.id,
@@ -335,6 +363,7 @@ fn merge_schedule_metadata(
 }
 
 /// Scheduling semantics are UTC-only across the jobs framework.
+#[cfg(test)]
 fn compute_next_fire_at_utc(
     cron_expr: &str,
     from: DateTime<Utc>,
@@ -342,9 +371,70 @@ fn compute_next_fire_at_utc(
     max_jitter_seconds: i32,
 ) -> Option<DateTime<Utc>> {
     let schedule = Schedule::from_str(cron_expr).ok()?;
+    next_jittered_fire_after_utc(&schedule, from, schedule_id, max_jitter_seconds)
+}
+
+fn compute_coalesced_next_fire_after_now_utc(
+    schedule: &Schedule,
+    now: DateTime<Utc>,
+    schedule_id: uuid::Uuid,
+    max_jitter_seconds: i32,
+) -> Option<DateTime<Utc>> {
+    if max_jitter_seconds <= 0 {
+        return next_jittered_fire_after_utc(schedule, now, schedule_id, max_jitter_seconds);
+    }
+
+    let jitter_window_start = now
+        .checked_sub_signed(Duration::seconds(i64::from(max_jitter_seconds) + 1))
+        .unwrap_or(now);
+    first_jittered_fire_after_utc(
+        schedule,
+        jitter_window_start,
+        now,
+        schedule_id,
+        max_jitter_seconds,
+    )
+    .or_else(|| next_jittered_fire_after_utc(schedule, now, schedule_id, max_jitter_seconds))
+}
+
+fn first_jittered_fire_after_utc(
+    schedule: &Schedule,
+    from: DateTime<Utc>,
+    after: DateTime<Utc>,
+    schedule_id: uuid::Uuid,
+    max_jitter_seconds: i32,
+) -> Option<DateTime<Utc>> {
+    schedule
+        .after(&from)
+        .take(SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT)
+        .map(|next| apply_schedule_jitter(schedule_id, next, max_jitter_seconds))
+        .filter(|next| *next > after)
+        .min()
+}
+
+fn next_jittered_fire_after_utc(
+    schedule: &Schedule,
+    from: DateTime<Utc>,
+    schedule_id: uuid::Uuid,
+    max_jitter_seconds: i32,
+) -> Option<DateTime<Utc>> {
     let next = schedule.after(&from).next()?;
-    let jitter = schedule_jitter_seconds(schedule_id, next, max_jitter_seconds);
-    Some(next + Duration::seconds(jitter))
+    Some(apply_schedule_jitter(schedule_id, next, max_jitter_seconds))
+}
+
+fn apply_schedule_jitter(
+    schedule_id: uuid::Uuid,
+    next_fire_at: DateTime<Utc>,
+    max_jitter_seconds: i32,
+) -> DateTime<Utc> {
+    // Jitter is intentionally non-negative; the stale coalescing search depends
+    // on never moving a cron base earlier than its scheduled time.
+    next_fire_at
+        + Duration::seconds(schedule_jitter_seconds(
+            schedule_id,
+            next_fire_at,
+            max_jitter_seconds,
+        ))
 }
 
 fn schedule_jitter_seconds(

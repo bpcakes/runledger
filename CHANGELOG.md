@@ -6,7 +6,28 @@ All notable changes to this workspace are documented here.
 
 ### Added
 
+- Add durable workflow result handles:
+  `WorkflowDagBuilder::result_step`,
+  `WorkflowRunEnqueueBuilder::try_result_step_key`,
+  `enqueue_workflow_run_handle`, `retrieve_workflow_run_handle`,
+  `workflow_run_handle`, `WorkflowRunHandle::get_status`,
+  `WorkflowRunHandle::get_run`, `WorkflowRunHandle::get_result`, and
+  `WorkflowRunWaitOptions`.
 - Expose successful job completion output on `JobQueueRecord`.
+- Add `count_workflow_runs` and `WorkflowRunCountFilter` for dashboard/admin
+  workflow counters.
+- Add classified job-payload UUID array mutation outcomes with
+  `JobPayloadUuidArrayFieldUpdate` and
+  `JobPayloadUuidArrayFieldUpdateRejection`.
+- Add catalog job definition overrides with
+  `JobCatalogDefinitionOverrides`, `job_with_definition_overrides`, and
+  `definition_overrides`.
+- Add catalog-owned schedule registration and sync APIs:
+  `CatalogJobScheduleSpec`, `JobCatalog::schedule`,
+  `sync_schedules`, `sync_schedules_with`, `sync_schedules_exact`,
+  `sync_schedules_exact_with`, and `JobCatalogScheduleSyncScope`.
+- Expand `runledger-tui` keyboard handling with search, type filters,
+  command palette, paging, payload view toggles, ID copy, and refresh pause.
 
 ### Changed
 
@@ -28,6 +49,26 @@ All notable changes to this workspace are documented here.
   canceling a succeeded run would flip it to `CANCELED`.
 - `WorkflowRunWaitOptions::default()` now waits up to five minutes by default;
   set `timeout: None` to opt into waiting indefinitely.
+- Direct `requeue_job` calls now reject workflow-managed jobs with
+  `job.workflow_requeue_not_supported`; use workflow APIs for workflow step
+  recovery or append/cancel flows instead.
+- Breaking: `update_job_payload_uuid_array_field` now returns
+  `JobPayloadUuidArrayFieldUpdate` instead of `bool`, so callers can distinguish
+  `Updated`, `NotFound`, and rejected mutations for workflow-managed jobs,
+  idempotent request snapshots, and jobs that are no longer pending or claimed.
+- `JobsConfig::validate` rejects directly constructed invalid runtime configs;
+  supervisor construction returns `RuntimeError::InvalidJobsConfig`, and
+  low-level loops can exit with `RuntimeLoopExit::InvalidConfig`.
+- Catalog schedule sync applies each spec's `is_active` value on every sync,
+  while lower-level `upsert_job_schedule` preserves existing active state on
+  conflict.
+- Active schedules require enabled job definitions. Schedule writes/activation
+  can return `job_schedule.definition_not_found_or_disabled`, and disabling a
+  definition referenced by an active schedule returns
+  `job_definition.active_schedule_exists`.
+- The scheduler materializes at most one stale fire after downtime, then
+  coalesces `next_fire_at` to the first future fire instead of replaying every
+  missed cron tick.
 
 ## [0.3.0] - 2026-05-27
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.2.1...v0.3.0)

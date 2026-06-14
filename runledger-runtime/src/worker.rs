@@ -40,6 +40,11 @@ pub async fn run_worker_loop(
     config: JobsConfig,
     mut shutdown: watch::Receiver<bool>,
 ) -> RuntimeLoopExit {
+    if let Err(error) = config.validate_worker_loop() {
+        warn!(%error, "invalid jobs config; stopping worker loop");
+        return RuntimeLoopExit::InvalidConfig(error);
+    }
+
     let registry = Arc::new(registry);
     let claimable_job_types = registry.registered_types();
     let semaphore = Arc::new(Semaphore::new(config.max_global_concurrency));
@@ -129,6 +134,9 @@ async fn drain_in_flight_jobs(mut join_set: JoinSet<()>, exit: RuntimeLoopExit) 
         match exit {
             RuntimeLoopExit::Shutdown => {
                 info!("worker shutdown requested; draining in-flight jobs")
+            }
+            RuntimeLoopExit::InvalidConfig(_) => {
+                warn!("worker loop rejected invalid config; draining in-flight jobs");
             }
             RuntimeLoopExit::Completed => {
                 warn!("worker loop completed before shutdown; draining in-flight jobs");

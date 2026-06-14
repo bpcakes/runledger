@@ -898,9 +898,32 @@ async fn external_result_output_is_idempotent_and_conflicts_on_change() {
         .await
         .expect("identical external completion is idempotent");
 
+    let conflicting_metadata = CompleteExternalWorkflowStepInput {
+        workflow_run_id: handle.workflow_run_id,
+        organization_id: None,
+        step_key: StepKey::new("approval"),
+        terminal_status: WorkflowStepStatus::Succeeded,
+        status_reason: Some("approved-later"),
+        last_error_code: None,
+        last_error_message: None,
+        output: Some(&output),
+    };
+    assert_external_completion_metadata_conflict(
+        &pool,
+        &conflicting_metadata,
+        "changed successful status reason should conflict",
+    )
+    .await;
+
     let conflicting = CompleteExternalWorkflowStepInput {
+        workflow_run_id: handle.workflow_run_id,
+        organization_id: None,
+        step_key: StepKey::new("approval"),
+        terminal_status: WorkflowStepStatus::Succeeded,
+        status_reason: Some("approved"),
+        last_error_code: None,
+        last_error_message: None,
         output: Some(&changed_output),
-        ..input
     };
     let error = complete_external_workflow_step(&pool, &conflicting)
         .await
@@ -971,6 +994,170 @@ async fn external_result_output_idempotency_uses_jsonb_semantics() {
         .await
         .expect("external result should be materialized");
     assert_eq!(result.result, output);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn external_failed_completion_metadata_is_idempotent_and_conflicts_on_change() {
+    let (pool, database) = setup_ephemeral_pool("workflow_external_failed_metadata", 8).await;
+
+    let metadata = json!({"test": "workflow_external_failed_metadata"});
+    let payload = json!({"gate": "approval"});
+    let gate = WorkflowStepEnqueueBuilder::new_external(StepKey::new("approval"), &payload)
+        .try_build()
+        .expect("build external gate");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.external_failed_metadata"),
+        &metadata,
+    )
+    .step(gate)
+    .try_build()
+    .expect("build workflow");
+    let handle = enqueue_workflow_run_handle(&pool, &workflow)
+        .await
+        .expect("enqueue workflow handle");
+
+    let input = CompleteExternalWorkflowStepInput {
+        workflow_run_id: handle.workflow_run_id,
+        organization_id: None,
+        step_key: StepKey::new("approval"),
+        terminal_status: WorkflowStepStatus::Failed,
+        status_reason: Some("approval.rejected"),
+        last_error_code: Some("approval.rejected"),
+        last_error_message: Some("Approval was rejected."),
+        output: None,
+    };
+    let first = complete_external_workflow_step(&pool, &input)
+        .await
+        .expect("first failed external completion succeeds");
+    assert_eq!(first.status, WorkflowStepStatus::Failed);
+    assert_eq!(first.status_reason.as_deref(), Some("approval.rejected"));
+    assert_eq!(first.last_error_code.as_deref(), Some("approval.rejected"));
+    assert_eq!(
+        first.last_error_message.as_deref(),
+        Some("Approval was rejected.")
+    );
+    assert_eq!(first.output, None);
+
+    complete_external_workflow_step(&pool, &input)
+        .await
+        .expect("identical failed external completion is idempotent");
+
+    let changed_reason = CompleteExternalWorkflowStepInput {
+        status_reason: Some("approval.denied"),
+        ..input
+    };
+    assert_external_completion_metadata_conflict(
+        &pool,
+        &changed_reason,
+        "changed failed status reason should conflict",
+    )
+    .await;
+
+    let changed_error_code = CompleteExternalWorkflowStepInput {
+        last_error_code: Some("approval.denied"),
+        ..input
+    };
+    assert_external_completion_metadata_conflict(
+        &pool,
+        &changed_error_code,
+        "changed failed error code should conflict",
+    )
+    .await;
+
+    let changed_error_message = CompleteExternalWorkflowStepInput {
+        last_error_message: Some("Approval was denied."),
+        ..input
+    };
+    assert_external_completion_metadata_conflict(
+        &pool,
+        &changed_error_message,
+        "changed failed error message should conflict",
+    )
+    .await;
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn external_canceled_completion_metadata_is_idempotent_and_conflicts_on_change() {
+    let (pool, database) = setup_ephemeral_pool("workflow_external_canceled_metadata", 8).await;
+
+    let metadata = json!({"test": "workflow_external_canceled_metadata"});
+    let payload = json!({"gate": "approval"});
+    let gate = WorkflowStepEnqueueBuilder::new_external(StepKey::new("approval"), &payload)
+        .try_build()
+        .expect("build external gate");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.external_canceled_metadata"),
+        &metadata,
+    )
+    .step(gate)
+    .try_build()
+    .expect("build workflow");
+    let handle = enqueue_workflow_run_handle(&pool, &workflow)
+        .await
+        .expect("enqueue workflow handle");
+
+    let input = CompleteExternalWorkflowStepInput {
+        workflow_run_id: handle.workflow_run_id,
+        organization_id: None,
+        step_key: StepKey::new("approval"),
+        terminal_status: WorkflowStepStatus::Canceled,
+        status_reason: Some("approval.canceled"),
+        last_error_code: Some("approval.canceled"),
+        last_error_message: Some("Approval was canceled."),
+        output: None,
+    };
+    let first = complete_external_workflow_step(&pool, &input)
+        .await
+        .expect("first canceled external completion succeeds");
+    assert_eq!(first.status, WorkflowStepStatus::Canceled);
+    assert_eq!(first.status_reason.as_deref(), Some("approval.canceled"));
+    assert_eq!(first.last_error_code.as_deref(), Some("approval.canceled"));
+    assert_eq!(
+        first.last_error_message.as_deref(),
+        Some("Approval was canceled.")
+    );
+    assert_eq!(first.output, None);
+
+    complete_external_workflow_step(&pool, &input)
+        .await
+        .expect("identical canceled external completion is idempotent");
+
+    let changed_reason = CompleteExternalWorkflowStepInput {
+        status_reason: Some("approval.aborted"),
+        ..input
+    };
+    assert_external_completion_metadata_conflict(
+        &pool,
+        &changed_reason,
+        "changed canceled status reason should conflict",
+    )
+    .await;
+
+    let changed_error_code = CompleteExternalWorkflowStepInput {
+        last_error_code: Some("approval.aborted"),
+        ..input
+    };
+    assert_external_completion_metadata_conflict(
+        &pool,
+        &changed_error_code,
+        "changed canceled error code should conflict",
+    )
+    .await;
+
+    let changed_error_message = CompleteExternalWorkflowStepInput {
+        last_error_message: Some("Approval was aborted."),
+        ..input
+    };
+    assert_external_completion_metadata_conflict(
+        &pool,
+        &changed_error_message,
+        "changed canceled error message should conflict",
+    )
+    .await;
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -1068,4 +1255,18 @@ fn query_error_code(error: &runledger_postgres::Error) -> Option<&'static str> {
         | runledger_postgres::Error::ConnectionError(_)
         | runledger_postgres::Error::MigrationError(_) => None,
     }
+}
+
+async fn assert_external_completion_metadata_conflict(
+    pool: &PgPool,
+    input: &CompleteExternalWorkflowStepInput<'_>,
+    message: &str,
+) {
+    let error = complete_external_workflow_step(pool, input)
+        .await
+        .expect_err(message);
+    assert_eq!(
+        query_error_code(&error),
+        Some("workflow.external_step_conflicting_completion_retry")
+    );
 }

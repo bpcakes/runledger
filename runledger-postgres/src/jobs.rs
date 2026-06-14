@@ -15,6 +15,7 @@ mod logs;
 mod queue;
 mod row_decode;
 mod runtime_configs;
+mod schedule_definition_guard;
 mod schedules;
 mod transaction_isolation;
 mod types;
@@ -22,7 +23,8 @@ mod workflow_types;
 mod workflows;
 
 pub use admin::{
-    cancel_job, get_job_by_id, get_job_metrics, get_job_payload_by_idempotency_key,
+    JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
+    get_job_by_id, get_job_metrics, get_job_payload_by_idempotency_key,
     get_latest_job_payload_for_run, list_job_events, list_jobs, requeue_job,
     update_job_payload_uuid_array_field,
 };

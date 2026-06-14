@@ -113,9 +113,12 @@ pub mod prelude {
 
 /// Reason a low-level runtime loop exited.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RuntimeLoopExit {
     /// The loop observed a shutdown request or a closed shutdown channel.
     Shutdown,
+    /// The loop rejected an invalid [`config::JobsConfig`] before polling.
+    InvalidConfig(config::JobsConfigValidationError),
     /// The loop completed without observing shutdown. Supervisors treat this as
     /// an unexpected task exit.
     Completed,
