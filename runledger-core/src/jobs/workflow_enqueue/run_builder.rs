@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use super::super::identifiers::WorkflowType;
+use super::super::identifiers::{StepKey, WorkflowType};
 use super::build_validation::validate_workflow_enqueue;
 use super::errors::WorkflowBuildError;
 use super::types::{WorkflowRunEnqueue, WorkflowStepEnqueue};
@@ -53,6 +53,7 @@ pub struct WorkflowRunEnqueueBuilder<'a> {
     organization_id: Option<Uuid>,
     metadata: &'a serde_json::Value,
     idempotency_key: Option<&'a str>,
+    result_step_key: Option<StepKey<'a>>,
     steps: Vec<WorkflowStepEnqueue<'a>>,
 }
 
@@ -85,6 +86,7 @@ impl<'a> WorkflowRunEnqueueBuilder<'a> {
             organization_id: None,
             metadata,
             idempotency_key: None,
+            result_step_key: None,
             steps: Vec::new(),
         }
     }
@@ -167,6 +169,38 @@ impl<'a> WorkflowRunEnqueueBuilder<'a> {
     #[must_use]
     pub fn clear_idempotency_key(mut self) -> Self {
         self.idempotency_key = None;
+        self
+    }
+
+    /// Declares the workflow step whose successful output becomes the workflow result.
+    ///
+    /// The key must be non-blank and must match one of the workflow steps when
+    /// [`Self::try_build`] is called.
+    #[must_use]
+    pub fn result_step_key(mut self, result_step_key: StepKey<'a>) -> Self {
+        self.result_step_key = Some(result_step_key);
+        self
+    }
+
+    /// Declares the workflow result step from a raw step-key string.
+    ///
+    /// # Errors
+    /// Returns [`WorkflowBuildError::BlankResultStepKey`] when `result_step_key` is blank.
+    pub fn try_result_step_key(
+        mut self,
+        result_step_key: &'a str,
+    ) -> Result<Self, WorkflowBuildError> {
+        self.result_step_key = Some(
+            StepKey::try_new(result_step_key)
+                .map_err(|_| WorkflowBuildError::BlankResultStepKey)?,
+        );
+        Ok(self)
+    }
+
+    /// Clears any previously configured workflow result step.
+    #[must_use]
+    pub fn clear_result_step_key(mut self) -> Self {
+        self.result_step_key = None;
         self
     }
 
@@ -293,6 +327,7 @@ impl<'a> WorkflowRunEnqueueBuilder<'a> {
             organization_id: self.organization_id,
             metadata: self.metadata,
             idempotency_key: self.idempotency_key,
+            result_step_key: self.result_step_key,
             steps: self.steps,
         };
         validate_workflow_enqueue(&workflow)?;

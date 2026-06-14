@@ -2,6 +2,33 @@
 
 All notable changes to this workspace are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Expose successful job completion output on `JobQueueRecord`.
+
+### Changed
+
+- Breaking: `JobHandler::execute` now returns `JobCompletion`, allowing handlers
+  to persist compact workflow result output with `JobCompletion::with_output(...)`.
+- Breaking: the stage-bearing `JobProgress` completion type was removed; use
+  `JobCompletion::success()` or `JobCompletion::with_output(...)`. In-flight
+  progress updates still use `JobProgressUpdate`.
+- Breaking: low-level completion inputs gained output fields:
+  `JobCompletionUpdate::output` and `CompleteExternalWorkflowStepInput::output`;
+  set them to `None` when no workflow result output is returned.
+- Breaking: public read DTOs now expose result metadata through
+  `JobQueueRecord::output`, `WorkflowStepDbRecord::output`, and
+  `WorkflowRunDbRecord::result_step_key`; manual construction and exhaustive
+  struct patterns must account for the new fields.
+- Breaking: `cancel_workflow_run_tx` is now a no-op for any already-terminal workflow run
+  (`SUCCEEDED`, `COMPLETED_WITH_ERRORS`, or `CANCELED`) and returns the existing
+  run unchanged; previously only already-canceled runs were skipped, so
+  canceling a succeeded run would flip it to `CANCELED`.
+- `WorkflowRunWaitOptions::default()` now waits up to five minutes by default;
+  set `timeout: None` to opt into waiting indefinitely.
+
 ## [0.3.0] - 2026-05-27
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.2.1...v0.3.0)
 
@@ -96,4 +123,3 @@ All notable changes to this workspace are documented here.
   - Add refresh-sqlx-cache.sh script guidance
   - Include publishing workflow and dependency order
   - Add runledger-postgres SQLx query cache
-

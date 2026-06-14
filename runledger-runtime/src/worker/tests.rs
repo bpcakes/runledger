@@ -7,14 +7,14 @@ use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{
-    JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobEventType, JobFailure, JobFailureKind,
-    JobStatus, JobType,
+    JobCompletion, JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobEventType, JobFailure,
+    JobFailureKind, JobStatus, JobType,
 };
 use runledger_postgres::jobs::{
-    JobDefinitionUpsert, JobEnqueue, JobFailureUpdate, JobProgressUpdate, claim_prestart_jobs,
-    complete_job_failure, complete_job_success, enqueue_job, get_job_by_id, heartbeat_job,
-    list_job_events, reap_expired_leases, release_unstarted_job_claim, update_job_progress,
-    upsert_job_definition_tx,
+    JobCompletionUpdate, JobDefinitionUpsert, JobEnqueue, JobFailureUpdate, JobProgressUpdate,
+    claim_prestart_jobs, complete_job_failure, complete_job_success, enqueue_job, get_job_by_id,
+    heartbeat_job, list_job_events, reap_expired_leases, release_unstarted_job_claim,
+    update_job_progress, upsert_job_definition_tx,
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -53,9 +53,13 @@ impl JobHandler for CountingHandler {
         JobType::new("jobs.test.pre_run_lease_loss")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(JobCompletion::success())
     }
 }
 
@@ -69,9 +73,13 @@ impl JobHandler for PersistenceFailureHandler {
         JobType::new("jobs.test.persistence_failure")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(JobCompletion::success())
     }
 }
 
@@ -106,7 +114,11 @@ impl JobHandler for RetryThenSuccessHandler {
         JobType::new("jobs.test.retry_then_success")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         let prior_runs = self.runs.fetch_add(1, Ordering::SeqCst);
         if prior_runs == 0 {
             return Err(JobFailure::retryable(
@@ -115,7 +127,7 @@ impl JobHandler for RetryThenSuccessHandler {
             ));
         }
 
-        Ok(())
+        Ok(JobCompletion::success())
     }
 }
 
@@ -125,7 +137,11 @@ impl JobHandler for PanickingHandler {
         JobType::new("jobs.test.handler_panic")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         panic!("panic from main job handler");
     }
@@ -137,9 +153,13 @@ impl JobHandler for LoopSuccessHandler {
         JobType::new("jobs.test.handler_panic_successor")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(JobCompletion::success())
     }
 }
 
@@ -149,7 +169,11 @@ impl JobHandler for RecordingDeadLetterHandler {
         JobType::new(self.job_type_name)
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Err(self.failure.clone())
     }
@@ -173,7 +197,11 @@ impl JobHandler for FailingHandler {
         JobType::new(self.job_type_name)
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Err(self.failure.clone())
     }
@@ -206,7 +234,11 @@ impl JobHandler for TerminalHookHangHandler {
         JobType::new("jobs.test.terminal_hook_hang")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Err(JobFailure::terminal(
             "job.test.terminal_failure",
@@ -231,7 +263,11 @@ impl JobHandler for TerminalHookPanicHandler {
         JobType::new("jobs.test.terminal_hook_panic")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Err(JobFailure::terminal(
             "job.test.terminal_failure",
@@ -846,19 +882,21 @@ async fn heartbeat_rejects_lease_that_expires_while_waiting_for_job_lock() {
 }
 
 #[tokio::test]
-async fn successful_completion_rejects_non_completed_stage() {
-    let (pool, database) = setup_ephemeral_pool("jobs_worker_success_invalid_stage", 8).await;
-    let job_type = JobType::new("jobs.test.success_invalid_stage");
+async fn successful_completion_persists_completion_update() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_success_completion_update", 8).await;
+    let job_type = JobType::new("jobs.test.success_completion_update");
     let (job_id, claim) = enqueue_and_claim_job(
         &pool,
         job_type,
         3,
-        json!({"kind":"invalid-success-stage"}),
-        "worker-invalid-success-stage",
+        json!({"kind":"success-completion-update"}),
+        "worker-success-completion-update",
     )
     .await;
 
-    let error = complete_job_success(
+    let checkpoint = json!({"cursor": "next"});
+    let output = json!({"result_id": "result_123"});
+    complete_job_success(
         &pool,
         claim.id,
         claim.run_number,
@@ -867,23 +905,26 @@ async fn successful_completion_rejects_non_completed_stage() {
             .worker_id
             .as_deref()
             .expect("claimed job has worker id"),
-        Some(&JobProgressUpdate {
-            stage: Some(runledger_core::jobs::JobStage::Running),
-            progress_done: None,
-            progress_total: None,
-            checkpoint: None,
+        Some(&JobCompletionUpdate {
+            progress_done: Some(2),
+            progress_total: Some(3),
+            checkpoint: Some(&checkpoint),
+            output: Some(&output),
         }),
     )
     .await
-    .expect_err("success completion should reject non-completed stage");
-    assert_eq!(query_error_code(&error), Some("job.success_stage_invalid"));
+    .expect("success completion should persist completion update");
 
     let job = get_job_by_id(&pool, None, job_id)
         .await
         .expect("load job")
         .expect("job exists");
-    assert_eq!(job.status, JobStatus::Leased);
-    assert_eq!(job.stage, runledger_core::jobs::JobStage::Queued);
+    assert_eq!(job.status, JobStatus::Succeeded);
+    assert_eq!(job.stage, runledger_core::jobs::JobStage::Completed);
+    assert_eq!(job.progress_done, Some(2));
+    assert_eq!(job.progress_total, Some(3));
+    assert_eq!(job.checkpoint, Some(checkpoint));
+    assert_eq!(job.output, Some(output));
 
     teardown_ephemeral_pool(pool, database).await;
 }

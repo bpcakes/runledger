@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workflow_runs\n             SET status = $2::text::workflow_run_status,\n                 finished_at = CASE\n                    WHEN $2::text::workflow_run_status IN ('RUNNING', 'WAITING_FOR_EXTERNAL')\n                        THEN NULL\n                    ELSE COALESCE(finished_at, now())\n                 END,\n                 result = CASE\n                    WHEN $2::text::workflow_run_status = 'SUCCEEDED' THEN (\n                        SELECT ws.output\n                        FROM workflow_steps ws\n                        WHERE ws.workflow_run_id = workflow_runs.id\n                          AND ws.step_key = workflow_runs.result_step_key\n                          AND ws.status = 'SUCCEEDED'\n                        LIMIT 1\n                    )\n                    WHEN $2::text::workflow_run_status IN ('COMPLETED_WITH_ERRORS', 'CANCELED')\n                        THEN NULL\n                    ELSE result\n                 END,\n                 updated_at = now()\n             WHERE id = $1\n               AND status <> 'CANCELED'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f739666274060f765e117d062d9a333dc941af6d0a41f1086e8652c08e75a43a"
+}

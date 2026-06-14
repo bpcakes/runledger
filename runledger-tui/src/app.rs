@@ -639,6 +639,7 @@ mod tests {
             progress_total: None,
             progress_pct: None,
             checkpoint: None,
+            output: None,
             idempotency_key: None,
             status_reason: None,
             last_error_code: None,

@@ -238,6 +238,7 @@ async fn update_dead_lettered_queue_row(
              last_heartbeat_at = NULL,
              worker_id = NULL,
              finished_at = now(),
+             output = NULL,
              status_reason = 'LEASE_EXPIRED',
              last_error_code = 'job.lease_expired',
              last_error_message = 'Job lease expired before completion.',
@@ -404,6 +405,7 @@ async fn handle_exhausted_expired_lease(
         Some(LEASE_EXPIRED_KIND),
         Some(LEASE_EXPIRED_CODE),
         Some(LEASE_EXPIRED_MESSAGE),
+        None,
     )
     .await?;
 
@@ -422,6 +424,7 @@ async fn update_retryable_queue_row(
              last_heartbeat_at = NULL,
              worker_id = NULL,
              next_run_at = now() + ($2::bigint * interval '1 millisecond'),
+             output = NULL,
              status_reason = 'LEASE_EXPIRED',
              last_error_code = 'job.lease_expired',
              last_error_message = 'Job lease expired before completion.',

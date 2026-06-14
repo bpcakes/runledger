@@ -2,9 +2,9 @@ use runledger_core::jobs::{JobStage, WorkflowStepStatus};
 use serde_json::Value;
 use sqlx::types::Uuid;
 
-use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
+use crate::{DbPool, DbTx, Error, Result};
 
-use super::super::super::types::JobProgressUpdate;
+use super::super::super::types::JobCompletionUpdate;
 use super::super::super::workflows::on_terminal;
 use super::common::{COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
 
@@ -13,35 +13,19 @@ struct SuccessProgressUpdate<'a> {
     progress_done: Option<i64>,
     progress_total: Option<i64>,
     checkpoint: Option<&'a Value>,
+    output: Option<&'a Value>,
 }
 
 fn success_progress_update<'a>(
-    progress: Option<&'a JobProgressUpdate<'a>>,
+    progress: Option<&'a JobCompletionUpdate<'a>>,
 ) -> Result<SuccessProgressUpdate<'a>> {
-    if let Some(stage) = progress.and_then(|value| value.stage)
-        && stage != JobStage::Completed
-    {
-        return Err(job_success_stage_invalid_error(stage));
-    }
-
     Ok(SuccessProgressUpdate {
         stage: JobStage::Completed,
         progress_done: progress.and_then(|value| value.progress_done),
         progress_total: progress.and_then(|value| value.progress_total),
         checkpoint: progress.and_then(|value| value.checkpoint),
+        output: progress.and_then(|value| value.output),
     })
-}
-
-fn job_success_stage_invalid_error(stage: JobStage) -> Error {
-    Error::QueryError(QueryError::from_classified(
-        QueryErrorCategory::Validation,
-        "job.success_stage_invalid",
-        "Successful job completion requires the completed stage.",
-        format!(
-            "complete job success received non-completed stage '{}'",
-            stage.as_db_value()
-        ),
-    ))
 }
 
 async fn mark_job_succeeded_tx(
@@ -74,6 +58,7 @@ async fn mark_job_succeeded_tx(
              progress_done = COALESCE($6, progress_done),
              progress_total = COALESCE($7, progress_total),
              checkpoint = COALESCE($8::jsonb, checkpoint),
+             output = $9::jsonb,
              status_reason = NULL,
              last_error_code = NULL,
              last_error_message = NULL,
@@ -89,6 +74,7 @@ async fn mark_job_succeeded_tx(
         progress.progress_done,
         progress.progress_total,
         progress.checkpoint,
+        progress.output,
     )
     .execute(&mut **tx)
     .await
@@ -160,15 +146,15 @@ async fn insert_job_succeeded_event_tx(
 
 /// Completes a leased job successfully.
 ///
-/// Successful completion always persists `JobStage::Completed`; passing any
-/// other stage in the optional progress update is rejected.
+/// Successful completion always persists `JobStage::Completed`. The optional
+/// completion update carries final progress, checkpoint, and output values.
 pub async fn complete_job_success(
     pool: &DbPool,
     job_id: Uuid,
     run_number: i32,
     attempt: i32,
     worker_id: &str,
-    progress: Option<&JobProgressUpdate<'_>>,
+    progress: Option<&JobCompletionUpdate<'_>>,
 ) -> Result<()> {
     let progress = success_progress_update(progress)?;
     let mut tx = pool
@@ -194,6 +180,7 @@ pub async fn complete_job_success(
         Some("SUCCEEDED"),
         None,
         None,
+        progress.output,
     )
     .await?;
 

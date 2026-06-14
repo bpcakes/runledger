@@ -460,6 +460,7 @@ async fn load_workflow_steps_by_keys_tx(
             ws.status_reason,
             ws.last_error_code,
             ws.last_error_message,
+            ws.output,
             ws.created_at,
             ws.updated_at
          FROM workflow_steps ws
@@ -506,6 +507,7 @@ async fn load_workflow_steps_by_keys_tx(
                     status_reason: row.status_reason,
                     last_error_code: row.last_error_code,
                     last_error_message: row.last_error_message,
+                    output: row.output,
                     created_at: row.created_at,
                     updated_at: row.updated_at,
                 },

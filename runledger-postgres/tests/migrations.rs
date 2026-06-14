@@ -1,3 +1,6 @@
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -5,6 +8,8 @@ use runledger_postgres::{
     MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
     migrate_after_idempotency_cutover,
 };
+use runledger_test_support::{TestDbConnectionBudgetPermit, acquire_test_db_connection_budget};
+use serde_json::{Value, json};
 use sqlx::migrate::{Migrate, MigrateError};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{
@@ -15,9 +20,12 @@ const DEFAULT_POSTGRES_IMAGE: &str = "postgres:18";
 const POSTGRES_USER: &str = "runledger";
 const POSTGRES_PASSWORD: &str = "runledger";
 const POSTGRES_DB: &str = "postgres";
+const TEST_ADMIN_DATABASE_URL_ENV: &str = "RUNLEDGER_TEST_ADMIN_DATABASE_URL";
 const MAX_POSTGRES_BOOTSTRAP_ATTEMPTS: u8 = 40;
 const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
 const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
+const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
+const TEST_HARNESS_ADMIN_CONNECTIONS: u32 = 1;
 
 static DATABASE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -25,26 +33,38 @@ struct TestHarness {
     admin_url: String,
     database_name: String,
     pool: PgPool,
-    _container: ContainerAsync<GenericImage>,
+    _connection_budget: TestDbConnectionBudgetPermit,
+    _container: Option<ContainerAsync<GenericImage>>,
 }
 
 impl TestHarness {
     async fn fresh(prefix: &str) -> Self {
-        let image_ref = std::env::var("RUNLEDGER_TEST_PG_IMAGE")
-            .unwrap_or_else(|_| DEFAULT_POSTGRES_IMAGE.into());
-        let (repository, tag) = parse_image_ref(&image_ref);
-        let container = GenericImage::new(repository, tag)
-            .with_exposed_port(ContainerPort::Tcp(5432))
-            .with_env_var("POSTGRES_USER", POSTGRES_USER)
-            .with_env_var("POSTGRES_PASSWORD", POSTGRES_PASSWORD)
-            .with_env_var("POSTGRES_DB", POSTGRES_DB)
-            .start()
-            .await
-            .expect("start postgres container");
+        let connection_budget = acquire_test_db_connection_budget(
+            TEST_HARNESS_POOL_CONNECTIONS + TEST_HARNESS_ADMIN_CONNECTIONS,
+        )
+        .await;
+        let (admin_url, container) =
+            if let Ok(admin_url) = std::env::var(TEST_ADMIN_DATABASE_URL_ENV) {
+                wait_for_postgres(&admin_url).await;
+                (admin_url, None)
+            } else {
+                let image_ref = std::env::var("RUNLEDGER_TEST_PG_IMAGE")
+                    .unwrap_or_else(|_| DEFAULT_POSTGRES_IMAGE.into());
+                let (repository, tag) = parse_image_ref(&image_ref);
+                let container = GenericImage::new(repository, tag)
+                    .with_exposed_port(ContainerPort::Tcp(5432))
+                    .with_env_var("POSTGRES_USER", POSTGRES_USER)
+                    .with_env_var("POSTGRES_PASSWORD", POSTGRES_PASSWORD)
+                    .with_env_var("POSTGRES_DB", POSTGRES_DB)
+                    .start()
+                    .await
+                    .expect("start postgres container");
 
-        let port = resolve_host_port(&container, 5432).await;
-        let admin_url = postgres_admin_url(port);
-        wait_for_postgres(&admin_url).await;
+                let port = resolve_host_port(&container, 5432).await;
+                let admin_url = postgres_admin_url(port);
+                wait_for_postgres(&admin_url).await;
+                (admin_url, Some(container))
+            };
 
         let database_name = build_database_name(prefix);
         let admin_pool = connect_admin_pool(&admin_url)
@@ -59,7 +79,7 @@ impl TestHarness {
 
         let database_url = with_database_name(&admin_url, &database_name);
         let pool = PgPoolOptions::new()
-            .max_connections(4)
+            .max_connections(TEST_HARNESS_POOL_CONNECTIONS)
             .connect(&database_url)
             .await
             .expect("connect postgres");
@@ -68,6 +88,7 @@ impl TestHarness {
             admin_url,
             database_name,
             pool,
+            _connection_budget: connection_budget,
             _container: container,
         }
     }
@@ -245,12 +266,30 @@ async fn ensure_schema_compatible_ignores_unrelated_sqlx_history_with_runledger_
     harness.teardown().await;
 }
 
+#[test]
+fn vendored_migration_copies_match_root_migrations() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("postgres crate should live under workspace root");
+    let root_migrations = workspace_root.join("migrations");
+
+    assert_migration_dir_matches(
+        &root_migrations,
+        &workspace_root.join("runledger-postgres/migrations"),
+    );
+    assert_migration_dir_matches(
+        &root_migrations,
+        &workspace_root.join("runledger-test-support/migrations"),
+    );
+}
+
 #[tokio::test]
 async fn ensure_schema_compatible_rejects_legacy_idempotency_rows() {
     let harness = TestHarness::fresh("runledger_pg_validate_legacy").await;
     apply_runledger_migrations_before_cutover(&harness.pool).await;
     seed_legacy_idempotency_rows(&harness.pool).await;
     apply_enqueue_request_cutover_migration(&harness.pool).await;
+    apply_runledger_migrations_after_cutover(&harness.pool).await;
 
     let error = ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
@@ -270,6 +309,36 @@ async fn migrate_after_idempotency_cutover_rejects_legacy_idempotency_rows() {
         .await
         .expect_err("migrate should reject legacy keyed rows without snapshots");
     assert_legacy_idempotency_snapshot_error(&error, 1, 1);
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn workflow_results_migration_preserves_existing_enqueue_request_snapshots() {
+    let harness = TestHarness::fresh("runledger_pg_workflow_results_preserve").await;
+    apply_runledger_migrations_before_cutover(&harness.pool).await;
+    apply_enqueue_request_cutover_migration(&harness.pool).await;
+    insert_workflow_row_with_pre_result_snapshot(&harness.pool).await;
+
+    apply_runledger_migrations_after_cutover(&harness.pool).await;
+
+    let snapshot = sqlx::query_scalar::<_, Value>(
+        "SELECT enqueue_request
+         FROM workflow_runs
+         WHERE idempotency_key = 'legacy-result-snapshot'
+         LIMIT 1",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("load preserved workflow snapshot");
+    assert_eq!(
+        snapshot,
+        json!({
+            "metadata": {},
+            "steps": []
+        })
+    );
+    assert!(snapshot.get("result_step_key").is_none());
 
     harness.teardown().await;
 }
@@ -560,6 +629,65 @@ fn runledger_migration_versions() -> Vec<i64> {
         .collect()
 }
 
+fn assert_migration_dir_matches(expected_dir: &Path, actual_dir: &Path) {
+    let expected_names = migration_file_names(expected_dir);
+    let actual_names = migration_file_names(actual_dir);
+    assert_eq!(
+        actual_names,
+        expected_names,
+        "migration filenames in {} must match {}",
+        actual_dir.display(),
+        expected_dir.display()
+    );
+
+    for name in expected_names {
+        let expected = fs::read(expected_dir.join(&name)).unwrap_or_else(|error| {
+            panic!(
+                "read expected migration {} from {}: {error}",
+                name,
+                expected_dir.display()
+            )
+        });
+        let actual = fs::read(actual_dir.join(&name)).unwrap_or_else(|error| {
+            panic!(
+                "read actual migration {} from {}: {error}",
+                name,
+                actual_dir.display()
+            )
+        });
+        assert_eq!(
+            actual,
+            expected,
+            "migration {} in {} must match {}",
+            name,
+            actual_dir.display(),
+            expected_dir.display()
+        );
+    }
+}
+
+fn migration_file_names(dir: &Path) -> BTreeSet<String> {
+    fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("read migration directory {}: {error}", dir.display()))
+        .map(|entry| {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!("read migration entry in {}: {error}", dir.display())
+            });
+            entry
+                .file_name()
+                .to_str()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "migration file name is not valid UTF-8 in {}",
+                        dir.display()
+                    )
+                })
+                .to_owned()
+        })
+        .filter(|name| name.ends_with(".sql"))
+        .collect()
+}
+
 async fn apply_runledger_migrations_before_cutover(pool: &PgPool) {
     let mut conn = pool.acquire().await.expect("acquire migration connection");
     (*conn)
@@ -595,6 +723,23 @@ async fn apply_enqueue_request_cutover_migration(pool: &PgPool) {
         .apply(migration)
         .await
         .expect("apply enqueue request cutover migration");
+}
+
+async fn apply_runledger_migrations_after_cutover(pool: &PgPool) {
+    let mut conn = pool.acquire().await.expect("acquire migration connection");
+
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .filter(|migration| migration.version > ENQUEUE_REQUEST_CUTOVER_VERSION)
+    {
+        (*conn).apply(migration).await.unwrap_or_else(|error| {
+            panic!(
+                "apply post-cutover Runledger migration {}: {error}",
+                migration.version
+            )
+        });
+    }
 }
 
 fn assert_legacy_idempotency_snapshot_error(
@@ -727,6 +872,30 @@ async fn insert_legacy_workflow_row(
     .bind(idempotency_key)
     .execute(pool)
     .await
+}
+
+async fn insert_workflow_row_with_pre_result_snapshot(pool: &PgPool) {
+    sqlx::query(
+        "INSERT INTO workflow_runs (
+            workflow_type,
+            idempotency_key,
+            metadata,
+            enqueue_request
+         )
+         VALUES (
+            'workflow.test.pre_result_snapshot',
+            'legacy-result-snapshot',
+            '{}'::jsonb,
+            $1::jsonb
+         )",
+    )
+    .bind(json!({
+        "metadata": {},
+        "steps": []
+    }))
+    .execute(pool)
+    .await
+    .expect("insert pre-result workflow snapshot");
 }
 
 async fn seed_unrelated_sqlx_migration(pool: &PgPool, version: i64, success: bool) {

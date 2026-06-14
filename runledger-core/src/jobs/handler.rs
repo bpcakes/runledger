@@ -4,12 +4,16 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::identifiers::JobType;
-use super::{JobContext, JobDeadLetterInfo, JobFailure};
+use super::{JobCompletion, JobContext, JobDeadLetterInfo, JobFailure};
 
 #[async_trait]
 pub trait JobHandler: Send + Sync {
     fn job_type(&self) -> JobType<'static>;
-    async fn execute(&self, context: JobContext, payload: Value) -> Result<(), JobFailure>;
+    async fn execute(
+        &self,
+        context: JobContext,
+        payload: Value,
+    ) -> Result<JobCompletion, JobFailure>;
 
     async fn on_dead_letter(
         &self,

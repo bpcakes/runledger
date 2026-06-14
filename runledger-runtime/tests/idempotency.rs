@@ -1070,6 +1070,63 @@ async fn workflow_enqueue_idempotency_rejects_conflicting_retry() {
 }
 
 #[tokio::test]
+async fn workflow_enqueue_idempotency_rejects_changed_result_step_key() {
+    let (pool, database) =
+        setup_ephemeral_pool("workflow_idempotent_result_step_conflict", 8).await;
+
+    let workflow_type = WorkflowType::new("workflow.test.idempotent_result_step_conflict");
+    let metadata = json!({"source": "test"});
+    let first_payload = json!({"step": "first"});
+    let second_payload = json!({"step": "second"});
+    let first = WorkflowRunEnqueueBuilder::new(workflow_type, &metadata)
+        .idempotency_key("conflicting-workflow-result-step")
+        .step(
+            WorkflowStepEnqueueBuilder::new_external(StepKey::new("first"), &first_payload)
+                .try_build()
+                .expect("build first external step"),
+        )
+        .step(
+            WorkflowStepEnqueueBuilder::new_external(StepKey::new("second"), &second_payload)
+                .try_build()
+                .expect("build second external step"),
+        )
+        .try_result_step_key("first")
+        .expect("set first result step")
+        .try_build()
+        .expect("build first workflow");
+    let changed = WorkflowRunEnqueueBuilder::new(workflow_type, &metadata)
+        .idempotency_key("conflicting-workflow-result-step")
+        .step(
+            WorkflowStepEnqueueBuilder::new_external(StepKey::new("first"), &first_payload)
+                .try_build()
+                .expect("build retry first external step"),
+        )
+        .step(
+            WorkflowStepEnqueueBuilder::new_external(StepKey::new("second"), &second_payload)
+                .try_build()
+                .expect("build retry second external step"),
+        )
+        .try_result_step_key("second")
+        .expect("set changed result step")
+        .try_build()
+        .expect("build changed workflow");
+
+    enqueue_workflow_run(&pool, &first)
+        .await
+        .expect("first workflow enqueue succeeds");
+    let error = enqueue_workflow_run(&pool, &changed)
+        .await
+        .expect_err("changed result step retry should be rejected");
+
+    assert_eq!(
+        query_error_code(&error),
+        Some("workflow.enqueue_conflicting_retry")
+    );
+    assert_error_does_not_expose(&error, "conflicting-workflow-result-step");
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn append_workflow_steps_rejects_conflicting_retry() {
     let (pool, database) = setup_ephemeral_pool("workflow_append_conflicting_retry", 8).await;
 
@@ -1390,6 +1447,7 @@ async fn append_workflow_steps_identical_retry_after_closed_window_is_already_ap
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
+            output: None,
         },
     )
     .await

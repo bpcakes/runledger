@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use runledger_core::jobs::{
-    JobContext, JobFailure, JobStage, JobStatus, JobType, WorkflowBuildError,
+    JobCompletion, JobContext, JobFailure, JobStage, JobStatus, JobType, WorkflowBuildError,
 };
 use runledger_postgres::jobs::{
     JobDefinitionUpdate, enqueue_job, get_job_by_id, get_job_definition_by_type,
@@ -42,9 +42,13 @@ impl JobHandler for CountingHandler {
         JobType::new(CATALOG_TEST_JOB)
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(JobCompletion::success())
     }
 }
 
@@ -56,8 +60,12 @@ impl JobHandler for HandlerReturningOtherType {
         JobType::new(CATALOG_OTHER_JOB)
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-        Ok(())
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        Ok(JobCompletion::success())
     }
 }
 
@@ -69,8 +77,12 @@ impl JobHandler for HandlerReturningThirdType {
         JobType::new(CATALOG_THIRD_JOB)
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-        Ok(())
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        Ok(JobCompletion::success())
     }
 }
 

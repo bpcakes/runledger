@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             status_reason: Some("approved by trusted service"),
             last_error_code: None,
             last_error_message: None,
+            output: None,
         },
     )
     .await?;

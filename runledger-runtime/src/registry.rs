@@ -66,7 +66,7 @@ impl JobHandlerRegistry for JobRegistry {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use runledger_core::jobs::{JobContext, JobFailure, JobType};
+    use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobType};
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -80,8 +80,12 @@ mod tests {
             JobType::new("jobs.example")
         }
 
-        async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-            Ok(())
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::success())
         }
     }
 

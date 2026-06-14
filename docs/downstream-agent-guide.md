@@ -23,6 +23,7 @@ together.
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
 | Multi-step work with dependencies | Workflow DAG APIs |
+| Multi-step work with a durable JSON result | Workflow result-step and handle APIs |
 | Fan-out, fan-in, or ordered stages | Workflow DAG APIs |
 | Human/API approval or another external gate | External workflow steps |
 | Delayed or recurring entrypoint | `runledger_postgres::jobs::upsert_job_schedule` |
@@ -42,6 +43,18 @@ If the task requires step dependencies, build a workflow DAG:
    settings, external steps, hand-authored dependency specs, or call sites that
    pass explicit `StepKey` and `JobType` values.
 3. Persist the run with `runledger_postgres::jobs::enqueue_workflow_run`.
+
+If callers need a durable workflow result, declare one initial DAG step as the
+result step with `WorkflowDagBuilder::result_step(...)` or
+`WorkflowRunEnqueueBuilder::try_result_step_key(...)`, enqueue with
+`runledger_postgres::jobs::enqueue_workflow_run_handle`, and read through
+`WorkflowRunHandle::get_result`. Job handlers return `JobCompletion`; use
+`JobCompletion::with_output(...)` for compact JSON result metadata. If the run
+succeeds but the declared result step stores no output, `get_result` returns
+`WorkflowRunHandleError::ResultMissing`. `WorkflowRunWaitOptions::default()`
+waits up to five minutes; set `timeout: None` only when the caller intentionally
+wants to wait indefinitely and can afford the pending PostgreSQL listener
+connection.
 
 `WorkflowDagBuilder` validates workflow shape, not job registration. `.job(...)`
 rejects blank identifiers and duplicate step keys immediately, but it does not

@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{
-    JobContext, JobDeadLetterInfo, JobFailure, JobStage, JobStatus, JobType,
+    JobCompletion, JobContext, JobDeadLetterInfo, JobFailure, JobStage, JobStatus, JobType,
 };
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
@@ -155,18 +155,22 @@ impl JobHandler for SmokeHandler {
         JobType::new(SMOKE_JOB_TYPE)
     }
 
-    async fn execute(&self, _context: JobContext, payload: Value) -> Result<(), JobFailure> {
+    async fn execute(
+        &self,
+        _context: JobContext,
+        payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
         self.execution_count.fetch_add(1, Ordering::SeqCst);
 
         match payload_kind(&payload) {
-            "success" | "scheduled-success" => Ok(()),
+            "success" | "scheduled-success" => Ok(JobCompletion::success()),
             "terminal" => Err(JobFailure::terminal(
                 "smoke.terminal_failure",
                 "Smoke handler returned a terminal failure.",
             )),
             "hang" => {
                 self.hang_release.notified().await;
-                Ok(())
+                Ok(JobCompletion::success())
             }
             other => Err(JobFailure::terminal(
                 "smoke.unknown_kind",

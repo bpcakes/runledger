@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_queue\n         SET status = 'PENDING',\n             lease_expires_at = NULL,\n             last_heartbeat_at = NULL,\n             worker_id = NULL,\n             next_run_at = now() + ($5::bigint * interval '1 millisecond'),\n             output = NULL,\n             status_reason = $6,\n             last_error_code = $7,\n             last_error_message = $8,\n             updated_at = now()\n         WHERE id = $1\n           AND run_number = $2\n           AND attempt = $3\n           AND worker_id = $4\n           AND status = 'LEASED'\n         RETURNING next_run_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_run_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f2c0cecb5440dd84792a7b5d479e9c7753504ded1fee41d4e9873907ea89f64"
+}

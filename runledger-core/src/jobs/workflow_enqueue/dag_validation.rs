@@ -58,6 +58,13 @@ pub enum WorkflowDagValidationError {
     },
     /// The workflow idempotency key was blank.
     BlankIdempotencyKey,
+    /// The workflow result step key was blank.
+    BlankResultStepKey,
+    /// The workflow result step key does not match any step.
+    UnknownResultStepKey {
+        /// The missing result step key.
+        step_key: String,
+    },
     /// A step max-attempts override was zero or negative.
     NonPositiveStepMaxAttempts {
         /// The step with the invalid max-attempts override.
@@ -280,6 +287,12 @@ pub fn validate_workflow_run_enqueue(
     {
         return Err(WorkflowDagValidationError::BlankIdempotencyKey);
     }
+    if payload
+        .result_step_key()
+        .is_some_and(|step_key| step_key.as_str().trim().is_empty())
+    {
+        return Err(WorkflowDagValidationError::BlankResultStepKey);
+    }
 
     let steps = payload
         .steps()
@@ -302,7 +315,20 @@ pub fn validate_workflow_run_enqueue(
         })
         .collect::<Vec<_>>();
 
-    validate_workflow_dag(payload.workflow_type(), &steps)
+    validate_workflow_dag(payload.workflow_type(), &steps)?;
+
+    if let Some(result_step_key) = payload.result_step_key()
+        && !payload
+            .steps()
+            .iter()
+            .any(|step| step.step_key() == result_step_key)
+    {
+        return Err(WorkflowDagValidationError::UnknownResultStepKey {
+            step_key: result_step_key.as_str().to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 /// Validates steps that are about to be appended to an existing workflow.

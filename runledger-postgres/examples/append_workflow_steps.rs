@@ -27,6 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             status_reason: Some("seed accepted"),
             last_error_code: None,
             last_error_message: None,
+            output: None,
         },
     )
     .await?;

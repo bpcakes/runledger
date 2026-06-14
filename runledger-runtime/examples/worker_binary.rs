@@ -14,8 +14,12 @@ impl JobHandler for SendEmail {
         JobType::new("jobs.email.send")
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<(), JobFailure> {
-        Ok(())
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        Ok(JobCompletion::success())
     }
 }
 
