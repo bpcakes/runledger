@@ -8,6 +8,13 @@ PUBLISHABLE_CRATES=(
   "runledger-test-support"
   "runledger-postgres"
   "runledger-runtime"
+  "runledger-tui"
+)
+WORKSPACE_DEPENDENCY_CRATES=(
+  "runledger-core"
+  "runledger-test-support"
+  "runledger-postgres"
+  "runledger-runtime"
 )
 PUBLISH_REMOTE="${PUBLISH_REMOTE:-origin}"
 
@@ -53,7 +60,9 @@ require_manifest_versions() {
     if [[ "$manifest_version" != "$version" ]]; then
       die "${crate} manifest is ${manifest_version}, expected ${version}"
     fi
+  done
 
+  for crate in "${WORKSPACE_DEPENDENCY_CRATES[@]}"; do
     grep -Eq "^${crate}[[:space:]]*=[[:space:]]*\\{[[:space:]]*version[[:space:]]*=[[:space:]]*\"${version}\"" "$ROOT_DIR/Cargo.toml" \
       || die "workspace dependency for ${crate} is not pinned to ${version}"
   done

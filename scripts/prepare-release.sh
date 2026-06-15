@@ -8,6 +8,13 @@ PUBLISHABLE_CRATES=(
   "runledger-test-support"
   "runledger-postgres"
   "runledger-runtime"
+  "runledger-tui"
+)
+WORKSPACE_DEPENDENCY_CRATES=(
+  "runledger-core"
+  "runledger-test-support"
+  "runledger-postgres"
+  "runledger-runtime"
 )
 
 usage() {
@@ -99,6 +106,9 @@ done
 
 for crate in "${PUBLISHABLE_CRATES[@]}"; do
   bump_crate_manifest "$ROOT_DIR/${crate}/Cargo.toml"
+done
+
+for crate in "${WORKSPACE_DEPENDENCY_CRATES[@]}"; do
   bump_workspace_dependency "$crate"
 done
 
@@ -110,7 +120,7 @@ cargo test --workspace
 
 cargo publish --allow-dirty --dry-run -p runledger-core
 
-for crate in runledger-test-support runledger-postgres runledger-runtime; do
+for crate in runledger-test-support runledger-postgres runledger-runtime runledger-tui; do
   cargo package \
     --allow-dirty \
     --no-verify \

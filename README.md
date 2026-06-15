@@ -74,12 +74,12 @@ Add the libraries to your service:
 
 ```toml
 [dependencies]
-runledger-core = "0.3"
-runledger-postgres = "0.3"
-runledger-runtime = "0.3"
+runledger-core = "0.4"
+runledger-postgres = "0.4"
+runledger-runtime = "0.4"
 
 [dev-dependencies]
-runledger-test-support = "0.3"
+runledger-test-support = "0.4"
 ```
 
 The published crates require **Rust 1.88+** and a PostgreSQL database that
@@ -788,7 +788,7 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.3.0
+./scripts/prepare-release.sh 0.4.0
 ```
 
 The preparation script requires a clean working tree, bumps publishable crate
@@ -801,11 +801,11 @@ packaging the dependent crates locally. If publishing manually, run
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.3.0
+./scripts/publish-release.sh 0.4.0
 ```
 
 The publish script publishes crates in dependency order, dry-runs each once its
-workspace dependencies are indexed, creates a `v0.3.0` tag, and pushes the
+workspace dependencies are indexed, creates a `v0.4.0` tag, and pushes the
 current branch and tag. Set `PUBLISH_REMOTE` to override the git remote for the
 final push.
 

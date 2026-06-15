@@ -4,6 +4,9 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-15
+[Compare changes](https://github.com/featherenvy/runledger/compare/v0.3.0...v0.4.0)
+
 ### Added
 
 - Add durable workflow result handles:
@@ -71,7 +74,7 @@ All notable changes to this workspace are documented here.
   missed cron tick.
 
 ## [0.3.0] - 2026-05-27
-[Compare changes](https://github.com/bpcakes/runledger/compare/v0.2.1...v0.3.0)
+[Compare changes](https://github.com/featherenvy/runledger/compare/v0.2.1...v0.3.0)
 
 ### Added
 
@@ -93,7 +96,7 @@ All notable changes to this workspace are documented here.
 - Fix cargo deny CI runner
 
 ## [0.2.1] - 2026-05-25
-[Compare changes](https://github.com/bpcakes/runledger/compare/v0.1.2...v0.2.1)
+[Compare changes](https://github.com/featherenvy/runledger/compare/v0.1.2...v0.2.1)
 
 ### Added
 
@@ -116,7 +119,7 @@ All notable changes to this workspace are documented here.
 - Improve runtime supervisor and agent-facing docs
 
 ## [0.1.2] - 2026-05-19
-[Compare changes](https://github.com/bpcakes/runledger/compare/v0.1.1...v0.1.2)
+[Compare changes](https://github.com/featherenvy/runledger/compare/v0.1.1...v0.1.2)
 
 ### Added
 
