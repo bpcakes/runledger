@@ -87,6 +87,11 @@ struct RetryThenSuccessHandler {
     runs: Arc<AtomicUsize>,
 }
 
+struct InvalidCompletionProgressHandler {
+    runs: Arc<AtomicUsize>,
+    dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
+}
+
 struct PanickingHandler {
     runs: Arc<AtomicUsize>,
 }
@@ -128,6 +133,34 @@ impl JobHandler for RetryThenSuccessHandler {
         }
 
         Ok(JobCompletion::success())
+    }
+}
+
+#[async_trait::async_trait]
+impl JobHandler for InvalidCompletionProgressHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.test.invalid_completion_progress")
+    }
+
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(JobCompletion::success().progress(2, 1))
+    }
+
+    async fn on_dead_letter(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+        dead_letter: JobDeadLetterInfo,
+    ) {
+        self.dead_letters
+            .lock()
+            .expect("dead-letter list lock should not be poisoned")
+            .push(dead_letter);
     }
 }
 
@@ -969,6 +1002,91 @@ async fn standalone_success_completion_allows_non_read_committed_session() {
         .expect("load job")
         .expect("job exists");
     assert_eq!(job.status, JobStatus::Succeeded);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn process_claimed_job_terminally_fails_invalid_success_progress_without_replay() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_invalid_success_progress", 8).await;
+
+    let (job_id, claimed_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.invalid_completion_progress"),
+        3,
+        json!({"kind":"invalid-success-progress"}),
+        "worker-invalid-success-progress",
+    )
+    .await;
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let dead_letters = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = JobRegistry::new();
+    registry.register(InvalidCompletionProgressHandler {
+        runs: runs.clone(),
+        dead_letters: dead_letters.clone(),
+    });
+
+    process_claimed_job(pool.clone(), Arc::new(registry), claimed_job, 30).await;
+
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let dead_letters = clone_dead_letters(&dead_letters);
+    assert_eq!(dead_letters.len(), 1);
+    let dead_letter = &dead_letters[0];
+    assert_eq!(
+        dead_letter.reason,
+        JobDeadLetterReason::FailureKindNonRetryable
+    );
+    assert_eq!(dead_letter.failure.kind, JobFailureKind::Terminal);
+    assert_eq!(dead_letter.failure.code, "job.invalid_completion_progress");
+    assert_eq!(dead_letter.max_attempts, Some(3));
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job")
+        .expect("job exists");
+    assert_eq!(persisted.status, JobStatus::DeadLettered);
+    assert_eq!(persisted.status_reason.as_deref(), Some("TERMINAL"));
+    assert_eq!(
+        persisted.last_error_code.as_deref(),
+        Some("job.invalid_completion_progress")
+    );
+    assert!(persisted.worker_id.is_none());
+    assert!(persisted.lease_expires_at.is_none());
+
+    let events = list_job_events(&pool, None, job_id, 50, None)
+        .await
+        .expect("list job events");
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event_type != JobEventType::Succeeded),
+        "invalid success completion must not write a succeeded event"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event_type != JobEventType::RetryScheduled),
+        "invalid success completion must not schedule a retry"
+    );
+    let failed = events
+        .iter()
+        .find(|event| event.event_type == JobEventType::Failed)
+        .expect("failed event should exist");
+    assert_eq!(failed.payload.get("kind"), Some(&json!("TERMINAL")));
+    assert_eq!(
+        failed.payload.get("error_code"),
+        Some(&json!("job.invalid_completion_progress"))
+    );
+
+    reap_expired_leases(&pool, 10, 1_000)
+        .await
+        .expect("reaper should not requeue terminal invalid completion");
+    let replay_claims = claim_prestart_jobs(&pool, "worker-invalid-success-replay", 30, 1)
+        .await
+        .expect("claim after terminal invalid completion");
+    assert!(replay_claims.is_empty());
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
 
     teardown_ephemeral_pool(pool, database).await;
 }

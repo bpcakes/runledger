@@ -58,8 +58,9 @@ pub async fn fetch_workflow_detail(
     pool: &DbPool,
     scope: Scope,
     run_id: uuid::Uuid,
+    limit: i64,
 ) -> Result<WorkflowDetailData, String> {
-    workflows::fetch_detail(pool, scope, run_id).await
+    workflows::fetch_detail(pool, scope, run_id, limit).await
 }
 
 pub async fn fetch_definitions(

@@ -11,6 +11,12 @@ use sqlx::types::Uuid;
 /// cursors, and the persistence layer rejects larger values.
 pub const JOB_SCHEDULE_MAX_JITTER_SECONDS: i32 = 86_400;
 
+/// Maximum page size accepted by public job and workflow list APIs.
+///
+/// This bounds accidental unbounded reads from admin/TUI surfaces while still
+/// allowing operators to inspect a large page when needed.
+pub const JOB_LIST_PAGE_LIMIT_MAX: i64 = 1_000;
+
 #[derive(Debug, Clone)]
 pub struct JobDefinitionUpsert<'a> {
     pub job_type: JobType<'a>,
@@ -233,10 +239,29 @@ pub struct ReapedTerminalLeaseRecord {
     pub payload: Value,
 }
 
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct ReapExpiredLeaseDeferredError {
+    pub job_id: Uuid,
+    pub run_number: i32,
+    pub attempt: i32,
+    pub error_code: String,
+    pub error_message: String,
+    pub sqlstate: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReapExpiredLeasesResult {
     pub processed: i64,
     pub terminal_dead_lettered: Vec<ReapedTerminalLeaseRecord>,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct ReapExpiredLeasesDetailedResult {
+    pub summary: ReapExpiredLeasesResult,
+    pub deferred_row_error_count: usize,
+    pub deferred_row_errors: Vec<ReapExpiredLeaseDeferredError>,
 }
 
 #[derive(Debug, Clone)]

@@ -89,12 +89,21 @@ pub fn draw_detail(
     f.render_widget(Paragraph::new(scope_banner(app.scope)), chunks[0]);
 
     let run = &data.run;
-    let header = format!(
+    let mut header = format!(
         "Run {} | {} | {}",
         short_uuid(run.id),
         run.workflow_type.as_str(),
         workflow_run_status_label(run.status),
     );
+    if data.steps_truncated() || data.dependencies_truncated() {
+        header.push_str(&format!(
+            "\nShowing {} of {} steps and {} of {} dependencies.",
+            data.steps.len(),
+            data.steps_total,
+            data.dependencies.len(),
+            data.dependencies_total
+        ));
+    }
     f.render_widget(Paragraph::new(header), chunks[1]);
 
     let step_columns = [
@@ -176,6 +185,11 @@ pub fn draw_detail(
         .iter()
         .map(|s| (s.id, s.step_key.as_str()))
         .collect();
+    let missing_step_label = if data.steps_truncated() {
+        "(outside page)"
+    } else {
+        "?"
+    };
     let dep_rows: Vec<TableRow> = data
         .dependencies
         .iter()
@@ -198,7 +212,7 @@ pub fn draw_detail(
                     step_key_by_id
                         .get(&d.prerequisite_step_id)
                         .copied()
-                        .unwrap_or("?")
+                        .unwrap_or(missing_step_label)
                         .to_owned(),
                     CellAlign::Left,
                 ),
@@ -206,7 +220,7 @@ pub fn draw_detail(
                     step_key_by_id
                         .get(&d.dependent_step_id)
                         .copied()
-                        .unwrap_or("?")
+                        .unwrap_or(missing_step_label)
                         .to_owned(),
                     CellAlign::Left,
                 ),
@@ -214,12 +228,17 @@ pub fn draw_detail(
             ])
         })
         .collect();
+    let dependency_empty = if data.dependencies_truncated() {
+        "No direct dependencies in the fetched page; more dependency rows are available."
+    } else {
+        "The selected step has no direct dependencies."
+    };
     draw_table_unselected(
         f,
         chunks[3],
         " Dependencies for selected step ",
         &dep_columns,
         dep_rows,
-        "The selected step has no direct dependencies.",
+        dependency_empty,
     );
 }

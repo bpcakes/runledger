@@ -6,6 +6,7 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
+use super::super::errors::validate_positive_lease_duration;
 use super::super::row_decode::{parse_job_stage, parse_job_status, parse_job_type_name};
 use super::super::transaction_isolation::ensure_read_committed_tx;
 use super::super::types::{JobEnqueue, JobQueueRecord};
@@ -390,6 +391,8 @@ pub async fn claim_jobs(
     lease_duration_seconds: i32,
     limit: i64,
 ) -> Result<Vec<JobQueueRecord>> {
+    validate_positive_lease_duration(lease_duration_seconds)?;
+
     claim_jobs_inner(
         pool,
         worker_id,
@@ -408,6 +411,8 @@ pub async fn claim_jobs_for_types(
     limit: i64,
     allowed_job_types: &[JobType<'_>],
 ) -> Result<Vec<JobQueueRecord>> {
+    validate_positive_lease_duration(lease_duration_seconds)?;
+
     if allowed_job_types.is_empty() {
         return Ok(Vec::new());
     }
@@ -429,6 +434,8 @@ pub async fn claim_prestart_jobs(
     lease_duration_seconds: i32,
     limit: i64,
 ) -> Result<Vec<JobQueueRecord>> {
+    validate_positive_lease_duration(lease_duration_seconds)?;
+
     claim_jobs_inner(
         pool,
         worker_id,
@@ -447,6 +454,8 @@ pub async fn claim_prestart_jobs_for_types(
     limit: i64,
     allowed_job_types: &[JobType<'_>],
 ) -> Result<Vec<JobQueueRecord>> {
+    validate_positive_lease_duration(lease_duration_seconds)?;
+
     if allowed_job_types.is_empty() {
         return Ok(Vec::new());
     }

@@ -3,6 +3,7 @@ use std::{error::Error as StdError, fmt};
 use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 use runledger_core::jobs::{JobType, JobTypeName};
 
+use super::super::errors::validate_pagination;
 use super::super::row_decode::parse_job_type_name;
 use super::super::schedule_definition_guard::{
     self, GuardLockContext, ScheduleDefinitionLockError,
@@ -456,6 +457,8 @@ pub async fn list_job_definitions(
     pool: &DbPool,
     filter: &JobDefinitionListFilter<'_>,
 ) -> Result<Vec<JobDefinitionRecord>> {
+    validate_pagination(filter.limit, filter.offset)?;
+
     let escaped_job_type = filter.job_type.map(escape_ilike_pattern);
 
     let rows = sqlx::query!(

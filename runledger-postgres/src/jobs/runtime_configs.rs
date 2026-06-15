@@ -1,7 +1,7 @@
 use crate::{DbPool, DbTx, Error, Result};
 use runledger_core::jobs::JobType;
 
-use super::errors::runtime_config_not_found_error;
+use super::errors::{runtime_config_not_found_error, validate_pagination};
 use super::row_decode::parse_job_type_name;
 use super::types::{JobRuntimeConfigListFilter, JobRuntimeConfigRecord, JobRuntimeConfigUpsert};
 
@@ -142,6 +142,8 @@ pub async fn list_job_runtime_configs(
     pool: &DbPool,
     filter: &JobRuntimeConfigListFilter<'_>,
 ) -> Result<Vec<JobRuntimeConfigRecord>> {
+    validate_pagination(filter.limit, filter.offset)?;
+
     let rows = sqlx::query!(
         "SELECT
             job_type,
