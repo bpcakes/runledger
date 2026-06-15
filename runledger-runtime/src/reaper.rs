@@ -42,7 +42,7 @@ pub async fn run_reaper_loop(
             return reaper_shutdown_complete();
         }
 
-        match runledger_postgres::jobs::reap_expired_leases_with_terminal_records(
+        match runledger_postgres::jobs::reap_expired_leases_with_diagnostics(
             &pool,
             config.claim_batch_size,
             config.reaper_retry_delay_ms,
@@ -50,13 +50,17 @@ pub async fn run_reaper_loop(
         .await
         {
             Ok(result) => {
-                if result.processed > 0 {
-                    info!(reaped = result.processed, "reaper reclaimed expired leases");
+                if result.summary.processed > 0 {
+                    info!(
+                        reaped = result.summary.processed,
+                        "reaper reclaimed expired leases"
+                    );
                 }
+                log_deferred_row_errors(&result);
 
                 let fanout_result = notify_handlers_of_terminal_lease_expirations(
                     registry.as_ref(),
-                    &result.terminal_dead_lettered,
+                    &result.summary.terminal_dead_lettered,
                     &mut shutdown,
                 )
                 .await;
@@ -80,6 +84,30 @@ pub async fn run_reaper_loop(
         if wait_for_shutdown_or_poll(&mut shutdown, config.reaper_interval).await {
             return reaper_shutdown_complete();
         }
+    }
+}
+
+fn log_deferred_row_errors(result: &runledger_postgres::jobs::ReapExpiredLeasesDetailedResult) {
+    for error in &result.deferred_row_errors {
+        warn!(
+            job_id = %error.job_id,
+            run_number = error.run_number,
+            attempt = error.attempt,
+            error_code = %error.error_code,
+            error_message = %error.error_message,
+            error_sqlstate = error.sqlstate.as_deref().unwrap_or(""),
+            deferred_row_error_count = result.deferred_row_error_count,
+            logged_deferred_row_errors = result.deferred_row_errors.len(),
+            "reaper deferred expired leased job after row-level processing error"
+        );
+    }
+
+    if result.deferred_row_error_count > result.deferred_row_errors.len() {
+        warn!(
+            deferred_row_error_count = result.deferred_row_error_count,
+            logged_deferred_row_errors = result.deferred_row_errors.len(),
+            "reaper deferred additional expired leased jobs after row-level processing errors"
+        );
     }
 }
 

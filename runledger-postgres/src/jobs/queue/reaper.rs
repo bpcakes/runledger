@@ -5,8 +5,12 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, DbTx, Error, Result};
 
+use super::super::errors::validate_positive_retry_delay;
 use super::super::row_decode::parse_job_type_name;
-use super::super::types::{ReapExpiredLeasesResult, ReapedTerminalLeaseRecord};
+use super::super::types::{
+    ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult,
+    ReapedTerminalLeaseRecord,
+};
 use super::super::workflows::{on_retry_scheduled, on_terminal};
 use super::attempts::ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART;
 use super::release::{
@@ -18,6 +22,7 @@ pub async fn reap_expired_leases(
     limit: i64,
     default_retry_delay_ms: i32,
 ) -> Result<i64> {
+    validate_positive_retry_delay(default_retry_delay_ms)?;
     let result =
         reap_expired_leases_with_terminal_records(pool, limit, default_retry_delay_ms).await?;
     Ok(result.processed)
@@ -28,6 +33,17 @@ pub async fn reap_expired_leases_with_terminal_records(
     limit: i64,
     default_retry_delay_ms: i32,
 ) -> Result<ReapExpiredLeasesResult> {
+    let result = reap_expired_leases_with_diagnostics(pool, limit, default_retry_delay_ms).await?;
+    Ok(result.summary)
+}
+
+pub async fn reap_expired_leases_with_diagnostics(
+    pool: &DbPool,
+    limit: i64,
+    default_retry_delay_ms: i32,
+) -> Result<ReapExpiredLeasesDetailedResult> {
+    validate_positive_retry_delay(default_retry_delay_ms)?;
+
     let mut tx = pool
         .begin()
         .await
@@ -68,6 +84,8 @@ pub async fn reap_expired_leases_with_terminal_records(
 
     let mut processed: i64 = 0;
     let mut terminal_dead_lettered = Vec::new();
+    let mut deferred_row_error_count = 0;
+    let mut deferred_row_errors = Vec::new();
     for db_row in rows {
         let row = ReapExpiredLeaseRow {
             job_id: db_row.id,
@@ -99,7 +117,9 @@ pub async fn reap_expired_leases_with_terminal_records(
             .await
         {
             Ok(disposition) => disposition,
-            Err(_error) => {
+            Err(error) => {
+                log_trusted_deferred_row_error(&row, &error);
+
                 sqlx::query!("ROLLBACK TO SAVEPOINT reaper_row")
                     .execute(&mut *tx)
                     .await
@@ -132,6 +152,13 @@ pub async fn reap_expired_leases_with_terminal_records(
                     Error::from_query_sqlx_with_context("reap defer failed row", error)
                 })?;
 
+                record_deferred_row_error(
+                    &mut deferred_row_error_count,
+                    &mut deferred_row_errors,
+                    &row,
+                    &error,
+                );
+
                 continue;
             }
         };
@@ -163,9 +190,13 @@ pub async fn reap_expired_leases_with_terminal_records(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    Ok(ReapExpiredLeasesResult {
-        processed,
-        terminal_dead_lettered,
+    Ok(ReapExpiredLeasesDetailedResult {
+        summary: ReapExpiredLeasesResult {
+            processed,
+            terminal_dead_lettered,
+        },
+        deferred_row_error_count,
+        deferred_row_errors,
     })
 }
 
@@ -196,6 +227,7 @@ struct ReapLeaseIdentity {
 const LEASE_EXPIRED_KIND: &str = "LEASE_EXPIRED";
 const LEASE_EXPIRED_CODE: &str = "job.lease_expired";
 const LEASE_EXPIRED_MESSAGE: &str = "Job lease expired before completion.";
+const MAX_DEFERRED_ROW_ERRORS: usize = 16;
 
 enum ReapExpiredLeaseDisposition {
     ReleasedToPending,
@@ -208,6 +240,114 @@ fn identity_for(row: &ReapExpiredLeaseRow) -> ReapLeaseIdentity {
         job_id: row.job_id,
         run_number: row.run_number,
         attempt: row.attempt,
+    }
+}
+
+fn record_deferred_row_error(
+    deferred_row_error_count: &mut usize,
+    deferred_row_errors: &mut Vec<ReapExpiredLeaseDeferredError>,
+    row: &ReapExpiredLeaseRow,
+    error: &Error,
+) {
+    *deferred_row_error_count += 1;
+
+    if deferred_row_errors.len() >= MAX_DEFERRED_ROW_ERRORS {
+        return;
+    }
+
+    let (error_code, error_message, sqlstate) = sanitized_deferred_row_error(error);
+    deferred_row_errors.push(ReapExpiredLeaseDeferredError {
+        job_id: row.job_id,
+        run_number: row.run_number,
+        attempt: row.attempt,
+        error_code,
+        error_message,
+        sqlstate,
+    });
+}
+
+fn log_trusted_deferred_row_error(row: &ReapExpiredLeaseRow, error: &Error) {
+    match error {
+        Error::QueryError(query_error) => {
+            let source = query_error.source_arc();
+            let source_detail = source
+                .as_deref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            tracing::warn!(
+                job_id = %row.job_id,
+                run_number = row.run_number,
+                attempt = row.attempt,
+                error_code = query_error.code(),
+                error_sqlstate = query_error.sqlstate().unwrap_or(""),
+                error_internal_message = query_error.internal_message(),
+                error_has_source = source.is_some(),
+                error_source = source_detail.as_str(),
+                "reaper deferred expired leased job after row-level query error"
+            );
+        }
+        Error::ConfigError(_) => log_trusted_deferred_row_non_query_error(
+            row,
+            "ConfigError",
+            "reaper.config_error",
+            "reaper row processing failed with a configuration error",
+        ),
+        Error::ConnectionError(_) => log_trusted_deferred_row_non_query_error(
+            row,
+            "ConnectionError",
+            "db.connection_failed",
+            "reaper row processing failed with a database connection error",
+        ),
+        Error::MigrationError(_) => log_trusted_deferred_row_non_query_error(
+            row,
+            "MigrationError",
+            "db.migration_failed",
+            "reaper row processing failed with a database migration error",
+        ),
+    }
+}
+
+fn log_trusted_deferred_row_non_query_error(
+    row: &ReapExpiredLeaseRow,
+    variant: &'static str,
+    error_code: &'static str,
+    message: &'static str,
+) {
+    tracing::warn!(
+        job_id = %row.job_id,
+        run_number = row.run_number,
+        attempt = row.attempt,
+        error_code,
+        error_sqlstate = "",
+        error_variant = variant,
+        error_message = message,
+        error_has_source = false,
+        "reaper deferred expired leased job after row-level non-query error"
+    );
+}
+
+fn sanitized_deferred_row_error(error: &Error) -> (String, String, Option<String>) {
+    match error {
+        Error::QueryError(query_error) => (
+            query_error.code().to_owned(),
+            query_error.client_message().to_owned(),
+            query_error.sqlstate().map(ToOwned::to_owned),
+        ),
+        Error::ConfigError(_) => (
+            "reaper.config_error".to_owned(),
+            "Reaper configuration is invalid.".to_owned(),
+            None,
+        ),
+        Error::ConnectionError(_) => (
+            "db.connection_failed".to_owned(),
+            "Database connection failed.".to_owned(),
+            None,
+        ),
+        Error::MigrationError(_) => (
+            "db.migration_failed".to_owned(),
+            "Database migration failed.".to_owned(),
+            None,
+        ),
     }
 }
 

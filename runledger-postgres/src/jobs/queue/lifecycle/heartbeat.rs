@@ -2,6 +2,7 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, Error, Result};
 
+use super::super::super::errors::validate_positive_lease_duration;
 use super::common::{HEARTBEAT_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
 
 pub async fn heartbeat_job(
@@ -12,6 +13,8 @@ pub async fn heartbeat_job(
     worker_id: &str,
     lease_duration_seconds: i32,
 ) -> Result<()> {
+    validate_positive_lease_duration(lease_duration_seconds)?;
+
     let mut tx = pool
         .begin()
         .await

@@ -25,6 +25,7 @@ const LEASE_OWNER_MISMATCH_CODE: &str = "job.lease_owner_mismatch";
 const LEASE_MAINTENANCE_FAILED_CODE: &str = "job.lease_maintenance_failed";
 const WORKFLOW_RELEASE_CONFLICT_CODE: &str = "workflow.release_conflict";
 const HANDLER_PANIC_CODE: &str = "job.handler_panic";
+const INVALID_COMPLETION_PROGRESS_CODE: &str = "job.invalid_completion_progress";
 const RUNNING_PROGRESS_PERSIST_FAILED_REASON: &str = "RUNNING_PROGRESS_PERSIST_FAILED";
 const UNSTARTED_CLAIM_RELEASE_NOT_APPLICABLE_CODE: &str =
     "job.unstarted_claim_release_not_applicable";
@@ -215,109 +216,60 @@ async fn process_claimed_job(
         .await
         {
             Ok(completion) => {
-                let completion_update = JobCompletionUpdate {
-                    progress_done: completion.progress_done,
-                    progress_total: completion.progress_total,
-                    checkpoint: completion.checkpoint.as_ref(),
-                    output: completion.output.as_ref(),
-                };
-                if let Err(error) = jobs::complete_job_success(
-                    &pool,
-                    job.id,
-                    job.run_number,
-                    job.attempt,
-                    &context.worker_id,
-                    Some(&completion_update),
-                )
-                .await
-                {
-                    let release_conflict = is_workflow_release_conflict_error(&error);
-                    let error = WorkerError::CompleteSuccess {
-                        job_id: job.id,
-                        attempt: job.attempt,
-                        source: error,
-                    };
-                    if release_conflict {
-                        warn!(
-                            %error,
-                            job_id = %job.id,
-                            "job success completion conflicted with workflow cancellation; leaving lease for reaper recovery"
-                        );
-                    } else {
-                        error!(%error, job_id = %job.id, "failed to mark job success");
-                    }
-                }
-            }
-            Err(failure) => {
-                if is_lease_maintenance_failure(&failure) {
+                if let Some(failure) = invalid_completion_progress_failure(&completion) {
                     warn!(
                         job_id = %job.id,
                         attempt = job.attempt,
                         failure_code = failure.code,
-                        "job processing aborted because durable lease maintenance was lost"
+                        failure_message = %failure.message,
+                        "handler returned invalid success completion; marking job terminal"
                     );
-                    return;
-                }
-
-                let retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
-                    None
-                } else {
-                    Some(retry_delay_ms_for_failure(
+                    complete_job_failure_after_handler(
+                        &pool,
                         registry.as_ref(),
+                        &context,
                         &job,
-                        &failure,
-                    ))
-                };
-                let failure_payload = JobFailureUpdate {
-                    kind: failure.kind,
-                    code: failure.code,
-                    message: failure.message.as_ref(),
-                    retry_delay_ms,
-                };
-                let dead_letter = dead_letter_info(&job, &failure);
-                if let Err(error) = jobs::complete_job_failure(
-                    &pool,
-                    job.id,
-                    job.run_number,
-                    job.attempt,
-                    &context.worker_id,
-                    &failure_payload,
-                )
-                .await
-                {
-                    let release_conflict = is_workflow_release_conflict_error(&error);
-                    let error = WorkerError::CompleteFailure {
-                        job_id: job.id,
-                        attempt: job.attempt,
-                        source: error,
+                        failure,
+                    )
+                    .await;
+                } else {
+                    let completion_update = JobCompletionUpdate {
+                        progress_done: completion.progress_done,
+                        progress_total: completion.progress_total,
+                        checkpoint: completion.checkpoint.as_ref(),
+                        output: completion.output.as_ref(),
                     };
-                    if release_conflict {
-                        warn!(
-                            %error,
-                            job_id = %job.id,
-                            "job failure completion conflicted with workflow cancellation; leaving lease for reaper recovery"
-                        );
-                    } else {
-                        error!(%error, job_id = %job.id, "failed to mark job failure");
+                    if let Err(error) = jobs::complete_job_success(
+                        &pool,
+                        job.id,
+                        job.run_number,
+                        job.attempt,
+                        &context.worker_id,
+                        Some(&completion_update),
+                    )
+                    .await
+                    {
+                        let release_conflict = is_workflow_release_conflict_error(&error);
+                        let error = WorkerError::CompleteSuccess {
+                            job_id: job.id,
+                            attempt: job.attempt,
+                            source: error,
+                        };
+                        if release_conflict {
+                            warn!(
+                                %error,
+                                job_id = %job.id,
+                                "job success completion conflicted with workflow cancellation; leaving lease for reaper recovery"
+                            );
+                        } else {
+                            error!(%error, job_id = %job.id, "failed to mark job success");
+                        }
                     }
-                } else if let Some(dead_letter) = dead_letter {
-                    warn!(
-                        job_id = %job.id,
-                        job_type = %job.job_type,
-                        run_number = job.run_number,
-                        attempt = job.attempt,
-                        max_attempts = job.max_attempts,
-                        organization_id = ?job.organization_id,
-                        worker_id = %context.worker_id,
-                        dead_letter_reason = ?dead_letter.reason,
-                        failure_kind = ?dead_letter.failure.kind,
-                        failure_code = dead_letter.failure.code,
-                        failure_message = %dead_letter.failure.message,
-                        "job dead lettered after handler failure"
-                    );
-                    notify_handler_of_dead_letter(registry.as_ref(), &context, &job, dead_letter)
-                        .await;
                 }
+            }
+            Err(failure) => {
+                complete_job_failure_after_handler(&pool, registry.as_ref(), &context, &job, failure)
+                    .await;
             }
         }
 
@@ -331,6 +283,79 @@ async fn process_claimed_job(
     }
     .instrument(job_span)
     .await;
+}
+
+async fn complete_job_failure_after_handler(
+    pool: &runledger_postgres::DbPool,
+    registry: &JobRegistry,
+    context: &JobContext,
+    job: &jobs::JobQueueRecord,
+    failure: JobFailure,
+) {
+    if is_lease_maintenance_failure(&failure) {
+        warn!(
+            job_id = %job.id,
+            attempt = job.attempt,
+            failure_code = failure.code,
+            "job processing aborted because durable lease maintenance was lost"
+        );
+        return;
+    }
+
+    let retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
+        None
+    } else {
+        Some(retry_delay_ms_for_failure(registry, job, &failure))
+    };
+    let failure_payload = JobFailureUpdate {
+        kind: failure.kind,
+        code: failure.code,
+        message: failure.message.as_ref(),
+        retry_delay_ms,
+    };
+    let dead_letter = dead_letter_info(job, &failure);
+    if let Err(error) = jobs::complete_job_failure(
+        pool,
+        job.id,
+        job.run_number,
+        job.attempt,
+        &context.worker_id,
+        &failure_payload,
+    )
+    .await
+    {
+        let release_conflict = is_workflow_release_conflict_error(&error);
+        let error = WorkerError::CompleteFailure {
+            job_id: job.id,
+            attempt: job.attempt,
+            source: error,
+        };
+        if release_conflict {
+            warn!(
+                %error,
+                job_id = %job.id,
+                "job failure completion conflicted with workflow cancellation; leaving lease for reaper recovery"
+            );
+        } else {
+            error!(%error, job_id = %job.id, "failed to mark job failure");
+        }
+    } else if let Some(dead_letter) = dead_letter {
+        warn!(
+            job_id = %job.id,
+            job_type = %job.job_type,
+            run_number = job.run_number,
+            attempt = job.attempt,
+            max_attempts = job.max_attempts,
+            organization_id = ?job.organization_id,
+            worker_id = %context.worker_id,
+            dead_letter_reason = ?dead_letter.reason,
+            failure_kind = ?dead_letter.failure.kind,
+            failure_code = dead_letter.failure.code,
+            failure_message = %dead_letter.failure.message,
+            "job dead lettered after handler failure"
+        );
+        notify_handler_of_dead_letter(registry, context, job, dead_letter).await;
+    }
 }
 
 async fn mark_job_running_or_abort(
@@ -548,6 +573,42 @@ fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
     }
 
     "non-string panic payload".to_string()
+}
+
+fn invalid_completion_progress_failure(completion: &JobCompletion) -> Option<JobFailure> {
+    invalid_completion_progress_detail(completion.progress_done, completion.progress_total)
+        .map(|detail| JobFailure::terminal(INVALID_COMPLETION_PROGRESS_CODE, detail))
+}
+
+fn invalid_completion_progress_detail(
+    progress_done: Option<i64>,
+    progress_total: Option<i64>,
+) -> Option<String> {
+    if let Some(progress_done) = progress_done
+        && progress_done < 0
+    {
+        return Some(format!(
+            "Handler returned invalid success progress: progress_done must be greater than or equal to zero, got {progress_done}."
+        ));
+    }
+
+    if let Some(progress_total) = progress_total
+        && progress_total < 0
+    {
+        return Some(format!(
+            "Handler returned invalid success progress: progress_total must be greater than or equal to zero, got {progress_total}."
+        ));
+    }
+
+    if let (Some(progress_done), Some(progress_total)) = (progress_done, progress_total)
+        && progress_done > progress_total
+    {
+        return Some(format!(
+            "Handler returned invalid success progress: progress_done must not exceed progress_total, got progress_done={progress_done}, progress_total={progress_total}."
+        ));
+    }
+
+    None
 }
 
 fn has_query_error_code(error: &runledger_postgres::Error, expected_code: &str) -> bool {

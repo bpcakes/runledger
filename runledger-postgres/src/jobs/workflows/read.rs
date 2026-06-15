@@ -3,6 +3,7 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, DbTx, Result};
 
+use super::super::errors::validate_pagination;
 use super::super::row_decode::{
     parse_job_stage, parse_job_type_name, parse_step_key_name, parse_workflow_release_mode,
     parse_workflow_run_status, parse_workflow_step_execution_kind, parse_workflow_step_status,
@@ -27,6 +28,44 @@ struct WorkflowRunLookupRow {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(sqlx::FromRow)]
+struct WorkflowStepLookupRow {
+    id: Uuid,
+    workflow_run_id: Uuid,
+    step_key: String,
+    execution_kind: String,
+    job_type: Option<String>,
+    organization_id: Option<Uuid>,
+    payload: serde_json::Value,
+    priority: Option<i32>,
+    max_attempts: Option<i32>,
+    timeout_seconds: Option<i32>,
+    stage: Option<String>,
+    status: String,
+    job_id: Option<Uuid>,
+    released_at: Option<chrono::DateTime<chrono::Utc>>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    dependency_count_total: i32,
+    dependency_count_pending: i32,
+    dependency_count_unsatisfied: i32,
+    status_reason: Option<String>,
+    last_error_code: Option<String>,
+    last_error_message: Option<String>,
+    output: Option<serde_json::Value>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct WorkflowStepDependencyLookupRow {
+    workflow_run_id: Uuid,
+    prerequisite_step_id: Uuid,
+    dependent_step_id: Uuid,
+    release_mode: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
 fn workflow_run_db_record_from_lookup_row(
     row: WorkflowRunLookupRow,
 ) -> Result<WorkflowRunDbRecord> {
@@ -42,6 +81,50 @@ fn workflow_run_db_record_from_lookup_row(
         finished_at: row.finished_at,
         created_at: row.created_at,
         updated_at: row.updated_at,
+    })
+}
+
+fn workflow_step_db_record_from_lookup_row(
+    row: WorkflowStepLookupRow,
+) -> Result<WorkflowStepDbRecord> {
+    Ok(WorkflowStepDbRecord {
+        id: row.id,
+        workflow_run_id: row.workflow_run_id,
+        step_key: parse_step_key_name(row.step_key)?,
+        execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,
+        job_type: row.job_type.map(parse_job_type_name).transpose()?,
+        organization_id: row.organization_id,
+        payload: row.payload,
+        priority: row.priority,
+        max_attempts: row.max_attempts,
+        timeout_seconds: row.timeout_seconds,
+        stage: row.stage.map(parse_job_stage).transpose()?,
+        status: parse_workflow_step_status(row.status)?,
+        job_id: row.job_id,
+        released_at: row.released_at,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        dependency_count_total: row.dependency_count_total,
+        dependency_count_pending: row.dependency_count_pending,
+        dependency_count_unsatisfied: row.dependency_count_unsatisfied,
+        status_reason: row.status_reason,
+        last_error_code: row.last_error_code,
+        last_error_message: row.last_error_message,
+        output: row.output,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn workflow_step_dependency_db_record_from_lookup_row(
+    row: WorkflowStepDependencyLookupRow,
+) -> Result<WorkflowStepDependencyDbRecord> {
+    Ok(WorkflowStepDependencyDbRecord {
+        workflow_run_id: row.workflow_run_id,
+        prerequisite_step_id: row.prerequisite_step_id,
+        dependent_step_id: row.dependent_step_id,
+        release_mode: parse_workflow_release_mode(row.release_mode)?,
+        created_at: row.created_at,
     })
 }
 
@@ -113,12 +196,12 @@ pub async fn list_workflow_steps(
     organization_id: Option<Uuid>,
     workflow_run_id: Uuid,
 ) -> Result<Vec<WorkflowStepDbRecord>> {
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as::<_, WorkflowStepLookupRow>(
         "SELECT
             ws.id,
             ws.workflow_run_id,
             ws.step_key,
-            ws.execution_kind::text AS \"execution_kind!\",
+            ws.execution_kind::text AS execution_kind,
             ws.job_type,
             ws.organization_id,
             ws.payload,
@@ -126,7 +209,7 @@ pub async fn list_workflow_steps(
             ws.max_attempts,
             ws.timeout_seconds,
             ws.stage,
-            ws.status::text AS \"status!\",
+            ws.status::text AS status,
             ws.job_id,
             ws.released_at,
             ws.started_at,
@@ -144,51 +227,102 @@ pub async fn list_workflow_steps(
          JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
          WHERE ws.workflow_run_id = $1
            AND ($2::uuid IS NULL OR wr.organization_id = $2)
-         ORDER BY ws.created_at ASC",
-        workflow_run_id,
-        organization_id,
+         ORDER BY ws.created_at ASC, ws.id ASC",
     )
+    .bind(workflow_run_id)
+    .bind(organization_id)
     .fetch_all(pool)
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context("list workflow steps", error))?;
 
     rows.into_iter()
-        .map(|row| {
-            Ok(WorkflowStepDbRecord {
-                id: row.id,
-                workflow_run_id: row.workflow_run_id,
-                step_key: parse_step_key_name(row.step_key)?,
-                execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,
-                job_type: row.job_type.map(parse_job_type_name).transpose()?,
-                organization_id: row.organization_id,
-                payload: row.payload,
-                priority: row.priority,
-                max_attempts: row.max_attempts,
-                timeout_seconds: row.timeout_seconds,
-                stage: row.stage.map(parse_job_stage).transpose()?,
-                status: parse_workflow_step_status(row.status)?,
-                job_id: row.job_id,
-                released_at: row.released_at,
-                started_at: row.started_at,
-                finished_at: row.finished_at,
-                dependency_count_total: row.dependency_count_total,
-                dependency_count_pending: row.dependency_count_pending,
-                dependency_count_unsatisfied: row.dependency_count_unsatisfied,
-                status_reason: row.status_reason,
-                last_error_code: row.last_error_code,
-                last_error_message: row.last_error_message,
-                output: row.output,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            })
-        })
+        .map(workflow_step_db_record_from_lookup_row)
         .collect()
+}
+
+pub async fn list_workflow_steps_page(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    workflow_run_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WorkflowStepDbRecord>> {
+    validate_pagination(limit, offset)?;
+
+    let rows = sqlx::query_as::<_, WorkflowStepLookupRow>(
+        "SELECT
+            ws.id,
+            ws.workflow_run_id,
+            ws.step_key,
+            ws.execution_kind::text AS execution_kind,
+            ws.job_type,
+            ws.organization_id,
+            ws.payload,
+            ws.priority,
+            ws.max_attempts,
+            ws.timeout_seconds,
+            ws.stage,
+            ws.status::text AS status,
+            ws.job_id,
+            ws.released_at,
+            ws.started_at,
+            ws.finished_at,
+            ws.dependency_count_total,
+            ws.dependency_count_pending,
+            ws.dependency_count_unsatisfied,
+            ws.status_reason,
+            ws.last_error_code,
+            ws.last_error_message,
+            ws.output,
+            ws.created_at,
+            ws.updated_at
+         FROM workflow_steps ws
+         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
+         WHERE ws.workflow_run_id = $1
+           AND ($2::uuid IS NULL OR wr.organization_id = $2)
+         ORDER BY ws.created_at ASC, ws.id ASC
+         LIMIT $3 OFFSET $4",
+    )
+    .bind(workflow_run_id)
+    .bind(organization_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        crate::Error::from_query_sqlx_with_context("list workflow steps page", error)
+    })?;
+
+    rows.into_iter()
+        .map(workflow_step_db_record_from_lookup_row)
+        .collect()
+}
+
+pub async fn count_workflow_steps(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    workflow_run_id: Uuid,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint
+         FROM workflow_steps ws
+         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
+         WHERE ws.workflow_run_id = $1
+           AND ($2::uuid IS NULL OR wr.organization_id = $2)",
+    )
+    .bind(workflow_run_id)
+    .bind(organization_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| crate::Error::from_query_sqlx_with_context("count workflow steps", error))
 }
 
 pub async fn list_workflow_runs(
     pool: &DbPool,
     filter: &WorkflowRunListFilter<'_>,
 ) -> Result<Vec<WorkflowRunDbRecord>> {
+    validate_pagination(filter.limit, filter.offset)?;
+
     let status_text = filter.status.map(|status| status.as_db_value());
 
     let rows = sqlx::query_as!(
@@ -291,12 +425,12 @@ pub async fn list_workflow_step_dependencies(
     organization_id: Option<Uuid>,
     workflow_run_id: Uuid,
 ) -> Result<Vec<WorkflowStepDependencyDbRecord>> {
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as::<_, WorkflowStepDependencyLookupRow>(
         "SELECT
             wsd.workflow_run_id,
             wsd.prerequisite_step_id,
             wsd.dependent_step_id,
-            wsd.release_mode::text AS \"release_mode!\",
+            wsd.release_mode::text AS release_mode,
             wsd.created_at
          FROM workflow_step_dependencies wsd
          JOIN workflow_runs wr ON wr.id = wsd.workflow_run_id
@@ -305,9 +439,9 @@ pub async fn list_workflow_step_dependencies(
          ORDER BY
            wsd.prerequisite_step_id ASC,
            wsd.dependent_step_id ASC",
-        workflow_run_id,
-        organization_id,
     )
+    .bind(workflow_run_id)
+    .bind(organization_id)
     .fetch_all(pool)
     .await
     .map_err(|error| {
@@ -315,16 +449,69 @@ pub async fn list_workflow_step_dependencies(
     })?;
 
     rows.into_iter()
-        .map(|row| {
-            Ok(WorkflowStepDependencyDbRecord {
-                workflow_run_id: row.workflow_run_id,
-                prerequisite_step_id: row.prerequisite_step_id,
-                dependent_step_id: row.dependent_step_id,
-                release_mode: parse_workflow_release_mode(row.release_mode)?,
-                created_at: row.created_at,
-            })
-        })
+        .map(workflow_step_dependency_db_record_from_lookup_row)
         .collect()
+}
+
+pub async fn list_workflow_step_dependencies_page(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    workflow_run_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WorkflowStepDependencyDbRecord>> {
+    validate_pagination(limit, offset)?;
+
+    let rows = sqlx::query_as::<_, WorkflowStepDependencyLookupRow>(
+        "SELECT
+            wsd.workflow_run_id,
+            wsd.prerequisite_step_id,
+            wsd.dependent_step_id,
+            wsd.release_mode::text AS release_mode,
+            wsd.created_at
+         FROM workflow_step_dependencies wsd
+         JOIN workflow_runs wr ON wr.id = wsd.workflow_run_id
+         WHERE wsd.workflow_run_id = $1
+           AND ($2::uuid IS NULL OR wr.organization_id = $2)
+         ORDER BY
+           wsd.prerequisite_step_id ASC,
+           wsd.dependent_step_id ASC
+         LIMIT $3 OFFSET $4",
+    )
+    .bind(workflow_run_id)
+    .bind(organization_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        crate::Error::from_query_sqlx_with_context("list workflow step dependencies page", error)
+    })?;
+
+    rows.into_iter()
+        .map(workflow_step_dependency_db_record_from_lookup_row)
+        .collect()
+}
+
+pub async fn count_workflow_step_dependencies(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    workflow_run_id: Uuid,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint
+         FROM workflow_step_dependencies wsd
+         JOIN workflow_runs wr ON wr.id = wsd.workflow_run_id
+         WHERE wsd.workflow_run_id = $1
+           AND ($2::uuid IS NULL OR wr.organization_id = $2)",
+    )
+    .bind(workflow_run_id)
+    .bind(organization_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        crate::Error::from_query_sqlx_with_context("count workflow step dependencies", error)
+    })
 }
 
 pub async fn get_workflow_run_id_for_job(pool: &DbPool, job_id: Uuid) -> Result<Option<Uuid>> {

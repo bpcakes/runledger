@@ -2,6 +2,7 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, Error, Result};
 
+use super::errors::validate_page_limit;
 use super::types::{JobLogRecord, JobLogRecordInput};
 
 pub async fn insert_job_log(pool: &DbPool, input: &JobLogRecordInput) -> Result<()> {
@@ -36,6 +37,8 @@ pub async fn list_job_logs(
     limit: i64,
     after_id: Option<i64>,
 ) -> Result<Vec<JobLogRecord>> {
+    validate_page_limit(limit)?;
+
     sqlx::query_as!(
         JobLogRecord,
         "SELECT

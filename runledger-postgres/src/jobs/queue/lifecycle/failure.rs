@@ -5,6 +5,7 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, DbTx, Error, Result};
 
+use super::super::super::errors::require_positive_retry_delay;
 use super::super::super::row_decode::parse_job_type_name;
 use super::super::super::types::JobFailureUpdate;
 use super::super::super::workflows::{on_retry_scheduled, on_terminal};
@@ -34,7 +35,7 @@ struct FailureOutcome<'a> {
     kind_db_value: &'a str,
     code: &'a str,
     message: &'a str,
-    retry_delay_ms: i32,
+    retry_delay_ms: Option<i32>,
     terminal: bool,
 }
 
@@ -92,7 +93,7 @@ fn failure_outcome<'a>(
         kind_db_value: failure.kind.as_db_value(),
         code: failure.code,
         message: failure.message,
-        retry_delay_ms: failure.retry_delay_ms.unwrap_or(0).max(0),
+        retry_delay_ms: failure.retry_delay_ms,
         terminal,
     }
 }
@@ -298,12 +299,13 @@ async fn apply_retryable_failure(
     identity: FailureJobIdentity<'_>,
     outcome: FailureOutcome<'_>,
 ) -> Result<()> {
-    let next_run_at = mark_retryable_job_queue_for_failure_tx(tx, identity, outcome).await?;
-    update_failed_attempt_retryable_tx(tx, identity, outcome).await?;
+    let retry_delay_ms = require_positive_retry_delay(outcome.retry_delay_ms)?;
+    let next_run_at =
+        mark_retryable_job_queue_for_failure_tx(tx, identity, outcome, retry_delay_ms).await?;
+    update_failed_attempt_retryable_tx(tx, identity, outcome, retry_delay_ms).await?;
     insert_failed_event_for_failure_tx(tx, identity, outcome, INSERT_FAILED_EVENT_RETRY_CONTEXT)
         .await?;
-    insert_retry_scheduled_event_for_failure_tx(tx, identity, outcome.retry_delay_ms, next_run_at)
-        .await?;
+    insert_retry_scheduled_event_for_failure_tx(tx, identity, retry_delay_ms, next_run_at).await?;
     on_retry_scheduled(
         tx,
         identity.job_id,
@@ -320,6 +322,7 @@ async fn mark_retryable_job_queue_for_failure_tx(
     tx: &mut DbTx<'_>,
     identity: FailureJobIdentity<'_>,
     outcome: FailureOutcome<'_>,
+    retry_delay_ms: i32,
 ) -> Result<DateTime<Utc>> {
     sqlx::query_scalar!(
         "UPDATE job_queue
@@ -343,7 +346,7 @@ async fn mark_retryable_job_queue_for_failure_tx(
         identity.run_number,
         identity.attempt,
         identity.worker_id,
-        i64::from(outcome.retry_delay_ms),
+        i64::from(retry_delay_ms),
         outcome.kind_db_value,
         outcome.code,
         outcome.message,
@@ -357,6 +360,7 @@ async fn update_failed_attempt_retryable_tx(
     tx: &mut DbTx<'_>,
     identity: FailureJobIdentity<'_>,
     outcome: FailureOutcome<'_>,
+    retry_delay_ms: i32,
 ) -> Result<()> {
     sqlx::query!(
         "UPDATE job_attempts
@@ -374,7 +378,7 @@ async fn update_failed_attempt_retryable_tx(
         outcome.kind_db_value,
         outcome.code,
         outcome.message,
-        outcome.retry_delay_ms,
+        retry_delay_ms,
     )
     .execute(&mut **tx)
     .await

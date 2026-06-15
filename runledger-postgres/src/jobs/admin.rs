@@ -5,7 +5,8 @@ use sqlx::types::Uuid;
 use crate::{DbPool, DbTx, Error, Result};
 
 use super::errors::{
-    invalid_job_state_error, job_not_found_error, workflow_requeue_not_supported_error,
+    invalid_job_state_error, job_not_found_error, validate_page_limit, validate_pagination,
+    workflow_requeue_not_supported_error,
 };
 use super::row_decode::{
     parse_job_event_type, parse_job_stage, parse_job_status, parse_job_type_name,
@@ -153,6 +154,8 @@ fn job_queue_record_from_row(row: JobQueueRecordRow) -> Result<JobQueueRecord> {
 }
 
 pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<JobQueueRecord>> {
+    validate_pagination(filter.limit, filter.offset)?;
+
     let status_filter = filter.status.map(JobStatus::as_db_value);
 
     let rows = sqlx::query!(
@@ -558,6 +561,8 @@ pub async fn list_job_events(
     limit: i64,
     after_id: Option<i64>,
 ) -> Result<Vec<JobEventRecord>> {
+    validate_page_limit(limit)?;
+
     let rows = sqlx::query!(
         "SELECT
             je.id,

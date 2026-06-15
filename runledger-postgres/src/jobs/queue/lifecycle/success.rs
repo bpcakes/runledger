@@ -4,6 +4,7 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, DbTx, Error, Result};
 
+use super::super::super::errors::validate_completion_progress;
 use super::super::super::types::JobCompletionUpdate;
 use super::super::super::workflows::on_terminal;
 use super::common::{COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
@@ -19,10 +20,14 @@ struct SuccessProgressUpdate<'a> {
 fn success_progress_update<'a>(
     progress: Option<&'a JobCompletionUpdate<'a>>,
 ) -> Result<SuccessProgressUpdate<'a>> {
+    let progress_done = progress.and_then(|value| value.progress_done);
+    let progress_total = progress.and_then(|value| value.progress_total);
+    validate_completion_progress(progress_done, progress_total)?;
+
     Ok(SuccessProgressUpdate {
         stage: JobStage::Completed,
-        progress_done: progress.and_then(|value| value.progress_done),
-        progress_total: progress.and_then(|value| value.progress_total),
+        progress_done,
+        progress_total,
         checkpoint: progress.and_then(|value| value.checkpoint),
         output: progress.and_then(|value| value.output),
     })

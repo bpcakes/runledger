@@ -18,5 +18,8 @@ pub use self::dispatch::{
 pub use self::lifecycle::{
     complete_job_failure, complete_job_success, heartbeat_job, update_job_progress,
 };
-pub use self::reaper::{reap_expired_leases, reap_expired_leases_with_terminal_records};
+pub use self::reaper::{
+    reap_expired_leases, reap_expired_leases_with_diagnostics,
+    reap_expired_leases_with_terminal_records,
+};
 pub use self::release::release_unstarted_job_claim;

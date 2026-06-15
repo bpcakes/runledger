@@ -1301,7 +1301,7 @@ async fn retryable_workflow_job_failure_returns_step_to_enqueued() {
             kind: JobFailureKind::Retryable,
             code: "test.retryable",
             message: "retryable failure",
-            retry_delay_ms: Some(0),
+            retry_delay_ms: Some(1),
         },
     )
     .await

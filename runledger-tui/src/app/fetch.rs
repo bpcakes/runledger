@@ -54,7 +54,7 @@ pub(crate) async fn execute_fetch(pool: &DbPool, req: FetchRequest) -> FetchOutc
                 .map(Box::new),
         ),
         Screen::WorkflowDetail { run_id } => FetchOutcome::WorkflowDetail(
-            fetch_workflow_detail(pool, req.scope, run_id)
+            fetch_workflow_detail(pool, req.scope, run_id, req.limit)
                 .await
                 .map(Box::new),
         ),
