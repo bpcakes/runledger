@@ -11,6 +11,9 @@ const DEFAULT_REAPER_INTERVAL_SECONDS: u64 = 15;
 const DEFAULT_SCHEDULE_POLL_INTERVAL_SECONDS: u64 = 30;
 const DEFAULT_REAPER_RETRY_DELAY_MS: i32 = 30_000;
 
+/// Maximum batch size accepted by runtime worker, scheduler, and reaper loops.
+pub const JOBS_CLAIM_BATCH_SIZE_MAX: i64 = 1_000;
+
 #[derive(Debug, Clone)]
 pub struct JobsConfig {
     pub worker_id: String,
@@ -30,7 +33,7 @@ pub enum JobsConfigValidationError {
     EmptyWorkerId,
     #[error("jobs config poll_interval must be greater than zero")]
     ZeroPollInterval,
-    #[error("jobs config claim_batch_size must be at least 1, got {actual}")]
+    #[error("jobs config claim_batch_size must be between 1 and 1000, got {actual}")]
     InvalidClaimBatchSize { actual: i64 },
     #[error("jobs config lease_ttl_seconds must be at least 1, got {actual}")]
     InvalidLeaseTtlSeconds { actual: i32 },
@@ -55,7 +58,8 @@ impl JobsConfig {
             poll_interval: Duration::from_millis(
                 parse_env("JOBS_POLL_INTERVAL_MS", DEFAULT_POLL_INTERVAL_MS).max(1),
             ),
-            claim_batch_size: parse_env("JOBS_CLAIM_BATCH_SIZE", DEFAULT_CLAIM_BATCH_SIZE).max(1),
+            claim_batch_size: parse_env("JOBS_CLAIM_BATCH_SIZE", DEFAULT_CLAIM_BATCH_SIZE)
+                .clamp(1, JOBS_CLAIM_BATCH_SIZE_MAX),
             lease_ttl_seconds: parse_env("JOBS_LEASE_TTL_SECONDS", DEFAULT_LEASE_TTL_SECONDS)
                 .max(10),
             max_global_concurrency: parse_env(
@@ -92,11 +96,7 @@ impl JobsConfig {
         if self.poll_interval.is_zero() {
             return Err(JobsConfigValidationError::ZeroPollInterval);
         }
-        if self.claim_batch_size < 1 {
-            return Err(JobsConfigValidationError::InvalidClaimBatchSize {
-                actual: self.claim_batch_size,
-            });
-        }
+        validate_claim_batch_size(self.claim_batch_size)?;
         if self.lease_ttl_seconds < 1 {
             return Err(JobsConfigValidationError::InvalidLeaseTtlSeconds {
                 actual: self.lease_ttl_seconds,
@@ -127,11 +127,7 @@ impl JobsConfig {
         if self.poll_interval.is_zero() {
             return Err(JobsConfigValidationError::ZeroPollInterval);
         }
-        if self.claim_batch_size < 1 {
-            return Err(JobsConfigValidationError::InvalidClaimBatchSize {
-                actual: self.claim_batch_size,
-            });
-        }
+        validate_claim_batch_size(self.claim_batch_size)?;
         if self.lease_ttl_seconds < 1 {
             return Err(JobsConfigValidationError::InvalidLeaseTtlSeconds {
                 actual: self.lease_ttl_seconds,
@@ -145,11 +141,7 @@ impl JobsConfig {
     }
 
     pub(crate) fn validate_scheduler_loop(&self) -> Result<(), JobsConfigValidationError> {
-        if self.claim_batch_size < 1 {
-            return Err(JobsConfigValidationError::InvalidClaimBatchSize {
-                actual: self.claim_batch_size,
-            });
-        }
+        validate_claim_batch_size(self.claim_batch_size)?;
         if self.schedule_poll_interval.is_zero() {
             return Err(JobsConfigValidationError::ZeroSchedulePollInterval);
         }
@@ -158,11 +150,7 @@ impl JobsConfig {
     }
 
     pub(crate) fn validate_reaper_loop(&self) -> Result<(), JobsConfigValidationError> {
-        if self.claim_batch_size < 1 {
-            return Err(JobsConfigValidationError::InvalidClaimBatchSize {
-                actual: self.claim_batch_size,
-            });
-        }
+        validate_claim_batch_size(self.claim_batch_size)?;
         if self.reaper_interval.is_zero() {
             return Err(JobsConfigValidationError::ZeroReaperInterval);
         }
@@ -174,6 +162,16 @@ impl JobsConfig {
 
         Ok(())
     }
+}
+
+fn validate_claim_batch_size(claim_batch_size: i64) -> Result<(), JobsConfigValidationError> {
+    if (1..=JOBS_CLAIM_BATCH_SIZE_MAX).contains(&claim_batch_size) {
+        return Ok(());
+    }
+
+    Err(JobsConfigValidationError::InvalidClaimBatchSize {
+        actual: claim_batch_size,
+    })
 }
 
 fn parse_env<T>(name: &str, default: T) -> T
@@ -286,6 +284,16 @@ mod tests {
             },
             {
                 let mut config = test_config();
+                config.claim_batch_size = JOBS_CLAIM_BATCH_SIZE_MAX + 1;
+                (
+                    config,
+                    JobsConfigValidationError::InvalidClaimBatchSize {
+                        actual: JOBS_CLAIM_BATCH_SIZE_MAX + 1,
+                    },
+                )
+            },
+            {
+                let mut config = test_config();
                 config.lease_ttl_seconds = 0;
                 (
                     config,
@@ -342,7 +350,7 @@ mod tests {
     #[test]
     fn from_env_clamps_non_interval_limits_and_falls_back_worker_id() {
         let _env = ScopedEnv::set(&[
-            ("JOBS_CLAIM_BATCH_SIZE", Some("0")),
+            ("JOBS_CLAIM_BATCH_SIZE", Some("1001")),
             ("JOBS_LEASE_TTL_SECONDS", Some("1")),
             ("JOBS_MAX_GLOBAL_CONCURRENCY", Some("0")),
             ("JOBS_REAPER_RETRY_DELAY_MS", Some("1")),
@@ -350,7 +358,7 @@ mod tests {
         ]);
 
         let config = JobsConfig::from_env();
-        assert_eq!(config.claim_batch_size, 1);
+        assert_eq!(config.claim_batch_size, JOBS_CLAIM_BATCH_SIZE_MAX);
         assert_eq!(config.lease_ttl_seconds, 10);
         assert_eq!(config.max_global_concurrency, 1);
         assert_eq!(config.reaper_retry_delay_ms, 1_000);

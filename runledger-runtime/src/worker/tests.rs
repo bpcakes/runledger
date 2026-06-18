@@ -92,6 +92,11 @@ struct InvalidCompletionProgressHandler {
     dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
 }
 
+struct PartialInvalidCompletionProgressHandler {
+    runs: Arc<AtomicUsize>,
+    dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
+}
+
 struct PanickingHandler {
     runs: Arc<AtomicUsize>,
 }
@@ -149,6 +154,39 @@ impl JobHandler for InvalidCompletionProgressHandler {
     ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Ok(JobCompletion::success().progress(2, 1))
+    }
+
+    async fn on_dead_letter(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+        dead_letter: JobDeadLetterInfo,
+    ) {
+        self.dead_letters
+            .lock()
+            .expect("dead-letter list lock should not be poisoned")
+            .push(dead_letter);
+    }
+}
+
+#[async_trait::async_trait]
+impl JobHandler for PartialInvalidCompletionProgressHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.test.partial_invalid_completion_progress")
+    }
+
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(JobCompletion {
+            progress_done: Some(20),
+            progress_total: None,
+            checkpoint: None,
+            output: None,
+        })
     }
 
     async fn on_dead_letter(
@@ -1092,6 +1130,101 @@ async fn process_claimed_job_terminally_fails_invalid_success_progress_without_r
 }
 
 #[tokio::test]
+async fn process_claimed_job_terminally_fails_stale_partial_success_progress_without_replay() {
+    let (pool, database) =
+        setup_ephemeral_pool("jobs_worker_stale_partial_success_progress", 8).await;
+
+    let (job_id, claimed_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.partial_invalid_completion_progress"),
+        3,
+        json!({"kind":"stale-partial-success-progress"}),
+        "worker-stale-partial-success-progress",
+    )
+    .await;
+
+    let worker_id = claimed_job
+        .worker_id
+        .clone()
+        .expect("claimed job has worker id");
+    update_job_progress(
+        &pool,
+        claimed_job.id,
+        claimed_job.run_number,
+        claimed_job.attempt,
+        &worker_id,
+        &JobProgressUpdate {
+            stage: None,
+            progress_done: Some(5),
+            progress_total: Some(10),
+            checkpoint: None,
+        },
+    )
+    .await
+    .expect("persist prior progress");
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let dead_letters = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = JobRegistry::new();
+    registry.register(PartialInvalidCompletionProgressHandler {
+        runs: runs.clone(),
+        dead_letters: dead_letters.clone(),
+    });
+
+    process_claimed_job(pool.clone(), Arc::new(registry), claimed_job, 30).await;
+
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let dead_letters = clone_dead_letters(&dead_letters);
+    assert_eq!(dead_letters.len(), 1);
+    let dead_letter = &dead_letters[0];
+    assert_eq!(
+        dead_letter.reason,
+        JobDeadLetterReason::FailureKindNonRetryable
+    );
+    assert_eq!(dead_letter.failure.kind, JobFailureKind::Terminal);
+    assert_eq!(dead_letter.failure.code, "job.invalid_completion_progress");
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job")
+        .expect("job exists");
+    assert_eq!(persisted.status, JobStatus::DeadLettered);
+    assert_eq!(
+        persisted.last_error_code.as_deref(),
+        Some("job.invalid_completion_progress")
+    );
+    assert!(persisted.worker_id.is_none());
+    assert!(persisted.lease_expires_at.is_none());
+
+    let events = list_job_events(&pool, None, job_id, 50, None)
+        .await
+        .expect("list job events");
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event_type != JobEventType::Succeeded),
+        "invalid coalesced success completion must not write a succeeded event"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event_type != JobEventType::RetryScheduled),
+        "invalid coalesced success completion must not schedule a retry"
+    );
+
+    reap_expired_leases(&pool, 10, 1_000)
+        .await
+        .expect("reaper should not requeue terminal invalid completion");
+    let replay_claims = claim_prestart_jobs(&pool, "worker-stale-partial-replay", 30, 1)
+        .await
+        .expect("claim after terminal invalid completion");
+    assert!(replay_claims.is_empty());
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn process_claimed_job_aborts_before_handler_when_lease_owner_changes_pre_run() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_pre_run_lease", 8).await;
 
@@ -1378,6 +1511,60 @@ async fn process_claimed_job_reports_non_retryable_failure_to_dead_letter_hook()
         .expect("load job")
         .expect("job exists");
     assert_eq!(persisted.status, JobStatus::DeadLettered);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn process_claimed_job_persists_handler_failure_with_reserved_lease_code() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_reserved_lease_code", 8).await;
+
+    let (job_id, claimed_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.reserved_lease_code"),
+        3,
+        json!({"kind":"reserved-lease-code"}),
+        "worker-reserved-lease-code",
+    )
+    .await;
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let dead_letters = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = JobRegistry::new();
+    registry.register(RecordingDeadLetterHandler {
+        job_type_name: "jobs.test.reserved_lease_code",
+        failure: JobFailure::terminal(
+            "job.lease_owner_mismatch",
+            "handler failure should not be treated as internal lease loss",
+        ),
+        runs: runs.clone(),
+        dead_letters: dead_letters.clone(),
+    });
+
+    process_claimed_job(pool.clone(), Arc::new(registry), claimed_job, 30).await;
+
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let dead_letters = clone_dead_letters(&dead_letters);
+    assert_eq!(dead_letters.len(), 1);
+    let dead_letter = &dead_letters[0];
+    assert_eq!(
+        dead_letter.reason,
+        JobDeadLetterReason::FailureKindNonRetryable
+    );
+    assert_eq!(dead_letter.failure.kind, JobFailureKind::Terminal);
+    assert_eq!(dead_letter.failure.code, "job.lease_owner_mismatch");
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job")
+        .expect("job exists");
+    assert_eq!(persisted.status, JobStatus::DeadLettered);
+    assert_eq!(
+        persisted.last_error_code.as_deref(),
+        Some("job.lease_owner_mismatch")
+    );
+    assert!(persisted.worker_id.is_none());
+    assert!(persisted.lease_expires_at.is_none());
 
     teardown_ephemeral_pool(pool, database).await;
 }

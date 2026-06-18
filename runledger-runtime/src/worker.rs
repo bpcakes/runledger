@@ -35,6 +35,11 @@ const TERMINAL_HOOK_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(not(test))]
 const TERMINAL_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 
+enum JobExecutionFailure {
+    Handler(JobFailure),
+    LeaseMaintenance(JobFailure),
+}
+
 pub async fn run_worker_loop(
     pool: runledger_postgres::DbPool,
     registry: JobRegistry,
@@ -249,27 +254,49 @@ async fn process_claimed_job(
                     )
                     .await
                     {
-                        let release_conflict = is_workflow_release_conflict_error(&error);
-                        let error = WorkerError::CompleteSuccess {
-                            job_id: job.id,
-                            attempt: job.attempt,
-                            source: error,
-                        };
-                        if release_conflict {
+                        if let Some(failure) = invalid_completion_progress_failure_from_error(&error)
+                        {
                             warn!(
-                                %error,
                                 job_id = %job.id,
-                                "job success completion conflicted with workflow cancellation; leaving lease for reaper recovery"
+                                attempt = job.attempt,
+                                failure_code = failure.code,
+                                failure_message = %failure.message,
+                                "handler returned invalid success completion after stored progress was applied; marking job terminal"
                             );
+                            complete_job_failure_after_handler(
+                                &pool,
+                                registry.as_ref(),
+                                &context,
+                                &job,
+                                failure,
+                            )
+                            .await;
                         } else {
-                            error!(%error, job_id = %job.id, "failed to mark job success");
+                            let release_conflict = is_workflow_release_conflict_error(&error);
+                            let error = WorkerError::CompleteSuccess {
+                                job_id: job.id,
+                                attempt: job.attempt,
+                                source: error,
+                            };
+                            if release_conflict {
+                                warn!(
+                                    %error,
+                                    job_id = %job.id,
+                                    "job success completion conflicted with workflow cancellation; leaving lease for reaper recovery"
+                                );
+                            } else {
+                                error!(%error, job_id = %job.id, "failed to mark job success");
+                            }
                         }
                     }
                 }
             }
-            Err(failure) => {
+            Err(JobExecutionFailure::Handler(failure)) => {
                 complete_job_failure_after_handler(&pool, registry.as_ref(), &context, &job, failure)
                     .await;
+            }
+            Err(JobExecutionFailure::LeaseMaintenance(failure)) => {
+                log_lease_maintenance_abort(&job, &failure);
             }
         }
 
@@ -292,16 +319,6 @@ async fn complete_job_failure_after_handler(
     job: &jobs::JobQueueRecord,
     failure: JobFailure,
 ) {
-    if is_lease_maintenance_failure(&failure) {
-        warn!(
-            job_id = %job.id,
-            attempt = job.attempt,
-            failure_code = failure.code,
-            "job processing aborted because durable lease maintenance was lost"
-        );
-        return;
-    }
-
     let retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
         None
     } else {
@@ -356,6 +373,15 @@ async fn complete_job_failure_after_handler(
         );
         notify_handler_of_dead_letter(registry, context, job, dead_letter).await;
     }
+}
+
+fn log_lease_maintenance_abort(job: &jobs::JobQueueRecord, failure: &JobFailure) {
+    warn!(
+        job_id = %job.id,
+        attempt = job.attempt,
+        failure_code = failure.code,
+        "job processing aborted because durable lease maintenance was lost"
+    );
 }
 
 async fn mark_job_running_or_abort(
@@ -480,7 +506,7 @@ async fn execute_job_handler_with_heartbeats(
     context: &JobContext,
     job: &jobs::JobQueueRecord,
     lease_ttl_seconds: i32,
-) -> Result<JobCompletion, JobFailure> {
+) -> Result<JobCompletion, JobExecutionFailure> {
     let mut execution =
         Box::pin(AssertUnwindSafe(execute_job_handler(registry, context, job)).catch_unwind());
     let timeout_deadline = Instant::now() + Duration::from_secs(job.timeout_seconds.max(1) as u64);
@@ -494,15 +520,17 @@ async fn execute_job_handler_with_heartbeats(
         tokio::select! {
             result = &mut execution => {
                 return match result {
-                    Ok(result) => result,
-                    Err(panic_payload) => Err(handler_panic_failure(panic_payload)),
+                    Ok(result) => result.map_err(JobExecutionFailure::Handler),
+                    Err(panic_payload) => {
+                        Err(JobExecutionFailure::Handler(handler_panic_failure(panic_payload)))
+                    }
                 };
             }
             _ = &mut timeout => {
-                return Err(JobFailure::timeout(
+                return Err(JobExecutionFailure::Handler(JobFailure::timeout(
                     "job.timeout_exceeded",
                     "Job exceeded the configured timeout.",
-                ));
+                )));
             }
             _ = ticker.tick() => {
                 if let Err(error) = jobs::heartbeat_job(
@@ -524,7 +552,9 @@ async fn execute_job_handler_with_heartbeats(
 
                     if lease_owner_mismatch {
                         warn!(%error, job_id = %job.id, "job heartbeat lost lease ownership");
-                        return Err(lease_owner_mismatch_failure());
+                        return Err(JobExecutionFailure::LeaseMaintenance(
+                            lease_owner_mismatch_failure(),
+                        ));
                     }
 
                     warn!(
@@ -532,7 +562,9 @@ async fn execute_job_handler_with_heartbeats(
                         job_id = %job.id,
                         "aborting job because lease heartbeat could not be persisted"
                     );
-                    return Err(lease_maintenance_failure());
+                    return Err(JobExecutionFailure::LeaseMaintenance(
+                        lease_maintenance_failure(),
+                    ));
                 }
             }
         }
@@ -578,6 +610,26 @@ fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
 fn invalid_completion_progress_failure(completion: &JobCompletion) -> Option<JobFailure> {
     invalid_completion_progress_detail(completion.progress_done, completion.progress_total)
         .map(|detail| JobFailure::terminal(INVALID_COMPLETION_PROGRESS_CODE, detail))
+}
+
+fn invalid_completion_progress_failure_from_error(
+    error: &runledger_postgres::Error,
+) -> Option<JobFailure> {
+    let runledger_postgres::Error::QueryError(query_error) = error else {
+        return None;
+    };
+
+    if query_error.code() != INVALID_COMPLETION_PROGRESS_CODE {
+        return None;
+    }
+
+    Some(JobFailure::terminal(
+        INVALID_COMPLETION_PROGRESS_CODE,
+        format!(
+            "Handler returned invalid success progress after combining with stored progress: {}.",
+            query_error.internal_message()
+        ),
+    ))
 }
 
 fn invalid_completion_progress_detail(
@@ -629,13 +681,6 @@ fn is_unstarted_claim_release_not_applicable_error(error: &runledger_postgres::E
 
 fn is_workflow_release_conflict_error(error: &runledger_postgres::Error) -> bool {
     has_query_error_code(error, WORKFLOW_RELEASE_CONFLICT_CODE)
-}
-
-fn is_lease_maintenance_failure(failure: &JobFailure) -> bool {
-    matches!(
-        failure.code,
-        LEASE_OWNER_MISMATCH_CODE | LEASE_MAINTENANCE_FAILED_CODE
-    )
 }
 
 fn heartbeat_interval(lease_ttl_seconds: i32) -> Duration {

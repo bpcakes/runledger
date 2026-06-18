@@ -17,6 +17,20 @@ struct SuccessProgressUpdate<'a> {
     output: Option<&'a Value>,
 }
 
+#[derive(sqlx::FromRow)]
+struct ExistingSuccessProgress {
+    progress_done: Option<i64>,
+    progress_total: Option<i64>,
+}
+
+impl SuccessProgressUpdate<'_> {
+    fn coalesce_existing_progress(&mut self, existing: ExistingSuccessProgress) -> Result<()> {
+        self.progress_done = self.progress_done.or(existing.progress_done);
+        self.progress_total = self.progress_total.or(existing.progress_total);
+        validate_completion_progress(self.progress_done, self.progress_total)
+    }
+}
+
 fn success_progress_update<'a>(
     progress: Option<&'a JobCompletionUpdate<'a>>,
 ) -> Result<SuccessProgressUpdate<'a>> {
@@ -33,6 +47,34 @@ fn success_progress_update<'a>(
     })
 }
 
+async fn lock_job_success_progress_tx(
+    tx: &mut DbTx<'_>,
+    job_id: Uuid,
+    run_number: i32,
+    attempt: i32,
+    worker_id: &str,
+) -> Result<Option<ExistingSuccessProgress>> {
+    sqlx::query_as::<_, ExistingSuccessProgress>(
+        "SELECT progress_done, progress_total
+         FROM job_queue
+         WHERE id = $1
+           AND run_number = $2
+           AND attempt = $3
+           AND worker_id = $4
+           AND status = 'LEASED'
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at > clock_timestamp()
+         FOR UPDATE",
+    )
+    .bind(job_id)
+    .bind(run_number)
+    .bind(attempt)
+    .bind(worker_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("lock job success progress", error))
+}
+
 async fn mark_job_succeeded_tx(
     tx: &mut DbTx<'_>,
     job_id: Uuid,
@@ -41,19 +83,8 @@ async fn mark_job_succeeded_tx(
     worker_id: &str,
     progress: &SuccessProgressUpdate<'_>,
 ) -> Result<u64> {
-    let rows_affected = sqlx::query!(
-        "WITH locked_job AS MATERIALIZED (
-             SELECT id
-             FROM job_queue
-             WHERE id = $1
-               AND run_number = $2
-               AND attempt = $3
-               AND worker_id = $4
-               AND status = 'LEASED'
-               AND lease_expires_at IS NOT NULL
-             FOR UPDATE
-         )
-         UPDATE job_queue
+    let rows_affected = sqlx::query(
+        "UPDATE job_queue
          SET status = 'SUCCEEDED',
              lease_expires_at = NULL,
              last_heartbeat_at = NULL,
@@ -68,19 +99,23 @@ async fn mark_job_succeeded_tx(
              last_error_code = NULL,
              last_error_message = NULL,
              updated_at = now()
-         FROM locked_job
-         WHERE job_queue.id = locked_job.id
+         WHERE id = $1
+           AND run_number = $2
+           AND attempt = $3
+           AND worker_id = $4
+           AND status = 'LEASED'
+           AND lease_expires_at IS NOT NULL
            AND job_queue.lease_expires_at > clock_timestamp()",
-        job_id,
-        run_number,
-        attempt,
-        worker_id,
-        progress.stage.as_db_value(),
-        progress.progress_done,
-        progress.progress_total,
-        progress.checkpoint,
-        progress.output,
     )
+    .bind(job_id)
+    .bind(run_number)
+    .bind(attempt)
+    .bind(worker_id)
+    .bind(progress.stage.as_db_value())
+    .bind(progress.progress_done)
+    .bind(progress.progress_total)
+    .bind(progress.checkpoint)
+    .bind(progress.output)
     .execute(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("complete job success", error))?
@@ -161,11 +196,19 @@ pub async fn complete_job_success(
     worker_id: &str,
     progress: Option<&JobCompletionUpdate<'_>>,
 ) -> Result<()> {
-    let progress = success_progress_update(progress)?;
+    let mut progress = success_progress_update(progress)?;
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
+
+    let Some(existing_progress) =
+        lock_job_success_progress_tx(&mut tx, job_id, run_number, attempt, worker_id).await?
+    else {
+        return rollback_and_return_lease_mismatch(tx, COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT)
+            .await;
+    };
+    progress.coalesce_existing_progress(existing_progress)?;
 
     let updated =
         mark_job_succeeded_tx(&mut tx, job_id, run_number, attempt, worker_id, &progress).await?;

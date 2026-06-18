@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use runledger_runtime::config::{JobsConfig, JobsConfigValidationError};
+use runledger_runtime::config::{JOBS_CLAIM_BATCH_SIZE_MAX, JobsConfig, JobsConfigValidationError};
 use runledger_runtime::reaper::run_reaper_loop;
 use runledger_runtime::registry::JobRegistry;
 use runledger_runtime::scheduler::run_scheduler_loop;
@@ -86,6 +86,16 @@ async fn supervisor_build_rejects_any_invalid_config_field() {
             (
                 config,
                 JobsConfigValidationError::InvalidClaimBatchSize { actual: 0 },
+            )
+        },
+        {
+            let mut config = test_config();
+            config.claim_batch_size = JOBS_CLAIM_BATCH_SIZE_MAX + 1;
+            (
+                config,
+                JobsConfigValidationError::InvalidClaimBatchSize {
+                    actual: JOBS_CLAIM_BATCH_SIZE_MAX + 1,
+                },
             )
         },
         {
@@ -181,6 +191,36 @@ async fn scheduler_loop_rejects_zero_claim_batch_size() {
     assert_invalid_config_quickly(
         run_scheduler_loop(lazy_pool(), config, shutdown_rx),
         JobsConfigValidationError::InvalidClaimBatchSize { actual: 0 },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn runtime_loops_reject_oversized_claim_batch_size() {
+    let mut config = test_config();
+    config.claim_batch_size = JOBS_CLAIM_BATCH_SIZE_MAX + 1;
+    let expected = JobsConfigValidationError::InvalidClaimBatchSize {
+        actual: JOBS_CLAIM_BATCH_SIZE_MAX + 1,
+    };
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    assert_invalid_config_quickly(
+        run_worker_loop(lazy_pool(), JobRegistry::new(), config.clone(), shutdown_rx),
+        expected,
+    )
+    .await;
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    assert_invalid_config_quickly(
+        run_scheduler_loop(lazy_pool(), config.clone(), shutdown_rx),
+        expected,
+    )
+    .await;
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    assert_invalid_config_quickly(
+        run_reaper_loop(lazy_pool(), JobRegistry::new(), config, shutdown_rx),
+        expected,
     )
     .await;
 }

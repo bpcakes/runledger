@@ -1,7 +1,8 @@
 use runledger_core::jobs::{JobEventType, JobStatus, JobType};
 use runledger_postgres::jobs::{
-    JobCompletionUpdate, JobDefinitionUpsert, JobEnqueue, JobQueueRecord, claim_jobs,
-    complete_job_success, enqueue_job, get_job_by_id, list_job_events, upsert_job_definition_tx,
+    JobCompletionUpdate, JobDefinitionUpsert, JobEnqueue, JobProgressUpdate, JobQueueRecord,
+    claim_jobs, complete_job_success, enqueue_job, get_job_by_id, list_job_events,
+    update_job_progress, upsert_job_definition_tx,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -181,6 +182,68 @@ async fn successful_completion_rejects_invalid_progress_without_mutating_lease()
             JobEventType::Enqueued,
             JobEventType::Leased,
             JobEventType::Succeeded,
+        ],
+    )
+    .await;
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn successful_completion_rejects_progress_invalid_after_existing_progress_is_applied() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_completion_stale_progress_validation", 4).await;
+    register_job_definition(&pool).await;
+    let job_id = enqueue_test_job(&pool).await;
+    let job = claim_one_job(&pool, "worker-completion-stale-progress").await;
+    let worker_id = job.worker_id.clone().expect("claimed job has worker id");
+
+    update_job_progress(
+        &pool,
+        job.id,
+        job.run_number,
+        job.attempt,
+        &worker_id,
+        &JobProgressUpdate {
+            stage: None,
+            progress_done: Some(5),
+            progress_total: Some(10),
+            checkpoint: None,
+        },
+    )
+    .await
+    .expect("persist prior progress");
+
+    let before = load_job(&pool, job_id).await;
+    assert_eq!(before.progress_done, Some(5));
+    assert_eq!(before.progress_total, Some(10));
+
+    assert_invalid_completion_progress_error(
+        complete_job_success(
+            &pool,
+            job.id,
+            job.run_number,
+            job.attempt,
+            &worker_id,
+            Some(&JobCompletionUpdate {
+                progress_done: Some(20),
+                progress_total: None,
+                checkpoint: None,
+                output: None,
+            }),
+        )
+        .await
+        .expect_err("coalesced invalid completion progress should be rejected"),
+    );
+
+    assert_job_unchanged(&pool, job_id, &before).await;
+    assert_event_types(
+        &pool,
+        job_id,
+        &[
+            JobEventType::Enqueued,
+            JobEventType::Leased,
+            JobEventType::Progress,
         ],
     )
     .await;
