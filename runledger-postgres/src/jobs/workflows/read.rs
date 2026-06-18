@@ -14,6 +14,7 @@ use super::super::workflow_types::{
     WorkflowStepDependencyDbRecord,
 };
 
+#[derive(sqlx::FromRow)]
 struct WorkflowRunLookupRow {
     id: Uuid,
     workflow_type: String,
@@ -325,13 +326,12 @@ pub async fn list_workflow_runs(
 
     let status_text = filter.status.map(|status| status.as_db_value());
 
-    let rows = sqlx::query_as!(
-        WorkflowRunLookupRow,
+    let rows = sqlx::query_as::<_, WorkflowRunLookupRow>(
         "SELECT
             id,
             workflow_type,
             organization_id,
-            status::text AS \"status!\",
+            status::text AS status,
             idempotency_key,
             result_step_key,
             metadata,
@@ -343,14 +343,14 @@ pub async fn list_workflow_runs(
          WHERE ($1::uuid IS NULL OR organization_id = $1)
            AND ($2::text IS NULL OR status = $2::text::workflow_run_status)
            AND ($3::text IS NULL OR workflow_type ILIKE '%' || $3 || '%')
-         ORDER BY created_at DESC
+         ORDER BY created_at DESC, id DESC
          LIMIT $4 OFFSET $5",
-        filter.organization_id,
-        status_text,
-        filter.workflow_type,
-        filter.limit,
-        filter.offset,
     )
+    .bind(filter.organization_id)
+    .bind(status_text)
+    .bind(filter.workflow_type)
+    .bind(filter.limit)
+    .bind(filter.offset)
     .fetch_all(pool)
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context("list workflow runs", error))?;
@@ -385,13 +385,12 @@ pub async fn get_latest_workflow_run_by_type(
     organization_id: Option<Uuid>,
     workflow_type: WorkflowType<'_>,
 ) -> Result<Option<WorkflowRunDbRecord>> {
-    let row = sqlx::query_as!(
-        WorkflowRunLookupRow,
+    let row = sqlx::query_as::<_, WorkflowRunLookupRow>(
         "SELECT
             id,
             workflow_type,
             organization_id,
-            status::text AS \"status!\",
+            status::text AS status,
             idempotency_key,
             result_step_key,
             metadata,
@@ -402,11 +401,11 @@ pub async fn get_latest_workflow_run_by_type(
          FROM workflow_runs
          WHERE ($1::uuid IS NULL OR organization_id = $1)
            AND workflow_type = $2
-         ORDER BY created_at DESC
+         ORDER BY created_at DESC, id DESC
          LIMIT 1",
-        organization_id,
-        workflow_type as _,
     )
+    .bind(organization_id)
+    .bind(workflow_type.as_str())
     .fetch_optional(pool)
     .await
     .map_err(|error| {

@@ -3,6 +3,14 @@ use std::sync::Arc;
 
 pub use runledger_core::jobs::JobHandler;
 use runledger_core::jobs::{JobHandlerRegistry, JobType};
+use thiserror::Error;
+
+#[derive(Debug, Clone, Error, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum JobRegistryError {
+    #[error("job handler already registered for {job_type}")]
+    DuplicateJobType { job_type: JobType<'static> },
+}
 
 #[derive(Clone, Default)]
 pub struct JobRegistry {
@@ -20,7 +28,28 @@ impl JobRegistry {
     where
         H: JobHandler + 'static,
     {
-        self.register_boxed(Arc::new(handler));
+        let handler: Arc<dyn JobHandler> = Arc::new(handler);
+        self.handlers.insert(handler.job_type(), handler);
+    }
+
+    pub fn try_register<H>(&mut self, handler: H) -> Result<(), JobRegistryError>
+    where
+        H: JobHandler + 'static,
+    {
+        self.try_register_boxed(Arc::new(handler))
+    }
+
+    pub fn try_register_boxed(
+        &mut self,
+        handler: Arc<dyn JobHandler>,
+    ) -> Result<(), JobRegistryError> {
+        let job_type = handler.job_type();
+        if self.handlers.contains_key(job_type.as_str()) {
+            return Err(JobRegistryError::DuplicateJobType { job_type });
+        }
+
+        self.handlers.insert(job_type, handler);
+        Ok(())
     }
 
     pub fn register_retry_delay_override(
@@ -65,12 +94,16 @@ impl JobHandlerRegistry for JobRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use async_trait::async_trait;
-    use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobType};
+    use runledger_core::jobs::{
+        JobCompletion, JobContext, JobFailure, JobHandlerRegistry, JobType,
+    };
     use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::{JobHandler, JobRegistry};
+    use super::{JobHandler, JobRegistry, JobRegistryError};
 
     struct ExampleHandler;
 
@@ -89,6 +122,23 @@ mod tests {
         }
     }
 
+    struct OutputHandler(&'static str);
+
+    #[async_trait]
+    impl JobHandler for OutputHandler {
+        fn job_type(&self) -> JobType<'static> {
+            JobType::new("jobs.example")
+        }
+
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::with_output(json!(self.0)))
+        }
+    }
+
     fn test_context() -> JobContext {
         JobContext {
             job_id: Uuid::now_v7(),
@@ -97,6 +147,17 @@ mod tests {
             organization_id: None,
             worker_id: "registry-test-worker".to_string(),
         }
+    }
+
+    async fn registered_output(registry: &JobRegistry) -> Value {
+        registry
+            .get(JobType::new("jobs.example"))
+            .expect("handler exists")
+            .execute(test_context(), json!({}))
+            .await
+            .expect("registered handler should execute")
+            .output
+            .expect("handler should return output")
     }
 
     #[tokio::test]
@@ -122,6 +183,56 @@ mod tests {
             registry.registered_types(),
             vec![JobType::new("jobs.example")]
         );
+    }
+
+    #[tokio::test]
+    async fn try_register_rejects_duplicate_job_type_and_keeps_first_handler() {
+        let mut registry = JobRegistry::new();
+        registry
+            .try_register(OutputHandler("first"))
+            .expect("first handler registration should succeed");
+
+        assert_eq!(
+            registry.try_register(OutputHandler("second")),
+            Err(JobRegistryError::DuplicateJobType {
+                job_type: JobType::new("jobs.example"),
+            })
+        );
+        assert_eq!(registered_output(&registry).await, json!("first"));
+    }
+
+    #[tokio::test]
+    async fn try_register_boxed_rejects_duplicate_job_type_and_keeps_first_handler() {
+        let mut registry = JobRegistry::new();
+        registry
+            .try_register_boxed(Arc::new(OutputHandler("first")))
+            .expect("first handler registration should succeed");
+
+        assert_eq!(
+            registry.try_register_boxed(Arc::new(OutputHandler("second"))),
+            Err(JobRegistryError::DuplicateJobType {
+                job_type: JobType::new("jobs.example"),
+            })
+        );
+        assert_eq!(registered_output(&registry).await, json!("first"));
+    }
+
+    #[tokio::test]
+    async fn register_overwrites_duplicate_job_type() {
+        let mut registry = JobRegistry::new();
+        registry.register(OutputHandler("first"));
+        registry.register(OutputHandler("second"));
+
+        assert_eq!(registered_output(&registry).await, json!("second"));
+    }
+
+    #[tokio::test]
+    async fn trait_register_boxed_overwrites_duplicate_job_type() {
+        let mut registry = JobRegistry::new();
+        JobHandlerRegistry::register_boxed(&mut registry, Arc::new(OutputHandler("first")));
+        JobHandlerRegistry::register_boxed(&mut registry, Arc::new(OutputHandler("second")));
+
+        assert_eq!(registered_output(&registry).await, json!("second"));
     }
 
     #[test]
