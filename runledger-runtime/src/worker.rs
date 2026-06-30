@@ -10,13 +10,14 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::{self, JobCompletionUpdate, JobFailureUpdate, JobProgressUpdate};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
-use tokio::time::{Duration, Instant, MissedTickBehavior, sleep, sleep_until};
+use tokio::time::{Duration, Instant, MissedTickBehavior, sleep_until};
 use tracing::{Instrument, error, info, info_span, warn};
 
 use crate::RuntimeLoopExit;
 use crate::WorkerError;
 use crate::config::JobsConfig;
 use crate::registry::JobRegistry;
+use crate::shutdown;
 
 const UNKNOWN_WORKER_ID: &str = "unknown-worker";
 // Kept stable for clients that already match this code; it also covers leases
@@ -59,12 +60,12 @@ pub async fn run_worker_loop(
     loop {
         drain_finished_tasks(&mut join_set).await;
 
-        if shutdown_requested_or_closed(&shutdown) {
+        if shutdown::is_requested_or_closed(&shutdown) {
             return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
         }
 
         if claimable_job_types.is_empty() {
-            if wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await {
+            if shutdown::wait_for_request_or_timeout(&mut shutdown, config.poll_interval).await {
                 return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
             }
             continue;
@@ -72,7 +73,7 @@ pub async fn run_worker_loop(
 
         let available = semaphore.available_permits();
         if available == 0 {
-            if wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await {
+            if shutdown::wait_for_request_or_timeout(&mut shutdown, config.poll_interval).await {
                 return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
             }
             continue;
@@ -100,7 +101,7 @@ pub async fn run_worker_loop(
         };
 
         if claimed.is_empty() {
-            wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await;
+            shutdown::wait_for_request_or_timeout(&mut shutdown, config.poll_interval).await;
             continue;
         }
 
@@ -129,7 +130,7 @@ pub async fn run_worker_loop(
             continue;
         }
 
-        if wait_for_shutdown_or_poll(&mut shutdown, config.poll_interval).await {
+        if shutdown::wait_for_request_or_timeout(&mut shutdown, config.poll_interval).await {
             return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
         }
     }
@@ -158,20 +159,6 @@ async fn drain_finished_tasks(join_set: &mut JoinSet<()>) {
         if let Err(error) = result {
             error!(%error, "job task crashed");
         }
-    }
-}
-
-fn shutdown_requested_or_closed(shutdown: &watch::Receiver<bool>) -> bool {
-    *shutdown.borrow() || shutdown.has_changed().is_err()
-}
-
-async fn wait_for_shutdown_or_poll(
-    shutdown: &mut watch::Receiver<bool>,
-    poll_interval: Duration,
-) -> bool {
-    tokio::select! {
-        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
-        _ = sleep(poll_interval) => false,
     }
 }
 
