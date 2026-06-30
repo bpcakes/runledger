@@ -1,6 +1,5 @@
 use std::collections::{BTreeSet, VecDeque};
 
-use chrono::{DateTime, Utc};
 use runledger_core::jobs::{
     WorkflowDependencyReleaseMode, WorkflowRunStatus, WorkflowStepExecutionKind, WorkflowStepStatus,
 };
@@ -11,9 +10,10 @@ use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::{DbTx, Error, Result};
 
 use super::super::row_decode::{
-    parse_job_stage, parse_job_type_name, parse_step_key_name, parse_workflow_release_mode,
-    parse_workflow_run_status, parse_workflow_step_execution_kind, parse_workflow_step_status,
+    parse_job_stage, parse_job_type_name, parse_workflow_release_mode, parse_workflow_run_status,
+    parse_workflow_step_execution_kind, parse_workflow_step_status,
 };
+use super::super::rows::WorkflowStepRow;
 use super::super::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowStepDbRecord};
 use super::errors::{
     workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
@@ -30,65 +30,6 @@ use super::locking::{
 use super::release::{StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx};
 
 pub(crate) const WORKFLOW_RUN_TERMINAL_CHANNEL: &str = "runledger_workflow_run_terminal";
-
-#[derive(sqlx::FromRow)]
-struct WorkflowStepRow {
-    id: Uuid,
-    workflow_run_id: Uuid,
-    step_key: String,
-    execution_kind: String,
-    job_type: Option<String>,
-    organization_id: Option<Uuid>,
-    payload: serde_json::Value,
-    priority: Option<i32>,
-    max_attempts: Option<i32>,
-    timeout_seconds: Option<i32>,
-    stage: Option<String>,
-    status: String,
-    job_id: Option<Uuid>,
-    released_at: Option<DateTime<Utc>>,
-    started_at: Option<DateTime<Utc>>,
-    finished_at: Option<DateTime<Utc>>,
-    dependency_count_total: i32,
-    dependency_count_pending: i32,
-    dependency_count_unsatisfied: i32,
-    status_reason: Option<String>,
-    last_error_code: Option<String>,
-    last_error_message: Option<String>,
-    output: Option<Value>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-fn workflow_step_db_record_from_row(row: WorkflowStepRow) -> Result<WorkflowStepDbRecord> {
-    Ok(WorkflowStepDbRecord {
-        id: row.id,
-        workflow_run_id: row.workflow_run_id,
-        step_key: parse_step_key_name(row.step_key)?,
-        execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,
-        job_type: row.job_type.map(parse_job_type_name).transpose()?,
-        organization_id: row.organization_id,
-        payload: row.payload,
-        priority: row.priority,
-        max_attempts: row.max_attempts,
-        timeout_seconds: row.timeout_seconds,
-        stage: row.stage.map(parse_job_stage).transpose()?,
-        status: parse_workflow_step_status(row.status)?,
-        job_id: row.job_id,
-        released_at: row.released_at,
-        started_at: row.started_at,
-        finished_at: row.finished_at,
-        dependency_count_total: row.dependency_count_total,
-        dependency_count_pending: row.dependency_count_pending,
-        dependency_count_unsatisfied: row.dependency_count_unsatisfied,
-        status_reason: row.status_reason,
-        last_error_code: row.last_error_code,
-        last_error_message: row.last_error_message,
-        output: row.output,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
-}
 
 fn validate_external_completion_status(terminal_status: WorkflowStepStatus) -> Result<()> {
     if terminal_status.is_terminal() {
@@ -446,7 +387,7 @@ pub async fn complete_external_workflow_step_tx(
     .ok_or_else(workflow_external_step_not_found_error)?;
 
     let stored_output = row.output.clone();
-    let step = workflow_step_db_record_from_row(row)?;
+    let step = row.into_record()?;
     if step.execution_kind != WorkflowStepExecutionKind::External {
         return Err(workflow_external_step_not_external_error(
             step.step_key.as_str(),
@@ -543,7 +484,7 @@ pub async fn complete_external_workflow_step_tx(
         Error::from_query_sqlx_with_context("mark external workflow step terminal", error)
     })?;
 
-    let updated = workflow_step_db_record_from_row(updated)?;
+    let updated = updated.into_record()?;
     let mut touched_run_ids = BTreeSet::from([updated.workflow_run_id]);
     // External completion already owns the workflow-step row locks. Do not wait
     // on the shared release advisory lock here: cancellation may own the

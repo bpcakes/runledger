@@ -9,9 +9,9 @@ use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::row_decode::{
-    parse_job_stage, parse_job_type_name, parse_step_key_name, parse_workflow_run_status,
-    parse_workflow_step_execution_kind, parse_workflow_type_name,
+    parse_job_stage, parse_job_type_name, parse_workflow_step_execution_kind,
 };
+use super::super::rows::WorkflowRunEnqueueRow;
 use super::super::workflow_types::WorkflowRunDbRecord;
 use super::errors::{
     workflow_enqueue_conflicting_retry_error, workflow_internal_state_error,
@@ -30,22 +30,6 @@ use super::validation::workflow_dag_validation_error;
 struct WorkflowRunInsertOutcome {
     record: WorkflowRunDbRecord,
     inserted: bool,
-}
-
-#[derive(sqlx::FromRow)]
-struct WorkflowRunRow {
-    id: Uuid,
-    workflow_type: String,
-    organization_id: Option<Uuid>,
-    status: String,
-    idempotency_key: Option<String>,
-    result_step_key: Option<String>,
-    metadata: JsonValue,
-    enqueue_request_matches: Option<bool>,
-    started_at: chrono::DateTime<chrono::Utc>,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Serialize)]
@@ -173,8 +157,8 @@ async fn insert_workflow_run_record_tx(
         .transpose()?;
     // The conflict clause is selected from static literals only; all request
     // data remains bound below. This dynamic SQL is not SQLx macro-checked, so
-    // keep the returned columns and bind order aligned with WorkflowRunRow and
-    // the workflow_runs insert list.
+    // keep the returned columns and bind order aligned with WorkflowRunEnqueueRow
+    // and the workflow_runs insert list.
     let insert_sql = format!(
         "INSERT INTO workflow_runs (
             workflow_type,
@@ -203,7 +187,7 @@ async fn insert_workflow_run_record_tx(
             updated_at",
         enqueue_workflow_run_idempotency_conflict_clause(payload),
     );
-    let run_row = sqlx::query_as::<_, WorkflowRunRow>(&insert_sql)
+    let run_row = sqlx::query_as::<_, WorkflowRunEnqueueRow>(&insert_sql)
         .bind(payload.workflow_type())
         .bind(payload.organization_id())
         .bind(payload.idempotency_key())
@@ -216,7 +200,7 @@ async fn insert_workflow_run_record_tx(
 
     if let Some(run_row) = run_row {
         return Ok(WorkflowRunInsertOutcome {
-            record: workflow_run_record_from_row(run_row)?,
+            record: run_row.into_record()?,
             inserted: true,
         });
     }
@@ -235,29 +219,8 @@ async fn insert_workflow_run_record_tx(
     validate_existing_idempotent_workflow_run(&existing)?;
 
     Ok(WorkflowRunInsertOutcome {
-        record: workflow_run_record_from_row(existing)?,
+        record: existing.into_record()?,
         inserted: false,
-    })
-}
-
-fn workflow_run_record_from_row(run_row: WorkflowRunRow) -> Result<WorkflowRunDbRecord> {
-    // The retry-match flags are only validation scratch fields for idempotent
-    // conflict resolution; they are not part of the persisted public run record.
-    Ok(WorkflowRunDbRecord {
-        id: run_row.id,
-        workflow_type: parse_workflow_type_name(run_row.workflow_type)?,
-        organization_id: run_row.organization_id,
-        status: parse_workflow_run_status(run_row.status)?,
-        idempotency_key: run_row.idempotency_key,
-        result_step_key: run_row
-            .result_step_key
-            .map(parse_step_key_name)
-            .transpose()?,
-        metadata: run_row.metadata,
-        started_at: run_row.started_at,
-        finished_at: run_row.finished_at,
-        created_at: run_row.created_at,
-        updated_at: run_row.updated_at,
     })
 }
 
@@ -266,13 +229,13 @@ async fn load_existing_idempotent_workflow_run_tx(
     payload: &WorkflowRunEnqueue<'_>,
     idempotency_key: &str,
     enqueue_request: &JsonValue,
-) -> Result<WorkflowRunRow> {
+) -> Result<WorkflowRunEnqueueRow> {
     // After INSERT ... ON CONFLICT reports an existing keyed run, this locks the
     // matched committed row while the enqueue transaction compares and returns
     // the idempotent result.
     let run = if let Some(organization_id) = payload.organization_id() {
         sqlx::query_as!(
-            WorkflowRunRow,
+            WorkflowRunEnqueueRow,
             r#"SELECT
                 id,
                 workflow_type,
@@ -301,7 +264,7 @@ async fn load_existing_idempotent_workflow_run_tx(
         .await
     } else {
         sqlx::query_as!(
-            WorkflowRunRow,
+            WorkflowRunEnqueueRow,
             r#"SELECT
                 id,
                 workflow_type,
@@ -361,8 +324,8 @@ fn enqueue_workflow_run_idempotency_conflict_clause(
     }
 }
 
-fn validate_existing_idempotent_workflow_run(existing: &WorkflowRunRow) -> Result<()> {
-    match existing.enqueue_request_matches {
+fn validate_existing_idempotent_workflow_run(existing: &WorkflowRunEnqueueRow) -> Result<()> {
+    match existing.enqueue_request_matches() {
         Some(true) => Ok(()),
         Some(false) => Err(workflow_enqueue_conflicting_retry_error("request")),
         None => Err(workflow_legacy_idempotency_snapshot_missing_error(

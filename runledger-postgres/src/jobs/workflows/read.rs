@@ -4,59 +4,12 @@ use sqlx::types::Uuid;
 use crate::{DbPool, DbTx, Result};
 
 use super::super::errors::validate_pagination;
-use super::super::row_decode::{
-    parse_job_stage, parse_job_type_name, parse_step_key_name, parse_workflow_release_mode,
-    parse_workflow_run_status, parse_workflow_step_execution_kind, parse_workflow_step_status,
-    parse_workflow_type_name,
-};
+use super::super::row_decode::parse_workflow_release_mode;
+use super::super::rows::{WorkflowRunRow, WorkflowStepRow};
 use super::super::workflow_types::{
     WorkflowRunCountFilter, WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowStepDbRecord,
     WorkflowStepDependencyDbRecord,
 };
-
-#[derive(sqlx::FromRow)]
-struct WorkflowRunLookupRow {
-    id: Uuid,
-    workflow_type: String,
-    organization_id: Option<Uuid>,
-    status: String,
-    idempotency_key: Option<String>,
-    result_step_key: Option<String>,
-    metadata: serde_json::Value,
-    started_at: chrono::DateTime<chrono::Utc>,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(sqlx::FromRow)]
-struct WorkflowStepLookupRow {
-    id: Uuid,
-    workflow_run_id: Uuid,
-    step_key: String,
-    execution_kind: String,
-    job_type: Option<String>,
-    organization_id: Option<Uuid>,
-    payload: serde_json::Value,
-    priority: Option<i32>,
-    max_attempts: Option<i32>,
-    timeout_seconds: Option<i32>,
-    stage: Option<String>,
-    status: String,
-    job_id: Option<Uuid>,
-    released_at: Option<chrono::DateTime<chrono::Utc>>,
-    started_at: Option<chrono::DateTime<chrono::Utc>>,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    dependency_count_total: i32,
-    dependency_count_pending: i32,
-    dependency_count_unsatisfied: i32,
-    status_reason: Option<String>,
-    last_error_code: Option<String>,
-    last_error_message: Option<String>,
-    output: Option<serde_json::Value>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-}
 
 #[derive(sqlx::FromRow)]
 struct WorkflowStepDependencyLookupRow {
@@ -65,56 +18,6 @@ struct WorkflowStepDependencyLookupRow {
     dependent_step_id: Uuid,
     release_mode: String,
     created_at: chrono::DateTime<chrono::Utc>,
-}
-
-fn workflow_run_db_record_from_lookup_row(
-    row: WorkflowRunLookupRow,
-) -> Result<WorkflowRunDbRecord> {
-    Ok(WorkflowRunDbRecord {
-        id: row.id,
-        workflow_type: parse_workflow_type_name(row.workflow_type)?,
-        organization_id: row.organization_id,
-        status: parse_workflow_run_status(row.status)?,
-        idempotency_key: row.idempotency_key,
-        result_step_key: row.result_step_key.map(parse_step_key_name).transpose()?,
-        metadata: row.metadata,
-        started_at: row.started_at,
-        finished_at: row.finished_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
-}
-
-fn workflow_step_db_record_from_lookup_row(
-    row: WorkflowStepLookupRow,
-) -> Result<WorkflowStepDbRecord> {
-    Ok(WorkflowStepDbRecord {
-        id: row.id,
-        workflow_run_id: row.workflow_run_id,
-        step_key: parse_step_key_name(row.step_key)?,
-        execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,
-        job_type: row.job_type.map(parse_job_type_name).transpose()?,
-        organization_id: row.organization_id,
-        payload: row.payload,
-        priority: row.priority,
-        max_attempts: row.max_attempts,
-        timeout_seconds: row.timeout_seconds,
-        stage: row.stage.map(parse_job_stage).transpose()?,
-        status: parse_workflow_step_status(row.status)?,
-        job_id: row.job_id,
-        released_at: row.released_at,
-        started_at: row.started_at,
-        finished_at: row.finished_at,
-        dependency_count_total: row.dependency_count_total,
-        dependency_count_pending: row.dependency_count_pending,
-        dependency_count_unsatisfied: row.dependency_count_unsatisfied,
-        status_reason: row.status_reason,
-        last_error_code: row.last_error_code,
-        last_error_message: row.last_error_message,
-        output: row.output,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
 }
 
 fn workflow_step_dependency_db_record_from_lookup_row(
@@ -135,7 +38,7 @@ pub async fn get_workflow_run_by_id(
     workflow_run_id: Uuid,
 ) -> Result<Option<WorkflowRunDbRecord>> {
     let row = sqlx::query_as!(
-        WorkflowRunLookupRow,
+        WorkflowRunRow,
         "SELECT
             id,
             workflow_type,
@@ -159,7 +62,7 @@ pub async fn get_workflow_run_by_id(
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context("get workflow run by id", error))?;
 
-    row.map(workflow_run_db_record_from_lookup_row).transpose()
+    row.map(WorkflowRunRow::into_record).transpose()
 }
 
 pub(in crate::jobs::workflows) async fn load_workflow_run_by_id_tx(
@@ -168,7 +71,7 @@ pub(in crate::jobs::workflows) async fn load_workflow_run_by_id_tx(
     context: &'static str,
 ) -> Result<WorkflowRunDbRecord> {
     let run_row = sqlx::query_as!(
-        WorkflowRunLookupRow,
+        WorkflowRunRow,
         "SELECT
             id,
             workflow_type,
@@ -189,7 +92,7 @@ pub(in crate::jobs::workflows) async fn load_workflow_run_by_id_tx(
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context(context, error))?;
 
-    workflow_run_db_record_from_lookup_row(run_row)
+    run_row.into_record()
 }
 
 pub async fn list_workflow_steps(
@@ -197,7 +100,7 @@ pub async fn list_workflow_steps(
     organization_id: Option<Uuid>,
     workflow_run_id: Uuid,
 ) -> Result<Vec<WorkflowStepDbRecord>> {
-    let rows = sqlx::query_as::<_, WorkflowStepLookupRow>(
+    let rows = sqlx::query_as::<_, WorkflowStepRow>(
         "SELECT
             ws.id,
             ws.workflow_run_id,
@@ -236,9 +139,7 @@ pub async fn list_workflow_steps(
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context("list workflow steps", error))?;
 
-    rows.into_iter()
-        .map(workflow_step_db_record_from_lookup_row)
-        .collect()
+    rows.into_iter().map(WorkflowStepRow::into_record).collect()
 }
 
 pub async fn list_workflow_steps_page(
@@ -250,7 +151,7 @@ pub async fn list_workflow_steps_page(
 ) -> Result<Vec<WorkflowStepDbRecord>> {
     validate_pagination(limit, offset)?;
 
-    let rows = sqlx::query_as::<_, WorkflowStepLookupRow>(
+    let rows = sqlx::query_as::<_, WorkflowStepRow>(
         "SELECT
             ws.id,
             ws.workflow_run_id,
@@ -294,9 +195,7 @@ pub async fn list_workflow_steps_page(
         crate::Error::from_query_sqlx_with_context("list workflow steps page", error)
     })?;
 
-    rows.into_iter()
-        .map(workflow_step_db_record_from_lookup_row)
-        .collect()
+    rows.into_iter().map(WorkflowStepRow::into_record).collect()
 }
 
 pub async fn count_workflow_steps(
@@ -326,7 +225,7 @@ pub async fn list_workflow_runs(
 
     let status_text = filter.status.map(|status| status.as_db_value());
 
-    let rows = sqlx::query_as::<_, WorkflowRunLookupRow>(
+    let rows = sqlx::query_as::<_, WorkflowRunRow>(
         "SELECT
             id,
             workflow_type,
@@ -355,9 +254,7 @@ pub async fn list_workflow_runs(
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context("list workflow runs", error))?;
 
-    rows.into_iter()
-        .map(workflow_run_db_record_from_lookup_row)
-        .collect()
+    rows.into_iter().map(WorkflowRunRow::into_record).collect()
 }
 
 pub async fn count_workflow_runs(
@@ -385,7 +282,7 @@ pub async fn get_latest_workflow_run_by_type(
     organization_id: Option<Uuid>,
     workflow_type: WorkflowType<'_>,
 ) -> Result<Option<WorkflowRunDbRecord>> {
-    let row = sqlx::query_as::<_, WorkflowRunLookupRow>(
+    let row = sqlx::query_as::<_, WorkflowRunRow>(
         "SELECT
             id,
             workflow_type,
@@ -416,7 +313,7 @@ pub async fn get_latest_workflow_run_by_type(
         return Ok(None);
     };
 
-    Ok(Some(workflow_run_db_record_from_lookup_row(row)?))
+    Ok(Some(row.into_record()?))
 }
 
 pub async fn list_workflow_step_dependencies(
@@ -556,7 +453,7 @@ pub async fn get_workflow_run_by_type_and_idempotency_key_tx(
 ) -> Result<Option<WorkflowRunDbRecord>> {
     let row = if let Some(organization_id) = organization_id {
         sqlx::query_as!(
-            WorkflowRunLookupRow,
+            WorkflowRunRow,
             "SELECT
                 id,
                 workflow_type,
@@ -582,7 +479,7 @@ pub async fn get_workflow_run_by_type_and_idempotency_key_tx(
         .await
     } else {
         sqlx::query_as!(
-            WorkflowRunLookupRow,
+            WorkflowRunRow,
             "SELECT
                 id,
                 workflow_type,
@@ -613,5 +510,5 @@ pub async fn get_workflow_run_by_type_and_idempotency_key_tx(
         )
     })?;
 
-    row.map(workflow_run_db_record_from_lookup_row).transpose()
+    row.map(WorkflowRunRow::into_record).transpose()
 }

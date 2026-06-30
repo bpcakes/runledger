@@ -7,9 +7,9 @@ use runledger_core::jobs::{
 use sqlx::types::Uuid;
 
 use crate::jobs::row_decode::{
-    parse_job_stage, parse_job_type_name, parse_step_key_name, parse_workflow_step_execution_kind,
-    parse_workflow_step_status,
+    parse_job_stage, parse_job_type_name, parse_workflow_step_execution_kind,
 };
+use crate::jobs::rows::WorkflowStepRow;
 use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::jobs::workflow_types::{
     AppendWorkflowStepsInput as AppendWorkflowStepsInputRecord,
@@ -436,7 +436,8 @@ async fn load_workflow_steps_by_keys_tx(
         .iter()
         .map(|step| step.step_key().as_str().to_owned())
         .collect::<Vec<_>>();
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as!(
+        WorkflowStepRow,
         "SELECT
             ws.id,
             ws.workflow_run_id,
@@ -481,37 +482,8 @@ async fn load_workflow_steps_by_keys_tx(
     let steps_by_key = rows
         .into_iter()
         .map(|row| {
-            let step_key = parse_step_key_name(row.step_key)?;
-            Ok((
-                step_key.clone(),
-                WorkflowStepDbRecord {
-                    id: row.id,
-                    workflow_run_id: row.workflow_run_id,
-                    step_key,
-                    execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,
-                    job_type: row.job_type.map(parse_job_type_name).transpose()?,
-                    organization_id: row.organization_id,
-                    payload: row.payload,
-                    priority: row.priority,
-                    max_attempts: row.max_attempts,
-                    timeout_seconds: row.timeout_seconds,
-                    stage: row.stage.map(parse_job_stage).transpose()?,
-                    status: parse_workflow_step_status(row.status)?,
-                    job_id: row.job_id,
-                    released_at: row.released_at,
-                    started_at: row.started_at,
-                    finished_at: row.finished_at,
-                    dependency_count_total: row.dependency_count_total,
-                    dependency_count_pending: row.dependency_count_pending,
-                    dependency_count_unsatisfied: row.dependency_count_unsatisfied,
-                    status_reason: row.status_reason,
-                    last_error_code: row.last_error_code,
-                    last_error_message: row.last_error_message,
-                    output: row.output,
-                    created_at: row.created_at,
-                    updated_at: row.updated_at,
-                },
-            ))
+            let record = row.into_record()?;
+            Ok((record.step_key.clone(), record))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
 
