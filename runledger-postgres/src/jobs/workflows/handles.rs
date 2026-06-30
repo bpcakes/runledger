@@ -14,6 +14,7 @@ use crate::{DbPool, Error, QueryError, QueryErrorCategory, Result};
 use super::super::row_decode::{
     parse_step_key_name, parse_workflow_run_status, parse_workflow_type_name,
 };
+use super::super::rows::WorkflowRunRow;
 use super::super::workflow_types::{
     WorkflowRunDbRecord, WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunHandleScope,
     WorkflowRunResultRecord, WorkflowRunWaitOptions,
@@ -21,20 +22,6 @@ use super::super::workflow_types::{
 use super::enqueue::enqueue_workflow_run;
 use super::read::get_workflow_run_by_id;
 use super::runtime::WORKFLOW_RUN_TERMINAL_CHANNEL;
-
-struct WorkflowRunHandleLookupRow {
-    id: Uuid,
-    workflow_type: String,
-    organization_id: Option<Uuid>,
-    status: String,
-    idempotency_key: Option<String>,
-    result_step_key: Option<String>,
-    metadata: Value,
-    started_at: DateTime<Utc>,
-    finished_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
 
 struct WorkflowRunResultLookupRow {
     id: Uuid,
@@ -485,7 +472,7 @@ async fn load_global_workflow_run_by_id(
     workflow_run_id: Uuid,
 ) -> Result<Option<WorkflowRunDbRecord>> {
     let row = sqlx::query_as!(
-        WorkflowRunHandleLookupRow,
+        WorkflowRunRow,
         "SELECT
             id,
             workflow_type,
@@ -508,25 +495,7 @@ async fn load_global_workflow_run_by_id(
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("load global workflow run", error))?;
 
-    row.map(workflow_run_db_record_from_handle_row).transpose()
-}
-
-fn workflow_run_db_record_from_handle_row(
-    row: WorkflowRunHandleLookupRow,
-) -> Result<WorkflowRunDbRecord> {
-    Ok(WorkflowRunDbRecord {
-        id: row.id,
-        workflow_type: parse_workflow_type_name(row.workflow_type)?,
-        organization_id: row.organization_id,
-        status: parse_workflow_run_status(row.status)?,
-        idempotency_key: row.idempotency_key,
-        result_step_key: row.result_step_key.map(parse_step_key_name).transpose()?,
-        metadata: row.metadata,
-        started_at: row.started_at,
-        finished_at: row.finished_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
+    row.map(WorkflowRunRow::into_record).transpose()
 }
 
 async fn load_workflow_run_result(

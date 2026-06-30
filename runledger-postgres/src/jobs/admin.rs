@@ -8,9 +8,8 @@ use super::errors::{
     invalid_job_state_error, job_not_found_error, validate_page_limit, validate_pagination,
     workflow_requeue_not_supported_error,
 };
-use super::row_decode::{
-    parse_job_event_type, parse_job_stage, parse_job_status, parse_job_type_name,
-};
+use super::row_decode::{parse_job_event_type, parse_job_stage, parse_job_type_name};
+use super::rows::JobQueueRow;
 use super::types::{JobEventRecord, JobListFilter, JobMetricsRecord, JobQueueRecord};
 use super::workflows::on_terminal;
 
@@ -79,38 +78,6 @@ async fn workflow_managed_job_exists_tx(
 }
 
 #[derive(sqlx::FromRow)]
-struct JobQueueRecordRow {
-    id: Uuid,
-    job_type: String,
-    organization_id: Option<Uuid>,
-    payload: Value,
-    status: String,
-    priority: i32,
-    run_number: i32,
-    attempt: i32,
-    max_attempts: i32,
-    timeout_seconds: i32,
-    next_run_at: chrono::DateTime<chrono::Utc>,
-    lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
-    worker_id: Option<String>,
-    started_at: Option<chrono::DateTime<chrono::Utc>>,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    stage: String,
-    progress_done: Option<i64>,
-    progress_total: Option<i64>,
-    progress_pct: Option<f64>,
-    checkpoint: Option<Value>,
-    output: Option<Value>,
-    idempotency_key: Option<String>,
-    status_reason: Option<String>,
-    last_error_code: Option<String>,
-    last_error_message: Option<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(sqlx::FromRow)]
 struct JobPayloadUuidArrayFieldUpdateCandidate {
     status: String,
     worker_id: Option<String>,
@@ -120,45 +87,13 @@ struct JobPayloadUuidArrayFieldUpdateCandidate {
     enqueue_request: Option<Value>,
 }
 
-fn job_queue_record_from_row(row: JobQueueRecordRow) -> Result<JobQueueRecord> {
-    Ok(JobQueueRecord {
-        id: row.id,
-        job_type: parse_job_type_name(row.job_type)?,
-        organization_id: row.organization_id,
-        payload: row.payload,
-        status: parse_job_status(row.status)?,
-        priority: row.priority,
-        run_number: row.run_number,
-        attempt: row.attempt,
-        max_attempts: row.max_attempts,
-        timeout_seconds: row.timeout_seconds,
-        next_run_at: row.next_run_at,
-        lease_expires_at: row.lease_expires_at,
-        last_heartbeat_at: row.last_heartbeat_at,
-        worker_id: row.worker_id,
-        started_at: row.started_at,
-        finished_at: row.finished_at,
-        stage: parse_job_stage(row.stage)?,
-        progress_done: row.progress_done,
-        progress_total: row.progress_total,
-        progress_pct: row.progress_pct,
-        checkpoint: row.checkpoint,
-        output: row.output,
-        idempotency_key: row.idempotency_key,
-        status_reason: row.status_reason,
-        last_error_code: row.last_error_code,
-        last_error_message: row.last_error_message,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
-}
-
 pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<JobQueueRecord>> {
     validate_pagination(filter.limit, filter.offset)?;
 
     let status_filter = filter.status.map(JobStatus::as_db_value);
 
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as!(
+        JobQueueRow,
         "SELECT
             id,
             job_type,
@@ -205,40 +140,7 @@ pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("list jobs", error))?;
 
-    rows.into_iter()
-        .map(|row| {
-            Ok(JobQueueRecord {
-                id: row.id,
-                job_type: parse_job_type_name(row.job_type)?,
-                organization_id: row.organization_id,
-                payload: row.payload,
-                status: parse_job_status(row.status)?,
-                priority: row.priority,
-                run_number: row.run_number,
-                attempt: row.attempt,
-                max_attempts: row.max_attempts,
-                timeout_seconds: row.timeout_seconds,
-                next_run_at: row.next_run_at,
-                lease_expires_at: row.lease_expires_at,
-                last_heartbeat_at: row.last_heartbeat_at,
-                worker_id: row.worker_id,
-                started_at: row.started_at,
-                finished_at: row.finished_at,
-                stage: parse_job_stage(row.stage)?,
-                progress_done: row.progress_done,
-                progress_total: row.progress_total,
-                progress_pct: row.progress_pct,
-                checkpoint: row.checkpoint,
-                output: row.output,
-                idempotency_key: row.idempotency_key,
-                status_reason: row.status_reason,
-                last_error_code: row.last_error_code,
-                last_error_message: row.last_error_message,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            })
-        })
-        .collect::<Result<Vec<_>>>()
+    rows.into_iter().map(JobQueueRow::into_record).collect()
 }
 
 pub async fn get_job_by_id(
@@ -246,7 +148,8 @@ pub async fn get_job_by_id(
     organization_id: Option<Uuid>,
     job_id: Uuid,
 ) -> Result<Option<JobQueueRecord>> {
-    let row = sqlx::query!(
+    let row = sqlx::query_as!(
+        JobQueueRow,
         "SELECT
             id,
             job_type,
@@ -287,39 +190,7 @@ pub async fn get_job_by_id(
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("get job by id", error))?;
 
-    row.map(|row| {
-        Ok(JobQueueRecord {
-            id: row.id,
-            job_type: parse_job_type_name(row.job_type)?,
-            organization_id: row.organization_id,
-            payload: row.payload,
-            status: parse_job_status(row.status)?,
-            priority: row.priority,
-            run_number: row.run_number,
-            attempt: row.attempt,
-            max_attempts: row.max_attempts,
-            timeout_seconds: row.timeout_seconds,
-            next_run_at: row.next_run_at,
-            lease_expires_at: row.lease_expires_at,
-            last_heartbeat_at: row.last_heartbeat_at,
-            worker_id: row.worker_id,
-            started_at: row.started_at,
-            finished_at: row.finished_at,
-            stage: parse_job_stage(row.stage)?,
-            progress_done: row.progress_done,
-            progress_total: row.progress_total,
-            progress_pct: row.progress_pct,
-            checkpoint: row.checkpoint,
-            output: row.output,
-            idempotency_key: row.idempotency_key,
-            status_reason: row.status_reason,
-            last_error_code: row.last_error_code,
-            last_error_message: row.last_error_message,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        })
-    })
-    .transpose()
+    row.map(JobQueueRow::into_record).transpose()
 }
 
 pub async fn get_job_payload_by_idempotency_key(
@@ -692,7 +563,7 @@ pub(crate) async fn cancel_job_tx(
     reason: Option<&str>,
 ) -> Result<Option<JobQueueRecord>> {
     let row = sqlx::query_as!(
-        JobQueueRecordRow,
+        JobQueueRow,
         "UPDATE job_queue
          SET status = 'CANCELED',
              lease_expires_at = NULL,
@@ -746,7 +617,7 @@ pub(crate) async fn cancel_job_tx(
         return Ok(None);
     };
 
-    let record = job_queue_record_from_row(row)?;
+    let record = row.into_record()?;
 
     sqlx::query!(
         "UPDATE job_attempts
@@ -848,7 +719,7 @@ pub async fn requeue_job(
     let previous_attempt: i32 = previous_run.attempt;
 
     let row = sqlx::query_as!(
-        JobQueueRecordRow,
+        JobQueueRow,
         "UPDATE job_queue
          SET status = 'PENDING',
              stage = 'queued',
@@ -914,7 +785,7 @@ pub async fn requeue_job(
         );
     };
 
-    let record = job_queue_record_from_row(row)?;
+    let record = row.into_record()?;
 
     let event_attempt = (previous_attempt > 0).then_some(previous_attempt);
     sqlx::query!(

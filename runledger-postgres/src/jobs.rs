@@ -14,6 +14,7 @@ mod errors;
 mod logs;
 mod queue;
 mod row_decode;
+mod rows;
 mod runtime_configs;
 mod schedule_definition_guard;
 mod schedules;

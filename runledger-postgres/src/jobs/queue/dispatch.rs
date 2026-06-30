@@ -7,7 +7,7 @@ use sqlx::types::Uuid;
 use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
 use super::super::errors::validate_positive_lease_duration;
-use super::super::row_decode::{parse_job_stage, parse_job_status, parse_job_type_name};
+use super::super::rows::JobQueueRow;
 use super::super::transaction_isolation::ensure_read_committed_tx;
 use super::super::types::{JobEnqueue, JobQueueRecord};
 use super::super::workflows::on_claimed;
@@ -493,7 +493,8 @@ async fn claim_jobs_inner(
         return Ok(Vec::new());
     }
 
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as!(
+        JobQueueRow,
         "UPDATE job_queue
          SET status = 'LEASED',
              attempt = attempt + 1,
@@ -542,38 +543,7 @@ async fn claim_jobs_inner(
 
     let claimed: Vec<JobQueueRecord> = rows
         .into_iter()
-        .map(|row| {
-            Ok(JobQueueRecord {
-                id: row.id,
-                job_type: parse_job_type_name(row.job_type)?,
-                organization_id: row.organization_id,
-                payload: row.payload,
-                status: parse_job_status(row.status)?,
-                priority: row.priority,
-                run_number: row.run_number,
-                attempt: row.attempt,
-                max_attempts: row.max_attempts,
-                timeout_seconds: row.timeout_seconds,
-                next_run_at: row.next_run_at,
-                lease_expires_at: row.lease_expires_at,
-                last_heartbeat_at: row.last_heartbeat_at,
-                worker_id: row.worker_id,
-                started_at: row.started_at,
-                finished_at: row.finished_at,
-                stage: parse_job_stage(row.stage)?,
-                progress_done: row.progress_done,
-                progress_total: row.progress_total,
-                progress_pct: row.progress_pct,
-                checkpoint: row.checkpoint,
-                output: row.output,
-                idempotency_key: row.idempotency_key,
-                status_reason: row.status_reason,
-                last_error_code: row.last_error_code,
-                last_error_message: row.last_error_message,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            })
-        })
+        .map(JobQueueRow::into_record)
         .collect::<Result<_>>()?;
 
     for job in &claimed {
