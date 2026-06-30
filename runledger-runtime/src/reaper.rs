@@ -3,13 +3,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::{Id, JoinSet};
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 use crate::ReaperError;
 use crate::RuntimeLoopExit;
 use crate::config::JobsConfig;
 use crate::registry::JobRegistry;
+use crate::shutdown;
 
 const REAPER_WORKER_ID: &str = "reaper";
 const LEASE_EXPIRED_CODE: &str = "job.lease_expired";
@@ -38,7 +39,7 @@ pub async fn run_reaper_loop(
     let registry = Arc::new(registry);
 
     loop {
-        if shutdown_requested_or_closed(&shutdown) {
+        if shutdown::is_requested_or_closed(&shutdown) {
             return reaper_shutdown_complete();
         }
 
@@ -81,7 +82,7 @@ pub async fn run_reaper_loop(
             }
         }
 
-        if wait_for_shutdown_or_poll(&mut shutdown, config.reaper_interval).await {
+        if shutdown::wait_for_request_or_timeout(&mut shutdown, config.reaper_interval).await {
             return reaper_shutdown_complete();
         }
     }
@@ -114,20 +115,6 @@ fn log_deferred_row_errors(result: &runledger_postgres::jobs::ReapExpiredLeasesD
 fn reaper_shutdown_complete() -> RuntimeLoopExit {
     info!("reaper shutdown complete");
     RuntimeLoopExit::Shutdown
-}
-
-fn shutdown_requested_or_closed(shutdown: &watch::Receiver<bool>) -> bool {
-    *shutdown.borrow() || shutdown.has_changed().is_err()
-}
-
-async fn wait_for_shutdown_or_poll(
-    shutdown: &mut watch::Receiver<bool>,
-    poll_interval: Duration,
-) -> bool {
-    tokio::select! {
-        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
-        _ = sleep(poll_interval) => false,
-    }
 }
 
 async fn notify_handlers_of_terminal_lease_expirations(

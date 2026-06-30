@@ -88,7 +88,9 @@ pub mod error;
 pub mod reaper;
 pub mod registry;
 pub mod scheduler;
+mod shutdown;
 pub mod supervisor;
+mod task_group;
 pub mod worker;
 
 pub use error::{Error, ReaperError, Result, RuntimeError, SchedulerError, WorkerError};

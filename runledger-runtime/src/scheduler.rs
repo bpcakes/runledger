@@ -5,10 +5,10 @@ use cron::Schedule;
 use runledger_postgres::jobs::{self, JobEnqueue};
 use serde_json::{Value, json};
 use tokio::sync::watch;
-use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::config::JobsConfig;
+use crate::shutdown;
 use crate::{Result, RuntimeLoopExit, SchedulerError};
 
 const FAILED_SCHEDULE_RETRY_DELAY_SECONDS: i64 = 30;
@@ -52,7 +52,7 @@ pub async fn run_scheduler_loop(
     }
 
     loop {
-        if shutdown_requested_or_closed(&shutdown) {
+        if shutdown::is_requested_or_closed(&shutdown) {
             return scheduler_shutdown_complete();
         }
 
@@ -60,7 +60,8 @@ pub async fn run_scheduler_loop(
             warn!(%error, "schedule materialization failed");
         }
 
-        if wait_for_shutdown_or_poll(&mut shutdown, config.schedule_poll_interval).await {
+        if shutdown::wait_for_request_or_timeout(&mut shutdown, config.schedule_poll_interval).await
+        {
             return scheduler_shutdown_complete();
         }
     }
@@ -69,20 +70,6 @@ pub async fn run_scheduler_loop(
 fn scheduler_shutdown_complete() -> RuntimeLoopExit {
     info!("scheduler shutdown complete");
     RuntimeLoopExit::Shutdown
-}
-
-fn shutdown_requested_or_closed(shutdown: &watch::Receiver<bool>) -> bool {
-    *shutdown.borrow() || shutdown.has_changed().is_err()
-}
-
-async fn wait_for_shutdown_or_poll(
-    shutdown: &mut watch::Receiver<bool>,
-    poll_interval: std::time::Duration,
-) -> bool {
-    tokio::select! {
-        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
-        _ = sleep(poll_interval) => false,
-    }
 }
 
 async fn materialize_due_schedules(
