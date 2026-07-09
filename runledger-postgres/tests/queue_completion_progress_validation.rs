@@ -1,8 +1,8 @@
 use runledger_core::jobs::{JobEventType, JobStatus, JobType};
 use runledger_postgres::jobs::{
     JobCompletionUpdate, JobDefinitionUpsert, JobEnqueue, JobProgressUpdate, JobQueueRecord,
-    claim_jobs, complete_job_success, enqueue_job, get_job_by_id, list_job_events,
-    update_job_progress, upsert_job_definition_tx,
+    claim_jobs, complete_job_success, complete_job_success_with_outcome, enqueue_job,
+    get_job_by_id, list_job_events, update_job_progress, upsert_job_definition_tx,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -92,6 +92,17 @@ async fn assert_event_types(pool: &DbPool, job_id: Uuid, expected: &[JobEventTyp
         .map(|event| event.event_type)
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
+}
+
+async fn succeeded_event_progress(pool: &DbPool, job_id: Uuid) -> (Option<i64>, Option<i64>) {
+    let event = list_job_events(pool, None, job_id, 10, None)
+        .await
+        .expect("list job events")
+        .into_iter()
+        .find(|event| event.event_type == JobEventType::Succeeded)
+        .expect("succeeded event exists");
+
+    (event.progress_done, event.progress_total)
 }
 
 fn assert_invalid_completion_progress_error(error: Error) {
@@ -185,6 +196,107 @@ async fn successful_completion_rejects_invalid_progress_without_mutating_lease()
         ],
     )
     .await;
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn complete_job_success_with_outcome_returns_coalesced_progress() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_success_outcome_coalesced_progress", 4).await;
+    register_job_definition(&pool).await;
+
+    let job_id = enqueue_test_job(&pool).await;
+    let job = claim_one_job(&pool, "worker-success-outcome-existing").await;
+    let worker_id = job.worker_id.clone().expect("claimed job has worker id");
+    update_job_progress(
+        &pool,
+        job.id,
+        job.run_number,
+        job.attempt,
+        &worker_id,
+        &JobProgressUpdate {
+            stage: None,
+            progress_done: Some(5),
+            progress_total: Some(10),
+            checkpoint: None,
+        },
+    )
+    .await
+    .expect("persist prior progress");
+
+    let outcome = complete_job_success_with_outcome(
+        &pool,
+        job.id,
+        job.run_number,
+        job.attempt,
+        &worker_id,
+        None,
+    )
+    .await
+    .expect("complete success with existing progress");
+
+    let completed = load_job(&pool, job_id).await;
+    assert_eq!(completed.status, JobStatus::Succeeded);
+    assert_eq!(completed.progress_done, Some(5));
+    assert_eq!(completed.progress_total, Some(10));
+    assert_eq!(outcome.job_id, job_id);
+    assert_eq!(outcome.progress_done, Some(5));
+    assert_eq!(outcome.progress_total, Some(10));
+    assert_eq!(
+        succeeded_event_progress(&pool, job_id).await,
+        (Some(5), Some(10))
+    );
+
+    let partial_job_id = enqueue_test_job(&pool).await;
+    let partial_job = claim_one_job(&pool, "worker-success-outcome-partial").await;
+    let partial_worker_id = partial_job
+        .worker_id
+        .clone()
+        .expect("claimed partial job has worker id");
+    update_job_progress(
+        &pool,
+        partial_job.id,
+        partial_job.run_number,
+        partial_job.attempt,
+        &partial_worker_id,
+        &JobProgressUpdate {
+            stage: None,
+            progress_done: Some(5),
+            progress_total: Some(10),
+            checkpoint: None,
+        },
+    )
+    .await
+    .expect("persist prior partial progress");
+
+    let partial_outcome = complete_job_success_with_outcome(
+        &pool,
+        partial_job.id,
+        partial_job.run_number,
+        partial_job.attempt,
+        &partial_worker_id,
+        Some(&JobCompletionUpdate {
+            progress_done: Some(7),
+            progress_total: None,
+            checkpoint: None,
+            output: None,
+        }),
+    )
+    .await
+    .expect("complete success with partial progress");
+
+    let partial_completed = load_job(&pool, partial_job_id).await;
+    assert_eq!(partial_completed.status, JobStatus::Succeeded);
+    assert_eq!(partial_completed.progress_done, Some(7));
+    assert_eq!(partial_completed.progress_total, Some(10));
+    assert_eq!(partial_outcome.job_id, partial_job_id);
+    assert_eq!(partial_outcome.progress_done, Some(7));
+    assert_eq!(partial_outcome.progress_total, Some(10));
+    assert_eq!(
+        succeeded_event_progress(&pool, partial_job_id).await,
+        (Some(7), Some(10))
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }

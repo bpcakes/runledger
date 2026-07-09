@@ -4,18 +4,25 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures_util::FutureExt;
-use runledger_core::jobs::{
-    JobCompletion, JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobFailure, JobFailureKind,
-};
-use runledger_postgres::jobs::{self, JobCompletionUpdate, JobFailureUpdate, JobProgressUpdate};
+use runledger_core::jobs::{JobCompletion, JobContext, JobFailure};
+use runledger_postgres::jobs::{self, JobProgressUpdate};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant, MissedTickBehavior, sleep_until};
 use tracing::{Instrument, error, info, info_span, warn};
 
+mod completion;
+mod dead_letter;
+mod observers;
+
+use self::completion::{
+    CompletionObservation, complete_job_failure_after_handler, complete_job_success_after_handler,
+};
+use self::observers::{JobRunningNotification, TerminalJobObserverEvent, TerminalObserverTasks};
 use crate::RuntimeLoopExit;
 use crate::WorkerError;
 use crate::config::JobsConfig;
+use crate::observer::{JobLeaseLostEvent, JobLifecycleObservers, ObservedJob};
 use crate::registry::JobRegistry;
 use crate::shutdown;
 
@@ -31,10 +38,6 @@ const RUNNING_PROGRESS_PERSIST_FAILED_REASON: &str = "RUNNING_PROGRESS_PERSIST_F
 const UNSTARTED_CLAIM_RELEASE_NOT_APPLICABLE_CODE: &str =
     "job.unstarted_claim_release_not_applicable";
 const UNSTARTED_CLAIM_RETRY_DELAY_MS: i32 = 1_000;
-#[cfg(test)]
-const TERMINAL_HOOK_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
-const TERMINAL_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum JobExecutionFailure {
     Handler(JobFailure),
@@ -45,7 +48,24 @@ pub async fn run_worker_loop(
     pool: runledger_postgres::DbPool,
     registry: JobRegistry,
     config: JobsConfig,
+    shutdown: watch::Receiver<bool>,
+) -> RuntimeLoopExit {
+    run_worker_loop_with_observer(
+        pool,
+        registry,
+        config,
+        shutdown,
+        JobLifecycleObservers::empty(),
+    )
+    .await
+}
+
+pub async fn run_worker_loop_with_observer(
+    pool: runledger_postgres::DbPool,
+    registry: JobRegistry,
+    config: JobsConfig,
     mut shutdown: watch::Receiver<bool>,
+    observers: JobLifecycleObservers,
 ) -> RuntimeLoopExit {
     if let Err(error) = config.validate_worker_loop() {
         warn!(%error, "invalid jobs config; stopping worker loop");
@@ -56,17 +76,29 @@ pub async fn run_worker_loop(
     let claimable_job_types = registry.registered_types();
     let semaphore = Arc::new(Semaphore::new(config.max_global_concurrency));
     let mut join_set: JoinSet<()> = JoinSet::new();
+    let terminal_observer_tasks = TerminalObserverTasks::owned();
 
     loop {
         drain_finished_tasks(&mut join_set).await;
+        terminal_observer_tasks.drain_finished().await;
 
         if shutdown::is_requested_or_closed(&shutdown) {
-            return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
+            return drain_worker_tasks(
+                join_set,
+                terminal_observer_tasks,
+                RuntimeLoopExit::Shutdown,
+            )
+            .await;
         }
 
         if claimable_job_types.is_empty() {
             if shutdown::wait_for_request_or_timeout(&mut shutdown, config.poll_interval).await {
-                return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
+                return drain_worker_tasks(
+                    join_set,
+                    terminal_observer_tasks,
+                    RuntimeLoopExit::Shutdown,
+                )
+                .await;
             }
             continue;
         }
@@ -74,7 +106,12 @@ pub async fn run_worker_loop(
         let available = semaphore.available_permits();
         if available == 0 {
             if shutdown::wait_for_request_or_timeout(&mut shutdown, config.poll_interval).await {
-                return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
+                return drain_worker_tasks(
+                    join_set,
+                    terminal_observer_tasks,
+                    RuntimeLoopExit::Shutdown,
+                )
+                .await;
             }
             continue;
         }
@@ -114,15 +151,30 @@ pub async fn run_worker_loop(
                     // this defensive branch fires, surface it as an unexpected
                     // loop completion rather than graceful shutdown.
                     warn!("worker semaphore closed; stopping worker loop");
-                    return drain_in_flight_jobs(join_set, RuntimeLoopExit::Completed).await;
+                    return drain_worker_tasks(
+                        join_set,
+                        terminal_observer_tasks,
+                        RuntimeLoopExit::Completed,
+                    )
+                    .await;
                 }
             };
             let pool_clone = pool.clone();
             let registry_clone = Arc::clone(&registry);
             let lease_ttl_seconds = config.lease_ttl_seconds;
+            let observers = observers.clone();
+            let terminal_observer_tasks = terminal_observer_tasks.clone();
             join_set.spawn(async move {
                 let _permit = permit;
-                process_claimed_job(pool_clone, registry_clone, job, lease_ttl_seconds).await;
+                process_claimed_job_with_terminal_observers(
+                    pool_clone,
+                    registry_clone,
+                    job,
+                    lease_ttl_seconds,
+                    observers,
+                    terminal_observer_tasks,
+                )
+                .await;
             });
         }
 
@@ -131,12 +183,21 @@ pub async fn run_worker_loop(
         }
 
         if shutdown::wait_for_request_or_timeout(&mut shutdown, config.poll_interval).await {
-            return drain_in_flight_jobs(join_set, RuntimeLoopExit::Shutdown).await;
+            return drain_worker_tasks(
+                join_set,
+                terminal_observer_tasks,
+                RuntimeLoopExit::Shutdown,
+            )
+            .await;
         }
     }
 }
 
-async fn drain_in_flight_jobs(mut join_set: JoinSet<()>, exit: RuntimeLoopExit) -> RuntimeLoopExit {
+async fn drain_worker_tasks(
+    mut join_set: JoinSet<()>,
+    terminal_observer_tasks: TerminalObserverTasks,
+    exit: RuntimeLoopExit,
+) -> RuntimeLoopExit {
     if !join_set.is_empty() {
         match exit {
             RuntimeLoopExit::Shutdown => {
@@ -150,7 +211,12 @@ async fn drain_in_flight_jobs(mut join_set: JoinSet<()>, exit: RuntimeLoopExit) 
             }
         }
     }
-    while join_set.join_next().await.is_some() {}
+    while let Some(result) = join_set.join_next().await {
+        if let Err(error) = result {
+            error!(%error, "job task crashed while draining in-flight jobs");
+        }
+    }
+    terminal_observer_tasks.drain_for_shutdown().await;
     exit
 }
 
@@ -162,11 +228,49 @@ async fn drain_finished_tasks(join_set: &mut JoinSet<()>) {
     }
 }
 
+#[cfg(test)]
 async fn process_claimed_job(
     pool: runledger_postgres::DbPool,
     registry: Arc<JobRegistry>,
     job: jobs::JobQueueRecord,
     lease_ttl_seconds: i32,
+) {
+    process_claimed_job_with_observer(
+        pool,
+        registry,
+        job,
+        lease_ttl_seconds,
+        JobLifecycleObservers::empty(),
+    )
+    .await;
+}
+
+#[cfg(test)]
+async fn process_claimed_job_with_observer(
+    pool: runledger_postgres::DbPool,
+    registry: Arc<JobRegistry>,
+    job: jobs::JobQueueRecord,
+    lease_ttl_seconds: i32,
+    observers: JobLifecycleObservers,
+) {
+    process_claimed_job_with_terminal_observers(
+        pool,
+        registry,
+        job,
+        lease_ttl_seconds,
+        observers,
+        TerminalObserverTasks::detached(),
+    )
+    .await;
+}
+
+async fn process_claimed_job_with_terminal_observers(
+    pool: runledger_postgres::DbPool,
+    registry: Arc<JobRegistry>,
+    job: jobs::JobQueueRecord,
+    lease_ttl_seconds: i32,
+    observers: JobLifecycleObservers,
+    terminal_observer_tasks: TerminalObserverTasks,
 ) {
     let worker_id = job
         .worker_id
@@ -193,10 +297,13 @@ async fn process_claimed_job(
             organization_id: job.organization_id,
             worker_id: worker_id.clone(),
         };
+        let observed_job = observed_job(&job, &worker_id);
 
         if !mark_job_running_or_abort(&pool, &context, &job).await {
             return;
         }
+        let mut running_notification =
+            JobRunningNotification::spawn(observers.clone(), observed_job.clone());
 
         match execute_job_handler_with_heartbeats(
             pool.clone(),
@@ -208,82 +315,53 @@ async fn process_claimed_job(
         .await
         {
             Ok(completion) => {
-                if let Some(failure) = invalid_completion_progress_failure(&completion) {
-                    warn!(
-                        job_id = %job.id,
-                        attempt = job.attempt,
-                        failure_code = failure.code,
-                        failure_message = %failure.message,
-                        "handler returned invalid success completion; marking job terminal"
-                    );
-                    complete_job_failure_after_handler(
-                        &pool,
-                        registry.as_ref(),
-                        &context,
-                        &job,
-                        failure,
-                    )
-                    .await;
-                } else {
-                    let completion_update = JobCompletionUpdate {
-                        progress_done: completion.progress_done,
-                        progress_total: completion.progress_total,
-                        checkpoint: completion.checkpoint.as_ref(),
-                        output: completion.output.as_ref(),
-                    };
-                    if let Err(error) = jobs::complete_job_success(
-                        &pool,
-                        job.id,
-                        job.run_number,
-                        job.attempt,
-                        &context.worker_id,
-                        Some(&completion_update),
-                    )
-                    .await
-                    {
-                        if let Some(failure) = invalid_completion_progress_failure_from_error(&error)
-                        {
-                            warn!(
-                                job_id = %job.id,
-                                attempt = job.attempt,
-                                failure_code = failure.code,
-                                failure_message = %failure.message,
-                                "handler returned invalid success completion after stored progress was applied; marking job terminal"
-                            );
-                            complete_job_failure_after_handler(
-                                &pool,
-                                registry.as_ref(),
-                                &context,
-                                &job,
-                                failure,
-                            )
-                            .await;
-                        } else {
-                            let release_conflict = is_workflow_release_conflict_error(&error);
-                            let error = WorkerError::CompleteSuccess {
-                                job_id: job.id,
-                                attempt: job.attempt,
-                                source: error,
-                            };
-                            if release_conflict {
-                                warn!(
-                                    %error,
-                                    job_id = %job.id,
-                                    "job success completion conflicted with workflow cancellation; leaving lease for reaper recovery"
-                                );
-                            } else {
-                                error!(%error, job_id = %job.id, "failed to mark job success");
-                            }
-                        }
-                    }
-                }
+                complete_job_success_after_handler(
+                    &pool,
+                    registry.as_ref(),
+                    &context,
+                    &job,
+                    completion,
+                    CompletionObservation::new(
+                        &observers,
+                        observed_job.clone(),
+                        start.elapsed(),
+                        &mut running_notification,
+                        &terminal_observer_tasks,
+                    ),
+                )
+                .await;
             }
             Err(JobExecutionFailure::Handler(failure)) => {
-                complete_job_failure_after_handler(&pool, registry.as_ref(), &context, &job, failure)
-                    .await;
+                complete_job_failure_after_handler(
+                    &pool,
+                    registry.as_ref(),
+                    &context,
+                    &job,
+                    failure,
+                    CompletionObservation::new(
+                        &observers,
+                        observed_job.clone(),
+                        start.elapsed(),
+                        &mut running_notification,
+                        &terminal_observer_tasks,
+                    ),
+                )
+                .await;
             }
             Err(JobExecutionFailure::LeaseMaintenance(failure)) => {
                 log_lease_maintenance_abort(&job, &failure);
+                running_notification
+                    .spawn_terminal_observer(
+                        &terminal_observer_tasks,
+                        &job,
+                        observers.clone(),
+                        TerminalJobObserverEvent::LeaseLost(JobLeaseLostEvent {
+                            job: observed_job.clone(),
+                            duration: start.elapsed(),
+                            failure,
+                        }),
+                    )
+                    .await;
             }
         }
 
@@ -299,66 +377,15 @@ async fn process_claimed_job(
     .await;
 }
 
-async fn complete_job_failure_after_handler(
-    pool: &runledger_postgres::DbPool,
-    registry: &JobRegistry,
-    context: &JobContext,
-    job: &jobs::JobQueueRecord,
-    failure: JobFailure,
-) {
-    let retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
-        None
-    } else {
-        Some(retry_delay_ms_for_failure(registry, job, &failure))
-    };
-    let failure_payload = JobFailureUpdate {
-        kind: failure.kind,
-        code: failure.code,
-        message: failure.message.as_ref(),
-        retry_delay_ms,
-    };
-    let dead_letter = dead_letter_info(job, &failure);
-    if let Err(error) = jobs::complete_job_failure(
-        pool,
-        job.id,
-        job.run_number,
-        job.attempt,
-        &context.worker_id,
-        &failure_payload,
-    )
-    .await
-    {
-        let release_conflict = is_workflow_release_conflict_error(&error);
-        let error = WorkerError::CompleteFailure {
-            job_id: job.id,
-            attempt: job.attempt,
-            source: error,
-        };
-        if release_conflict {
-            warn!(
-                %error,
-                job_id = %job.id,
-                "job failure completion conflicted with workflow cancellation; leaving lease for reaper recovery"
-            );
-        } else {
-            error!(%error, job_id = %job.id, "failed to mark job failure");
-        }
-    } else if let Some(dead_letter) = dead_letter {
-        warn!(
-            job_id = %job.id,
-            job_type = %job.job_type,
-            run_number = job.run_number,
-            attempt = job.attempt,
-            max_attempts = job.max_attempts,
-            organization_id = ?job.organization_id,
-            worker_id = %context.worker_id,
-            dead_letter_reason = ?dead_letter.reason,
-            failure_kind = ?dead_letter.failure.kind,
-            failure_code = dead_letter.failure.code,
-            failure_message = %dead_letter.failure.message,
-            "job dead lettered after handler failure"
-        );
-        notify_handler_of_dead_letter(registry, context, job, dead_letter).await;
+fn observed_job(job: &jobs::JobQueueRecord, worker_id: &str) -> ObservedJob {
+    ObservedJob {
+        job_id: job.id,
+        job_type: job.job_type.clone(),
+        organization_id: job.organization_id,
+        run_number: job.run_number,
+        attempt: job.attempt,
+        max_attempts: job.max_attempts,
+        worker_id: worker_id.to_owned(),
     }
 }
 
@@ -594,62 +621,6 @@ fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
     "non-string panic payload".to_string()
 }
 
-fn invalid_completion_progress_failure(completion: &JobCompletion) -> Option<JobFailure> {
-    invalid_completion_progress_detail(completion.progress_done, completion.progress_total)
-        .map(|detail| JobFailure::terminal(INVALID_COMPLETION_PROGRESS_CODE, detail))
-}
-
-fn invalid_completion_progress_failure_from_error(
-    error: &runledger_postgres::Error,
-) -> Option<JobFailure> {
-    let runledger_postgres::Error::QueryError(query_error) = error else {
-        return None;
-    };
-
-    if query_error.code() != INVALID_COMPLETION_PROGRESS_CODE {
-        return None;
-    }
-
-    Some(JobFailure::terminal(
-        INVALID_COMPLETION_PROGRESS_CODE,
-        format!(
-            "Handler returned invalid success progress after combining with stored progress: {}.",
-            query_error.internal_message()
-        ),
-    ))
-}
-
-fn invalid_completion_progress_detail(
-    progress_done: Option<i64>,
-    progress_total: Option<i64>,
-) -> Option<String> {
-    if let Some(progress_done) = progress_done
-        && progress_done < 0
-    {
-        return Some(format!(
-            "Handler returned invalid success progress: progress_done must be greater than or equal to zero, got {progress_done}."
-        ));
-    }
-
-    if let Some(progress_total) = progress_total
-        && progress_total < 0
-    {
-        return Some(format!(
-            "Handler returned invalid success progress: progress_total must be greater than or equal to zero, got {progress_total}."
-        ));
-    }
-
-    if let (Some(progress_done), Some(progress_total)) = (progress_done, progress_total)
-        && progress_done > progress_total
-    {
-        return Some(format!(
-            "Handler returned invalid success progress: progress_done must not exceed progress_total, got progress_done={progress_done}, progress_total={progress_total}."
-        ));
-    }
-
-    None
-}
-
 fn has_query_error_code(error: &runledger_postgres::Error, expected_code: &str) -> bool {
     matches!(
         error,
@@ -666,121 +637,11 @@ fn is_unstarted_claim_release_not_applicable_error(error: &runledger_postgres::E
     has_query_error_code(error, UNSTARTED_CLAIM_RELEASE_NOT_APPLICABLE_CODE)
 }
 
-fn is_workflow_release_conflict_error(error: &runledger_postgres::Error) -> bool {
-    has_query_error_code(error, WORKFLOW_RELEASE_CONFLICT_CODE)
-}
-
 fn heartbeat_interval(lease_ttl_seconds: i32) -> Duration {
     // Renew at one-third of the lease TTL so a delayed heartbeat still leaves
     // time for subsequent renewals before the lease expires.
     let seconds = (lease_ttl_seconds.max(1) / 3).max(1) as u64;
     Duration::from_secs(seconds)
-}
-
-fn is_non_retryable_failure_kind(kind: JobFailureKind) -> bool {
-    matches!(kind, JobFailureKind::Terminal | JobFailureKind::Panicked)
-}
-
-fn retry_delay_ms_for_failure(
-    registry: &JobRegistry,
-    job: &jobs::JobQueueRecord,
-    failure: &JobFailure,
-) -> i32 {
-    registry
-        .retry_delay_override(job.job_type.as_borrowed(), failure.code)
-        .unwrap_or_else(|| compute_retry_delay_ms(job.attempt, job.id))
-}
-
-fn dead_letter_info(job: &jobs::JobQueueRecord, failure: &JobFailure) -> Option<JobDeadLetterInfo> {
-    let reason = if is_non_retryable_failure_kind(failure.kind) {
-        Some(JobDeadLetterReason::FailureKindNonRetryable)
-    } else if job.attempt >= job.max_attempts {
-        Some(JobDeadLetterReason::AttemptsExhausted)
-    } else {
-        None
-    }?;
-
-    Some(JobDeadLetterInfo::new(
-        failure.clone(),
-        reason,
-        Some(job.max_attempts),
-    ))
-}
-
-async fn notify_handler_of_dead_letter(
-    registry: &JobRegistry,
-    context: &JobContext,
-    job: &jobs::JobQueueRecord,
-    dead_letter: JobDeadLetterInfo,
-) {
-    let Some(handler) = registry.get(job.job_type.as_borrowed()) else {
-        return;
-    };
-    let context = context.clone();
-    let payload = job.payload.clone();
-
-    let hook_task = tokio::spawn(async move {
-        tokio::time::timeout(
-            TERMINAL_HOOK_TIMEOUT,
-            handler.on_dead_letter(context, payload, dead_letter),
-        )
-        .await
-        .is_ok()
-    });
-    match hook_task.await {
-        Ok(true) => {}
-        Ok(false) => {
-            warn!(
-                job_id = %job.id,
-                job_type = %job.job_type,
-                run_number = job.run_number,
-                attempt = job.attempt,
-                timeout_ms = TERMINAL_HOOK_TIMEOUT.as_millis(),
-                "dead-letter hook timed out; continuing worker job task"
-            );
-        }
-        Err(error) => log_dead_letter_hook_join_error(job, error),
-    }
-}
-
-fn log_dead_letter_hook_join_error(job: &jobs::JobQueueRecord, error: tokio::task::JoinError) {
-    if error.is_panic() {
-        warn!(
-            job_id = %job.id,
-            job_type = %job.job_type,
-            run_number = job.run_number,
-            attempt = job.attempt,
-            error = %error,
-            "dead-letter hook panicked; continuing worker job task"
-        );
-    } else if error.is_cancelled() {
-        warn!(
-            job_id = %job.id,
-            job_type = %job.job_type,
-            run_number = job.run_number,
-            attempt = job.attempt,
-            error = %error,
-            "dead-letter hook was cancelled; continuing worker job task"
-        );
-    } else {
-        warn!(
-            job_id = %job.id,
-            job_type = %job.job_type,
-            run_number = job.run_number,
-            attempt = job.attempt,
-            error = %error,
-            "dead-letter hook join failed; continuing worker job task"
-        );
-    }
-}
-
-fn compute_retry_delay_ms(attempt: i32, job_id: uuid::Uuid) -> i32 {
-    let exp = attempt.clamp(1, 10) as u32;
-    let base_ms: i64 = 5_000;
-    let raw = base_ms * (1_i64 << exp);
-    let capped = raw.min(300_000);
-    let jitter = (job_id.as_u128() % 1_000) as i64 - 500;
-    (capped + jitter).max(1_000) as i32
 }
 
 #[cfg(test)]

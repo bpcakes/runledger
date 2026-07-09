@@ -4,7 +4,6 @@ use sqlx::types::Uuid;
 use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::super::types::JobProgressUpdate;
-use super::super::attempts::ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART;
 use super::common::{UPDATE_PROGRESS_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
 
 async fn update_job_progress_row_tx(
@@ -126,12 +125,10 @@ async fn mark_execution_started_persisted_tx(
          WHERE job_id = $1
            AND run_number = $2
            AND attempt = $3
-           AND claim_origin = $4
            AND execution_started_persisted_at IS NULL",
         job_id,
         run_number,
         attempt,
-        ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART,
     )
     .execute(&mut **tx)
     .await
