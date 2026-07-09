@@ -4,6 +4,48 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-09
+[Compare changes](https://github.com/featherenvy/runledger/compare/v0.4.0...v0.5.0)
+
+### Added
+
+- Add job lifecycle observers for worker and reaper transitions through
+  `JobLifecycleObserver`, `JobLifecycleObservers`,
+  `SupervisorBuilder::with_job_lifecycle_observer`,
+  `run_worker_loop_with_observer`, and `run_reaper_loop_with_observer`.
+- Add typed observer events for running, success, failure, completion
+  persistence failure, lease loss, and lease reaping.
+- Add outcome-returning persistence APIs with
+  `complete_job_success_with_outcome`, `complete_job_failure_with_outcome`,
+  `JobSuccessCompletionOutcome`, and `JobFailureCompletionOutcome`.
+- Add per-lease reaper diagnostics through `ReapedLeaseRecord`,
+  `ReapedLeaseDisposition`, and
+  `ReapExpiredLeasesDetailedResult::reaped_leases`.
+
+### Changed
+
+- Deliver terminal observer events only after the corresponding database
+  transaction commits, preserve per-job running-before-terminal ordering, and
+  bound observer concurrency and shutdown draining.
+- Isolate dead-letter and reaper terminal hooks from panics, timeouts, and
+  shutdown races while preserving committed terminal deliveries.
+- Serialize successful completion with concurrent progress writes and validate
+  the coalesced persisted progress before committing.
+- Persist execution-start markers for direct claims and use historical running
+  events as a rolling-deploy fallback when diagnosing expired leases without a
+  renewal heartbeat.
+- Move shared PostgreSQL row decoders and runtime shutdown/task-group logic into
+  dedicated internal modules.
+
+### Fixed
+
+- Avoid treating progress written after a renewal heartbeat as evidence that a
+  running lease never renewed.
+- Prevent observer callbacks and terminal hooks from starving later worker or
+  reaper batches or causing unbounded shutdown.
+- Stabilize database-backed worker and reaper timing regressions under loaded
+  CI hosts.
+
 ## [0.4.0] - 2026-06-15
 [Compare changes](https://github.com/featherenvy/runledger/compare/v0.3.0...v0.4.0)
 

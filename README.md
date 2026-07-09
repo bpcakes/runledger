@@ -788,7 +788,7 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.4.0
+./scripts/prepare-release.sh 0.5.0
 ```
 
 The preparation script requires a clean working tree, bumps publishable crate
@@ -801,60 +801,31 @@ packaging the dependent crates locally. If publishing manually, run
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.4.0
+./scripts/publish-release.sh 0.5.0
 ```
 
 The publish script publishes crates in dependency order, dry-runs each once its
-workspace dependencies are indexed, creates a `v0.4.0` tag, and pushes the
+workspace dependencies are indexed, creates a `v0.5.0` tag, and pushes the
 current branch and tag. Set `PUBLISH_REMOTE` to override the git remote for the
 final push.
 
 Observable contract changes to call out in release notes for this line:
 
-- Breaking: `JobHandler::execute` returns `JobCompletion`; use
-  `JobCompletion::success()` or `JobCompletion::with_output(...)`.
-- Breaking: low-level completion structs expose output fields, and public read
-  DTOs expose job/step output plus workflow `result_step_key`.
-- Workflow result handles add result-step builders,
-  `enqueue_workflow_run_handle`, `retrieve_workflow_run_handle`,
-  `workflow_run_handle`, `WorkflowRunHandle`, `WorkflowRunHandleScope`,
-  `WorkflowRunHandle::get_status`, `WorkflowRunHandle::get_run`,
-  `WorkflowRunHandle::get_result`, `WorkflowRunWaitOptions`, and
-  `DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT`.
-- `WorkflowRunWaitOptions::default()` waits up to five minutes; `timeout: None`
-  opts into unbounded waits that may hold a PostgreSQL listener connection.
-- External workflow step completion accepts output only for successful
-  completions. Idempotent retry requires matching terminal status and completion
-  metadata; changed metadata returns
-  `workflow.external_step_conflicting_completion_retry`, and changed successful
-  output returns `workflow.external_step_conflicting_output_retry`.
-- `cancel_workflow_run_tx` is a no-op for any already-terminal run.
-- `requeue_job` rejects workflow-managed jobs with
-  `job.workflow_requeue_not_supported`.
-- `update_job_payload_uuid_array_field` returns
-  `JobPayloadUuidArrayFieldUpdate` instead of `bool`, with rejection reasons for
-  workflow-managed jobs, idempotent request snapshots, and jobs that are no
-  longer pending/unclaimed.
-- `count_workflow_runs` and `WorkflowRunCountFilter` are available for admin
-  counters.
-- `JobsConfig::validate`, `RuntimeError::InvalidJobsConfig`, and
-  `RuntimeLoopExit::InvalidConfig` expose runtime config validation for directly
-  constructed configs.
-- Active schedules now require enabled job definitions; schedule writes can
-  return `job_schedule.definition_not_found_or_disabled`, and definition
-  disables can return `job_definition.active_schedule_exists`.
-- Scheduler catch-up after downtime materializes at most one stale fire, then
-  advances the schedule cursor to the first future fire.
-- Catalog definition overrides add `JobCatalogDefinitionOverrides`,
-  `job_with_definition_overrides`, and `definition_overrides`.
-- Catalog schedule sync adds `CatalogJobScheduleSpec`,
-  `JobCatalog::schedule`, `sync_schedules`, `sync_schedules_with`,
-  `sync_schedules_exact`, `sync_schedules_exact_with`, and
-  `JobCatalogScheduleSyncScope`. Catalog sync owns `is_active`; lower-level
-  schedule upserts preserve stored active state on conflict.
-- `runledger-tui` adds interactive search, type filters, command palette,
-  paging, payload view toggles, copy-ID, auto-refresh pause, and expanded
-  navigation keys.
+- Runtime users can register `JobLifecycleObserver` implementations through
+  `SupervisorBuilder::with_job_lifecycle_observer` or the low-level
+  observer-aware worker and reaper loops.
+- Observers receive typed, post-commit events for running, success, failure,
+  completion persistence failure, lease loss, and lease reaping.
+- Terminal observer delivery is bounded and shutdown-aware; running callbacks
+  are ordered before the same job's terminal callback without blocking handler
+  execution or heartbeat maintenance.
+- PostgreSQL completion APIs add outcome-returning variants that expose the
+  committed progress and failure disposition.
+- Detailed lease reaping now reports every processed lease, including retry or
+  dead-letter disposition, failure data, worker metadata, and whether execution
+  started without a renewal heartbeat.
+- Successful completion coalesces and validates stored and handler-provided
+  progress while holding the job row lock.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
