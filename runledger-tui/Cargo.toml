@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
-crossterm = "0.28"
+crossterm = "0.29"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28"] }
 runledger-core = { workspace = true }
 runledger-postgres = { workspace = true }
