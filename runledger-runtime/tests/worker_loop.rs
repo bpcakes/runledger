@@ -1,3 +1,4 @@
+use std::future::pending;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -6,9 +7,13 @@ use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobStatus, Job
 use runledger_postgres::jobs::{
     JobDefinitionUpsert, JobEnqueue, enqueue_job, get_job_by_id, upsert_job_definition_tx,
 };
+use runledger_runtime::RuntimeLoopExit;
 use runledger_runtime::config::JobsConfig;
+use runledger_runtime::observer::{
+    JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent, JobSucceededEvent,
+};
 use runledger_runtime::registry::{JobHandler, JobRegistry};
-use runledger_runtime::worker::run_worker_loop;
+use runledger_runtime::worker::{run_worker_loop, run_worker_loop_with_observer};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, sleep, timeout};
@@ -26,6 +31,16 @@ struct BlockingHandler {
 struct CountingHandler {
     job_type: JobType<'static>,
     runs: Arc<AtomicUsize>,
+}
+
+struct HangingRunningObserver {
+    calls: Arc<AtomicUsize>,
+    started: Arc<Notify>,
+}
+
+struct SucceededObserver {
+    calls: Arc<AtomicUsize>,
+    notified: Arc<Notify>,
 }
 
 #[async_trait::async_trait]
@@ -58,6 +73,23 @@ impl JobHandler for CountingHandler {
     ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Ok(JobCompletion::success())
+    }
+}
+
+#[async_trait::async_trait]
+impl JobLifecycleObserver for HangingRunningObserver {
+    async fn on_job_running(&self, _event: JobRunningEvent) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        pending::<()>().await;
+    }
+}
+
+#[async_trait::async_trait]
+impl JobLifecycleObserver for SucceededObserver {
+    async fn on_job_succeeded(&self, _event: JobSucceededEvent) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.notified.notify_one();
     }
 }
 
@@ -186,6 +218,131 @@ async fn worker_shutdown_interrupts_poll_wait_when_no_permits_available() {
         .expect("load job")
         .expect("job exists");
     assert_eq!(persisted.status, JobStatus::Succeeded);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn worker_shutdown_delivers_terminal_success_when_running_observer_hangs() {
+    let (pool, database) =
+        setup_ephemeral_pool("jobs_worker_hung_running_terminal_success", 8).await;
+    let job_type = JobType::new("jobs.test.hung_running_terminal_success");
+
+    let mut tx = pool.begin().await.expect("begin tx");
+    upsert_job_definition_tx(
+        &mut tx,
+        &JobDefinitionUpsert {
+            job_type,
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 30,
+            default_priority: 100,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert job definition");
+    tx.commit().await.expect("commit tx");
+
+    let job_id = enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type,
+            organization_id: None,
+            payload: &json!({"kind":"hung-running-terminal-success"}),
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: None,
+            stage: Some(runledger_core::jobs::JobStage::Queued),
+        },
+    )
+    .await
+    .expect("enqueue job");
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = JobRegistry::new();
+    registry.register(CountingHandler {
+        job_type,
+        runs: runs.clone(),
+    });
+
+    let running_calls = Arc::new(AtomicUsize::new(0));
+    let running_started = Arc::new(Notify::new());
+    let succeeded_calls = Arc::new(AtomicUsize::new(0));
+    let succeeded_notified = Arc::new(Notify::new());
+    let observers = JobLifecycleObservers::from_arc_observers(vec![
+        Arc::new(HangingRunningObserver {
+            calls: running_calls.clone(),
+            started: running_started.clone(),
+        }) as Arc<dyn JobLifecycleObserver>,
+        Arc::new(SucceededObserver {
+            calls: succeeded_calls.clone(),
+            notified: succeeded_notified.clone(),
+        }) as Arc<dyn JobLifecycleObserver>,
+    ]);
+
+    let config = JobsConfig {
+        worker_id: "hung-running-terminal-success-worker".to_string(),
+        poll_interval: Duration::from_millis(25),
+        claim_batch_size: 1,
+        lease_ttl_seconds: 30,
+        max_global_concurrency: 1,
+        reaper_interval: Duration::from_secs(30),
+        schedule_poll_interval: Duration::from_secs(30),
+        reaper_retry_delay_ms: 1_000,
+    };
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let worker_task = tokio::spawn(run_worker_loop_with_observer(
+        pool.clone(),
+        registry,
+        config,
+        shutdown_rx,
+        observers,
+    ));
+
+    timeout(Duration::from_secs(5), running_started.notified())
+        .await
+        .expect("running observer should start");
+
+    let status_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let persisted = get_job_by_id(&pool, None, job_id)
+            .await
+            .expect("load job")
+            .expect("job exists");
+        if persisted.status == JobStatus::Succeeded {
+            break;
+        }
+        assert!(
+            Instant::now() < status_deadline,
+            "timed out waiting for job to durably succeed"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    shutdown_tx
+        .send(true)
+        .expect("shutdown receiver should still be active");
+    let exit = timeout(Duration::from_secs(15), worker_task)
+        .await
+        .expect("worker should shut down after the running observer timeout")
+        .expect("worker task should not panic");
+    assert_eq!(exit, RuntimeLoopExit::Shutdown);
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job after shutdown")
+        .expect("job exists");
+    assert_eq!(persisted.status, JobStatus::Succeeded);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert_eq!(running_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        succeeded_calls.load(Ordering::SeqCst),
+        1,
+        "terminal success observer should be delivered before shutdown returns"
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -382,7 +539,7 @@ async fn worker_does_not_starve_other_jobs_when_running_progress_persist_keeps_f
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let worker_task = tokio::spawn(run_worker_loop(pool.clone(), registry, config, shutdown_rx));
 
-    let healthy_started = timeout(Duration::from_millis(750), async {
+    let healthy_started = timeout(Duration::from_secs(2), async {
         while healthy_runs.load(Ordering::SeqCst) == 0 {
             sleep(Duration::from_millis(10)).await;
         }

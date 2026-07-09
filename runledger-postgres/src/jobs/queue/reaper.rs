@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use runledger_core::jobs::WorkflowStepStatus;
+use runledger_core::jobs::{JobFailure, WorkflowStepStatus};
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -9,7 +9,7 @@ use super::super::errors::validate_positive_retry_delay;
 use super::super::row_decode::parse_job_type_name;
 use super::super::types::{
     ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult,
-    ReapedTerminalLeaseRecord,
+    ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord,
 };
 use super::super::workflows::{on_retry_scheduled, on_terminal};
 use super::attempts::ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART;
@@ -62,9 +62,19 @@ pub async fn reap_expired_leases_with_diagnostics(
             jq.stage,
             jq.worker_id,
             jq.last_heartbeat_at AS \"last_heartbeat_at?\",
-            jq.updated_at,
             ja.claim_origin AS \"attempt_claim_origin?\",
-            ja.execution_started_persisted_at AS \"execution_started_persisted_at?\"
+            ja.execution_started_persisted_at AS \"execution_started_persisted_at?\",
+            (
+                SELECT je.occurred_at
+                FROM job_events je
+                WHERE je.job_id = jq.id
+                  AND je.run_number = jq.run_number
+                  AND je.attempt = jq.attempt
+                  AND je.event_type = 'STAGE_CHANGED'
+                  AND je.stage = 'running'
+                ORDER BY je.id ASC
+                LIMIT 1
+            ) AS \"legacy_execution_started_persisted_at?\"
          FROM job_queue jq
          LEFT JOIN job_attempts ja
            ON ja.job_id = jq.id
@@ -83,7 +93,7 @@ pub async fn reap_expired_leases_with_diagnostics(
     .map_err(|error| Error::from_query_sqlx_with_context("reap expired lease lookup", error))?;
 
     let mut processed: i64 = 0;
-    let mut terminal_dead_lettered = Vec::new();
+    let mut reaped_leases = Vec::new();
     let mut deferred_row_error_count = 0;
     let mut deferred_row_errors = Vec::new();
     for db_row in rows {
@@ -99,9 +109,9 @@ pub async fn reap_expired_leases_with_diagnostics(
             stage: db_row.stage,
             worker_id: db_row.worker_id,
             last_heartbeat_at: db_row.last_heartbeat_at,
-            updated_at: db_row.updated_at,
             attempt_claim_origin: db_row.attempt_claim_origin,
             execution_started_persisted_at: db_row.execution_started_persisted_at,
+            legacy_execution_started_persisted_at: db_row.legacy_execution_started_persisted_at,
         };
         let job_id = row.job_id;
         let run_number = row.run_number;
@@ -171,30 +181,20 @@ pub async fn reap_expired_leases_with_diagnostics(
             })?;
 
         processed += 1;
-        if matches!(
-            disposition,
-            ReapExpiredLeaseDisposition::DeadLetteredTerminal
-        ) {
-            terminal_dead_lettered.push(ReapedTerminalLeaseRecord {
-                job_id: row.job_id,
-                job_type: row.job_type.clone(),
-                organization_id: row.organization_id,
-                run_number: row.run_number,
-                attempt: row.attempt,
-                payload: row.payload_snapshot.clone(),
-            });
-        }
+        reaped_leases.push(reaped_lease_record(&row, &disposition));
     }
 
     tx.commit()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    let terminal_dead_lettered = terminal_dead_lettered_from(&reaped_leases);
 
     Ok(ReapExpiredLeasesDetailedResult {
         summary: ReapExpiredLeasesResult {
             processed,
             terminal_dead_lettered,
         },
+        reaped_leases,
         deferred_row_error_count,
         deferred_row_errors,
     })
@@ -212,9 +212,9 @@ struct ReapExpiredLeaseRow {
     stage: String,
     worker_id: Option<String>,
     last_heartbeat_at: Option<DateTime<Utc>>,
-    updated_at: DateTime<Utc>,
     attempt_claim_origin: Option<String>,
     execution_started_persisted_at: Option<DateTime<Utc>>,
+    legacy_execution_started_persisted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy)]
@@ -231,8 +231,70 @@ const MAX_DEFERRED_ROW_ERRORS: usize = 16;
 
 enum ReapExpiredLeaseDisposition {
     ReleasedToPending,
-    Retried,
+    RetryScheduled {
+        retry_delay_ms: i32,
+        next_run_at: DateTime<Utc>,
+    },
     DeadLetteredTerminal,
+}
+
+fn reaped_lease_record(
+    row: &ReapExpiredLeaseRow,
+    disposition: &ReapExpiredLeaseDisposition,
+) -> ReapedLeaseRecord {
+    let disposition = match disposition {
+        ReapExpiredLeaseDisposition::ReleasedToPending => ReapedLeaseDisposition::ReleasedToPending,
+        ReapExpiredLeaseDisposition::RetryScheduled {
+            retry_delay_ms,
+            next_run_at,
+        } => ReapedLeaseDisposition::RetryScheduled {
+            retry_delay_ms: *retry_delay_ms,
+            next_run_at: *next_run_at,
+        },
+        ReapExpiredLeaseDisposition::DeadLetteredTerminal => {
+            ReapedLeaseDisposition::DeadLetteredTerminal {
+                payload: row.payload_snapshot.clone(),
+            }
+        }
+    };
+
+    ReapedLeaseRecord {
+        job_id: row.job_id,
+        job_type: row.job_type.clone(),
+        organization_id: row.organization_id,
+        run_number: row.run_number,
+        attempt: row.attempt,
+        max_attempts: row.max_attempts,
+        worker_id: row.worker_id.clone(),
+        started_without_renewal_heartbeat: started_without_renewal_heartbeat(row),
+        failure: lease_expired_failure(),
+        disposition,
+    }
+}
+
+fn terminal_dead_lettered_from(
+    reaped_leases: &[ReapedLeaseRecord],
+) -> Vec<ReapedTerminalLeaseRecord> {
+    reaped_leases
+        .iter()
+        .filter_map(|record| match &record.disposition {
+            ReapedLeaseDisposition::DeadLetteredTerminal { payload } => {
+                Some(ReapedTerminalLeaseRecord {
+                    job_id: record.job_id,
+                    job_type: record.job_type.clone(),
+                    organization_id: record.organization_id,
+                    run_number: record.run_number,
+                    attempt: record.attempt,
+                    payload: payload.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn lease_expired_failure() -> JobFailure {
+    JobFailure::lease_expired(LEASE_EXPIRED_CODE, LEASE_EXPIRED_MESSAGE)
 }
 
 fn identity_for(row: &ReapExpiredLeaseRow) -> ReapLeaseIdentity {
@@ -361,10 +423,22 @@ fn is_worker_prestart_unstarted(row: &ReapExpiredLeaseRow) -> bool {
 }
 
 fn started_without_renewal_heartbeat(row: &ReapExpiredLeaseRow) -> bool {
-    row.stage == runledger_core::jobs::JobStage::Running.as_db_value()
-        && row
-            .last_heartbeat_at
-            .is_some_and(|last_heartbeat_at| last_heartbeat_at < row.updated_at)
+    if row.stage != runledger_core::jobs::JobStage::Running.as_db_value() {
+        return false;
+    }
+
+    // Older direct-claim workers persisted the RUNNING event but did not fill
+    // the attempt marker. The event occurred in the same transaction as the
+    // stage update, so its first timestamp is an exact rolling-deploy fallback.
+    let Some(execution_started_persisted_at) = row
+        .execution_started_persisted_at
+        .or(row.legacy_execution_started_persisted_at)
+    else {
+        return false;
+    };
+
+    row.last_heartbeat_at
+        .is_none_or(|last_heartbeat_at| last_heartbeat_at <= execution_started_persisted_at)
 }
 
 async fn update_dead_lettered_queue_row(
@@ -645,7 +719,7 @@ async fn handle_retryable_expired_lease(
     tx: &mut DbTx<'_>,
     row: &ReapExpiredLeaseRow,
     default_retry_delay_ms: i32,
-) -> Result<()> {
+) -> Result<DateTime<Utc>> {
     let identity = identity_for(row);
     let next_run_at = update_retryable_queue_row(tx, identity, default_retry_delay_ms).await?;
     update_retry_attempt(tx, identity, default_retry_delay_ms).await?;
@@ -659,7 +733,7 @@ async fn handle_retryable_expired_lease(
         Some(LEASE_EXPIRED_MESSAGE),
     )
     .await?;
-    Ok(())
+    Ok(next_run_at)
 }
 
 async fn reap_expired_lease_row_tx(
@@ -699,6 +773,9 @@ async fn reap_expired_lease_row_tx(
         return Ok(ReapExpiredLeaseDisposition::DeadLetteredTerminal);
     }
 
-    handle_retryable_expired_lease(tx, row, default_retry_delay_ms).await?;
-    Ok(ReapExpiredLeaseDisposition::Retried)
+    let next_run_at = handle_retryable_expired_lease(tx, row, default_retry_delay_ms).await?;
+    Ok(ReapExpiredLeaseDisposition::RetryScheduled {
+        retry_delay_ms: default_retry_delay_ms,
+        next_run_at,
+    })
 }

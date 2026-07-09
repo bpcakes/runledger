@@ -16,7 +16,8 @@ pub use self::dispatch::{
     enqueue_job, enqueue_job_tx,
 };
 pub use self::lifecycle::{
-    complete_job_failure, complete_job_success, heartbeat_job, update_job_progress,
+    complete_job_failure, complete_job_failure_with_outcome, complete_job_success,
+    complete_job_success_with_outcome, heartbeat_job, update_job_progress,
 };
 pub use self::reaper::{
     reap_expired_leases, reap_expired_leases_with_diagnostics,

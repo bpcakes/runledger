@@ -33,12 +33,13 @@ pub use logs::{insert_job_log, list_job_logs};
 pub use queue::{
     JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionCatalogSyncReport,
     claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
-    complete_job_failure, complete_job_success, enqueue_job, enqueue_job_tx,
-    get_job_definition_by_type, heartbeat_job, insert_job_definition_if_missing_tx,
-    list_job_definitions, reap_expired_leases, reap_expired_leases_with_diagnostics,
-    reap_expired_leases_with_terminal_records, release_unstarted_job_claim,
-    sync_catalog_job_definitions_exact_tx, sync_catalog_job_definitions_tx, update_job_definition,
-    update_job_progress, upsert_job_definition_tx,
+    complete_job_failure, complete_job_failure_with_outcome, complete_job_success,
+    complete_job_success_with_outcome, enqueue_job, enqueue_job_tx, get_job_definition_by_type,
+    heartbeat_job, insert_job_definition_if_missing_tx, list_job_definitions, reap_expired_leases,
+    reap_expired_leases_with_diagnostics, reap_expired_leases_with_terminal_records,
+    release_unstarted_job_claim, sync_catalog_job_definitions_exact_tx,
+    sync_catalog_job_definitions_tx, update_job_definition, update_job_progress,
+    upsert_job_definition_tx,
 };
 pub use runtime_configs::{
     get_job_runtime_config_by_type, get_required_job_runtime_config_by_type,
@@ -55,12 +56,13 @@ pub use schedules::{
 pub use types::{
     JOB_LIST_PAGE_LIMIT_MAX, JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate,
     JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,
-    JobEnqueue, JobEventRecord, JobFailureUpdate, JobListFilter, JobLogRecord, JobLogRecordInput,
-    JobMetricsRecord, JobProgressUpdate, JobQueueRecord, JobRuntimeConfigListFilter,
-    JobRuntimeConfigRecord, JobRuntimeConfigUpsert, JobScheduleCatalogSyncEntry,
-    JobScheduleCatalogSyncReport, JobScheduleJobTypeReference, JobScheduleRecord,
-    JobScheduleUpsert, ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult,
-    ReapExpiredLeasesResult, ReapedTerminalLeaseRecord,
+    JobEnqueue, JobEventRecord, JobFailureCompletionDisposition, JobFailureCompletionOutcome,
+    JobFailureUpdate, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
+    JobProgressUpdate, JobQueueRecord, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
+    JobRuntimeConfigUpsert, JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport,
+    JobScheduleJobTypeReference, JobScheduleRecord, JobScheduleUpsert, JobSuccessCompletionOutcome,
+    ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult,
+    ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord,
 };
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,
@@ -83,7 +85,61 @@ pub use workflows::{
 };
 #[cfg(feature = "test-support")]
 pub mod test_support {
+    use runledger_core::jobs::{JobFailure, JobTypeName};
+    use serde_json::Value;
+    use sqlx::types::Uuid;
+
+    use super::types::{ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord};
+
     pub use super::workflows::test_support::workflow_run_release_lock_key;
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reaped_lease_record(
+        job_id: Uuid,
+        job_type: JobTypeName,
+        organization_id: Option<Uuid>,
+        run_number: i32,
+        attempt: i32,
+        max_attempts: i32,
+        worker_id: Option<String>,
+        started_without_renewal_heartbeat: bool,
+        disposition: ReapedLeaseDisposition,
+    ) -> ReapedLeaseRecord {
+        ReapedLeaseRecord {
+            job_id,
+            job_type,
+            organization_id,
+            run_number,
+            attempt,
+            max_attempts,
+            worker_id,
+            started_without_renewal_heartbeat,
+            failure: lease_expired_failure(),
+            disposition,
+        }
+    }
+
+    pub fn reaped_terminal_lease_record(
+        job_id: Uuid,
+        job_type: JobTypeName,
+        organization_id: Option<Uuid>,
+        run_number: i32,
+        attempt: i32,
+        payload: Value,
+    ) -> ReapedTerminalLeaseRecord {
+        ReapedTerminalLeaseRecord {
+            job_id,
+            job_type,
+            organization_id,
+            run_number,
+            attempt,
+            payload,
+        }
+    }
+
+    fn lease_expired_failure() -> JobFailure {
+        JobFailure::lease_expired("job.lease_expired", "Job lease expired before completion.")
+    }
 }
 
 #[deprecated(note = "Use WorkflowRunDbRecord instead.")]

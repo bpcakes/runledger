@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use runledger_core::jobs::{
-    JobEventType, JobFailureKind, JobStage, JobStatus, JobType, JobTypeName,
+    JobEventType, JobFailure, JobFailureKind, JobStage, JobStatus, JobType, JobTypeName,
 };
 use serde_json::Value;
 use sqlx::types::Uuid;
@@ -229,7 +229,7 @@ pub struct JobEventRecord {
     pub occurred_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReapedTerminalLeaseRecord {
     pub job_id: Uuid,
     pub job_type: JobTypeName,
@@ -237,6 +237,34 @@ pub struct ReapedTerminalLeaseRecord {
     pub run_number: i32,
     pub attempt: i32,
     pub payload: Value,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReapedLeaseDisposition {
+    ReleasedToPending,
+    RetryScheduled {
+        retry_delay_ms: i32,
+        next_run_at: DateTime<Utc>,
+    },
+    DeadLetteredTerminal {
+        payload: Value,
+    },
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct ReapedLeaseRecord {
+    pub job_id: Uuid,
+    pub job_type: JobTypeName,
+    pub organization_id: Option<Uuid>,
+    pub run_number: i32,
+    pub attempt: i32,
+    pub max_attempts: i32,
+    pub worker_id: Option<String>,
+    pub started_without_renewal_heartbeat: bool,
+    pub failure: JobFailure,
+    pub disposition: ReapedLeaseDisposition,
 }
 
 #[non_exhaustive]
@@ -260,6 +288,7 @@ pub struct ReapExpiredLeasesResult {
 #[derive(Debug, Clone)]
 pub struct ReapExpiredLeasesDetailedResult {
     pub summary: ReapExpiredLeasesResult,
+    pub reaped_leases: Vec<ReapedLeaseRecord>,
     pub deferred_row_error_count: usize,
     pub deferred_row_errors: Vec<ReapExpiredLeaseDeferredError>,
 }
@@ -318,12 +347,52 @@ pub struct JobCompletionUpdate<'a> {
     pub output: Option<&'a Value>,
 }
 
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct JobSuccessCompletionOutcome {
+    pub job_id: Uuid,
+    pub job_type: JobTypeName,
+    pub organization_id: Option<Uuid>,
+    pub run_number: i32,
+    pub attempt: i32,
+    pub max_attempts: i32,
+    pub progress_done: Option<i64>,
+    pub progress_total: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct JobFailureUpdate<'a> {
     pub kind: JobFailureKind,
     pub code: &'a str,
     pub message: &'a str,
     pub retry_delay_ms: Option<i32>,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobFailureCompletionDisposition {
+    RetryScheduled {
+        retry_delay_ms: i32,
+        next_run_at: DateTime<Utc>,
+    },
+    DeadLettered {
+        reason: runledger_core::jobs::JobDeadLetterReason,
+    },
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct JobFailureCompletionOutcome {
+    pub job_id: Uuid,
+    pub job_type: JobTypeName,
+    pub organization_id: Option<Uuid>,
+    pub run_number: i32,
+    pub attempt: i32,
+    pub max_attempts: i32,
+    pub failure_kind: JobFailureKind,
+    pub failure_code: String,
+    pub failure_message: String,
+    pub disposition: JobFailureCompletionDisposition,
 }
 
 #[derive(Debug, Clone)]

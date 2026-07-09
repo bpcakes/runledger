@@ -85,6 +85,7 @@
 pub mod catalog;
 pub mod config;
 pub mod error;
+pub mod observer;
 pub mod reaper;
 pub mod registry;
 pub mod scheduler;
@@ -94,6 +95,11 @@ mod task_group;
 pub mod worker;
 
 pub use error::{Error, ReaperError, Result, RuntimeError, SchedulerError, WorkerError};
+pub use observer::{
+    JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobFailedEvent,
+    JobFailureDisposition, JobLeaseLostEvent, JobLeaseReapedDisposition, JobLeaseReapedEvent,
+    JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent, JobSucceededEvent, ObservedJob,
+};
 pub use supervisor::{Supervisor, SupervisorBuilder, SupervisorShutdown};
 
 /// Common `runledger-runtime` imports for worker-process integration.
@@ -109,6 +115,12 @@ pub mod prelude {
     };
     pub use crate::config::JobsConfig;
     pub use crate::error::{ReaperError, RuntimeError, SchedulerError, WorkerError};
+    pub use crate::observer::{
+        JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobFailedEvent,
+        JobFailureDisposition, JobLeaseLostEvent, JobLeaseReapedDisposition, JobLeaseReapedEvent,
+        JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent, JobSucceededEvent,
+        ObservedJob,
+    };
     pub use crate::registry::JobRegistry;
     pub use crate::{RuntimeLoopExit, Supervisor, SupervisorBuilder, SupervisorShutdown};
 }

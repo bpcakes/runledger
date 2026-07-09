@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::runtime::Handle;
@@ -7,12 +8,11 @@ use tracing::warn;
 
 use crate::catalog::JobCatalog;
 use crate::config::JobsConfig;
-use crate::reaper::run_reaper_loop;
+use crate::observer::{JobLifecycleObserver, JobLifecycleObservers};
 use crate::registry::JobRegistry;
 use crate::scheduler::run_scheduler_loop;
 use crate::shutdown::{ShutdownHandle, ShutdownSignal};
 use crate::task_group::TaskGroup;
-use crate::worker::run_worker_loop;
 use crate::{Result, RuntimeError};
 
 const WORKER_TASK: &str = "worker";
@@ -48,6 +48,7 @@ pub struct SupervisorBuilder<'a> {
     registry_source: Option<RegistrySource>,
     mixed_registry_sources: bool,
     config: JobsConfig,
+    observers: Vec<Arc<dyn JobLifecycleObserver>>,
     worker_enabled: bool,
     scheduler_enabled: bool,
     reaper_enabled: bool,
@@ -85,6 +86,7 @@ impl Supervisor {
             registry_source: None,
             mixed_registry_sources: false,
             config,
+            observers: Vec::new(),
             worker_enabled: true,
             scheduler_enabled: true,
             reaper_enabled: true,
@@ -261,6 +263,19 @@ impl<'a> SupervisorBuilder<'a> {
         self
     }
 
+    /// Registers a best-effort observer for committed job lifecycle events.
+    ///
+    /// Observer callbacks run outside Runledger storage transactions. A callback
+    /// timeout or panic is logged and does not change durable job state.
+    #[must_use = "builder methods return an updated builder value"]
+    pub fn with_job_lifecycle_observer(
+        mut self,
+        observer: impl JobLifecycleObserver + 'static,
+    ) -> Self {
+        self.observers.push(Arc::new(observer));
+        self
+    }
+
     /// Starts the enabled runtime loops and returns the owning supervisor.
     ///
     /// Returns an error when worker or reaper loops are enabled without a job
@@ -273,6 +288,7 @@ impl<'a> SupervisorBuilder<'a> {
             registry_source: _,
             mixed_registry_sources,
             config,
+            observers,
             worker_enabled,
             scheduler_enabled,
             reaper_enabled,
@@ -299,6 +315,7 @@ impl<'a> SupervisorBuilder<'a> {
 
         let (shutdown, shutdown_rx) = ShutdownSignal::channel();
         let mut tasks = TaskGroup::new();
+        let observers = JobLifecycleObservers::from_arc_observers(observers);
 
         if worker_enabled {
             tasks.spawn_on(&runtime, WORKER_TASK, {
@@ -306,7 +323,17 @@ impl<'a> SupervisorBuilder<'a> {
                 let registry = registry.clone();
                 let config = config.clone();
                 let shutdown_rx = shutdown_rx.clone();
-                async move { run_worker_loop(pool, registry, config, shutdown_rx).await }
+                let observers = observers.clone();
+                async move {
+                    crate::worker::run_worker_loop_with_observer(
+                        pool,
+                        registry,
+                        config,
+                        shutdown_rx,
+                        observers,
+                    )
+                    .await
+                }
             });
         }
 
@@ -324,8 +351,16 @@ impl<'a> SupervisorBuilder<'a> {
             let registry = registry.clone();
             let config = config.clone();
             let shutdown_rx = shutdown_rx.clone();
+            let observers = observers.clone();
             tasks.spawn_on(&runtime, REAPER_TASK, async move {
-                run_reaper_loop(pool, registry, config, shutdown_rx).await
+                crate::reaper::run_reaper_loop_with_observer(
+                    pool,
+                    registry,
+                    config,
+                    shutdown_rx,
+                    observers,
+                )
+                .await
             });
         }
 

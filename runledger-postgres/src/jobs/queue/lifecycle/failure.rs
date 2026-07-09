@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use runledger_core::jobs::{JobFailureKind, WorkflowStepStatus};
+use runledger_core::jobs::{JobDeadLetterReason, JobFailureKind, WorkflowStepStatus};
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -7,7 +7,9 @@ use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::super::errors::require_positive_retry_delay;
 use super::super::super::row_decode::parse_job_type_name;
-use super::super::super::types::JobFailureUpdate;
+use super::super::super::types::{
+    JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
+};
 use super::super::super::workflows::{on_retry_scheduled, on_terminal};
 use super::common::{
     COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT, INSERT_FAILED_EVENT_RETRY_CONTEXT,
@@ -36,7 +38,7 @@ struct FailureOutcome<'a> {
     code: &'a str,
     message: &'a str,
     retry_delay_ms: Option<i32>,
-    terminal: bool,
+    dead_letter_reason: Option<JobDeadLetterReason>,
 }
 
 async fn load_failure_lookup_row(
@@ -84,17 +86,23 @@ fn failure_outcome<'a>(
     max_attempts: i32,
     failure: &'a JobFailureUpdate<'a>,
 ) -> FailureOutcome<'a> {
-    let terminal = attempt >= max_attempts
-        || matches!(
-            failure.kind,
-            JobFailureKind::Terminal | JobFailureKind::Panicked
-        );
+    let dead_letter_reason = if matches!(
+        failure.kind,
+        JobFailureKind::Terminal | JobFailureKind::Panicked
+    ) {
+        Some(JobDeadLetterReason::FailureKindNonRetryable)
+    } else if attempt >= max_attempts {
+        Some(JobDeadLetterReason::AttemptsExhausted)
+    } else {
+        None
+    };
+
     FailureOutcome {
         kind_db_value: failure.kind.as_db_value(),
         code: failure.code,
         message: failure.message,
         retry_delay_ms: failure.retry_delay_ms,
-        terminal,
+        dead_letter_reason,
     }
 }
 
@@ -298,7 +306,7 @@ async fn apply_retryable_failure(
     tx: &mut DbTx<'_>,
     identity: FailureJobIdentity<'_>,
     outcome: FailureOutcome<'_>,
-) -> Result<()> {
+) -> Result<DateTime<Utc>> {
     let retry_delay_ms = require_positive_retry_delay(outcome.retry_delay_ms)?;
     let next_run_at =
         mark_retryable_job_queue_for_failure_tx(tx, identity, outcome, retry_delay_ms).await?;
@@ -315,7 +323,7 @@ async fn apply_retryable_failure(
     )
     .await?;
 
-    Ok(())
+    Ok(next_run_at)
 }
 
 async fn mark_retryable_job_queue_for_failure_tx(
@@ -423,6 +431,19 @@ pub async fn complete_job_failure(
     worker_id: &str,
     failure: &JobFailureUpdate<'_>,
 ) -> Result<()> {
+    complete_job_failure_with_outcome(pool, job_id, run_number, attempt, worker_id, failure)
+        .await
+        .map(|_| ())
+}
+
+pub async fn complete_job_failure_with_outcome(
+    pool: &DbPool,
+    job_id: Uuid,
+    run_number: i32,
+    attempt: i32,
+    worker_id: &str,
+    failure: &JobFailureUpdate<'_>,
+) -> Result<JobFailureCompletionOutcome> {
     let mut tx = pool
         .begin()
         .await
@@ -436,21 +457,42 @@ pub async fn complete_job_failure(
     };
 
     let Some(lookup) = load_failure_lookup_row(&mut tx, identity).await? else {
-        return rollback_and_return_lease_mismatch(tx, COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT)
-            .await;
+        return match rollback_and_return_lease_mismatch(tx, COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT)
+            .await
+        {
+            Ok(()) => unreachable!("lease-mismatch rollback unexpectedly returned success"),
+            Err(error) => Err(error),
+        };
     };
 
     let outcome = failure_outcome(attempt, lookup.max_attempts, failure);
 
-    if outcome.terminal {
+    let disposition = if let Some(reason) = outcome.dead_letter_reason {
         apply_terminal_failure(&mut tx, identity, &lookup, outcome).await?;
+        JobFailureCompletionDisposition::DeadLettered { reason }
     } else {
-        apply_retryable_failure(&mut tx, identity, outcome).await?;
-    }
+        let retry_delay_ms = require_positive_retry_delay(outcome.retry_delay_ms)?;
+        let next_run_at = apply_retryable_failure(&mut tx, identity, outcome).await?;
+        JobFailureCompletionDisposition::RetryScheduled {
+            retry_delay_ms,
+            next_run_at,
+        }
+    };
 
     tx.commit()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    Ok(())
+    Ok(JobFailureCompletionOutcome {
+        job_id,
+        job_type: lookup.job_type,
+        organization_id: lookup.organization_id,
+        run_number,
+        attempt,
+        max_attempts: lookup.max_attempts,
+        failure_kind: failure.kind,
+        failure_code: failure.code.to_owned(),
+        failure_message: failure.message.to_owned(),
+        disposition,
+    })
 }

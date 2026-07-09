@@ -5,7 +5,8 @@ use sqlx::types::Uuid;
 use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::super::errors::validate_completion_progress;
-use super::super::super::types::JobCompletionUpdate;
+use super::super::super::row_decode::parse_job_type_name;
+use super::super::super::types::{JobCompletionUpdate, JobSuccessCompletionOutcome};
 use super::super::super::workflows::on_terminal;
 use super::common::{COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
 
@@ -18,13 +19,16 @@ struct SuccessProgressUpdate<'a> {
 }
 
 #[derive(sqlx::FromRow)]
-struct ExistingSuccessProgress {
+struct SuccessLookupRow {
+    job_type: String,
+    organization_id: Option<Uuid>,
+    max_attempts: i32,
     progress_done: Option<i64>,
     progress_total: Option<i64>,
 }
 
 impl SuccessProgressUpdate<'_> {
-    fn coalesce_existing_progress(&mut self, existing: ExistingSuccessProgress) -> Result<()> {
+    fn coalesce_existing_progress(&mut self, existing: &SuccessLookupRow) -> Result<()> {
         self.progress_done = self.progress_done.or(existing.progress_done);
         self.progress_total = self.progress_total.or(existing.progress_total);
         validate_completion_progress(self.progress_done, self.progress_total)
@@ -53,9 +57,9 @@ async fn lock_job_success_progress_tx(
     run_number: i32,
     attempt: i32,
     worker_id: &str,
-) -> Result<Option<ExistingSuccessProgress>> {
-    sqlx::query_as::<_, ExistingSuccessProgress>(
-        "SELECT progress_done, progress_total
+) -> Result<Option<SuccessLookupRow>> {
+    sqlx::query_as::<_, SuccessLookupRow>(
+        "SELECT job_type, organization_id, max_attempts, progress_done, progress_total
          FROM job_queue
          WHERE id = $1
            AND run_number = $2
@@ -196,30 +200,52 @@ pub async fn complete_job_success(
     worker_id: &str,
     progress: Option<&JobCompletionUpdate<'_>>,
 ) -> Result<()> {
+    complete_job_success_with_outcome(pool, job_id, run_number, attempt, worker_id, progress)
+        .await
+        .map(|_| ())
+}
+
+pub async fn complete_job_success_with_outcome(
+    pool: &DbPool,
+    job_id: Uuid,
+    run_number: i32,
+    attempt: i32,
+    worker_id: &str,
+    progress: Option<&JobCompletionUpdate<'_>>,
+) -> Result<JobSuccessCompletionOutcome> {
     let mut progress = success_progress_update(progress)?;
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    let Some(existing_progress) =
+    let Some(lookup) =
         lock_job_success_progress_tx(&mut tx, job_id, run_number, attempt, worker_id).await?
     else {
-        return rollback_and_return_lease_mismatch(tx, COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT)
-            .await;
+        return match rollback_and_return_lease_mismatch(tx, COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT)
+            .await
+        {
+            Ok(()) => unreachable!("lease-mismatch rollback unexpectedly returned success"),
+            Err(error) => Err(error),
+        };
     };
-    progress.coalesce_existing_progress(existing_progress)?;
+    progress.coalesce_existing_progress(&lookup)?;
 
     let updated =
         mark_job_succeeded_tx(&mut tx, job_id, run_number, attempt, worker_id, &progress).await?;
 
     if updated == 0 {
-        return rollback_and_return_lease_mismatch(tx, COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT)
-            .await;
+        return match rollback_and_return_lease_mismatch(tx, COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT)
+            .await
+        {
+            Ok(()) => unreachable!("lease-mismatch rollback unexpectedly returned success"),
+            Err(error) => Err(error),
+        };
     }
 
     mark_job_attempt_succeeded_tx(&mut tx, job_id, run_number, attempt).await?;
     insert_job_succeeded_event_tx(&mut tx, job_id, run_number, attempt, &progress).await?;
+    let job_type = parse_job_type_name(lookup.job_type)?;
 
     on_terminal(
         &mut tx,
@@ -236,5 +262,14 @@ pub async fn complete_job_success(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    Ok(())
+    Ok(JobSuccessCompletionOutcome {
+        job_id,
+        job_type,
+        organization_id: lookup.organization_id,
+        run_number,
+        attempt,
+        max_attempts: lookup.max_attempts,
+        progress_done: progress.progress_done,
+        progress_total: progress.progress_total,
+    })
 }
