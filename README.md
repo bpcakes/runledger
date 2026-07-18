@@ -74,17 +74,17 @@ Add the libraries to your service:
 
 ```toml
 [dependencies]
-runledger-core = "0.4"
-runledger-postgres = "0.4"
-runledger-runtime = "0.4"
+runledger-core = "0.6"
+runledger-postgres = "0.6"
+runledger-runtime = "0.6"
 
 [dev-dependencies]
-runledger-test-support = "0.4"
+runledger-test-support = "0.6"
 ```
 
-The published crates require **Rust 1.88+** and a PostgreSQL database that
-provides `uuidv7()` (PostgreSQL 18+, or an equivalent extension). See
-[PostgreSQL requirements](#postgresql-requirements).
+The published crates require **Rust 1.88+** and **PostgreSQL 18+**. Older
+PostgreSQL releases are not supported, even when an extension supplies an
+equivalent `uuidv7()` function. See [PostgreSQL requirements](#postgresql-requirements).
 
 Common imports:
 
@@ -359,7 +359,73 @@ Breaking API note: `JobHandler::execute` returns
 `Result<JobCompletion, JobFailure>`. The old stage-bearing `JobProgress`
 completion type was removed; use `JobCompletion::success()` or
 `JobCompletion::with_output(...)`. In-flight progress reporting still uses
-`JobProgressUpdate`.
+`JobProgressUpdate`. Completion disposition and final output are intentionally
+private; inspect them with `disposition()` / `output()` and use constructors
+rather than struct literals.
+
+### Bounded job continuation
+
+A direct-job handler that has successfully finished one bounded slice but still
+has more work for the same logical job can return
+`JobCompletion::continue_now()` or `JobCompletion::continue_after(delay)`.
+Progress and checkpoints can be carried into the next run with the existing
+builders:
+
+```rust
+use std::time::Duration;
+
+let completion = JobCompletion::continue_after(Duration::from_secs(5))
+    .progress(processed, total)
+    .checkpoint(serde_json::json!({ "cursor": next_cursor }));
+```
+
+On the next claim, the handler reads that committed value from
+`context.checkpoint`; the original payload remains unchanged. A first run, or a
+run without committed resume state, receives `None`.
+
+Runledger closes the current attempt successfully, changes the exact live lease
+back to `PENDING`, increments `run_number`, resets `attempt` to zero, releases
+the worker/lease, and writes a `REQUEUED` event whose reason is
+`HANDLER_CONTINUATION`. The job ID and payload stay the same. A later claim of
+the next run starts at attempt one with a fresh failure-attempt budget. If the
+continuation write does not commit, the durable row remains leased and normal
+lease recovery retries the idempotent slice while attempts remain or
+dead-letters an exhausted run. State from an uncommitted slice, including its
+new checkpoint, cannot be recovered. Final output is valid only for terminal
+success; continuation-plus-output cannot be constructed or deserialized.
+Workflow-managed handlers must use
+normal workflow step completion rather than continuation.
+
+Successful continuations deliberately have no implicit run cap and do not
+consume the per-run `max_attempts` failure budget. The handler owns its terminal
+condition; use a nonzero delay for polling-style work and do not return
+`continue_now()` forever.
+
+Lifecycle observers receive `on_job_continued` after the same run's
+`on_job_running` callback settles, with the completed run identity, duration,
+next run number/time, and committed progress. Observers are best-effort and
+different run numbers may be observed concurrently or out of order; correlate
+by `(job_id, run_number)` and use durable job events for authoritative history.
+
+#### 0.5 to 0.6 continuation and recovery rollout
+
+Continuation and the new transactional recovery path require a two-phase
+runtime rollout even though 0.6 adds no schema migration:
+
+1. Deploy 0.6 with continuation emission and new recovery calls disabled to
+   every process that can participate in job lifecycle state: workers, reapers,
+   and admin, API, or repair processes that cancel or requeue jobs. Keep those
+   features disabled until every 0.5 process has stopped and leases created by
+   old workers have quiesced.
+2. Only after the fleet is wholly on 0.6, enable handlers that return
+   `continue_now()` / `continue_after(...)` and callers of the new recovery API.
+
+Once phase 2 is active, do not partially roll back or run 0.5 and 0.6 job-state
+writers together. A coordinated rollback must first disable new continuations
+and new recovery calls, drain every continuation-descended `PENDING` or `LEASED`
+job to a terminal state, and wait for retained live-lease markers on canceled
+jobs to quiesce. Then stop every 0.6 worker, reaper, and admin/API/repair writer
+before starting any 0.5 process.
 
 The target of `.after_success(...)` / `.after_terminal(...)` must already have
 been added with `.job(...)`; prerequisite steps may be added later in the chain,
@@ -675,7 +741,31 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
 - **Lease ownership.** Worker lifecycle updates reject expired leases with the
   stable `job.lease_owner_mismatch` code, even when the lease was lost by time
   rather than to another worker. Once `lease_expires_at` passes there is no
-  owner grace period for heartbeat/progress/success/failure writes.
+  owner grace period for heartbeat/progress/success/failure/continuation writes.
+- **Transactional enqueue state.** Use `enqueue_job_with_outcome_tx` when the
+  caller needs the job ID together with its locked `status`, `run_number`, and
+  `Inserted`/`Existing` disposition. That API takes a mutation-ready lock on an
+  existing keyed row. `enqueue_job_tx` remains the UUID-only compatibility API
+  and retains key-share concurrency between identical keyed enqueues while
+  composing safely with same-transaction compare-and-requeue.
+- **Compare-and-requeue.** Use `compare_and_requeue_job_tx` for transactional
+  recovery of canceled or dead-lettered direct jobs. `JobScope::Global` matches
+  only a global row, `JobScope::Organization(id)` matches only that tenant, and
+  `RequeueableJobStatus` deliberately cannot represent `SUCCEEDED`. Stale status
+  or run expectations and missing rows are returned as no-mutation outcomes
+  without locking a live worker row. The caller transaction must use
+  `READ COMMITTED`; other isolation levels return
+  `job.compare_and_requeue_unsupported_isolation` before lookup. Canceling a
+  leased job preserves its original expiry as a quiescence marker; recovery
+  returns `CancellationNotQuiesced { retry_after, .. }` until that marker passes,
+  preventing a healthy canceled handler from overlapping the replacement run.
+  Every request must choose `JobRequeueStatePolicy::PreserveProgressAndCheckpoint`
+  to resume from committed state or `ResetProgressAndCheckpoint` to restart
+  from scratch; the selected policy is recorded in the `REQUEUED` event.
+  The older pool-owning `requeue_job` API is deprecated for 0.6 compatibility;
+  when a canceled handler's retained lease is still active, it returns the
+  conflict code `job.cancellation_not_quiesced` so compatibility callers know
+  the recovery may be retried after lease expiry.
 - **Success stage.** `complete_job_success` persists `JobStage::Completed`; any
   other success stage is rejected as a caller error.
 - **Workflow release conflicts.** Workflow-backed job completion waits for an
@@ -684,9 +774,10 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   may still return `workflow.release_conflict` while cancellation holds the
   exclusive release lock.
 - **Workflow-managed jobs.** Jobs created for workflow steps cannot be requeued
-  directly with `requeue_job`; that returns `job.workflow_requeue_not_supported`
-  so the workflow DAG cannot be bypassed. Use workflow cancellation, external
-  completion, or append APIs for workflow-level recovery.
+  directly with either recovery API; that returns
+  `job.workflow_requeue_not_supported` so the workflow DAG cannot be bypassed.
+  Use workflow cancellation, external completion, or append APIs for
+  workflow-level recovery.
 - **Stable error codes.** Conflicts such as `workflow.append_conflicting_retry`
   are conflict-category errors; branch on the stable code rather than the broad
   category.
@@ -703,10 +794,12 @@ before matching the inner persistence error.
 
 ## PostgreSQL requirements
 
-Runledger expects PostgreSQL semantics consistent with the migration set and the
-SQLx queries in this repo. In particular:
+Runledger requires PostgreSQL 18 or later. PostgreSQL 18 is the authoritative
+baseline for production support, diagnostics, reproductions, DB-backed tests,
+migration verification, and SQLx metadata. In particular:
 
-- `uuidv7()` must be available (PostgreSQL 18+, or an equivalent extension).
+- Native `uuidv7()` support from PostgreSQL 18+ is required; adding an
+  equivalent function to an older server does not make that server supported.
 - Transactional DDL must support the baseline migration as written.
 - The target database must be migrated before runtime code uses it.
 
@@ -740,9 +833,10 @@ and asserts terminal states:
 ./scripts/run-external-consumer-smoke.sh
 ```
 
-The default test image is `postgres:18`; override it with
-`RUNLEDGER_TEST_PG_IMAGE`. The harness requires an image that supports
-`uuidv7()`.
+The default test image is `postgres:18`. `RUNLEDGER_TEST_PG_IMAGE` may select a
+different PostgreSQL 18+ image for an explicit environment or compatibility
+test, but an override does not change the supported baseline. Results from an
+older major version are provisional until reproduced on PostgreSQL 18.
 
 ```bash
 export RUNLEDGER_TEST_PG_IMAGE=postgres:18
@@ -760,7 +854,7 @@ The repo uses `sqlx::query!` and friends extensively, and builds offline:
 
 If you change SQL or the schema, refresh the cache before committing:
 
-1. Bring up a PostgreSQL database with the current migrations applied.
+1. Bring up a PostgreSQL 18 database with the current migrations applied.
 2. Point `DATABASE_URL` at it.
 3. Run `./scripts/refresh-sqlx-cache.sh`.
 
@@ -780,15 +874,15 @@ crate from its packaged tarball. If the cache and schema drift apart,
   workflow behavior.
 - When schema semantics change, update Rust types, SQL, tests, and `.sqlx`
   metadata together.
-- The repo compiles offline, but DB-backed behavior still needs a
-  migration-compatible PostgreSQL to run.
+- The repo compiles offline, but DB-backed behavior still needs PostgreSQL 18+
+  with the current migrations applied.
 
 ## Releasing
 
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.5.0
+./scripts/prepare-release.sh 0.6.0
 ```
 
 The preparation script requires a clean working tree, bumps publishable crate
@@ -801,31 +895,25 @@ packaging the dependent crates locally. If publishing manually, run
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.5.0
+./scripts/publish-release.sh 0.6.0
 ```
 
 The publish script publishes crates in dependency order, dry-runs each once its
-workspace dependencies are indexed, creates a `v0.5.0` tag, and pushes the
+workspace dependencies are indexed, creates a `v0.6.0` tag, and pushes the
 current branch and tag. Set `PUBLISH_REMOTE` to override the git remote for the
 final push.
 
 Observable contract changes to call out in release notes for this line:
 
-- Runtime users can register `JobLifecycleObserver` implementations through
-  `SupervisorBuilder::with_job_lifecycle_observer` or the low-level
-  observer-aware worker and reaper loops.
-- Observers receive typed, post-commit events for running, success, failure,
-  completion persistence failure, lease loss, and lease reaping.
-- Terminal observer delivery is bounded and shutdown-aware; running callbacks
-  are ordered before the same job's terminal callback without blocking handler
-  execution or heartbeat maintenance.
-- PostgreSQL completion APIs add outcome-returning variants that expose the
-  committed progress and failure disposition.
-- Detailed lease reaping now reports every processed lease, including retry or
-  dead-letter disposition, failure data, worker metadata, and whether execution
-  started without a renewal heartbeat.
-- Successful completion coalesces and validates stored and handler-provided
-  progress while holding the job row lock.
+- Handlers can continue a successful bounded slice with
+  `JobCompletion::continue_now()` or `continue_after(...)` while retaining
+  progress/checkpoint state on the same job.
+- `compare_and_requeue_job_tx` provides exact-scope, compare-and-set recovery for
+  canceled and dead-lettered jobs; the broad legacy `requeue_job` API is
+  deprecated.
+- `enqueue_job_with_outcome_tx` returns job ID, status, run number, and whether
+  the enqueue inserted or resolved an existing keyed row.
+- Release 0.6 changes Rust APIs only and adds no database migration.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

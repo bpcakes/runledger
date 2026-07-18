@@ -130,6 +130,7 @@ where
             attempt: job.attempt,
             organization_id: job.organization_id,
             worker_id: REAPER_WORKER_ID.to_string(),
+            checkpoint: job.checkpoint.clone(),
         };
         let payload = payload.clone();
         let dead_letter = JobDeadLetterInfo::new(

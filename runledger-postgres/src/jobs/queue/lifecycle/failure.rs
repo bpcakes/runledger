@@ -457,12 +457,8 @@ pub async fn complete_job_failure_with_outcome(
     };
 
     let Some(lookup) = load_failure_lookup_row(&mut tx, identity).await? else {
-        return match rollback_and_return_lease_mismatch(tx, COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT)
-            .await
-        {
-            Ok(()) => unreachable!("lease-mismatch rollback unexpectedly returned success"),
-            Err(error) => Err(error),
-        };
+        return rollback_and_return_lease_mismatch(tx, COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT)
+            .await;
     };
 
     let outcome = failure_outcome(attempt, lookup.max_attempts, failure);
@@ -493,6 +489,7 @@ pub async fn complete_job_failure_with_outcome(
         failure_kind: failure.kind,
         failure_code: failure.code.to_owned(),
         failure_message: failure.message.to_owned(),
+        checkpoint: lookup.checkpoint_snapshot,
         disposition,
     })
 }

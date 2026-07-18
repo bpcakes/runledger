@@ -90,6 +90,39 @@ impl JobSucceededEvent {
     }
 }
 
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct JobContinuedEvent {
+    /// Identity of the successfully completed run slice.
+    pub job: ObservedJob,
+    pub duration: Duration,
+    pub next_run_number: i32,
+    pub next_run_at: DateTime<Utc>,
+    pub progress_done: Option<i64>,
+    pub progress_total: Option<i64>,
+}
+
+impl JobContinuedEvent {
+    #[must_use]
+    pub fn new(
+        job: ObservedJob,
+        duration: Duration,
+        next_run_number: i32,
+        next_run_at: DateTime<Utc>,
+        progress_done: Option<i64>,
+        progress_total: Option<i64>,
+    ) -> Self {
+        Self {
+            job,
+            duration,
+            next_run_number,
+            next_run_at,
+            progress_done,
+            progress_total,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JobFailureDisposition {
@@ -133,6 +166,7 @@ impl JobFailedEvent {
 #[non_exhaustive]
 pub enum JobCompletionPersistenceOperation {
     Success,
+    Continuation,
     Failure,
 }
 
@@ -225,6 +259,8 @@ impl JobLeaseReapedEvent {
 pub trait JobLifecycleObserver: Send + Sync {
     async fn on_job_running(&self, _event: JobRunningEvent) {}
 
+    async fn on_job_continued(&self, _event: JobContinuedEvent) {}
+
     async fn on_job_succeeded(&self, _event: JobSucceededEvent) {}
 
     async fn on_job_failed(&self, _event: JobFailedEvent) {}
@@ -286,6 +322,19 @@ impl JobLifecycleObservers {
             &job,
             |observer, event| async move {
                 observer.on_job_succeeded(event).await;
+            },
+        )
+        .await;
+    }
+
+    pub(crate) async fn job_continued(&self, event: JobContinuedEvent) {
+        let job = event.job.clone();
+        self.notify_all_observers(
+            "on_job_continued",
+            event,
+            &job,
+            |observer, event| async move {
+                observer.on_job_continued(event).await;
             },
         )
         .await;

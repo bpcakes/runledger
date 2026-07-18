@@ -96,9 +96,10 @@ pub mod worker;
 
 pub use error::{Error, ReaperError, Result, RuntimeError, SchedulerError, WorkerError};
 pub use observer::{
-    JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobFailedEvent,
-    JobFailureDisposition, JobLeaseLostEvent, JobLeaseReapedDisposition, JobLeaseReapedEvent,
-    JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent, JobSucceededEvent, ObservedJob,
+    JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobContinuedEvent,
+    JobFailedEvent, JobFailureDisposition, JobLeaseLostEvent, JobLeaseReapedDisposition,
+    JobLeaseReapedEvent, JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent,
+    JobSucceededEvent, ObservedJob,
 };
 pub use supervisor::{Supervisor, SupervisorBuilder, SupervisorShutdown};
 
@@ -116,10 +117,10 @@ pub mod prelude {
     pub use crate::config::JobsConfig;
     pub use crate::error::{ReaperError, RuntimeError, SchedulerError, WorkerError};
     pub use crate::observer::{
-        JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobFailedEvent,
-        JobFailureDisposition, JobLeaseLostEvent, JobLeaseReapedDisposition, JobLeaseReapedEvent,
-        JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent, JobSucceededEvent,
-        ObservedJob,
+        JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobContinuedEvent,
+        JobFailedEvent, JobFailureDisposition, JobLeaseLostEvent, JobLeaseReapedDisposition,
+        JobLeaseReapedEvent, JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent,
+        JobSucceededEvent, ObservedJob,
     };
     pub use crate::registry::JobRegistry;
     pub use crate::{RuntimeLoopExit, Supervisor, SupervisorBuilder, SupervisorShutdown};

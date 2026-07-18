@@ -12,6 +12,22 @@ pub enum QueryErrorCategory {
     Internal,
 }
 
+/// Stable semantic kinds for database errors that drive runtime policy.
+///
+/// Human- and machine-readable error codes remain available through
+/// [`QueryError::code`]. This enum is deliberately smaller: it covers errors
+/// whose handling must stay compile-checked across Runledger crates instead of
+/// depending on duplicated string literals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryErrorKind {
+    JobLeaseOwnerMismatch,
+    JobInvalidCompletionProgress,
+    JobInvalidContinuationDelay,
+    JobUnstartedClaimReleaseNotApplicable,
+    JobWorkflowRequeueNotSupported,
+    WorkflowReleaseConflict,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameworkConstraintSpec {
     category: QueryErrorCategory,
@@ -52,6 +68,7 @@ impl FrameworkConstraintSpec {
 #[derive(Clone)]
 pub struct QueryError {
     category: QueryErrorCategory,
+    kind: Option<QueryErrorKind>,
     code: &'static str,
     client_message: &'static str,
     sqlstate: Option<String>,
@@ -70,6 +87,7 @@ impl QueryError {
     ) -> Self {
         Self {
             category,
+            kind: None,
             code,
             client_message,
             sqlstate: None,
@@ -80,8 +98,29 @@ impl QueryError {
     }
 
     #[must_use]
-    pub(crate) fn from_classified_sqlx(
+    pub(crate) fn from_classified_with_kind(
         category: QueryErrorCategory,
+        kind: QueryErrorKind,
+        code: &'static str,
+        client_message: &'static str,
+        internal_message: impl Into<String>,
+    ) -> Self {
+        Self {
+            category,
+            kind: Some(kind),
+            code,
+            client_message,
+            sqlstate: None,
+            constraint: None,
+            message: internal_message.into(),
+            source: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn from_classified_sqlx_with_kind(
+        category: QueryErrorCategory,
+        kind: QueryErrorKind,
         code: &'static str,
         client_message: &'static str,
         internal_message: impl Into<String>,
@@ -99,6 +138,7 @@ impl QueryError {
 
         Self {
             category,
+            kind: Some(kind),
             code,
             client_message,
             sqlstate,
@@ -144,6 +184,7 @@ impl QueryError {
 
         Self {
             category: spec.category(),
+            kind: None,
             code: spec.code(),
             client_message: spec.client_message(),
             sqlstate,
@@ -160,6 +201,13 @@ impl QueryError {
     #[must_use]
     pub const fn category(&self) -> QueryErrorCategory {
         self.category
+    }
+
+    /// Returns a stable semantic kind when this error participates in
+    /// cross-crate runtime policy.
+    #[must_use]
+    pub const fn kind(&self) -> Option<QueryErrorKind> {
+        self.kind
     }
 
     #[must_use]
@@ -208,6 +256,7 @@ impl QueryError {
         };
 
         self.category = spec.category();
+        self.kind = None;
         self.code = spec.code();
         self.client_message = spec.client_message();
         self
@@ -218,6 +267,7 @@ impl fmt::Debug for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueryError")
             .field("category", &self.category)
+            .field("kind", &self.kind)
             .field("code", &self.code)
             .field("client_message", &self.client_message)
             .field("sqlstate", &self.sqlstate)
@@ -537,9 +587,10 @@ mod tests {
     }
 
     #[test]
-    fn query_error_from_classified_sqlx_preserves_source_without_leaking_display() {
-        let error = QueryError::from_classified_sqlx(
+    fn typed_query_error_from_classified_sqlx_preserves_source_without_leaking_display() {
+        let error = QueryError::from_classified_sqlx_with_kind(
             QueryErrorCategory::Conflict,
+            QueryErrorKind::WorkflowReleaseConflict,
             "workflow.release_conflict",
             "Workflow step release conflicted with another workflow mutation.",
             "internal context includes secret-lock-key",
@@ -547,6 +598,7 @@ mod tests {
         );
 
         assert_eq!(error.category(), QueryErrorCategory::Conflict);
+        assert_eq!(error.kind(), Some(QueryErrorKind::WorkflowReleaseConflict));
         assert_eq!(error.code(), "workflow.release_conflict");
         assert_eq!(
             error.client_message(),

@@ -327,7 +327,7 @@ async fn wait_for_postgres(admin_url: &str) {
 
             if let Err(err) = uuidv7_check {
                 panic!(
-                    "postgres is reachable but `uuidv7()` failed ({err}). Ensure RUNLEDGER_TEST_PG_IMAGE points to a runtime with uuidv7 support."
+                    "postgres is reachable but `uuidv7()` failed ({err}). Runledger requires PostgreSQL 18 or later; ensure RUNLEDGER_TEST_PG_IMAGE or RUNLEDGER_TEST_ADMIN_DATABASE_URL points to PostgreSQL 18+."
                 );
             }
             return;

@@ -97,6 +97,12 @@ pub enum WorkerError {
         attempt: i32,
         source: runledger_postgres::Error,
     },
+    #[error("failed continuing job `{job_id}` attempt `{attempt}` after successful handler slice")]
+    CompleteContinuation {
+        job_id: uuid::Uuid,
+        attempt: i32,
+        source: runledger_postgres::Error,
+    },
     #[error("failed completing job `{job_id}` attempt `{attempt}` as failure")]
     CompleteFailure {
         job_id: uuid::Uuid,

@@ -3,6 +3,9 @@
 This guide is for agents integrating Runledger into another application. It is
 not an instruction file for agents maintaining this repository.
 
+Runledger requires PostgreSQL 18 or later. An older PostgreSQL server with an
+extension-provided `uuidv7()` function is not a supported substitute.
+
 ## Choose The Highest-Level API
 
 Use the highest-level Runledger API that matches the shape of the work before
@@ -64,6 +67,30 @@ Its stable code is `workflow.result_missing`. Other handle error codes include
 five minutes; set `timeout: None` only when the caller intentionally wants to
 wait indefinitely and can afford the pending PostgreSQL listener connection.
 
+When one direct logical job must process bounded slices, return
+`JobCompletion::continue_now()` or `JobCompletion::continue_after(delay)` from
+the handler instead of enqueueing ordinal successor jobs. Add `.progress(...)`
+and `.checkpoint(...)` when the next run needs durable position metadata.
+The next handler invocation receives that committed value as
+`JobContext::checkpoint`; its original payload is unchanged.
+Runledger keeps the job ID, closes the current attempt successfully, advances
+`run_number`, and gives the next run a fresh attempt budget. The handler slice
+must remain idempotent because a crash before continuation persistence leaves
+the lease for normal recovery; an exhausted lease is dead-lettered, and a new
+checkpoint from an uncommitted slice is unavailable. Continuations cannot carry
+final output and are not supported for workflow-managed jobs.
+Successful continuations are not bounded by `max_attempts`; handlers must own a
+terminal condition and should use a nonzero delay for polling-style work.
+
+For a 0.5 to 0.6 upgrade, first deploy 0.6 everywhere with continuation and the
+new recovery path disabled. This includes workers, reapers, and admin/API/repair
+processes that cancel or requeue jobs. Enable the features only after all 0.5
+processes are gone and old leases have quiesced. After activation, never
+partially roll back: disable new continuation/recovery work, drain
+continuation-descended pending or leased rows to terminal, wait for canceled
+live-lease markers to quiesce, stop every 0.6 job-state writer, and only then
+start 0.5 processes.
+
 For external workflow steps, `CompleteExternalWorkflowStepInput::output` can be
 set only when `terminal_status` is `WorkflowStepStatus::Succeeded`. Failed or
 canceled external completions must leave output unset. Repeating an already
@@ -88,10 +115,27 @@ payload JSON, or adding app-owned workflow edge tables. Use those approaches
 only when the task explicitly requires a custom orchestrator outside
 Runledger's workflow model.
 
-Do not call `requeue_job` on workflow-managed jobs. Runledger rejects direct
-requeue with `job.workflow_requeue_not_supported` so workflow step state cannot
-be bypassed; use workflow cancellation, external completion, or append APIs for
-workflow-level recovery.
+For direct-job recovery, prefer `compare_and_requeue_job_tx` with an exact
+`JobScope`, expected `RequeueableJobStatus`, and expected run number. Treat
+`ExpectationMismatch` and `NotFound` as normal no-mutation outcomes. Do not call
+either requeue API on workflow-managed jobs. Runledger rejects direct requeue
+with `job.workflow_requeue_not_supported` so workflow step state cannot be
+bypassed; use workflow cancellation, external completion, or append APIs for
+workflow-level recovery. The legacy pool-owning `requeue_job` remains only as a
+deprecated compatibility API.
+Choose `JobRequeueStatePolicy::PreserveProgressAndCheckpoint` when recovery
+should resume from the last committed checkpoint, or
+`ResetProgressAndCheckpoint` for an explicit restart. The policy is written to
+the `REQUEUED` event for auditability.
+The caller transaction must use `READ COMMITTED`. A canceled job that had a
+live handler returns `CancellationNotQuiesced` until its original lease expiry;
+retry at or after the supplied `retry_after` time. Live status mismatches are
+read without retaining a row lock.
+
+When a transactional keyed enqueue needs to branch on the durable job state,
+use `enqueue_job_with_outcome_tx`. Its `JobEnqueueOutcome` contains the job ID,
+status, run number, and `Inserted`/`Existing` disposition under the enqueue
+transaction's mutation-ready row lock; do not query `job_queue` directly.
 
 Use `update_job_payload_uuid_array_field` only for direct pending jobs whose
 payload can be safely mutated. Inspect `JobPayloadUuidArrayFieldUpdate`; rejected

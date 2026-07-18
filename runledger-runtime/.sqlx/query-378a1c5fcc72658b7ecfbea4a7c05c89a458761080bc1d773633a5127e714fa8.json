@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_events (\n            job_id,\n            run_number,\n            attempt,\n            event_type,\n            stage,\n            progress_done,\n            progress_total,\n            payload\n         )\n         VALUES (\n            $1,\n            $2,\n            $3,\n            'REQUEUED',\n            $4,\n            $5,\n            $6,\n            jsonb_strip_nulls(jsonb_build_object(\n                'reason', $7::text,\n                'state_policy', $8::text,\n                'next_run_number', $9::int4,\n                'next_run_at', $10::timestamptz,\n                'delay_microseconds', $11::bigint\n            ))\n         )\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Int4",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "378a1c5fcc72658b7ecfbea4a7c05c89a458761080bc1d773633a5127e714fa8"
+}

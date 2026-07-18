@@ -146,6 +146,7 @@ mod tests {
             attempt: 1,
             organization_id: None,
             worker_id: "registry-test-worker".to_string(),
+            checkpoint: None,
         }
     }
 
@@ -156,7 +157,8 @@ mod tests {
             .execute(test_context(), json!({}))
             .await
             .expect("registered handler should execute")
-            .output
+            .output()
+            .cloned()
             .expect("handler should return output")
     }
 

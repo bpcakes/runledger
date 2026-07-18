@@ -1,52 +1,22 @@
 use runledger_core::jobs::{JobEventType, JobStatus, JobType};
 use runledger_postgres::jobs::{
-    JobDefinitionUpsert, JobEnqueue, JobQueueRecord, claim_jobs, claim_jobs_for_types,
-    claim_prestart_jobs, claim_prestart_jobs_for_types, enqueue_job, get_job_by_id, heartbeat_job,
-    list_job_events, upsert_job_definition_tx,
+    JobQueueRecord, claim_jobs, claim_jobs_for_types, claim_prestart_jobs,
+    claim_prestart_jobs_for_types, get_job_by_id, heartbeat_job, list_job_events,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::json;
 use sqlx::types::Uuid;
 
-const JOB_TYPE: &str = "jobs.test.lease_validation";
+mod support;
 
-async fn register_job_definition(pool: &DbPool) {
-    let mut tx = pool.begin().await.expect("begin setup tx");
-    upsert_job_definition_tx(
-        &mut tx,
-        &JobDefinitionUpsert {
-            job_type: JobType::new(JOB_TYPE),
-            version: 1,
-            max_attempts: 3,
-            default_timeout_seconds: 60,
-            default_priority: 100,
-            is_enabled: true,
-        },
-    )
-    .await
-    .expect("upsert job definition");
-    tx.commit().await.expect("commit setup tx");
-}
+use support::{enqueue_test_job as enqueue_shared_test_job, register_test_job_definition};
+
+const JOB_TYPE: &str = "jobs.test.lease_validation";
 
 async fn enqueue_test_job(pool: &DbPool, case_name: &str) -> Uuid {
     let payload = json!({ "case": case_name });
-    enqueue_job(
-        pool,
-        &JobEnqueue {
-            job_type: JobType::new(JOB_TYPE),
-            organization_id: None,
-            payload: &payload,
-            priority: None,
-            max_attempts: None,
-            timeout_seconds: None,
-            next_run_at: None,
-            idempotency_key: None,
-            stage: None,
-        },
-    )
-    .await
-    .expect("enqueue test job")
+    enqueue_shared_test_job(pool, JOB_TYPE, None, &payload).await
 }
 
 async fn load_job(pool: &DbPool, job_id: Uuid) -> JobQueueRecord {
@@ -113,7 +83,7 @@ async fn assert_pending_unclaimed(pool: &DbPool, job_id: Uuid) -> JobQueueRecord
 #[tokio::test]
 async fn claim_entrypoints_reject_non_positive_lease_duration_without_mutating_pending_jobs() {
     let (pool, database) = setup_ephemeral_pool("postgres_claim_lease_validation", 4).await;
-    register_job_definition(&pool).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
     let mut pending_jobs = Vec::new();
 
     let job_id = enqueue_test_job(&pool, "claim_jobs_zero").await;
@@ -174,7 +144,7 @@ async fn claim_entrypoints_reject_non_positive_lease_duration_without_mutating_p
 #[tokio::test]
 async fn heartbeat_rejects_non_positive_lease_duration_without_mutating_lease() {
     let (pool, database) = setup_ephemeral_pool("postgres_heartbeat_lease_validation", 4).await;
-    register_job_definition(&pool).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
     let job_id = enqueue_test_job(&pool, "heartbeat_invalid_ttl").await;
     let mut claimed = claim_jobs(&pool, "worker-heartbeat", 30, 1)
         .await

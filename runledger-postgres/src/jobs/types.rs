@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use runledger_core::jobs::{
     JobEventType, JobFailure, JobFailureKind, JobStage, JobStatus, JobType, JobTypeName,
@@ -97,6 +99,128 @@ pub struct JobEnqueue<'a> {
     pub next_run_at: Option<DateTime<Utc>>,
     pub idempotency_key: Option<&'a str>,
     pub stage: Option<JobStage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum JobEnqueueDisposition {
+    Inserted,
+    Existing,
+}
+
+/// Stable job state returned from a transactional enqueue.
+///
+/// Keyed existing rows are held under a mutation-ready row lock until the
+/// caller's transaction ends, so `status` and `run_number` describe the row
+/// protected by that transaction rather than a later unlocked lookup. This
+/// lock composes with a later mutation of the same row in the transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobEnqueueOutcome {
+    pub job_id: Uuid,
+    pub status: JobStatus,
+    pub run_number: i32,
+    pub disposition: JobEnqueueDisposition,
+}
+
+/// Exact tenant scope for a job mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobScope {
+    /// Match only a job whose `organization_id` is `NULL`.
+    Global,
+    /// Match only a job owned by this exact organization.
+    Organization(Uuid),
+}
+
+impl JobScope {
+    #[must_use]
+    pub const fn organization_id(self) -> Option<Uuid> {
+        match self {
+            Self::Global => None,
+            Self::Organization(organization_id) => Some(organization_id),
+        }
+    }
+}
+
+/// Terminal job statuses that may be recovered through compare-and-requeue.
+///
+/// `SUCCEEDED` is deliberately absent: replaying successful work requires a
+/// separate policy decision and cannot be requested through this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequeueableJobStatus {
+    DeadLettered,
+    Canceled,
+}
+
+impl RequeueableJobStatus {
+    #[must_use]
+    pub const fn as_job_status(self) -> JobStatus {
+        match self {
+            Self::DeadLettered => JobStatus::DeadLettered,
+            Self::Canceled => JobStatus::Canceled,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_db_value(self) -> &'static str {
+        self.as_job_status().as_db_value()
+    }
+}
+
+/// Whether compare-and-requeue carries durable resume state into the new run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobRequeueStatePolicy {
+    /// Keep `progress_done`, `progress_total`, and `checkpoint` so recovery can
+    /// resume from the last committed position.
+    PreserveProgressAndCheckpoint,
+    /// Clear progress and checkpoint state so the new run starts from scratch.
+    ResetProgressAndCheckpoint,
+}
+
+impl JobRequeueStatePolicy {
+    #[must_use]
+    pub const fn preserves_progress_and_checkpoint(self) -> bool {
+        matches!(self, Self::PreserveProgressAndCheckpoint)
+    }
+
+    #[must_use]
+    pub const fn as_event_value(self) -> &'static str {
+        match self {
+            Self::PreserveProgressAndCheckpoint => "preserve_progress_and_checkpoint",
+            Self::ResetProgressAndCheckpoint => "reset_progress_and_checkpoint",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompareAndRequeueJob<'a> {
+    pub scope: JobScope,
+    pub job_id: Uuid,
+    pub expected_status: RequeueableJobStatus,
+    pub expected_run_number: i32,
+    pub state_policy: JobRequeueStatePolicy,
+    pub reason: &'a str,
+}
+
+#[derive(Debug, Clone)]
+#[must_use = "callers must inspect whether the expected job was requeued"]
+#[non_exhaustive]
+pub enum CompareAndRequeueJobOutcome {
+    Requeued {
+        before: Box<JobQueueRecord>,
+        after: Box<JobQueueRecord>,
+        event_id: i64,
+    },
+    ExpectationMismatch {
+        actual: Box<JobQueueRecord>,
+    },
+    /// Cancellation fenced a live handler, but its original lease window has
+    /// not passed yet. Retrying before `retry_after` could overlap the new run
+    /// with the canceled handler's external side effects.
+    CancellationNotQuiesced {
+        actual: Box<JobQueueRecord>,
+        retry_after: DateTime<Utc>,
+    },
+    NotFound,
 }
 
 #[derive(Debug, Clone)]
@@ -261,6 +385,8 @@ pub struct ReapedLeaseRecord {
     pub run_number: i32,
     pub attempt: i32,
     pub max_attempts: i32,
+    /// Checkpoint committed on the leased run before it was reaped.
+    pub checkpoint: Option<Value>,
     pub worker_id: Option<String>,
     pub started_without_renewal_heartbeat: bool,
     pub failure: JobFailure,
@@ -347,6 +473,36 @@ pub struct JobCompletionUpdate<'a> {
     pub output: Option<&'a Value>,
 }
 
+/// Progress and scheduling data for a successful handler continuation.
+#[derive(Debug, Clone)]
+pub struct JobContinuationUpdate<'a> {
+    /// How long to wait before the next run becomes claimable. Zero means the
+    /// next run is immediately eligible. Delays whose resulting timestamp is
+    /// outside the persistence driver's representable range are rejected with
+    /// `job.invalid_continuation_delay`.
+    pub delay: Duration,
+    pub progress_done: Option<i64>,
+    pub progress_total: Option<i64>,
+    pub checkpoint: Option<&'a Value>,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct JobContinuationOutcome {
+    pub job_id: Uuid,
+    pub job_type: JobTypeName,
+    pub organization_id: Option<Uuid>,
+    /// The run whose attempt completed successfully.
+    pub completed_run_number: i32,
+    /// The newly pending run number.
+    pub next_run_number: i32,
+    pub attempt: i32,
+    pub max_attempts: i32,
+    pub next_run_at: DateTime<Utc>,
+    pub progress_done: Option<i64>,
+    pub progress_total: Option<i64>,
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct JobSuccessCompletionOutcome {
@@ -392,6 +548,8 @@ pub struct JobFailureCompletionOutcome {
     pub failure_kind: JobFailureKind,
     pub failure_code: String,
     pub failure_message: String,
+    /// Latest durable checkpoint observed while locking the failed attempt.
+    pub checkpoint: Option<Value>,
     pub disposition: JobFailureCompletionDisposition,
 }
 

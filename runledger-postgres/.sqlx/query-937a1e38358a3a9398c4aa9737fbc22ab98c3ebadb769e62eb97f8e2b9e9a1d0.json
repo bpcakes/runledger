@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_events (\n            job_id,\n            run_number,\n            attempt,\n            event_type,\n            payload\n         )\n         VALUES (\n            $1,\n            $2,\n            $3,\n            'CANCELED',\n            jsonb_strip_nulls(jsonb_build_object(\n                'reason', $4::text,\n                'lease_quiesces_at', $5::timestamptz\n            ))\n         )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "937a1e38358a3a9398c4aa9737fbc22ab98c3ebadb769e62eb97f8e2b9e9a1d0"
+}

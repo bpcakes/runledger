@@ -9,7 +9,10 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    self, JobDefinitionUpsert, JobEnqueue, JobListFilter, JobQueueRecord, get_job_by_id,
+    self, CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobDefinitionUpsert, JobEnqueue,
+    JobEnqueueDisposition, JobListFilter, JobQueueRecord, JobRequeueStatePolicy, JobScope,
+    RequeueableJobStatus,
+    compare_and_requeue_job_tx, enqueue_job_with_outcome_tx, get_job_by_id,
     upsert_job_definition_tx,
 };
 use runledger_runtime::Supervisor;
@@ -67,6 +70,72 @@ async fn packaged_crates_support_external_consumer_embedding() {
     .expect("upsert smoke job definition");
     tx.commit().await.expect("commit job definition tx");
 
+    let recovery_payload = json!({"kind": "success"});
+    let recovery_next_run_at = Utc::now() + ChronoDuration::hours(1);
+    let recovery_request = JobEnqueue {
+        job_type: JobType::new(SMOKE_JOB_TYPE),
+        organization_id: None,
+        payload: &recovery_payload,
+        priority: None,
+        max_attempts: None,
+        timeout_seconds: None,
+        next_run_at: Some(recovery_next_run_at),
+        idempotency_key: Some("external-smoke-recovery"),
+        stage: None,
+    };
+    let mut recovery_enqueue_tx = harness.pool.begin().await.expect("begin recovery enqueue");
+    let inserted_recovery = enqueue_job_with_outcome_tx(&mut recovery_enqueue_tx, &recovery_request)
+        .await
+        .expect("insert recovery job with outcome");
+    assert_eq!(inserted_recovery.disposition, JobEnqueueDisposition::Inserted);
+    recovery_enqueue_tx
+        .commit()
+        .await
+        .expect("commit recovery enqueue");
+    jobs::cancel_job(
+        &harness.pool,
+        None,
+        inserted_recovery.job_id,
+        Some("external smoke recovery"),
+    )
+    .await
+    .expect("cancel recovery job");
+
+    let mut existing_enqueue_tx = harness.pool.begin().await.expect("begin existing enqueue");
+    let existing_recovery = enqueue_job_with_outcome_tx(&mut existing_enqueue_tx, &recovery_request)
+        .await
+        .expect("resolve existing recovery job");
+    assert_eq!(existing_recovery.job_id, inserted_recovery.job_id);
+    assert_eq!(existing_recovery.status, JobStatus::Canceled);
+    assert_eq!(existing_recovery.disposition, JobEnqueueDisposition::Existing);
+    existing_enqueue_tx
+        .commit()
+        .await
+        .expect("commit existing enqueue");
+
+    let mut recovery_tx = harness.pool.begin().await.expect("begin compare-and-requeue");
+    let recovery_outcome = compare_and_requeue_job_tx(
+        &mut recovery_tx,
+        CompareAndRequeueJob {
+            scope: JobScope::Global,
+            job_id: inserted_recovery.job_id,
+            expected_status: RequeueableJobStatus::Canceled,
+            expected_run_number: 1,
+            state_policy: JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
+            reason: "external smoke compare-and-requeue",
+        },
+    )
+    .await
+    .expect("compare and requeue recovery job");
+    assert!(matches!(
+        recovery_outcome,
+        CompareAndRequeueJobOutcome::Requeued { .. }
+    ));
+    recovery_tx
+        .commit()
+        .await
+        .expect("commit compare-and-requeue");
+
     let config = JobsConfig {
         worker_id: "external-consumer-smoke-worker".to_string(),
         poll_interval: Duration::from_millis(25),
@@ -92,6 +161,7 @@ async fn packaged_crates_support_external_consumer_embedding() {
     ));
 
     let success_job_id = enqueue_kind(&harness.pool, "success").await;
+    let continuation_job_id = enqueue_kind(&harness.pool, "continuation").await;
     let terminal_job_id = enqueue_kind(&harness.pool, "terminal").await;
     insert_due_schedule(&harness.pool, "scheduled-success")
         .await
@@ -99,6 +169,19 @@ async fn packaged_crates_support_external_consumer_embedding() {
 
     let success_job = wait_for_status(&harness.pool, success_job_id, JobStatus::Succeeded).await;
     assert_eq!(success_job.status, JobStatus::Succeeded);
+
+    let continuation_job =
+        wait_for_status(&harness.pool, continuation_job_id, JobStatus::Succeeded).await;
+    assert_eq!(continuation_job.run_number, 2);
+    assert_eq!(continuation_job.attempt, 1);
+
+    let recovered_job = wait_for_status(
+        &harness.pool,
+        inserted_recovery.job_id,
+        JobStatus::Succeeded,
+    )
+    .await;
+    assert_eq!(recovered_job.run_number, 2);
 
     let terminal_job =
         wait_for_status(&harness.pool, terminal_job_id, JobStatus::DeadLettered).await;
@@ -128,8 +211,8 @@ async fn packaged_crates_support_external_consumer_embedding() {
     wait_for_dead_letter(&dead_letters, "hang").await;
 
     assert!(
-        execution_count.load(Ordering::SeqCst) >= 4,
-        "worker should execute direct, scheduled, and hanging jobs"
+        execution_count.load(Ordering::SeqCst) >= 7,
+        "worker should execute direct, continued, recovered, scheduled, and hanging jobs"
     );
 
     hang_release.notify_waiters();
@@ -157,13 +240,20 @@ impl JobHandler for SmokeHandler {
 
     async fn execute(
         &self,
-        _context: JobContext,
+        context: JobContext,
         payload: Value,
     ) -> Result<JobCompletion, JobFailure> {
         self.execution_count.fetch_add(1, Ordering::SeqCst);
 
         match payload_kind(&payload) {
             "success" | "scheduled-success" => Ok(JobCompletion::success()),
+            "continuation" if context.run_number == 1 => Ok(JobCompletion::continue_now()
+                .progress(1, 2)
+                .checkpoint(json!({"cursor": 1}))),
+            "continuation" => {
+                assert_eq!(context.checkpoint, Some(json!({"cursor": 1})));
+                Ok(JobCompletion::success().progress(2, 2))
+            }
             "terminal" => Err(JobFailure::terminal(
                 "smoke.terminal_failure",
                 "Smoke handler returned a terminal failure.",
@@ -299,7 +389,7 @@ async fn wait_for_postgres(database_url: &str) {
                 Ok(_) => return,
                 Err(error) => {
                     panic!(
-                        "postgres is reachable but `uuidv7()` failed ({error}). Ensure RUNLEDGER_TEST_PG_IMAGE points to a runtime with uuidv7 support."
+                        "postgres is reachable but `uuidv7()` failed ({error}). Runledger requires PostgreSQL 18 or later; ensure RUNLEDGER_TEST_PG_IMAGE points to PostgreSQL 18+."
                     );
                 }
             }

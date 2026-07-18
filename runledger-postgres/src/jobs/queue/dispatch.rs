@@ -7,21 +7,25 @@ use sqlx::types::Uuid;
 use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
 use super::super::errors::validate_positive_lease_duration;
+use super::super::row_decode::parse_job_status;
 use super::super::rows::JobQueueRow;
 use super::super::transaction_isolation::ensure_read_committed_tx;
-use super::super::types::{JobEnqueue, JobQueueRecord};
+use super::super::types::{JobEnqueue, JobEnqueueDisposition, JobEnqueueOutcome, JobQueueRecord};
 use super::super::workflows::on_claimed;
 use super::attempts::{ATTEMPT_CLAIM_ORIGIN_DIRECT, ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART};
 
 #[derive(sqlx::FromRow)]
 struct EnqueuedJobRow {
     id: Uuid,
+    status: String,
     run_number: i32,
 }
 
 #[derive(sqlx::FromRow)]
 struct ExistingIdempotentJobRow {
     id: Uuid,
+    status: String,
+    run_number: i32,
     enqueue_request_matches: Option<bool>,
 }
 
@@ -39,6 +43,12 @@ struct CanonicalJobEnqueueRequest<'a> {
 enum AttemptClaimOrigin {
     Direct,
     WorkerPrestart,
+}
+
+#[derive(Clone, Copy)]
+enum ExistingJobLock {
+    KeyShare,
+    MutationReady,
 }
 
 impl AttemptClaimOrigin {
@@ -63,7 +73,18 @@ impl AttemptClaimOrigin {
 /// fields do not affect retries because keyed rows compare the stored original
 /// request. Unkeyed rows do not store snapshots, and keyed rows without
 /// snapshots are rejected by the idempotency cutover.
-pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Result<Uuid> {
+pub async fn enqueue_job_with_outcome_tx(
+    tx: &mut DbTx<'_>,
+    payload: &JobEnqueue<'_>,
+) -> Result<JobEnqueueOutcome> {
+    enqueue_job_with_existing_lock_tx(tx, payload, ExistingJobLock::MutationReady).await
+}
+
+async fn enqueue_job_with_existing_lock_tx(
+    tx: &mut DbTx<'_>,
+    payload: &JobEnqueue<'_>,
+    existing_job_lock: ExistingJobLock,
+) -> Result<JobEnqueueOutcome> {
     let stage = payload
         .stage
         .unwrap_or(runledger_core::jobs::JobStage::Queued)
@@ -121,7 +142,7 @@ pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Resu
             $10::jsonb
          FROM defaults d
          {}
-         RETURNING id, run_number",
+         RETURNING id, status::text AS status, run_number",
         enqueue_job_idempotency_conflict_clause(payload),
     );
     let row = sqlx::query_as::<_, EnqueuedJobRow>(&insert_sql)
@@ -143,11 +164,13 @@ pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Resu
         let Some(enqueue_request) = enqueue_request.as_ref() else {
             return Err(job_definition_unavailable_error());
         };
-        return resolve_existing_idempotent_job_tx(tx, payload, enqueue_request).await;
+        return resolve_existing_idempotent_job_tx(tx, payload, enqueue_request, existing_job_lock)
+            .await;
     };
 
     let job_id: Uuid = row.id;
     let run_number: i32 = row.run_number;
+    let status = parse_job_status(row.status)?;
 
     sqlx::query!(
         "INSERT INTO job_events (
@@ -167,7 +190,19 @@ pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Resu
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("enqueue job event", error))?;
 
-    Ok(job_id)
+    Ok(JobEnqueueOutcome {
+        job_id,
+        status,
+        run_number,
+        disposition: JobEnqueueDisposition::Inserted,
+    })
+}
+
+/// Enqueues a job while preserving the original UUID-only API.
+pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Result<Uuid> {
+    enqueue_job_with_existing_lock_tx(tx, payload, ExistingJobLock::KeyShare)
+        .await
+        .map(|outcome| outcome.job_id)
 }
 
 // Keyed enqueues compare the canonical request snapshot exactly on retry. The
@@ -178,13 +213,20 @@ async fn resolve_existing_idempotent_job_tx(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
     enqueue_request: &Value,
-) -> Result<Uuid> {
+    existing_job_lock: ExistingJobLock,
+) -> Result<JobEnqueueOutcome> {
     let Some(idempotency_key) = payload.idempotency_key else {
         return Err(job_definition_unavailable_error());
     };
 
-    let Some(existing) =
-        load_existing_idempotent_job_tx(tx, payload, idempotency_key, enqueue_request).await?
+    let Some(existing) = load_existing_idempotent_job_tx(
+        tx,
+        payload,
+        idempotency_key,
+        enqueue_request,
+        existing_job_lock,
+    )
+    .await?
     else {
         if job_definition_available_tx(tx, payload.job_type.as_str()).await? {
             return Err(idempotent_job_missing_existing_error(
@@ -195,7 +237,12 @@ async fn resolve_existing_idempotent_job_tx(
     };
 
     validate_existing_idempotent_job(payload, &existing)?;
-    Ok(existing.id)
+    Ok(JobEnqueueOutcome {
+        job_id: existing.id,
+        status: parse_job_status(existing.status)?,
+        run_number: existing.run_number,
+        disposition: JobEnqueueDisposition::Existing,
+    })
 }
 
 fn job_definition_unavailable_error() -> Error {
@@ -229,48 +276,105 @@ async fn load_existing_idempotent_job_tx(
     payload: &JobEnqueue<'_>,
     idempotency_key: &str,
     enqueue_request: &Value,
+    existing_job_lock: ExistingJobLock,
 ) -> Result<Option<ExistingIdempotentJobRow>> {
-    // FOR SHARE keeps the matched job stable until the enqueue transaction
-    // returns the existing idempotent result.
-    if let Some(organization_id) = payload.organization_id {
-        sqlx::query_as!(
-            ExistingIdempotentJobRow,
-            r#"SELECT
+    // The outcome API gives callers a mutation-ready lock. The legacy UUID-only
+    // API uses KEY SHARE so identical keyed enqueues remain concurrent while a
+    // later compare-and-requeue can acquire NO KEY UPDATE without a lock upgrade
+    // cycle. Neither path permits the row identity to be deleted or changed.
+    // Keep the nullable scope split so PostgreSQL can prove the predicate of the
+    // matching partial unique index. `IS NOT DISTINCT FROM` is logically
+    // equivalent here but forces a scan.
+    let result = match (payload.organization_id, existing_job_lock) {
+        (Some(organization_id), ExistingJobLock::MutationReady) => {
+            sqlx::query_as!(
+                ExistingIdempotentJobRow,
+                r#"SELECT
                 id,
+                status::text AS "status!",
+                run_number,
                 enqueue_request = $4::jsonb AS "enqueue_request_matches?"
              FROM job_queue
              WHERE job_type = $1
                AND organization_id = $2
                AND idempotency_key = $3
              LIMIT 1
-             FOR SHARE"#,
-            payload.job_type as _,
-            organization_id,
-            idempotency_key,
-            enqueue_request,
-        )
-        .fetch_optional(&mut **tx)
-        .await
-    } else {
-        sqlx::query_as!(
-            ExistingIdempotentJobRow,
-            r#"SELECT
+             FOR NO KEY UPDATE"#,
+                payload.job_type as _,
+                organization_id,
+                idempotency_key,
+                enqueue_request,
+            )
+            .fetch_optional(&mut **tx)
+            .await
+        }
+        (None, ExistingJobLock::MutationReady) => {
+            sqlx::query_as!(
+                ExistingIdempotentJobRow,
+                r#"SELECT
                 id,
+                status::text AS "status!",
+                run_number,
                 enqueue_request = $3::jsonb AS "enqueue_request_matches?"
              FROM job_queue
              WHERE job_type = $1
                AND organization_id IS NULL
                AND idempotency_key = $2
              LIMIT 1
-             FOR SHARE"#,
-            payload.job_type as _,
-            idempotency_key,
-            enqueue_request,
-        )
-        .fetch_optional(&mut **tx)
-        .await
-    }
-    .map_err(|error| Error::from_query_sqlx_with_context("load idempotent job enqueue", error))
+             FOR NO KEY UPDATE"#,
+                payload.job_type as _,
+                idempotency_key,
+                enqueue_request,
+            )
+            .fetch_optional(&mut **tx)
+            .await
+        }
+        (Some(organization_id), ExistingJobLock::KeyShare) => {
+            sqlx::query_as!(
+                ExistingIdempotentJobRow,
+                r#"SELECT
+                    id,
+                    status::text AS "status!",
+                    run_number,
+                    enqueue_request = $4::jsonb AS "enqueue_request_matches?"
+                 FROM job_queue
+                 WHERE job_type = $1
+                   AND organization_id = $2
+                   AND idempotency_key = $3
+                 LIMIT 1
+                 FOR KEY SHARE"#,
+                payload.job_type as _,
+                organization_id,
+                idempotency_key,
+                enqueue_request,
+            )
+            .fetch_optional(&mut **tx)
+            .await
+        }
+        (None, ExistingJobLock::KeyShare) => {
+            sqlx::query_as!(
+                ExistingIdempotentJobRow,
+                r#"SELECT
+                    id,
+                    status::text AS "status!",
+                    run_number,
+                    enqueue_request = $3::jsonb AS "enqueue_request_matches?"
+                 FROM job_queue
+                 WHERE job_type = $1
+                   AND organization_id IS NULL
+                   AND idempotency_key = $2
+                 LIMIT 1
+                 FOR KEY SHARE"#,
+                payload.job_type as _,
+                idempotency_key,
+                enqueue_request,
+            )
+            .fetch_optional(&mut **tx)
+            .await
+        }
+    };
+    result
+        .map_err(|error| Error::from_query_sqlx_with_context("load idempotent job enqueue", error))
 }
 
 fn enqueue_job_idempotency_conflict_clause(payload: &JobEnqueue<'_>) -> &'static str {

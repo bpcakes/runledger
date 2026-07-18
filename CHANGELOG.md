@@ -4,6 +4,115 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-18
+[Compare changes](https://github.com/featherenvy/runledger/compare/v0.5.0...v0.6.0)
+
+### Added
+
+- Add successful bounded job continuation through
+  `JobCompletion::continue_now()` and `JobCompletion::continue_after(...)`.
+  Direct-job continuation closes the current attempt successfully, retains
+  optional progress/checkpoint state, advances the same job to a fresh pending
+  run, and records a `REQUEUED` handler-continuation event only for the exact
+  live lease.
+- Add caller-transaction compare-and-requeue through
+  `compare_and_requeue_job_tx`, `CompareAndRequeueJob`,
+  `CompareAndRequeueJobOutcome`, exact `JobScope`, and
+  `RequeueableJobStatus`. Missing jobs and stale expectations are explicit
+  no-mutation outcomes, and successful jobs are not representable as a recovery
+  expectation.
+- Add explicit `JobRequeueStatePolicy` selection so compare-and-requeue callers
+  can preserve committed progress/checkpoints or deliberately reset them. The
+  selected policy is included in the recovery event.
+- Add `enqueue_job_with_outcome_tx`, `JobEnqueueOutcome`, and
+  `JobEnqueueDisposition` so transactional callers receive the job ID, locked
+  status/run snapshot, and inserted-versus-existing result without querying
+  Runledger tables directly.
+- Add `QueryErrorKind` for the small set of PostgreSQL errors that drive
+  compile-checked worker policy; stable string codes remain available for
+  external diagnostics.
+
+### Changed
+
+- Breaking: `JobCompletion` now has a continuation disposition and keeps its
+  disposition/final output private so `ContinueAfter + output` is
+  unrepresentable. Use the supplied constructors plus `disposition()` and
+  `output()` instead of struct literals or direct field access.
+- Breaking: `JobContext` now exposes the committed `checkpoint` for the claimed
+  run so continuation handlers can resume from state persisted by the previous
+  run. Older serialized contexts still deserialize with `checkpoint: None`.
+- `JobCompletionPersistenceOperation` adds `Continuation` for failed
+  continuation persistence observer events. The enum remains non-exhaustive.
+- Add `JobContinuedEvent` and `JobLifecycleObserver::on_job_continued` so every
+  successful continuation has a typed, post-commit observer outcome ordered
+  after that run's running callback.
+- Preserve deserialization of pre-0.6 `JobCompletion` values by treating a
+  missing disposition as terminal success.
+- Deprecate the pool-owning `requeue_job` compatibility API, whose optional
+  organization argument can mean an unconstrained lookup and whose accepted
+  terminal states include `SUCCEEDED`. New recovery code should use the exact,
+  typed transactional API.
+- The deprecated `requeue_job` compatibility API now reports an active canceled
+  lease as the retryable conflict `job.cancellation_not_quiesced` instead of the
+  permanent-looking `job.invalid_state_transition`; callers may retry after the
+  retained lease expiry.
+- Keep `enqueue_job_tx` as the UUID-only compatibility API with key-share
+  concurrency for existing keyed rows; it now composes safely with
+  compare-and-requeue. The enriched outcome API deliberately takes a
+  mutation-ready lock for same-transaction recovery.
+- Require `READ COMMITTED` for compare-and-requeue, return live mismatches
+  without retaining a row lock, and return `CancellationNotQuiesced` while a
+  canceled handler's original lease window is still active.
+- Establish PostgreSQL 18 as the minimum supported and authoritative baseline
+  for production use, diagnostics, DB-backed tests, and SQLx metadata; an
+  equivalent function supplied by an extension on an older server is not a
+  supported substitute.
+- Document the required two-phase 0.5 to 0.6 rollout: deploy 0.6 to workers,
+  reapers, and admin/API/repair writers with continuation and new recovery
+  disabled; wait for all 0.5 processes and old leases to quiesce; then enable.
+  After activation, rollback must disable those features, drain
+  continuation-descended pending/leased rows to terminal, quiesce canceled live
+  lease markers, and stop every 0.6 writer before any 0.5 process starts.
+
+### Fixed
+
+- Treat continuation delays outside the persisted timestamp range as terminal
+  handler errors instead of persistence failures that replay the same
+  deterministic invalid completion. Continuation timestamps are calculated
+  exactly at PostgreSQL's microsecond precision without floating-point interval
+  conversion.
+- Reject workflow-managed continuation as a terminal handler error, and make
+  continuation output unrepresentable through `JobCompletion` constructors or
+  deserialization instead of silently discarding it.
+- Preserve operation-specific, source-neutral wording when completion progress
+  is invalid, with PostgreSQL as the single authoritative validator after
+  durable fields are coalesced.
+- Restore organization-specific idempotency lookup predicates so PostgreSQL can
+  use the matching partial unique index instead of scanning a job type.
+- Report success, failure, and continuation completion lease mismatches through
+  `on_job_lease_lost` instead of generic persistence-failure events.
+- Prevent compare-and-requeue from returning an expectation mismatch whose
+  reported status and run exactly equal the caller's expectation when the job
+  becomes terminal between `READ COMMITTED` statements.
+- Deliver the last committed checkpoint to both worker- and reaper-originated
+  dead-letter hooks.
+- Consolidate the shared advance-to-next-pending-run reset into one internal
+  transition while retaining the continuation path's mutation-time lease-expiry
+  recheck.
+- Centralize `REQUEUED` event payload construction, rejection rollback policy,
+  and completion-persistence-failure observer delivery so all lifecycle paths
+  retain the same field names and error semantics.
+- Prevent keyed enqueue followed by compare-and-requeue in one transaction from
+  deadlocking with another recovery transaction: the enriched enqueue path
+  takes `FOR NO KEY UPDATE` from the outset, while the legacy UUID path uses
+  `FOR KEY SHARE`, which is compatible with recovery's `FOR NO KEY UPDATE`.
+- Avoid retaining a row lock after compare-and-requeue reports an active
+  cancellation fence or rejects a workflow-managed job.
+- Omit a null `lease_quiesces_at` field from pending-job `CANCELED` events while
+  preserving the timestamp for cancellation of a live lease.
+
+Release 0.6 requires no database migration.
+
 ## [0.5.0] - 2026-07-09
 [Compare changes](https://github.com/featherenvy/runledger/compare/v0.4.0...v0.5.0)
 

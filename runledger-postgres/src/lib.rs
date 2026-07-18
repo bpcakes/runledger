@@ -236,9 +236,9 @@ pub mod jobs;
 mod migrations;
 
 pub use error::{
-    FrameworkConstraintSpec, QueryError, QueryErrorCategory, classify_framework_constraint,
-    classify_query_error, classify_query_error_with_constraint_classifier,
-    has_framework_constraint_classifier,
+    FrameworkConstraintSpec, QueryError, QueryErrorCategory, QueryErrorKind,
+    classify_framework_constraint, classify_query_error,
+    classify_query_error_with_constraint_classifier, has_framework_constraint_classifier,
 };
 pub use migrations::{
     MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
@@ -254,34 +254,40 @@ pub use migrations::{ensure_schema_compatible, migrate};
 /// `runledger-core` contracts, so it can be glob-imported alongside
 /// `runledger_core::prelude::*` and `runledger_runtime::prelude::*`.
 pub mod prelude {
+    #[allow(deprecated)]
     pub use crate::jobs::{
         AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,
-        CompleteExternalWorkflowStepInput, DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT,
-        JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate, JobDefinitionListFilter,
-        JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert, JobEnqueue, JobEventRecord,
-        JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
-        JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
-        JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, JobProgressUpdate,
-        JobQueueRecord, JobRuntimeConfigListFilter, JobRuntimeConfigRecord, JobRuntimeConfigUpsert,
-        JobScheduleRecord, JobScheduleUpsert, JobSuccessCompletionOutcome,
-        ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult,
-        ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord, WorkflowRunDbRecord,
+        CompareAndRequeueJob, CompareAndRequeueJobOutcome, CompleteExternalWorkflowStepInput,
+        DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT, JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate,
+        JobContinuationOutcome, JobContinuationUpdate, JobDefinitionListFilter,
+        JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert, JobEnqueue,
+        JobEnqueueDisposition, JobEnqueueOutcome, JobEventRecord, JobFailureCompletionDisposition,
+        JobFailureCompletionOutcome, JobFailureUpdate, JobListFilter, JobLogRecord,
+        JobLogRecordInput, JobMetricsRecord, JobPayloadUuidArrayFieldUpdate,
+        JobPayloadUuidArrayFieldUpdateRejection, JobProgressUpdate, JobQueueRecord,
+        JobRequeueStatePolicy, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
+        JobRuntimeConfigUpsert, JobScheduleRecord, JobScheduleUpsert, JobScope,
+        JobSuccessCompletionOutcome, ReapExpiredLeaseDeferredError,
+        ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult, ReapedLeaseDisposition,
+        ReapedLeaseRecord, ReapedTerminalLeaseRecord, RequeueableJobStatus, WorkflowRunDbRecord,
         WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunHandleScope, WorkflowRunListFilter,
         WorkflowRunResultRecord, WorkflowRunWaitOptions, WorkflowStepDbRecord,
         WorkflowStepDependencyDbRecord, append_workflow_steps, append_workflow_steps_tx,
-        cancel_job, cancel_workflow_run_tx, complete_external_workflow_step,
-        complete_external_workflow_step_tx, complete_job_failure,
+        cancel_job, cancel_workflow_run_tx, compare_and_requeue_job_tx,
+        complete_external_workflow_step, complete_external_workflow_step_tx,
+        complete_job_continuation, complete_job_continuation_with_outcome, complete_job_failure,
         complete_job_failure_with_outcome, complete_job_success, complete_job_success_with_outcome,
         count_workflow_step_dependencies, count_workflow_steps, enqueue_job, enqueue_job_tx,
-        enqueue_workflow_run, enqueue_workflow_run_handle, enqueue_workflow_run_tx, get_job_by_id,
-        get_job_definition_by_type, get_job_metrics, get_job_payload_by_idempotency_key,
-        get_job_runtime_config_by_type, get_job_schedule_by_name, get_latest_job_payload_for_run,
-        get_latest_workflow_run_by_type, get_required_job_runtime_config_by_type,
-        get_workflow_run_by_id, get_workflow_run_by_type_and_idempotency_key,
-        get_workflow_run_id_for_job, insert_job_definition_if_missing_tx, insert_job_log,
-        insert_job_runtime_config_if_missing, list_job_definitions, list_job_events, list_job_logs,
-        list_job_runtime_configs, list_jobs, list_workflow_runs, list_workflow_step_dependencies,
-        list_workflow_step_dependencies_page, list_workflow_steps, list_workflow_steps_page,
+        enqueue_job_with_outcome_tx, enqueue_workflow_run, enqueue_workflow_run_handle,
+        enqueue_workflow_run_tx, get_job_by_id, get_job_definition_by_type, get_job_metrics,
+        get_job_payload_by_idempotency_key, get_job_runtime_config_by_type,
+        get_job_schedule_by_name, get_latest_job_payload_for_run, get_latest_workflow_run_by_type,
+        get_required_job_runtime_config_by_type, get_workflow_run_by_id,
+        get_workflow_run_by_type_and_idempotency_key, get_workflow_run_id_for_job,
+        insert_job_definition_if_missing_tx, insert_job_log, insert_job_runtime_config_if_missing,
+        list_job_definitions, list_job_events, list_job_logs, list_job_runtime_configs, list_jobs,
+        list_workflow_runs, list_workflow_step_dependencies, list_workflow_step_dependencies_page,
+        list_workflow_steps, list_workflow_steps_page,
         prepare_schedule_exact_sync_critical_section_tx, reap_expired_leases_with_diagnostics,
         requeue_job, retrieve_workflow_run_handle, set_job_schedule_active,
         set_job_schedule_active_tx, set_job_schedule_next_fire_at,
@@ -296,8 +302,8 @@ pub mod prelude {
     };
     pub use crate::{
         DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, QueryError, QueryErrorCategory,
-        SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
-        migrate_after_idempotency_cutover,
+        QueryErrorKind, SchemaCompatibilityError,
+        ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
     };
 }
 

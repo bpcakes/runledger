@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use futures_util::FutureExt;
 use runledger_core::jobs::{JobCompletion, JobContext, JobFailure};
+use runledger_postgres::QueryErrorKind;
 use runledger_postgres::jobs::{self, JobProgressUpdate};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
@@ -16,7 +17,7 @@ mod dead_letter;
 mod observers;
 
 use self::completion::{
-    CompletionObservation, complete_job_failure_after_handler, complete_job_success_after_handler,
+    CompletionObservation, complete_job_after_handler, complete_job_failure_after_handler,
 };
 use self::observers::{JobRunningNotification, TerminalJobObserverEvent, TerminalObserverTasks};
 use crate::RuntimeLoopExit;
@@ -31,12 +32,8 @@ const UNKNOWN_WORKER_ID: &str = "unknown-worker";
 // that expired before the worker's lifecycle update reached storage.
 const LEASE_OWNER_MISMATCH_CODE: &str = "job.lease_owner_mismatch";
 const LEASE_MAINTENANCE_FAILED_CODE: &str = "job.lease_maintenance_failed";
-const WORKFLOW_RELEASE_CONFLICT_CODE: &str = "workflow.release_conflict";
 const HANDLER_PANIC_CODE: &str = "job.handler_panic";
-const INVALID_COMPLETION_PROGRESS_CODE: &str = "job.invalid_completion_progress";
 const RUNNING_PROGRESS_PERSIST_FAILED_REASON: &str = "RUNNING_PROGRESS_PERSIST_FAILED";
-const UNSTARTED_CLAIM_RELEASE_NOT_APPLICABLE_CODE: &str =
-    "job.unstarted_claim_release_not_applicable";
 const UNSTARTED_CLAIM_RETRY_DELAY_MS: i32 = 1_000;
 
 enum JobExecutionFailure {
@@ -296,6 +293,7 @@ async fn process_claimed_job_with_terminal_observers(
             attempt: job.attempt,
             organization_id: job.organization_id,
             worker_id: worker_id.clone(),
+            checkpoint: job.checkpoint.clone(),
         };
         let observed_job = observed_job(&job, &worker_id);
 
@@ -315,7 +313,7 @@ async fn process_claimed_job_with_terminal_observers(
         .await
         {
             Ok(completion) => {
-                complete_job_success_after_handler(
+                complete_job_after_handler(
                     &pool,
                     registry.as_ref(),
                     &context,
@@ -621,20 +619,20 @@ fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
     "non-string panic payload".to_string()
 }
 
-fn has_query_error_code(error: &runledger_postgres::Error, expected_code: &str) -> bool {
+fn has_query_error_kind(error: &runledger_postgres::Error, expected_kind: QueryErrorKind) -> bool {
     matches!(
         error,
         runledger_postgres::Error::QueryError(query_error)
-            if query_error.code() == expected_code
+            if query_error.kind() == Some(expected_kind)
     )
 }
 
 fn is_lease_owner_mismatch_error(error: &runledger_postgres::Error) -> bool {
-    has_query_error_code(error, LEASE_OWNER_MISMATCH_CODE)
+    has_query_error_kind(error, QueryErrorKind::JobLeaseOwnerMismatch)
 }
 
 fn is_unstarted_claim_release_not_applicable_error(error: &runledger_postgres::Error) -> bool {
-    has_query_error_code(error, UNSTARTED_CLAIM_RELEASE_NOT_APPLICABLE_CODE)
+    has_query_error_kind(error, QueryErrorKind::JobUnstartedClaimReleaseNotApplicable)
 }
 
 fn heartbeat_interval(lease_ttl_seconds: i32) -> Duration {

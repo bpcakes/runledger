@@ -9,8 +9,8 @@ use tracing::{Instrument, error, info, warn};
 use uuid::Uuid;
 
 use crate::observer::{
-    JobCompletionPersistFailedEvent, JobFailedEvent, JobLeaseLostEvent, JobLifecycleObservers,
-    JobRunningEvent, JobSucceededEvent, ObservedJob,
+    JobCompletionPersistFailedEvent, JobContinuedEvent, JobFailedEvent, JobLeaseLostEvent,
+    JobLifecycleObservers, JobRunningEvent, JobSucceededEvent, ObservedJob,
 };
 
 #[cfg(test)]
@@ -390,6 +390,7 @@ async fn drain_aborted_running_observer_tasks(tasks: &mut JoinSet<()>) -> usize 
 }
 
 pub(super) enum TerminalJobObserverEvent {
+    Continued(JobContinuedEvent),
     Succeeded(JobSucceededEvent),
     Failed(JobFailedEvent),
     CompletionPersistFailed(JobCompletionPersistFailedEvent),
@@ -399,6 +400,7 @@ pub(super) enum TerminalJobObserverEvent {
 impl TerminalJobObserverEvent {
     async fn notify(self, observers: &JobLifecycleObservers) {
         match self {
+            Self::Continued(event) => observers.job_continued(event).await,
             Self::Succeeded(event) => observers.job_succeeded(event).await,
             Self::Failed(event) => observers.job_failed(event).await,
             Self::CompletionPersistFailed(event) => {
@@ -466,6 +468,11 @@ impl JobRunningNotification {
 
         let span = tracing::Span::current();
         let job_log_context = JobObserverLogContext::from_job(job);
+        if let Some(handle) = self.handle.take_if(|handle| handle.is_finished()) {
+            RunningObserverHandle::new(handle, job_log_context.clone())
+                .drain()
+                .await;
+        }
         terminal_observer_tasks
             .spawn_terminal_if_admitted(&job_log_context, || {
                 let running_handle = self

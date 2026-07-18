@@ -349,6 +349,7 @@ async fn reaper_reports_legacy_direct_running_without_renewal_heartbeat() {
         .expect("claimed job should have worker id");
 
     sleep(Duration::from_millis(5)).await;
+    let checkpoint = json!({ "cursor": 900 });
     update_job_progress(
         &pool,
         claim.id,
@@ -359,7 +360,7 @@ async fn reaper_reports_legacy_direct_running_without_renewal_heartbeat() {
             stage: Some(JobStage::Running),
             progress_done: None,
             progress_total: None,
-            checkpoint: None,
+            checkpoint: Some(&checkpoint),
         },
     )
     .await
@@ -400,6 +401,7 @@ async fn reaper_reports_legacy_direct_running_without_renewal_heartbeat() {
     assert_eq!(result.reaped_leases.len(), 1);
     assert_eq!(result.reaped_leases[0].job_id, job_id);
     assert_eq!(result.reaped_leases[0].failure.code, "job.lease_expired");
+    assert_eq!(result.reaped_leases[0].checkpoint, Some(checkpoint));
     let ReapedLeaseDisposition::DeadLetteredTerminal { payload } =
         &result.reaped_leases[0].disposition
     else {

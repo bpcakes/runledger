@@ -23,9 +23,10 @@ mod types;
 mod workflow_types;
 mod workflows;
 
+#[allow(deprecated)]
 pub use admin::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
-    get_job_by_id, get_job_metrics, get_job_payload_by_idempotency_key,
+    compare_and_requeue_job_tx, get_job_by_id, get_job_metrics, get_job_payload_by_idempotency_key,
     get_latest_job_payload_for_run, list_job_events, list_jobs, requeue_job,
     update_job_payload_uuid_array_field,
 };
@@ -33,8 +34,9 @@ pub use logs::{insert_job_log, list_job_logs};
 pub use queue::{
     JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionCatalogSyncReport,
     claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
-    complete_job_failure, complete_job_failure_with_outcome, complete_job_success,
-    complete_job_success_with_outcome, enqueue_job, enqueue_job_tx, get_job_definition_by_type,
+    complete_job_continuation, complete_job_continuation_with_outcome, complete_job_failure,
+    complete_job_failure_with_outcome, complete_job_success, complete_job_success_with_outcome,
+    enqueue_job, enqueue_job_tx, enqueue_job_with_outcome_tx, get_job_definition_by_type,
     heartbeat_job, insert_job_definition_if_missing_tx, list_job_definitions, reap_expired_leases,
     reap_expired_leases_with_diagnostics, reap_expired_leases_with_terminal_records,
     release_unstarted_job_claim, sync_catalog_job_definitions_exact_tx,
@@ -54,15 +56,18 @@ pub use schedules::{
     upsert_job_schedule_tx,
 };
 pub use types::{
-    JOB_LIST_PAGE_LIMIT_MAX, JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate,
-    JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,
-    JobEnqueue, JobEventRecord, JobFailureCompletionDisposition, JobFailureCompletionOutcome,
-    JobFailureUpdate, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
-    JobProgressUpdate, JobQueueRecord, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
+    CompareAndRequeueJob, CompareAndRequeueJobOutcome, JOB_LIST_PAGE_LIMIT_MAX,
+    JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate, JobContinuationOutcome,
+    JobContinuationUpdate, JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate,
+    JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition, JobEnqueueOutcome, JobEventRecord,
+    JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate, JobListFilter,
+    JobLogRecord, JobLogRecordInput, JobMetricsRecord, JobProgressUpdate, JobQueueRecord,
+    JobRequeueStatePolicy, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
     JobRuntimeConfigUpsert, JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport,
-    JobScheduleJobTypeReference, JobScheduleRecord, JobScheduleUpsert, JobSuccessCompletionOutcome,
-    ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult,
-    ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord,
+    JobScheduleJobTypeReference, JobScheduleRecord, JobScheduleUpsert, JobScope,
+    JobSuccessCompletionOutcome, ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult,
+    ReapExpiredLeasesResult, ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord,
+    RequeueableJobStatus,
 };
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,
@@ -105,6 +110,33 @@ pub mod test_support {
         started_without_renewal_heartbeat: bool,
         disposition: ReapedLeaseDisposition,
     ) -> ReapedLeaseRecord {
+        reaped_lease_record_with_checkpoint(
+            job_id,
+            job_type,
+            organization_id,
+            run_number,
+            attempt,
+            max_attempts,
+            None,
+            worker_id,
+            started_without_renewal_heartbeat,
+            disposition,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reaped_lease_record_with_checkpoint(
+        job_id: Uuid,
+        job_type: JobTypeName,
+        organization_id: Option<Uuid>,
+        run_number: i32,
+        attempt: i32,
+        max_attempts: i32,
+        checkpoint: Option<Value>,
+        worker_id: Option<String>,
+        started_without_renewal_heartbeat: bool,
+        disposition: ReapedLeaseDisposition,
+    ) -> ReapedLeaseRecord {
         ReapedLeaseRecord {
             job_id,
             job_type,
@@ -112,6 +144,7 @@ pub mod test_support {
             run_number,
             attempt,
             max_attempts,
+            checkpoint,
             worker_id,
             started_without_renewal_heartbeat,
             failure: lease_expired_failure(),
