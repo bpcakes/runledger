@@ -11,7 +11,8 @@ pub use identifiers::{
     WorkflowTypeName,
 };
 pub use runtime_types::{
-    JobCompletion, JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobFailure,
+    JobCompletion, JobCompletionDisposition, JobContext, JobDeadLetterInfo, JobDeadLetterReason,
+    JobFailure,
 };
 pub use status::{
     JobEventType, JobFailureKind, JobStage, JobStatus, WorkflowRunStatus, WorkflowStepStatus,

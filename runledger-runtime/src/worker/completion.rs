@@ -1,18 +1,23 @@
 use std::time::Duration;
 
 use runledger_core::jobs::{
-    JobCompletion, JobContext, JobDeadLetterInfo, JobFailure, JobFailureKind,
+    JobCompletion, JobCompletionDisposition, JobContext, JobDeadLetterInfo, JobFailure,
+    JobFailureKind,
 };
-use runledger_postgres::jobs::{self, JobCompletionUpdate, JobFailureUpdate};
-use tracing::{error, warn};
+use runledger_postgres::QueryErrorKind;
+use runledger_postgres::jobs::{
+    self, JobCompletionUpdate, JobContinuationUpdate, JobFailureUpdate,
+};
+use tracing::{error, info, warn};
 
 use super::dead_letter::notify_handler_of_dead_letter;
 use super::observers::{JobRunningNotification, TerminalJobObserverEvent, TerminalObserverTasks};
-use super::{INVALID_COMPLETION_PROGRESS_CODE, WORKFLOW_RELEASE_CONFLICT_CODE};
+use super::{is_lease_owner_mismatch_error, lease_owner_mismatch_failure};
 use crate::WorkerError;
 use crate::observer::{
-    JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobFailedEvent,
-    JobFailureDisposition, JobLifecycleObservers, JobSucceededEvent, ObservedJob,
+    JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobContinuedEvent,
+    JobFailedEvent, JobFailureDisposition, JobLeaseLostEvent, JobLifecycleObservers,
+    JobSucceededEvent, ObservedJob,
 };
 use crate::registry::JobRegistry;
 
@@ -42,7 +47,49 @@ impl<'a> CompletionObservation<'a> {
     }
 }
 
-pub(super) async fn complete_job_success_after_handler(
+async fn handle_completion_persist_failure(
+    observation: CompletionObservation<'_>,
+    job: &jobs::JobQueueRecord,
+    operation: JobCompletionPersistenceOperation,
+    error: runledger_postgres::Error,
+    log_error: impl FnOnce(runledger_postgres::Error, bool),
+) {
+    let lease_owner_mismatch = is_lease_owner_mismatch_error(&error);
+    let terminal_event = if observation.observers.is_empty() {
+        None
+    } else if lease_owner_mismatch {
+        Some(TerminalJobObserverEvent::LeaseLost(JobLeaseLostEvent {
+            job: observation.observed_job,
+            duration: observation.duration,
+            failure: lease_owner_mismatch_failure(),
+        }))
+    } else {
+        Some(TerminalJobObserverEvent::CompletionPersistFailed(
+            JobCompletionPersistFailedEvent {
+                job: observation.observed_job,
+                duration: observation.duration,
+                operation,
+                error: completion_persist_error_diagnostic(&error),
+            },
+        ))
+    };
+    log_error(error, lease_owner_mismatch);
+
+    let Some(terminal_event) = terminal_event else {
+        return;
+    };
+    observation
+        .running_notification
+        .spawn_terminal_observer(
+            observation.terminal_observer_tasks,
+            job,
+            observation.observers.clone(),
+            terminal_event,
+        )
+        .await;
+}
+
+pub(super) async fn complete_job_after_handler(
     pool: &runledger_postgres::DbPool,
     registry: &JobRegistry,
     context: &JobContext,
@@ -50,24 +97,46 @@ pub(super) async fn complete_job_success_after_handler(
     completion: JobCompletion,
     observation: CompletionObservation<'_>,
 ) {
-    if let Some(failure) = invalid_completion_progress_failure(&completion) {
-        warn!(
-            job_id = %job.id,
-            attempt = job.attempt,
-            failure_code = failure.code,
-            failure_message = %failure.message,
-            "handler returned invalid success completion; marking job terminal"
-        );
-        complete_job_failure_after_handler(pool, registry, context, job, failure, observation)
+    match completion.disposition() {
+        JobCompletionDisposition::Succeed => {
+            complete_job_success_after_handler(
+                pool,
+                registry,
+                context,
+                job,
+                completion,
+                observation,
+            )
             .await;
-        return;
+        }
+        JobCompletionDisposition::ContinueAfter(delay) => {
+            complete_job_continuation_after_handler(
+                pool,
+                registry,
+                context,
+                job,
+                completion,
+                delay,
+                observation,
+            )
+            .await;
+        }
     }
+}
 
+async fn complete_job_success_after_handler(
+    pool: &runledger_postgres::DbPool,
+    registry: &JobRegistry,
+    context: &JobContext,
+    job: &jobs::JobQueueRecord,
+    completion: JobCompletion,
+    observation: CompletionObservation<'_>,
+) {
     let completion_update = JobCompletionUpdate {
         progress_done: completion.progress_done,
         progress_total: completion.progress_total,
         checkpoint: completion.checkpoint.as_ref(),
-        output: completion.output.as_ref(),
+        output: completion.output(),
     };
     match jobs::complete_job_success_with_outcome(
         pool,
@@ -79,39 +148,44 @@ pub(super) async fn complete_job_success_after_handler(
     )
     .await
     {
-        Err(error) if invalid_completion_progress_failure_from_error(&error).is_some() => {
-            let failure = invalid_completion_progress_failure_from_error(&error)
-                .expect("guard checked invalid completion progress");
-            warn!(
-                job_id = %job.id,
-                attempt = job.attempt,
-                failure_code = failure.code,
-                failure_message = %failure.message,
-                "handler returned invalid success completion after stored progress was applied; marking job terminal"
-            );
-            complete_job_failure_after_handler(pool, registry, context, job, failure, observation)
-                .await;
-        }
         Err(error) => {
-            let release_conflict = is_workflow_release_conflict_error(&error);
-            let error_message = completion_persist_error_diagnostic(&error);
-            log_completion_success_persist_error(job, error, release_conflict);
-            observation
-                .running_notification
-                .spawn_terminal_observer(
-                    observation.terminal_observer_tasks,
+            if let Some(failure) = invalid_completion_progress_failure_from_error(&error, "success")
+            {
+                warn!(
+                    job_id = %job.id,
+                    attempt = job.attempt,
+                    failure_code = failure.code,
+                    failure_message = %failure.message,
+                    "handler returned invalid success completion progress; marking job terminal"
+                );
+                complete_job_failure_after_handler(
+                    pool,
+                    registry,
+                    context,
                     job,
-                    observation.observers.clone(),
-                    TerminalJobObserverEvent::CompletionPersistFailed(
-                        JobCompletionPersistFailedEvent {
-                            job: observation.observed_job,
-                            duration: observation.duration,
-                            operation: JobCompletionPersistenceOperation::Success,
-                            error: error_message,
-                        },
-                    ),
+                    failure,
+                    observation,
                 )
                 .await;
+                return;
+            }
+
+            let release_conflict = is_workflow_release_conflict_error(&error);
+            handle_completion_persist_failure(
+                observation,
+                job,
+                JobCompletionPersistenceOperation::Success,
+                error,
+                |error, lease_owner_mismatch| {
+                    log_completion_success_persist_error(
+                        job,
+                        error,
+                        release_conflict,
+                        lease_owner_mismatch,
+                    );
+                },
+            )
+            .await;
         }
         Ok(outcome) => {
             observation
@@ -131,6 +205,113 @@ pub(super) async fn complete_job_success_after_handler(
                             worker_id: context.worker_id.clone(),
                         },
                         duration: observation.duration,
+                        progress_done: outcome.progress_done,
+                        progress_total: outcome.progress_total,
+                    }),
+                )
+                .await;
+        }
+    }
+}
+
+async fn complete_job_continuation_after_handler(
+    pool: &runledger_postgres::DbPool,
+    registry: &JobRegistry,
+    context: &JobContext,
+    job: &jobs::JobQueueRecord,
+    completion: JobCompletion,
+    delay: Duration,
+    observation: CompletionObservation<'_>,
+) {
+    let continuation = JobContinuationUpdate {
+        delay,
+        progress_done: completion.progress_done,
+        progress_total: completion.progress_total,
+        checkpoint: completion.checkpoint.as_ref(),
+    };
+    match jobs::complete_job_continuation_with_outcome(
+        pool,
+        job.id,
+        job.run_number,
+        job.attempt,
+        &context.worker_id,
+        &continuation,
+    )
+    .await
+    {
+        Err(error) => {
+            if let Some(failure) = invalid_continuation_failure_from_error(&error) {
+                warn!(
+                    job_id = %job.id,
+                    attempt = job.attempt,
+                    failure_code = failure.code,
+                    failure_message = %failure.message,
+                    "handler returned an invalid continuation; marking job terminal"
+                );
+                complete_job_failure_after_handler(
+                    pool,
+                    registry,
+                    context,
+                    job,
+                    failure,
+                    observation,
+                )
+                .await;
+                return;
+            }
+
+            handle_completion_persist_failure(
+                observation,
+                job,
+                JobCompletionPersistenceOperation::Continuation,
+                error,
+                |error, lease_owner_mismatch| {
+                    let error = WorkerError::CompleteContinuation {
+                        job_id: job.id,
+                        attempt: job.attempt,
+                        source: error,
+                    };
+                    if lease_owner_mismatch {
+                        warn!(
+                            %error,
+                            job_id = %job.id,
+                            run_number = job.run_number,
+                            attempt = job.attempt,
+                            "successful handler continuation lost lease ownership before persistence"
+                        );
+                    } else {
+                        error!(
+                            %error,
+                            job_id = %job.id,
+                            run_number = job.run_number,
+                            attempt = job.attempt,
+                            "failed to persist successful handler continuation; leaving job leased for recovery"
+                        );
+                    }
+                },
+            )
+            .await;
+        }
+        Ok(outcome) => {
+            info!(
+                job_id = %outcome.job_id,
+                completed_run_number = outcome.completed_run_number,
+                next_run_number = outcome.next_run_number,
+                attempt = outcome.attempt,
+                next_run_at = %outcome.next_run_at,
+                "handler continuation scheduled"
+            );
+            observation
+                .running_notification
+                .spawn_terminal_observer(
+                    observation.terminal_observer_tasks,
+                    job,
+                    observation.observers.clone(),
+                    TerminalJobObserverEvent::Continued(JobContinuedEvent {
+                        job: observation.observed_job,
+                        duration: observation.duration,
+                        next_run_number: outcome.next_run_number,
+                        next_run_at: outcome.next_run_at,
                         progress_done: outcome.progress_done,
                         progress_total: outcome.progress_total,
                     }),
@@ -239,29 +420,29 @@ pub(super) async fn complete_job_failure_after_handler(
                     failure_message = %dead_letter.failure.message,
                     "job dead lettered after handler failure"
                 );
-                notify_handler_of_dead_letter(registry, context, job, dead_letter).await;
+                let mut dead_letter_context = context.clone();
+                dead_letter_context.checkpoint = outcome.checkpoint;
+                notify_handler_of_dead_letter(registry, &dead_letter_context, job, dead_letter)
+                    .await;
             }
         }
         Err(error) => {
             let release_conflict = is_workflow_release_conflict_error(&error);
-            let error_message = completion_persist_error_diagnostic(&error);
-            log_completion_failure_persist_error(job, error, release_conflict);
-            observation
-                .running_notification
-                .spawn_terminal_observer(
-                    observation.terminal_observer_tasks,
-                    job,
-                    observation.observers.clone(),
-                    TerminalJobObserverEvent::CompletionPersistFailed(
-                        JobCompletionPersistFailedEvent {
-                            job: observation.observed_job,
-                            duration: observation.duration,
-                            operation: JobCompletionPersistenceOperation::Failure,
-                            error: error_message,
-                        },
-                    ),
-                )
-                .await;
+            handle_completion_persist_failure(
+                observation,
+                job,
+                JobCompletionPersistenceOperation::Failure,
+                error,
+                |error, lease_owner_mismatch| {
+                    log_completion_failure_persist_error(
+                        job,
+                        error,
+                        release_conflict,
+                        lease_owner_mismatch,
+                    );
+                },
+            )
+            .await;
         }
     }
 }
@@ -288,67 +469,63 @@ pub(super) fn compute_retry_delay_ms(attempt: i32, job_id: uuid::Uuid) -> i32 {
     (capped + jitter).max(1_000) as i32
 }
 
-fn invalid_completion_progress_failure(completion: &JobCompletion) -> Option<JobFailure> {
-    invalid_completion_progress_detail(completion.progress_done, completion.progress_total)
-        .map(|detail| JobFailure::terminal(INVALID_COMPLETION_PROGRESS_CODE, detail))
+fn invalid_completion_progress_failure_from_error(
+    error: &runledger_postgres::Error,
+    completion_kind: &'static str,
+) -> Option<JobFailure> {
+    let runledger_postgres::Error::QueryError(query_error) = error else {
+        return None;
+    };
+
+    if query_error.kind() != Some(QueryErrorKind::JobInvalidCompletionProgress) {
+        return None;
+    }
+
+    Some(JobFailure::terminal(
+        query_error.code(),
+        format!(
+            "Handler returned invalid {completion_kind} progress: {}.",
+            query_error.internal_message()
+        ),
+    ))
 }
 
-fn invalid_completion_progress_failure_from_error(
+fn invalid_continuation_failure_from_error(
     error: &runledger_postgres::Error,
 ) -> Option<JobFailure> {
     let runledger_postgres::Error::QueryError(query_error) = error else {
         return None;
     };
 
-    if query_error.code() != INVALID_COMPLETION_PROGRESS_CODE {
-        return None;
+    match query_error.kind() {
+        Some(QueryErrorKind::JobInvalidCompletionProgress) => {
+            invalid_completion_progress_failure_from_error(error, "continuation")
+        }
+        Some(QueryErrorKind::JobInvalidContinuationDelay) => Some(JobFailure::terminal(
+            query_error.code(),
+            format!(
+                "Handler returned a continuation delay that cannot be persisted: {}.",
+                query_error.internal_message()
+            ),
+        )),
+        Some(QueryErrorKind::JobWorkflowRequeueNotSupported) => Some(JobFailure::terminal(
+            query_error.code(),
+            "Handler continuation is supported only for direct jobs, not workflow-managed jobs.",
+        )),
+        Some(
+            QueryErrorKind::JobLeaseOwnerMismatch
+            | QueryErrorKind::JobUnstartedClaimReleaseNotApplicable
+            | QueryErrorKind::WorkflowReleaseConflict,
+        )
+        | None => None,
     }
-
-    Some(JobFailure::terminal(
-        INVALID_COMPLETION_PROGRESS_CODE,
-        format!(
-            "Handler returned invalid success progress after combining with stored progress: {}.",
-            query_error.internal_message()
-        ),
-    ))
-}
-
-fn invalid_completion_progress_detail(
-    progress_done: Option<i64>,
-    progress_total: Option<i64>,
-) -> Option<String> {
-    if let Some(progress_done) = progress_done
-        && progress_done < 0
-    {
-        return Some(format!(
-            "Handler returned invalid success progress: progress_done must be greater than or equal to zero, got {progress_done}."
-        ));
-    }
-
-    if let Some(progress_total) = progress_total
-        && progress_total < 0
-    {
-        return Some(format!(
-            "Handler returned invalid success progress: progress_total must be greater than or equal to zero, got {progress_total}."
-        ));
-    }
-
-    if let (Some(progress_done), Some(progress_total)) = (progress_done, progress_total)
-        && progress_done > progress_total
-    {
-        return Some(format!(
-            "Handler returned invalid success progress: progress_done must not exceed progress_total, got progress_done={progress_done}, progress_total={progress_total}."
-        ));
-    }
-
-    None
 }
 
 fn is_workflow_release_conflict_error(error: &runledger_postgres::Error) -> bool {
     matches!(
         error,
         runledger_postgres::Error::QueryError(query_error)
-            if query_error.code() == WORKFLOW_RELEASE_CONFLICT_CODE
+            if query_error.kind() == Some(QueryErrorKind::WorkflowReleaseConflict)
     )
 }
 
@@ -370,13 +547,20 @@ fn log_completion_success_persist_error(
     job: &jobs::JobQueueRecord,
     error: runledger_postgres::Error,
     release_conflict: bool,
+    lease_owner_mismatch: bool,
 ) {
     let error = WorkerError::CompleteSuccess {
         job_id: job.id,
         attempt: job.attempt,
         source: error,
     };
-    if release_conflict {
+    if lease_owner_mismatch {
+        warn!(
+            %error,
+            job_id = %job.id,
+            "successful handler completion lost lease ownership before persistence"
+        );
+    } else if release_conflict {
         warn!(
             %error,
             job_id = %job.id,
@@ -391,13 +575,20 @@ fn log_completion_failure_persist_error(
     job: &jobs::JobQueueRecord,
     error: runledger_postgres::Error,
     release_conflict: bool,
+    lease_owner_mismatch: bool,
 ) {
     let error = WorkerError::CompleteFailure {
         job_id: job.id,
         attempt: job.attempt,
         source: error,
     };
-    if release_conflict {
+    if lease_owner_mismatch {
+        warn!(
+            %error,
+            job_id = %job.id,
+            "handler failure completion lost lease ownership before persistence"
+        );
+    } else if release_conflict {
         warn!(
             %error,
             job_id = %job.id,

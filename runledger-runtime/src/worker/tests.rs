@@ -8,13 +8,15 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{
     JobCompletion, JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobEventType, JobFailure,
-    JobFailureKind, JobStage, JobStatus, JobType, JobTypeName,
+    JobFailureKind, JobStage, JobStatus, JobType, JobTypeName, StepKey, WorkflowRunEnqueueBuilder,
+    WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
 };
 use runledger_postgres::jobs::{
     JobCompletionUpdate, JobDefinitionUpsert, JobEnqueue, JobFailureUpdate, JobProgressUpdate,
-    claim_prestart_jobs, complete_job_failure, complete_job_success, enqueue_job, get_job_by_id,
-    heartbeat_job, list_job_events, reap_expired_leases, release_unstarted_job_claim,
-    update_job_progress, upsert_job_definition_tx,
+    claim_prestart_jobs, complete_job_failure, complete_job_success, enqueue_job,
+    enqueue_workflow_run, get_job_by_id, heartbeat_job, list_job_events, list_workflow_steps,
+    reap_expired_leases, release_unstarted_job_claim, update_job_progress,
+    upsert_job_definition_tx,
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -34,8 +36,9 @@ use super::{
 use crate::RuntimeLoopExit;
 use crate::config::JobsConfig;
 use crate::observer::{
-    JobCompletionPersistFailedEvent, JobFailedEvent, JobFailureDisposition, JobLeaseLostEvent,
-    JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent, JobSucceededEvent, ObservedJob,
+    JobCompletionPersistFailedEvent, JobContinuedEvent, JobFailedEvent, JobFailureDisposition,
+    JobLeaseLostEvent, JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent,
+    JobSucceededEvent, ObservedJob,
 };
 use crate::registry::{JobHandler, JobRegistry};
 use crate::test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -100,12 +103,45 @@ struct RetryThenSuccessHandler {
     runs: Arc<AtomicUsize>,
 }
 
+#[derive(Debug, PartialEq)]
+struct ContinuationExecution {
+    run_number: i32,
+    attempt: i32,
+    checkpoint: Option<Value>,
+}
+
+struct ContinueThenSuccessHandler {
+    executions: Arc<Mutex<Vec<ContinuationExecution>>>,
+}
+
+struct ExpireLeaseThenContinueHandler {
+    pool: PgPool,
+}
+
+struct ExpireLeaseThenSucceedHandler {
+    pool: PgPool,
+}
+
+struct ExpireLeaseThenFailHandler {
+    pool: PgPool,
+}
+
+struct InvalidContinuationDelayHandler {
+    runs: Arc<AtomicUsize>,
+    dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
+}
+
 struct InvalidCompletionProgressHandler {
     runs: Arc<AtomicUsize>,
     dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
 }
 
 struct PartialInvalidCompletionProgressHandler {
+    runs: Arc<AtomicUsize>,
+    dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
+}
+
+struct PartialInvalidContinuationProgressHandler {
     runs: Arc<AtomicUsize>,
     dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
 }
@@ -129,6 +165,11 @@ struct RecordingDeadLetterHandler {
     failure: JobFailure,
     runs: Arc<AtomicUsize>,
     dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
+}
+
+struct CheckpointingDeadLetterHandler {
+    pool: PgPool,
+    dead_letter_contexts: Arc<Mutex<Vec<JobContext>>>,
 }
 
 struct ControlledDeadLetterFailureHandler {
@@ -206,6 +247,7 @@ impl Drop for DropNotify {
 #[derive(Clone, Default)]
 struct RecordingObserver {
     running: Arc<Mutex<Vec<JobRunningEvent>>>,
+    continued: Arc<Mutex<Vec<JobContinuedEvent>>>,
     succeeded: Arc<Mutex<Vec<JobSucceededEvent>>>,
     failed: Arc<Mutex<Vec<JobFailedEvent>>>,
     persist_failed: Arc<Mutex<Vec<JobCompletionPersistFailedEvent>>>,
@@ -228,6 +270,13 @@ impl RecordingObserver {
         self.succeeded
             .lock()
             .expect("succeeded events lock should not be poisoned")
+            .clone()
+    }
+
+    fn continued(&self) -> Vec<JobContinuedEvent> {
+        self.continued
+            .lock()
+            .expect("continued events lock should not be poisoned")
             .clone()
     }
 
@@ -277,6 +326,117 @@ impl JobHandler for RetryThenSuccessHandler {
 }
 
 #[async_trait::async_trait]
+impl JobHandler for ContinueThenSuccessHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.test.continue_then_success")
+    }
+
+    async fn execute(
+        &self,
+        context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        self.executions
+            .lock()
+            .expect("continuation executions lock should not be poisoned")
+            .push(ContinuationExecution {
+                run_number: context.run_number,
+                attempt: context.attempt,
+                checkpoint: context.checkpoint,
+            });
+
+        if context.run_number == 1 {
+            return Ok(JobCompletion::continue_now()
+                .progress(1, 2)
+                .checkpoint(json!({"cursor": 1})));
+        }
+
+        Ok(JobCompletion::success().progress(2, 2))
+    }
+}
+
+#[async_trait::async_trait]
+impl JobHandler for ExpireLeaseThenContinueHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.test.continuation_lease_loss")
+    }
+
+    async fn execute(
+        &self,
+        context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        expire_job_lease(&self.pool, context.job_id).await;
+        Ok(JobCompletion::continue_now())
+    }
+}
+
+#[async_trait::async_trait]
+impl JobHandler for ExpireLeaseThenSucceedHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.test.success_lease_loss")
+    }
+
+    async fn execute(
+        &self,
+        context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        expire_job_lease(&self.pool, context.job_id).await;
+        Ok(JobCompletion::success())
+    }
+}
+
+#[async_trait::async_trait]
+impl JobHandler for ExpireLeaseThenFailHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.test.failure_lease_loss")
+    }
+
+    async fn execute(
+        &self,
+        context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        expire_job_lease(&self.pool, context.job_id).await;
+        Err(JobFailure::terminal(
+            "job.test.failure_after_lease_loss",
+            "failure completion should observe lease loss",
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl JobHandler for InvalidContinuationDelayHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.test.invalid_continuation_delay")
+    }
+
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(JobCompletion::continue_after(Duration::from_micros(
+            i64::MAX as u64,
+        )))
+    }
+
+    async fn on_dead_letter(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+        dead_letter: JobDeadLetterInfo,
+    ) {
+        self.dead_letters
+            .lock()
+            .expect("dead-letter list lock should not be poisoned")
+            .push(dead_letter);
+    }
+}
+
+#[async_trait::async_trait]
 impl JobHandler for InvalidCompletionProgressHandler {
     fn job_type(&self) -> JobType<'static> {
         JobType::new("jobs.test.invalid_completion_progress")
@@ -316,12 +476,39 @@ impl JobHandler for PartialInvalidCompletionProgressHandler {
         _payload: Value,
     ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
-        Ok(JobCompletion {
-            progress_done: Some(20),
-            progress_total: None,
-            checkpoint: None,
-            output: None,
-        })
+        let mut completion = JobCompletion::success();
+        completion.progress_done = Some(20);
+        Ok(completion)
+    }
+
+    async fn on_dead_letter(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+        dead_letter: JobDeadLetterInfo,
+    ) {
+        self.dead_letters
+            .lock()
+            .expect("dead-letter list lock should not be poisoned")
+            .push(dead_letter);
+    }
+}
+
+#[async_trait::async_trait]
+impl JobHandler for PartialInvalidContinuationProgressHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.test.partial_invalid_continuation_progress")
+    }
+
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let mut completion = JobCompletion::continue_now();
+        completion.progress_done = Some(20);
+        Ok(completion)
     }
 
     async fn on_dead_letter(
@@ -410,6 +597,52 @@ impl JobHandler for RecordingDeadLetterHandler {
             .lock()
             .expect("dead-letter list lock should not be poisoned")
             .push(dead_letter);
+    }
+}
+
+#[async_trait::async_trait]
+impl JobHandler for CheckpointingDeadLetterHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new("jobs.test.dead_letter_latest_checkpoint")
+    }
+
+    async fn execute(
+        &self,
+        context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        let checkpoint = json!({"cursor": "persisted-during-handler"});
+        update_job_progress(
+            &self.pool,
+            context.job_id,
+            context.run_number,
+            context.attempt,
+            &context.worker_id,
+            &JobProgressUpdate {
+                stage: None,
+                progress_done: Some(1),
+                progress_total: Some(2),
+                checkpoint: Some(&checkpoint),
+            },
+        )
+        .await
+        .expect("persist checkpoint during handler execution");
+        Err(JobFailure::terminal(
+            "job.test.dead_letter_latest_checkpoint",
+            "terminal failure after checkpoint update",
+        ))
+    }
+
+    async fn on_dead_letter(
+        &self,
+        context: JobContext,
+        _payload: Value,
+        _dead_letter: JobDeadLetterInfo,
+    ) {
+        self.dead_letter_contexts
+            .lock()
+            .expect("dead-letter contexts lock should not be poisoned")
+            .push(context);
     }
 }
 
@@ -605,6 +838,13 @@ impl JobLifecycleObserver for RecordingObserver {
         self.succeeded
             .lock()
             .expect("succeeded events lock should not be poisoned")
+            .push(event);
+    }
+
+    async fn on_job_continued(&self, event: JobContinuedEvent) {
+        self.continued
+            .lock()
+            .expect("continued events lock should not be poisoned")
             .push(event);
     }
 
@@ -1016,6 +1256,50 @@ async fn empty_lifecycle_observers_skip_running_and_terminal_tasks() {
         0,
         "empty observers should not create no-op terminal observer tasks"
     );
+}
+
+#[tokio::test]
+async fn finished_running_observer_is_reaped_before_terminal_task_admission() {
+    let tasks = TerminalObserverTasks::owned_with_max_concurrency(0);
+    let observer = RecordingObserver::default();
+    let observers = observer.lifecycle_observers();
+    let observed_job = observer_task_observed_job();
+    let mut running_notification =
+        JobRunningNotification::spawn(observers.clone(), observed_job.clone());
+
+    wait_for_observer_count(|| observer.running().len(), 1, Duration::from_millis(500)).await;
+    timeout(Duration::from_millis(500), async {
+        while !running_notification
+            .handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("running observer task should finish");
+
+    running_notification
+        .spawn_terminal_observer(
+            &tasks,
+            &observer_task_queue_record(),
+            observers,
+            TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
+                job: observed_job,
+                duration: Duration::from_millis(1),
+                progress_done: None,
+                progress_total: None,
+            }),
+        )
+        .await;
+
+    assert!(
+        running_notification.handle.is_none(),
+        "a finished running callback should be joined inline even when the terminal callback is not admitted"
+    );
+    assert!(observer.succeeded().is_empty());
+    assert_eq!(tasks.in_flight_count().await, 0);
 }
 
 #[tokio::test]
@@ -1871,6 +2155,340 @@ async fn process_claimed_job_observer_reports_success_after_commit() {
 }
 
 #[tokio::test]
+async fn handler_continuation_reuses_the_job_with_a_fresh_attempt_budget() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_handler_continuation", 8).await;
+    let (job_id, first_claim) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.continue_then_success"),
+        3,
+        json!({"kind": "continuation"}),
+        "worker-continuation-first",
+    )
+    .await;
+    let executions = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = JobRegistry::new();
+    registry.register(ContinueThenSuccessHandler {
+        executions: executions.clone(),
+    });
+    let registry = Arc::new(registry);
+    let observer = RecordingObserver::default();
+
+    process_claimed_job_with_observer(
+        pool.clone(),
+        registry.clone(),
+        first_claim,
+        30,
+        observer.lifecycle_observers(),
+    )
+    .await;
+    wait_for_observer_count(|| observer.continued().len(), 1, Duration::from_millis(500)).await;
+
+    let continued = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load continued job")
+        .expect("continued job exists");
+    assert_eq!(continued.status, JobStatus::Pending);
+    assert_eq!(continued.run_number, 2);
+    assert_eq!(continued.attempt, 0);
+    assert_eq!(continued.progress_done, Some(1));
+    assert_eq!(continued.progress_total, Some(2));
+    assert_eq!(continued.checkpoint, Some(json!({"cursor": 1})));
+    let continued_events = observer.continued();
+    assert_eq!(continued_events.len(), 1);
+    assert_eq!(continued_events[0].job.job_id, job_id);
+    assert_eq!(continued_events[0].job.run_number, 1);
+    assert_eq!(continued_events[0].job.attempt, 1);
+    assert_eq!(continued_events[0].next_run_number, 2);
+    assert_eq!(continued_events[0].progress_done, Some(1));
+    assert_eq!(continued_events[0].progress_total, Some(2));
+    assert_eq!(observer.running().len(), 1);
+    assert!(observer.succeeded().is_empty());
+    assert!(observer.failed().is_empty());
+    assert!(observer.persist_failed().is_empty());
+
+    let second_claim = claim_one_job(&pool, "worker-continuation-second").await;
+    assert_eq!(second_claim.id, job_id);
+    assert_eq!(second_claim.run_number, 2);
+    assert_eq!(second_claim.attempt, 1);
+    process_claimed_job_with_observer(
+        pool.clone(),
+        registry,
+        second_claim,
+        30,
+        observer.lifecycle_observers(),
+    )
+    .await;
+    wait_for_observer_count(|| observer.succeeded().len(), 1, Duration::from_millis(500)).await;
+
+    let succeeded = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load succeeded job")
+        .expect("succeeded job exists");
+    assert_eq!(succeeded.status, JobStatus::Succeeded);
+    assert_eq!(succeeded.run_number, 2);
+    assert_eq!(succeeded.attempt, 1);
+    assert_eq!(succeeded.progress_done, Some(2));
+    assert_eq!(succeeded.progress_total, Some(2));
+    assert_eq!(succeeded.checkpoint, Some(json!({"cursor": 1})));
+    assert_eq!(
+        *executions
+            .lock()
+            .expect("continuation executions lock should not be poisoned"),
+        vec![
+            ContinuationExecution {
+                run_number: 1,
+                attempt: 1,
+                checkpoint: None,
+            },
+            ContinuationExecution {
+                run_number: 2,
+                attempt: 1,
+                checkpoint: Some(json!({"cursor": 1})),
+            },
+        ]
+    );
+    assert_eq!(observer.succeeded().len(), 1);
+    assert_eq!(observer.continued().len(), 1);
+    assert_eq!(observer.running().len(), 2);
+    assert!(observer.failed().is_empty());
+
+    let attempts = sqlx::query_as::<_, (i32, i32, bool, Option<String>)>(
+        "SELECT run_number, attempt, finished_at IS NOT NULL, outcome::text
+         FROM job_attempts
+         WHERE job_id = $1
+         ORDER BY run_number, attempt",
+    )
+    .bind(job_id)
+    .fetch_all(&pool)
+    .await
+    .expect("load continuation attempts");
+    assert_eq!(attempts, vec![(1, 1, true, None), (2, 1, true, None)]);
+
+    let events = list_job_events(&pool, None, job_id, 20, None)
+        .await
+        .expect("list continuation lifecycle events");
+    let continuation_event = events
+        .iter()
+        .find(|event| event.event_type == JobEventType::Requeued)
+        .expect("handler continuation should write a requeued event");
+    assert_eq!(
+        continuation_event
+            .payload
+            .get("reason")
+            .and_then(Value::as_str),
+        Some("HANDLER_CONTINUATION")
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn continuation_lease_mismatch_reports_lease_loss_instead_of_persist_failure() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_continuation_lease_loss", 8).await;
+    let (job_id, claimed_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.continuation_lease_loss"),
+        3,
+        json!({"kind": "continuation-lease-loss"}),
+        "worker-continuation-lease-loss",
+    )
+    .await;
+    let mut registry = JobRegistry::new();
+    registry.register(ExpireLeaseThenContinueHandler { pool: pool.clone() });
+    let observer = RecordingObserver::default();
+
+    process_claimed_job_with_observer(
+        pool.clone(),
+        Arc::new(registry),
+        claimed_job,
+        30,
+        observer.lifecycle_observers(),
+    )
+    .await;
+    wait_for_observer_count(
+        || observer.lease_lost().len(),
+        1,
+        Duration::from_millis(500),
+    )
+    .await;
+
+    let lease_lost = observer.lease_lost();
+    assert_eq!(lease_lost.len(), 1);
+    assert_eq!(lease_lost[0].job.job_id, job_id);
+    assert_eq!(lease_lost[0].failure.kind, JobFailureKind::LeaseExpired);
+    assert_eq!(lease_lost[0].failure.code, "job.lease_owner_mismatch");
+    assert!(observer.persist_failed().is_empty());
+    assert!(observer.continued().is_empty());
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load expired continuation lease")
+        .expect("job exists");
+    assert_eq!(persisted.status, JobStatus::Leased);
+    assert_eq!(persisted.run_number, 1);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn success_and_failure_lease_mismatches_report_lease_loss() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_terminal_lease_loss", 8).await;
+    let observer = RecordingObserver::default();
+
+    let (success_job_id, success_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.success_lease_loss"),
+        3,
+        json!({"kind": "success-lease-loss"}),
+        "worker-success-lease-loss",
+    )
+    .await;
+    let mut success_registry = JobRegistry::new();
+    success_registry.register(ExpireLeaseThenSucceedHandler { pool: pool.clone() });
+    process_claimed_job_with_observer(
+        pool.clone(),
+        Arc::new(success_registry),
+        success_job,
+        30,
+        observer.lifecycle_observers(),
+    )
+    .await;
+
+    let (failure_job_id, failure_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.failure_lease_loss"),
+        3,
+        json!({"kind": "failure-lease-loss"}),
+        "worker-failure-lease-loss",
+    )
+    .await;
+    let mut failure_registry = JobRegistry::new();
+    failure_registry.register(ExpireLeaseThenFailHandler { pool: pool.clone() });
+    process_claimed_job_with_observer(
+        pool.clone(),
+        Arc::new(failure_registry),
+        failure_job,
+        30,
+        observer.lifecycle_observers(),
+    )
+    .await;
+
+    wait_for_observer_count(
+        || observer.lease_lost().len(),
+        2,
+        Duration::from_millis(500),
+    )
+    .await;
+    let lease_lost = observer.lease_lost();
+    assert_eq!(lease_lost.len(), 2);
+    assert!(
+        lease_lost
+            .iter()
+            .any(|event| event.job.job_id == success_job_id)
+    );
+    assert!(
+        lease_lost
+            .iter()
+            .any(|event| event.job.job_id == failure_job_id)
+    );
+    assert!(
+        lease_lost
+            .iter()
+            .all(|event| event.failure.kind == JobFailureKind::LeaseExpired)
+    );
+    assert!(observer.persist_failed().is_empty());
+    assert!(observer.succeeded().is_empty());
+    assert!(observer.failed().is_empty());
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn workflow_managed_handler_continuation_fails_terminally_without_requeueing() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_workflow_continuation", 8).await;
+    let job_type = JobType::new("jobs.test.continue_then_success");
+    let mut tx = pool.begin().await.expect("begin definition transaction");
+    upsert_job_definition_tx(
+        &mut tx,
+        &JobDefinitionUpsert {
+            job_type,
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 30,
+            default_priority: 100,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert workflow job definition");
+    tx.commit().await.expect("commit definition transaction");
+
+    let payload = json!({"kind": "workflow-continuation"});
+    let metadata = json!({"test": "workflow-continuation"});
+    let step = WorkflowStepEnqueueBuilder::new(StepKey::new("step"), job_type, &payload)
+        .try_build()
+        .expect("build workflow step");
+    let workflow =
+        WorkflowRunEnqueueBuilder::new(WorkflowType::new("workflow.test.continuation"), &metadata)
+            .step(step)
+            .try_build()
+            .expect("build workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue workflow");
+    let job_id = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list workflow steps")
+        .into_iter()
+        .next()
+        .and_then(|step| step.job_id)
+        .expect("workflow step job should be released");
+    let claim = claim_one_job(&pool, "worker-workflow-continuation").await;
+    assert_eq!(claim.id, job_id);
+
+    let executions = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = JobRegistry::new();
+    registry.register(ContinueThenSuccessHandler {
+        executions: executions.clone(),
+    });
+    process_claimed_job(pool.clone(), Arc::new(registry), claim, 30).await;
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load workflow job")
+        .expect("workflow job exists");
+    assert_eq!(persisted.status, JobStatus::DeadLettered);
+    assert_eq!(persisted.run_number, 1);
+    assert_eq!(
+        persisted.last_error_code.as_deref(),
+        Some("job.workflow_requeue_not_supported")
+    );
+    assert_eq!(
+        *executions
+            .lock()
+            .expect("continuation executions lock should not be poisoned"),
+        vec![ContinuationExecution {
+            run_number: 1,
+            attempt: 1,
+            checkpoint: None,
+        }]
+    );
+    let steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list terminal workflow steps");
+    assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+    assert!(
+        list_job_events(&pool, None, job_id, 20, None)
+            .await
+            .expect("list workflow job events")
+            .iter()
+            .all(|event| event.event_type != JobEventType::Requeued)
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn process_claimed_job_success_observer_reports_committed_coalesced_progress() {
     const JOB_TYPE: &str = "jobs.test.observer.coalesced_success_progress";
 
@@ -1907,11 +2525,10 @@ async fn process_claimed_job_success_observer_reports_committed_coalesced_progre
     let mut registry = JobRegistry::new();
     registry.register(FixedSuccessHandler {
         job_type_name: JOB_TYPE,
-        completion: JobCompletion {
-            progress_done: Some(7),
-            progress_total: None,
-            checkpoint: None,
-            output: None,
+        completion: {
+            let mut completion = JobCompletion::success();
+            completion.progress_done = Some(7);
+            completion
         },
         runs: runs.clone(),
     });
@@ -2746,6 +3363,86 @@ async fn standalone_success_completion_allows_non_read_committed_session() {
 }
 
 #[tokio::test]
+async fn process_claimed_job_terminally_fails_invalid_continuation_delay_without_replay() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_invalid_continuation_delay", 8).await;
+
+    let (job_id, claimed_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.invalid_continuation_delay"),
+        3,
+        json!({"kind":"invalid-continuation-delay"}),
+        "worker-invalid-continuation-delay",
+    )
+    .await;
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let dead_letters = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = JobRegistry::new();
+    registry.register(InvalidContinuationDelayHandler {
+        runs: runs.clone(),
+        dead_letters: dead_letters.clone(),
+    });
+
+    process_claimed_job(pool.clone(), Arc::new(registry), claimed_job, 30).await;
+
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let dead_letters = clone_dead_letters(&dead_letters);
+    assert_eq!(dead_letters.len(), 1);
+    let dead_letter = &dead_letters[0];
+    assert_eq!(
+        dead_letter.reason,
+        JobDeadLetterReason::FailureKindNonRetryable
+    );
+    assert_eq!(dead_letter.failure.kind, JobFailureKind::Terminal);
+    assert_eq!(dead_letter.failure.code, "job.invalid_continuation_delay");
+    assert_eq!(dead_letter.max_attempts, Some(3));
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job")
+        .expect("job exists");
+    assert_eq!(persisted.status, JobStatus::DeadLettered);
+    assert_eq!(persisted.status_reason.as_deref(), Some("TERMINAL"));
+    assert_eq!(
+        persisted.last_error_code.as_deref(),
+        Some("job.invalid_continuation_delay")
+    );
+    assert!(persisted.worker_id.is_none());
+    assert!(persisted.lease_expires_at.is_none());
+
+    let events = list_job_events(&pool, None, job_id, 50, None)
+        .await
+        .expect("list job events");
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event_type,
+            JobEventType::Requeued | JobEventType::RetryScheduled | JobEventType::Succeeded
+        )),
+        "invalid continuation delay must not continue, retry, or succeed"
+    );
+    let failed = events
+        .iter()
+        .find(|event| event.event_type == JobEventType::Failed)
+        .expect("failed event should exist");
+    assert_eq!(failed.payload.get("kind"), Some(&json!("TERMINAL")));
+    assert_eq!(
+        failed.payload.get("error_code"),
+        Some(&json!("job.invalid_continuation_delay"))
+    );
+
+    reap_expired_leases(&pool, 10, 1_000)
+        .await
+        .expect("reaper should not requeue terminal invalid continuation");
+    let replay_claims = claim_prestart_jobs(&pool, "worker-invalid-continuation-replay", 30, 1)
+        .await
+        .expect("claim after terminal invalid continuation");
+    assert!(replay_claims.is_empty());
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn process_claimed_job_terminally_fails_invalid_success_progress_without_replay() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_invalid_success_progress", 8).await;
 
@@ -2778,6 +3475,13 @@ async fn process_claimed_job_terminally_fails_invalid_success_progress_without_r
     );
     assert_eq!(dead_letter.failure.kind, JobFailureKind::Terminal);
     assert_eq!(dead_letter.failure.code, "job.invalid_completion_progress");
+    assert!(
+        dead_letter
+            .failure
+            .message
+            .contains("Handler returned invalid success progress:")
+    );
+    assert!(!dead_letter.failure.message.contains("stored progress"));
     assert_eq!(dead_letter.max_attempts, Some(3));
 
     let persisted = get_job_by_id(&pool, None, job_id)
@@ -2921,6 +3625,78 @@ async fn process_claimed_job_terminally_fails_stale_partial_success_progress_wit
         .expect("claim after terminal invalid completion");
     assert!(replay_claims.is_empty());
     assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn stale_partial_continuation_progress_reports_the_continuation_path() {
+    let (pool, database) =
+        setup_ephemeral_pool("jobs_worker_stale_partial_continuation_progress", 8).await;
+    let (job_id, claimed_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.partial_invalid_continuation_progress"),
+        3,
+        json!({"kind":"stale-partial-continuation-progress"}),
+        "worker-stale-partial-continuation-progress",
+    )
+    .await;
+    let worker_id = claimed_job
+        .worker_id
+        .clone()
+        .expect("claimed job has worker id");
+    update_job_progress(
+        &pool,
+        claimed_job.id,
+        claimed_job.run_number,
+        claimed_job.attempt,
+        &worker_id,
+        &JobProgressUpdate {
+            stage: None,
+            progress_done: Some(5),
+            progress_total: Some(10),
+            checkpoint: None,
+        },
+    )
+    .await
+    .expect("persist prior progress");
+    let runs = Arc::new(AtomicUsize::new(0));
+    let dead_letters = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = JobRegistry::new();
+    registry.register(PartialInvalidContinuationProgressHandler {
+        runs: runs.clone(),
+        dead_letters: dead_letters.clone(),
+    });
+
+    process_claimed_job(pool.clone(), Arc::new(registry), claimed_job, 30).await;
+
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let dead_letters = clone_dead_letters(&dead_letters);
+    assert_eq!(dead_letters.len(), 1);
+    assert_eq!(
+        dead_letters[0].failure.code,
+        "job.invalid_completion_progress"
+    );
+    assert!(
+        dead_letters[0]
+            .failure
+            .message
+            .contains("invalid continuation progress:")
+    );
+    assert!(!dead_letters[0].failure.message.contains("stored progress"));
+    assert!(!dead_letters[0].failure.message.contains("invalid success"));
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load stale continuation progress job")
+        .expect("job exists");
+    assert_eq!(persisted.status, JobStatus::DeadLettered);
+    assert!(
+        list_job_events(&pool, None, job_id, 20, None)
+            .await
+            .expect("list stale continuation progress events")
+            .iter()
+            .all(|event| event.event_type != JobEventType::Requeued)
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -3210,6 +3986,52 @@ async fn process_claimed_job_reports_attempt_exhaustion_to_dead_letter_hook() {
         .expect("load job")
         .expect("job exists");
     assert_eq!(persisted.status, JobStatus::DeadLettered);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn worker_dead_letter_hook_receives_latest_committed_checkpoint() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_dead_letter_checkpoint", 8).await;
+    let (job_id, claimed_job) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.dead_letter_latest_checkpoint"),
+        3,
+        json!({"kind": "dead-letter-checkpoint"}),
+        "worker-dead-letter-checkpoint",
+    )
+    .await;
+    assert!(claimed_job.checkpoint.is_none());
+
+    let dead_letter_contexts = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = JobRegistry::new();
+    registry.register(CheckpointingDeadLetterHandler {
+        pool: pool.clone(),
+        dead_letter_contexts: dead_letter_contexts.clone(),
+    });
+
+    process_claimed_job(pool.clone(), Arc::new(registry), claimed_job, 30).await;
+
+    {
+        let contexts = dead_letter_contexts
+            .lock()
+            .expect("dead-letter contexts lock should not be poisoned");
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(
+            contexts[0].checkpoint,
+            Some(json!({"cursor": "persisted-during-handler"}))
+        );
+    }
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load dead-lettered job")
+        .expect("dead-lettered job exists");
+    assert_eq!(persisted.status, JobStatus::DeadLettered);
+    assert_eq!(
+        persisted.checkpoint,
+        Some(json!({"cursor": "persisted-during-handler"}))
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }

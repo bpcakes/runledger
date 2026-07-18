@@ -265,6 +265,7 @@ fn reaped_lease_record(
         run_number: row.run_number,
         attempt: row.attempt,
         max_attempts: row.max_attempts,
+        checkpoint: row.checkpoint_snapshot.clone(),
         worker_id: row.worker_id.clone(),
         started_without_renewal_heartbeat: started_without_renewal_heartbeat(row),
         failure: lease_expired_failure(),

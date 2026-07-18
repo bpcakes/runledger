@@ -6,6 +6,10 @@ use super::super::errors::lease_owner_mismatch_error;
 use super::super::errors::unstarted_claim_release_not_applicable_error;
 use super::super::workflows::on_claim_released;
 use super::attempts::ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART;
+use super::events::{
+    RequeuedEventPayload, RequeuedJobEvent,
+    insert_requeued_event_tx as insert_job_requeued_event_tx,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) struct UnstartedClaimIdentity<'a> {
@@ -135,40 +139,6 @@ async fn delete_attempt_row_tx(
     Ok(())
 }
 
-async fn insert_requeued_event_tx(
-    tx: &mut DbTx<'_>,
-    identity: UnstartedClaimIdentity<'_>,
-    reason: &str,
-) -> Result<()> {
-    sqlx::query!(
-        "INSERT INTO job_events (
-            job_id,
-            run_number,
-            attempt,
-            event_type,
-            payload
-         )
-         VALUES (
-            $1,
-            $2,
-            $3,
-            'REQUEUED',
-            jsonb_build_object('reason', $4::text)
-         )",
-        identity.job_id,
-        identity.run_number,
-        identity.attempt,
-        reason,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("insert unstarted-claim requeued event", error)
-    })?;
-
-    Ok(())
-}
-
 pub(crate) async fn try_release_unstarted_job_claim_tx(
     tx: &mut DbTx<'_>,
     identity: UnstartedClaimIdentity<'_>,
@@ -182,7 +152,20 @@ pub(crate) async fn try_release_unstarted_job_claim_tx(
 
     on_claim_released(tx, identity.job_id, identity.should_reset_started_at()).await?;
     delete_attempt_row_tx(tx, identity).await?;
-    insert_requeued_event_tx(tx, identity, reason).await?;
+    insert_job_requeued_event_tx(
+        tx,
+        RequeuedJobEvent {
+            job_id: identity.job_id,
+            completed_run_number: identity.run_number,
+            attempt: Some(identity.attempt),
+            stage: None,
+            progress_done: None,
+            progress_total: None,
+            payload: RequeuedEventPayload::Basic { reason },
+        },
+        "insert unstarted-claim requeued event",
+    )
+    .await?;
 
     Ok(TryReleaseUnstartedClaimResult::Released)
 }

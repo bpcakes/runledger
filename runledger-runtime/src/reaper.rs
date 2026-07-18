@@ -169,7 +169,10 @@ mod tests {
         JobCompletion, JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobFailure, JobType,
     };
     use runledger_postgres::jobs::ReapedLeaseDisposition;
-    use runledger_postgres::jobs::test_support::reaped_lease_record as postgres_reaped_lease_record;
+    use runledger_postgres::jobs::test_support::{
+        reaped_lease_record as postgres_reaped_lease_record,
+        reaped_lease_record_with_checkpoint as postgres_reaped_lease_record_with_checkpoint,
+    };
     use serde_json::{Value, json};
     use sqlx::types::Uuid;
     use tokio::sync::{Notify, watch};
@@ -198,6 +201,7 @@ mod tests {
 
     struct RecordingDeadLetterHandler {
         dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
+        contexts: Arc<Mutex<Vec<JobContext>>>,
     }
 
     #[derive(Clone, Default)]
@@ -319,10 +323,14 @@ mod tests {
 
         async fn on_dead_letter(
             &self,
-            _context: JobContext,
+            context: JobContext,
             _payload: Value,
             dead_letter: JobDeadLetterInfo,
         ) {
+            self.contexts
+                .lock()
+                .expect("dead-letter context list lock should not be poisoned")
+                .push(context);
             self.dead_letters
                 .lock()
                 .expect("dead-letter list lock should not be poisoned")
@@ -416,6 +424,26 @@ mod tests {
             1,
             1,
             1,
+            Some("worker-reaped-terminal".to_owned()),
+            false,
+            ReapedLeaseDisposition::DeadLetteredTerminal { payload },
+        )
+    }
+
+    fn terminal_reaped_lease_record_with_checkpoint(
+        job_id: Uuid,
+        job_type: runledger_core::jobs::JobTypeName,
+        payload: Value,
+        checkpoint: Value,
+    ) -> runledger_postgres::jobs::ReapedLeaseRecord {
+        postgres_reaped_lease_record_with_checkpoint(
+            job_id,
+            job_type,
+            None,
+            1,
+            1,
+            1,
+            Some(checkpoint),
             Some("worker-reaped-terminal".to_owned()),
             false,
             ReapedLeaseDisposition::DeadLetteredTerminal { payload },
@@ -815,15 +843,19 @@ mod tests {
     #[tokio::test]
     async fn notify_handlers_delivers_terminal_hook_for_committed_batch() {
         let dead_letters = Arc::new(Mutex::new(Vec::new()));
+        let contexts = Arc::new(Mutex::new(Vec::new()));
         let mut registry = JobRegistry::new();
         registry.register(RecordingDeadLetterHandler {
             dead_letters: dead_letters.clone(),
+            contexts: contexts.clone(),
         });
 
-        let jobs = vec![terminal_reaped_lease_record(
+        let checkpoint = json!({ "cursor": 900 });
+        let jobs = vec![terminal_reaped_lease_record_with_checkpoint(
             Uuid::now_v7(),
             runledger_core::jobs::JobTypeName::from_static("jobs.test.reaper.dead_letter.record"),
             json!({ "kind": "committed-terminal-hook" }),
+            checkpoint.clone(),
         )];
 
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -838,6 +870,14 @@ mod tests {
                 .len(),
             1,
             "terminal hook must still run for a committed terminal reaper batch"
+        );
+        assert_eq!(
+            contexts
+                .lock()
+                .expect("dead-letter context list lock should not be poisoned")[0]
+                .checkpoint,
+            Some(checkpoint),
+            "terminal hook must receive the checkpoint committed before lease expiry"
         );
     }
 
@@ -913,9 +953,11 @@ mod tests {
     #[tokio::test]
     async fn notify_handlers_reports_lease_expiration_dead_letter_reason() {
         let dead_letters = Arc::new(Mutex::new(Vec::new()));
+        let contexts = Arc::new(Mutex::new(Vec::new()));
         let mut registry = JobRegistry::new();
         registry.register(RecordingDeadLetterHandler {
             dead_letters: dead_letters.clone(),
+            contexts,
         });
 
         let jobs = vec![terminal_reaped_lease_record(

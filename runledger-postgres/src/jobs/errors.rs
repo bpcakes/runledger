@@ -1,4 +1,4 @@
-use crate::{Error, QueryError, QueryErrorCategory, Result};
+use crate::{Error, QueryError, QueryErrorCategory, QueryErrorKind, Result};
 
 use super::types::JOB_LIST_PAGE_LIMIT_MAX;
 
@@ -48,6 +48,21 @@ pub(super) fn invalid_job_state_error() -> Error {
     ))
 }
 
+pub(super) fn cancellation_not_quiesced_error(retry_after: chrono::DateTime<chrono::Utc>) -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Conflict,
+        "job.cancellation_not_quiesced",
+        "Canceled job recovery must wait for the prior lease to expire.",
+        format!("canceled job lease remains active until {retry_after}"),
+    ))
+}
+
+pub(super) fn ensure_rejection_rollback_succeeded(
+    rollback_result: std::result::Result<(), sqlx::Error>,
+) -> Result<()> {
+    rollback_result.map_err(|error| Error::ConnectionError(error.to_string()))
+}
+
 pub(super) fn job_not_found_error() -> Error {
     Error::QueryError(QueryError::from_classified(
         QueryErrorCategory::Validation,
@@ -58,8 +73,9 @@ pub(super) fn job_not_found_error() -> Error {
 }
 
 pub(super) fn lease_owner_mismatch_error() -> Error {
-    Error::QueryError(QueryError::from_classified(
+    Error::QueryError(QueryError::from_classified_with_kind(
         QueryErrorCategory::Forbidden,
+        QueryErrorKind::JobLeaseOwnerMismatch,
         "job.lease_owner_mismatch",
         "Job lease is not currently held by this worker.",
         "job lease owner mismatch, missing lease, or expired lease",
@@ -110,8 +126,9 @@ pub(super) fn require_positive_retry_delay(retry_delay_ms: Option<i32>) -> Resul
 }
 
 fn invalid_completion_progress_error(detail: String) -> Error {
-    Error::QueryError(QueryError::from_classified(
+    Error::QueryError(QueryError::from_classified_with_kind(
         QueryErrorCategory::Validation,
+        QueryErrorKind::JobInvalidCompletionProgress,
         "job.invalid_completion_progress",
         "Job completion progress is invalid.",
         detail,
@@ -149,9 +166,20 @@ pub(super) fn validate_completion_progress(
     Ok(())
 }
 
-pub(super) fn unstarted_claim_release_not_applicable_error() -> Error {
-    Error::QueryError(QueryError::from_classified(
+pub(super) fn invalid_continuation_delay_error(detail: String) -> Error {
+    Error::QueryError(QueryError::from_classified_with_kind(
         QueryErrorCategory::Validation,
+        QueryErrorKind::JobInvalidContinuationDelay,
+        "job.invalid_continuation_delay",
+        "Job continuation delay is too large.",
+        detail,
+    ))
+}
+
+pub(super) fn unstarted_claim_release_not_applicable_error() -> Error {
+    Error::QueryError(QueryError::from_classified_with_kind(
+        QueryErrorCategory::Validation,
+        QueryErrorKind::JobUnstartedClaimReleaseNotApplicable,
         "job.unstarted_claim_release_not_applicable",
         "Job claim cannot be released as unstarted.",
         "job claim is not eligible for unstarted release",
@@ -168,10 +196,32 @@ pub(super) fn runtime_config_not_found_error(job_type: &str) -> Error {
 }
 
 pub(super) fn workflow_requeue_not_supported_error() -> Error {
-    Error::QueryError(QueryError::from_classified(
+    Error::QueryError(QueryError::from_classified_with_kind(
         QueryErrorCategory::Validation,
+        QueryErrorKind::JobWorkflowRequeueNotSupported,
         "job.workflow_requeue_not_supported",
         "Workflow-managed jobs cannot be requeued directly.",
         "workflow managed job requeue is not supported",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_rejection_rollback_succeeded;
+    use crate::Error;
+
+    #[test]
+    fn rejection_allows_domain_error_after_successful_rollback() {
+        let result = ensure_rejection_rollback_succeeded(Ok(()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rejection_returns_connection_error_when_rollback_fails() {
+        let result = ensure_rejection_rollback_succeeded(Err(sqlx::Error::PoolTimedOut));
+        match result {
+            Err(Error::ConnectionError(message)) => assert!(!message.is_empty()),
+            other => panic!("expected connection error, got {other:?}"),
+        }
+    }
 }

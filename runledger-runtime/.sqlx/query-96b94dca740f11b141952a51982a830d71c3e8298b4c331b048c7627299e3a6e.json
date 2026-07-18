@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                id,\n                status::text AS \"status!\",\n                run_number,\n                enqueue_request = $3::jsonb AS \"enqueue_request_matches?\"\n             FROM job_queue\n             WHERE job_type = $1\n               AND organization_id IS NULL\n               AND idempotency_key = $2\n             LIMIT 1\n             FOR NO KEY UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "run_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "enqueue_request_matches?",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      null
+    ]
+  },
+  "hash": "96b94dca740f11b141952a51982a830d71c3e8298b4c331b048c7627299e3a6e"
+}

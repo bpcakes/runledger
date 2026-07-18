@@ -1,7 +1,7 @@
 use runledger_core::jobs::{WorkflowRunStatus, WorkflowStepStatus};
 use sqlx::types::Uuid;
 
-use crate::{Error, QueryError, QueryErrorCategory};
+use crate::{Error, QueryError, QueryErrorCategory, QueryErrorKind};
 
 pub(in crate::jobs::workflows) fn workflow_definition_not_available_error(job_type: &str) -> Error {
     Error::QueryError(QueryError::from_classified(
@@ -24,8 +24,9 @@ pub(in crate::jobs::workflows) fn workflow_internal_state_error(
 }
 
 pub(in crate::jobs::workflows) fn workflow_release_conflict_error(workflow_run_id: Uuid) -> Error {
-    Error::QueryError(QueryError::from_classified(
+    Error::QueryError(QueryError::from_classified_with_kind(
         QueryErrorCategory::Conflict,
+        QueryErrorKind::WorkflowReleaseConflict,
         "workflow.release_conflict",
         "Workflow step release conflicted with another workflow mutation.",
         format!("workflow run {workflow_run_id} is locked for an exclusive mutation"),
@@ -36,8 +37,9 @@ pub(in crate::jobs::workflows) fn workflow_release_conflict_timeout_error(
     workflow_run_id: Uuid,
     source: sqlx::Error,
 ) -> Error {
-    Error::QueryError(QueryError::from_classified_sqlx(
+    Error::QueryError(QueryError::from_classified_sqlx_with_kind(
         QueryErrorCategory::Conflict,
+        QueryErrorKind::WorkflowReleaseConflict,
         "workflow.release_conflict",
         "Workflow step release conflicted with another workflow mutation.",
         format!("workflow run {workflow_run_id} timed out acquiring shared release advisory lock"),
