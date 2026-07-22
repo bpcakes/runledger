@@ -13,6 +13,7 @@ use super::super::transaction_isolation::ensure_read_committed_tx;
 use super::super::types::{JobEnqueue, JobEnqueueDisposition, JobEnqueueOutcome, JobQueueRecord};
 use super::super::workflows::on_claimed;
 use super::attempts::{ATTEMPT_CLAIM_ORIGIN_DIRECT, ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART};
+use super::events::{EnqueuedEventPayload, EnqueuedJobEvent, insert_enqueued_event_tx};
 
 #[derive(sqlx::FromRow)]
 struct EnqueuedJobRow {
@@ -77,13 +78,34 @@ pub async fn enqueue_job_with_outcome_tx(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
 ) -> Result<JobEnqueueOutcome> {
-    enqueue_job_with_existing_lock_tx(tx, payload, ExistingJobLock::MutationReady).await
+    enqueue_job_with_existing_lock_tx(
+        tx,
+        payload,
+        ExistingJobLock::MutationReady,
+        EnqueuedEventPayload::Ordinary,
+    )
+    .await
+}
+
+pub(in crate::jobs) async fn enqueue_replayed_job_with_outcome_tx(
+    tx: &mut DbTx<'_>,
+    payload: &JobEnqueue<'_>,
+    event_payload: EnqueuedEventPayload<'_>,
+) -> Result<JobEnqueueOutcome> {
+    debug_assert!(payload.idempotency_key.is_none());
+    debug_assert!(matches!(
+        &event_payload,
+        EnqueuedEventPayload::SuccessfulReplay { .. }
+    ));
+    enqueue_job_with_existing_lock_tx(tx, payload, ExistingJobLock::MutationReady, event_payload)
+        .await
 }
 
 async fn enqueue_job_with_existing_lock_tx(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
     existing_job_lock: ExistingJobLock,
+    event_payload: EnqueuedEventPayload<'_>,
 ) -> Result<JobEnqueueOutcome> {
     let stage = payload
         .stage
@@ -172,23 +194,17 @@ async fn enqueue_job_with_existing_lock_tx(
     let run_number: i32 = row.run_number;
     let status = parse_job_status(row.status)?;
 
-    sqlx::query!(
-        "INSERT INTO job_events (
+    insert_enqueued_event_tx(
+        tx,
+        EnqueuedJobEvent {
             job_id,
             run_number,
-            event_type,
             stage,
-            payload
-         )
-         VALUES ($1, $2, 'ENQUEUED', $3, jsonb_build_object('job_type', $4::text))",
-        job_id,
-        run_number,
-        stage,
-        payload.job_type as _,
+            job_type: payload.job_type,
+            payload: event_payload,
+        },
     )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("enqueue job event", error))?;
+    .await?;
 
     Ok(JobEnqueueOutcome {
         job_id,
@@ -200,9 +216,14 @@ async fn enqueue_job_with_existing_lock_tx(
 
 /// Enqueues a job while preserving the original UUID-only API.
 pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Result<Uuid> {
-    enqueue_job_with_existing_lock_tx(tx, payload, ExistingJobLock::KeyShare)
-        .await
-        .map(|outcome| outcome.job_id)
+    enqueue_job_with_existing_lock_tx(
+        tx,
+        payload,
+        ExistingJobLock::KeyShare,
+        EnqueuedEventPayload::Ordinary,
+    )
+    .await
+    .map(|outcome| outcome.job_id)
 }
 
 // Keyed enqueues compare the canonical request snapshot exactly on retry. The

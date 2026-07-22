@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -7,13 +8,16 @@ use chrono::{Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{
     JobCompletion, JobContext, JobDeadLetterInfo, JobFailure, JobStage, JobStatus, JobType,
 };
-use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    self, CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobDefinitionUpsert, JobEnqueue,
-    JobEnqueueDisposition, JobListFilter, JobQueueRecord, JobRequeueStatePolicy, JobScope,
-    RequeueableJobStatus,
+    self, CompareAndReplaySucceededJob, CompareAndReplaySucceededJobOutcome, CompareAndRequeueJob,
+    CompareAndRequeueJobOutcome, JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition,
+    JobListFilter, JobQueueRecord, JobRequeueStatePolicy, JobScope,
+    compare_and_replay_succeeded_job, compare_and_replay_succeeded_job_tx, compare_and_requeue_job,
     compare_and_requeue_job_tx, enqueue_job_with_outcome_tx, get_job_by_id,
-    upsert_job_definition_tx,
+    get_job_continuation_metrics, upsert_job_definition_tx,
+};
+use runledger_postgres::prelude::{
+    DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord, list_job_events,
 };
 use runledger_runtime::Supervisor;
 use runledger_runtime::config::JobsConfig;
@@ -33,6 +37,11 @@ const POSTGRES_DB: &str = "postgres";
 const DEFAULT_POSTGRES_IMAGE: &str = "postgres:18";
 const MAX_POSTGRES_BOOTSTRAP_ATTEMPTS: u8 = 40;
 const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
+const CONTINUATION_CHECKPOINT_VERSION: i64 = 1;
+const CONTINUATION_MAX_RUNS: i64 = 2;
+const HANDLER_CONTINUATION_REASON: &str = "HANDLER_CONTINUATION";
+const REPLAY_REQUEST_KEY: &str = "external-smoke-success-replay";
+const REPLAY_REASON: &str = "prove fresh successful replay from a packaged consumer";
 
 #[tokio::test]
 async fn packaged_crates_support_external_consumer_embedding() {
@@ -40,15 +49,21 @@ async fn packaged_crates_support_external_consumer_embedding() {
     runledger_postgres::migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect("apply packaged migrations");
+    create_consumer_audit_table(&harness.pool)
+        .await
+        .expect("create consumer-owned audit table");
 
     let hang_release = Arc::new(Notify::new());
     let dead_letters = Arc::new(Mutex::new(Vec::new()));
     let execution_count = Arc::new(AtomicUsize::new(0));
+    let completed_continuation_slices = Arc::new(Mutex::new(HashSet::new()));
 
     let handler = SmokeHandler {
         execution_count: Arc::clone(&execution_count),
         hang_release: Arc::clone(&hang_release),
         dead_letters: Arc::clone(&dead_letters),
+        completed_continuation_slices: Arc::clone(&completed_continuation_slices),
+        continuation_canary_enabled: true,
     };
 
     let mut registry = JobRegistry::new();
@@ -84,10 +99,14 @@ async fn packaged_crates_support_external_consumer_embedding() {
         stage: None,
     };
     let mut recovery_enqueue_tx = harness.pool.begin().await.expect("begin recovery enqueue");
-    let inserted_recovery = enqueue_job_with_outcome_tx(&mut recovery_enqueue_tx, &recovery_request)
-        .await
-        .expect("insert recovery job with outcome");
-    assert_eq!(inserted_recovery.disposition, JobEnqueueDisposition::Inserted);
+    let inserted_recovery =
+        enqueue_job_with_outcome_tx(&mut recovery_enqueue_tx, &recovery_request)
+            .await
+            .expect("insert recovery job with outcome");
+    assert_eq!(
+        inserted_recovery.disposition,
+        JobEnqueueDisposition::Inserted
+    );
     recovery_enqueue_tx
         .commit()
         .await
@@ -102,39 +121,103 @@ async fn packaged_crates_support_external_consumer_embedding() {
     .expect("cancel recovery job");
 
     let mut existing_enqueue_tx = harness.pool.begin().await.expect("begin existing enqueue");
-    let existing_recovery = enqueue_job_with_outcome_tx(&mut existing_enqueue_tx, &recovery_request)
-        .await
-        .expect("resolve existing recovery job");
+    let existing_recovery =
+        enqueue_job_with_outcome_tx(&mut existing_enqueue_tx, &recovery_request)
+            .await
+            .expect("resolve existing recovery job");
     assert_eq!(existing_recovery.job_id, inserted_recovery.job_id);
     assert_eq!(existing_recovery.status, JobStatus::Canceled);
-    assert_eq!(existing_recovery.disposition, JobEnqueueDisposition::Existing);
+    assert_eq!(
+        existing_recovery.disposition,
+        JobEnqueueDisposition::Existing
+    );
     existing_enqueue_tx
         .commit()
         .await
         .expect("commit existing enqueue");
 
-    let mut recovery_tx = harness.pool.begin().await.expect("begin compare-and-requeue");
-    let recovery_outcome = compare_and_requeue_job_tx(
-        &mut recovery_tx,
-        CompareAndRequeueJob {
-            scope: JobScope::Global,
-            job_id: inserted_recovery.job_id,
-            expected_status: RequeueableJobStatus::Canceled,
-            expected_run_number: 1,
-            state_policy: JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
-            reason: "external smoke compare-and-requeue",
-        },
+    let observed_recovery = get_job_by_id(&harness.pool, None, inserted_recovery.job_id)
+        .await
+        .expect("load canceled recovery job")
+        .expect("canceled recovery job exists");
+    let recovery_request = CompareAndRequeueJob::from_observed_job(
+        &observed_recovery,
+        JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
+        "external smoke compare-and-requeue",
     )
-    .await
-    .expect("compare and requeue recovery job");
+    .expect("canceled observation is recoverable");
+    let recovery_outcome = compare_and_requeue_job(&harness.pool, recovery_request)
+        .await
+        .expect("compare and requeue recovery job");
     assert!(matches!(
         recovery_outcome,
         CompareAndRequeueJobOutcome::Requeued { .. }
     ));
-    recovery_tx
+
+    let transactional_recovery_job_id = enqueue_payload(&harness.pool, &recovery_payload).await;
+    jobs::cancel_job(
+        &harness.pool,
+        None,
+        transactional_recovery_job_id,
+        Some("external smoke transactional recovery"),
+    )
+    .await
+    .expect("cancel transactional recovery job");
+    let observed_transactional_recovery =
+        get_job_by_id(&harness.pool, None, transactional_recovery_job_id)
+            .await
+            .expect("load transactional recovery job")
+            .expect("transactional recovery job exists");
+    let transactional_recovery_request = CompareAndRequeueJob::from_observed_job(
+        &observed_transactional_recovery,
+        JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
+        "external smoke transactional compare-and-requeue",
+    )
+    .expect("transactional recovery observation is recoverable");
+    let mut transactional_recovery_tx = harness
+        .pool
+        .begin()
+        .await
+        .expect("begin consumer-owned recovery transaction");
+    let transactional_recovery_outcome = compare_and_requeue_job_tx(
+        &mut transactional_recovery_tx,
+        transactional_recovery_request,
+    )
+    .await
+    .expect("compare and requeue in consumer-owned transaction");
+    let CompareAndRequeueJobOutcome::Requeued {
+        after: transactional_recovery,
+        ..
+    } = transactional_recovery_outcome
+    else {
+        panic!("expected transactional recovery to requeue");
+    };
+    record_consumer_audit_tx(
+        &mut transactional_recovery_tx,
+        "transactional-recovery",
+        transactional_recovery_job_id,
+        transactional_recovery.id,
+    )
+    .await
+    .expect("record recovery in consumer-owned transaction");
+    transactional_recovery_tx
         .commit()
         .await
-        .expect("commit compare-and-requeue");
+        .expect("commit recovery and consumer audit atomically");
+    assert_consumer_audit(
+        &harness.pool,
+        "transactional-recovery",
+        transactional_recovery_job_id,
+        transactional_recovery_job_id,
+    )
+    .await;
+    let committed_transactional_recovery =
+        get_job_by_id(&harness.pool, None, transactional_recovery_job_id)
+            .await
+            .expect("reload committed transactional recovery")
+            .expect("committed transactional recovery exists");
+    assert_eq!(committed_transactional_recovery.status, JobStatus::Pending);
+    assert_eq!(committed_transactional_recovery.run_number, 2);
 
     let config = JobsConfig {
         worker_id: "external-consumer-smoke-worker".to_string(),
@@ -161,7 +244,15 @@ async fn packaged_crates_support_external_consumer_embedding() {
     ));
 
     let success_job_id = enqueue_kind(&harness.pool, "success").await;
-    let continuation_job_id = enqueue_kind(&harness.pool, "continuation").await;
+    let continuation_job_id = enqueue_payload(
+        &harness.pool,
+        &json!({
+            "kind": "continuation",
+            "canary": true,
+            "max_runs": CONTINUATION_MAX_RUNS,
+        }),
+    )
+    .await;
     let terminal_job_id = enqueue_kind(&harness.pool, "terminal").await;
     insert_due_schedule(&harness.pool, "scheduled-success")
         .await
@@ -170,10 +261,105 @@ async fn packaged_crates_support_external_consumer_embedding() {
     let success_job = wait_for_status(&harness.pool, success_job_id, JobStatus::Succeeded).await;
     assert_eq!(success_job.status, JobStatus::Succeeded);
 
+    let replay_request = CompareAndReplaySucceededJob {
+        scope: JobScope::Global,
+        source_job_id: success_job.id,
+        expected_run_number: success_job.run_number,
+        replay_request_key: REPLAY_REQUEST_KEY,
+        reason: REPLAY_REASON,
+    };
+    let mut replay_tx = harness
+        .pool
+        .begin()
+        .await
+        .expect("begin consumer-owned replay transaction");
+    let replay_outcome =
+        compare_and_replay_succeeded_job_tx(&mut replay_tx, replay_request.clone())
+            .await
+            .expect("replay successful job in consumer-owned transaction");
+    let CompareAndReplaySucceededJobOutcome::Replayed { replay, .. } = replay_outcome else {
+        panic!("expected successful replay outcome");
+    };
+    assert_eq!(replay.disposition, JobEnqueueDisposition::Inserted);
+    assert_ne!(replay.job_id, success_job.id);
+    record_consumer_audit_tx(
+        &mut replay_tx,
+        "transactional-successful-replay",
+        success_job.id,
+        replay.job_id,
+    )
+    .await
+    .expect("record replay in consumer-owned transaction");
+    replay_tx
+        .commit()
+        .await
+        .expect("commit replay and consumer audit atomically");
+    assert_consumer_audit(
+        &harness.pool,
+        "transactional-successful-replay",
+        success_job.id,
+        replay.job_id,
+    )
+    .await;
+
+    let existing_replay = compare_and_replay_succeeded_job(&harness.pool, replay_request)
+        .await
+        .expect("resolve replay idempotently through pool wrapper");
+    let CompareAndReplaySucceededJobOutcome::Replayed {
+        replay: existing_replay,
+        ..
+    } = existing_replay
+    else {
+        panic!("expected existing successful replay outcome");
+    };
+    assert_eq!(existing_replay.job_id, replay.job_id);
+    assert_eq!(existing_replay.disposition, JobEnqueueDisposition::Existing);
+
+    let replayed_job = wait_for_status(&harness.pool, replay.job_id, JobStatus::Succeeded).await;
+    assert_eq!(replayed_job.run_number, 1);
+    let replay_events = list_job_events(&harness.pool, None, replay.job_id, 100, None)
+        .await
+        .expect("list successful replay events through the public prelude");
+    assert_successful_replay_event(
+        &replay_events,
+        replay.job_id,
+        success_job.id,
+        success_job.run_number,
+    );
+    assert_eq!(
+        get_job_by_id(&harness.pool, None, success_job.id)
+            .await
+            .expect("reload successful replay source")
+            .expect("successful replay source still exists")
+            .status,
+        JobStatus::Succeeded
+    );
+
     let continuation_job =
         wait_for_status(&harness.pool, continuation_job_id, JobStatus::Succeeded).await;
     assert_eq!(continuation_job.run_number, 2);
     assert_eq!(continuation_job.attempt, 1);
+    let continuation_events = list_job_events(&harness.pool, None, continuation_job_id, 100, None)
+        .await
+        .expect("list continuation events through the public prelude");
+    assert_handler_continuation_event(&continuation_events, continuation_job_id);
+    assert_eq!(
+        continuation_job.checkpoint,
+        Some(json!({
+            "version": CONTINUATION_CHECKPOINT_VERSION,
+            "cursor": CONTINUATION_MAX_RUNS - 1,
+        }))
+    );
+    let continuation_metrics =
+        get_job_continuation_metrics(&harness.pool, None, Some(SMOKE_JOB_TYPE))
+            .await
+            .expect("load smoke continuation metrics")
+            .pop()
+            .expect("registered smoke job type has metrics");
+    assert_eq!(continuation_metrics.continued_24h, 1);
+    assert_eq!(continuation_metrics.active_continued_count, 0);
+    assert_eq!(continuation_metrics.max_active_run_number, 0);
+    assert_eq!(completed_continuation_slices.lock().await.len(), 2);
 
     let recovered_job = wait_for_status(
         &harness.pool,
@@ -182,6 +368,13 @@ async fn packaged_crates_support_external_consumer_embedding() {
     )
     .await;
     assert_eq!(recovered_job.run_number, 2);
+    let transactionally_recovered_job = wait_for_status(
+        &harness.pool,
+        transactional_recovery_job_id,
+        JobStatus::Succeeded,
+    )
+    .await;
+    assert_eq!(transactionally_recovered_job.run_number, 2);
 
     let terminal_job =
         wait_for_status(&harness.pool, terminal_job_id, JobStatus::DeadLettered).await;
@@ -211,8 +404,8 @@ async fn packaged_crates_support_external_consumer_embedding() {
     wait_for_dead_letter(&dead_letters, "hang").await;
 
     assert!(
-        execution_count.load(Ordering::SeqCst) >= 7,
-        "worker should execute direct, continued, recovered, scheduled, and hanging jobs"
+        execution_count.load(Ordering::SeqCst) >= 9,
+        "worker should execute direct, continued, recovered, replayed, scheduled, and hanging jobs"
     );
 
     hang_release.notify_waiters();
@@ -230,6 +423,92 @@ struct SmokeHandler {
     execution_count: Arc<AtomicUsize>,
     hang_release: Arc<Notify>,
     dead_letters: Arc<Mutex<Vec<String>>>,
+    completed_continuation_slices: Arc<Mutex<HashSet<(sqlx::types::Uuid, i64)>>>,
+    continuation_canary_enabled: bool,
+}
+
+impl SmokeHandler {
+    async fn execute_continuation(
+        &self,
+        context: JobContext,
+        payload: &Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        if !self.continuation_canary_enabled
+            || payload.get("canary").and_then(Value::as_bool) != Some(true)
+        {
+            return Err(JobFailure::terminal(
+                "smoke.continuation_not_enabled",
+                "Continuation is not enabled for this application canary.",
+            ));
+        }
+
+        let max_runs = payload
+            .get("max_runs")
+            .and_then(Value::as_i64)
+            .filter(|max_runs| *max_runs > 0)
+            .ok_or_else(|| {
+                JobFailure::terminal(
+                    "smoke.invalid_continuation_limit",
+                    "Continuation payload requires a positive max_runs limit.",
+                )
+            })?;
+        if i64::from(context.run_number) > max_runs {
+            return Err(JobFailure::terminal(
+                "smoke.continuation_limit_exceeded",
+                "Continuation exceeded its application-owned run limit.",
+            ));
+        }
+
+        let cursor = match context.checkpoint.as_ref() {
+            None => 0,
+            Some(checkpoint) => {
+                if checkpoint.get("version").and_then(Value::as_i64)
+                    != Some(CONTINUATION_CHECKPOINT_VERSION)
+                {
+                    return Err(JobFailure::terminal(
+                        "smoke.unsupported_checkpoint_version",
+                        "Continuation checkpoint version is unsupported.",
+                    ));
+                }
+                checkpoint
+                    .get("cursor")
+                    .and_then(Value::as_i64)
+                    .filter(|cursor| *cursor >= 0)
+                    .ok_or_else(|| {
+                        JobFailure::terminal(
+                            "smoke.invalid_checkpoint_cursor",
+                            "Continuation checkpoint cursor is invalid.",
+                        )
+                    })?
+            }
+        };
+        let slice = cursor + 1;
+        if slice != i64::from(context.run_number) {
+            return Err(JobFailure::terminal(
+                "smoke.checkpoint_run_mismatch",
+                "Continuation checkpoint does not match the current run.",
+            ));
+        }
+
+        // A production handler would enforce this uniqueness in the same
+        // datastore as its externally visible side effect. `(job_id, slice)`
+        // remains stable if an attempt is retried, unlike `attempt`.
+        self.completed_continuation_slices
+            .lock()
+            .await
+            .insert((context.job_id, slice));
+
+        if slice < max_runs {
+            Ok(JobCompletion::continue_after(Duration::from_millis(25))
+                .progress(slice, max_runs)
+                .checkpoint(json!({
+                    "version": CONTINUATION_CHECKPOINT_VERSION,
+                    "cursor": slice,
+                })))
+        } else {
+            Ok(JobCompletion::success().progress(slice, max_runs))
+        }
+    }
 }
 
 #[async_trait]
@@ -247,13 +526,7 @@ impl JobHandler for SmokeHandler {
 
         match payload_kind(&payload) {
             "success" | "scheduled-success" => Ok(JobCompletion::success()),
-            "continuation" if context.run_number == 1 => Ok(JobCompletion::continue_now()
-                .progress(1, 2)
-                .checkpoint(json!({"cursor": 1}))),
-            "continuation" => {
-                assert_eq!(context.checkpoint, Some(json!({"cursor": 1})));
-                Ok(JobCompletion::success().progress(2, 2))
-            }
+            "continuation" => self.execute_continuation(context, &payload).await,
             "terminal" => Err(JobFailure::terminal(
                 "smoke.terminal_failure",
                 "Smoke handler returned a terminal failure.",
@@ -380,6 +653,17 @@ async fn wait_for_postgres(database_url: &str) {
             .connect(database_url)
             .await
         {
+            let server_version_num =
+                sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to read PostgreSQL server_version_num: {error}")
+                    });
+            assert!(
+                server_version_num >= 180_000,
+                "Runledger requires PostgreSQL 18 or later; connected server_version_num was {server_version_num}"
+            );
             let uuidv7_check = sqlx::query_scalar::<_, String>("SELECT uuidv7()::text")
                 .fetch_one(&pool)
                 .await;
@@ -404,12 +688,16 @@ async fn wait_for_postgres(database_url: &str) {
 }
 
 async fn enqueue_kind(pool: &DbPool, kind: &str) -> sqlx::types::Uuid {
+    enqueue_payload(pool, &json!({ "kind": kind })).await
+}
+
+async fn enqueue_payload(pool: &DbPool, payload: &Value) -> sqlx::types::Uuid {
     jobs::enqueue_job(
         pool,
         &JobEnqueue {
             job_type: JobType::new(SMOKE_JOB_TYPE),
             organization_id: None,
-            payload: &json!({ "kind": kind }),
+            payload,
             priority: None,
             max_attempts: None,
             timeout_seconds: None,
@@ -420,6 +708,161 @@ async fn enqueue_kind(pool: &DbPool, kind: &str) -> sqlx::types::Uuid {
     )
     .await
     .expect("enqueue smoke job")
+}
+
+async fn create_consumer_audit_table(pool: &DbPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE external_consumer_operation_audit (
+            operation_key text PRIMARY KEY,
+            source_job_id uuid NOT NULL,
+            result_job_id uuid NOT NULL
+         )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn record_consumer_audit_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    operation_key: &str,
+    source_job_id: sqlx::types::Uuid,
+    result_job_id: sqlx::types::Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO external_consumer_operation_audit (
+            operation_key,
+            source_job_id,
+            result_job_id
+         )
+         VALUES ($1, $2, $3)",
+    )
+    .bind(operation_key)
+    .bind(source_job_id)
+    .bind(result_job_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn assert_consumer_audit(
+    pool: &DbPool,
+    operation_key: &str,
+    expected_source_job_id: sqlx::types::Uuid,
+    expected_result_job_id: sqlx::types::Uuid,
+) {
+    let (source_job_id, result_job_id) =
+        sqlx::query_as::<_, (sqlx::types::Uuid, sqlx::types::Uuid)>(
+            "SELECT source_job_id, result_job_id
+         FROM external_consumer_operation_audit
+         WHERE operation_key = $1",
+        )
+        .bind(operation_key)
+        .fetch_one(pool)
+        .await
+        .expect("load consumer-owned audit row");
+    assert_eq!(source_job_id, expected_source_job_id);
+    assert_eq!(result_job_id, expected_result_job_id);
+}
+
+fn assert_successful_replay_event(
+    events: &[JobEventRecord],
+    expected_replay_job_id: sqlx::types::Uuid,
+    expected_source_job_id: sqlx::types::Uuid,
+    expected_source_run_number: i32,
+) {
+    let event = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.decoded_payload(),
+                DecodedJobEventPayload::SuccessfulReplayEnqueued(_)
+            )
+        })
+        .expect("successful replay should have a typed ENQUEUED payload");
+    assert_eq!(event.job_id, expected_replay_job_id);
+
+    match event.decoded_payload() {
+        DecodedJobEventPayload::SuccessfulReplayEnqueued(payload) => {
+            assert_eq!(payload.replayed_from_job_id, expected_source_job_id);
+            assert_eq!(payload.replayed_from_run_number, expected_source_run_number);
+            assert_eq!(payload.replay_request_key, REPLAY_REQUEST_KEY);
+            assert_eq!(payload.reason, REPLAY_REASON);
+        }
+        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::Unknown {
+            reason, ..
+        }) => panic!(
+            "expected successful replay payload, got unknown requeue reason {reason:?}; raw payload: {}",
+            event.payload
+        ),
+        DecodedJobEventPayload::Requeued(_) | DecodedJobEventPayload::Other => {
+            panic!(
+                "expected successful replay payload; raw payload: {}",
+                event.payload
+            )
+        }
+        _ => panic!(
+            "expected successful replay payload, got a future decoded variant; raw payload: {}",
+            event.payload
+        ),
+    }
+}
+
+fn assert_handler_continuation_event(
+    events: &[JobEventRecord],
+    expected_job_id: sqlx::types::Uuid,
+) {
+    let event = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.decoded_payload(),
+                DecodedJobEventPayload::Requeued(
+                    DecodedRequeuedEventPayload::HandlerContinuation { .. }
+                )
+            )
+        })
+        .expect("continuation should have a typed REQUEUED payload");
+    assert_eq!(event.job_id, expected_job_id);
+
+    match event.decoded_payload() {
+        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::HandlerContinuation {
+            reason,
+            next_run_number,
+            next_run_at,
+            delay_microseconds,
+            ..
+        }) => {
+            assert_eq!(reason, HANDLER_CONTINUATION_REASON);
+            assert_eq!(next_run_number, 2);
+            assert_eq!(delay_microseconds, 25_000);
+
+            let raw_next_run_at = event
+                .payload
+                .get("next_run_at")
+                .and_then(Value::as_str)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc))
+                .expect("continuation raw payload should retain next_run_at");
+            assert_eq!(next_run_at, raw_next_run_at);
+        }
+        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::Unknown {
+            reason, ..
+        }) => panic!(
+            "expected handler continuation payload, got unknown requeue reason {reason:?}; raw payload: {}",
+            event.payload
+        ),
+        DecodedJobEventPayload::Requeued(_)
+        | DecodedJobEventPayload::SuccessfulReplayEnqueued(_)
+        | DecodedJobEventPayload::Other => panic!(
+            "expected handler continuation payload; raw payload: {}",
+            event.payload
+        ),
+        _ => panic!(
+            "expected handler continuation payload, got a future decoded variant; raw payload: {}",
+            event.payload
+        ),
+    }
 }
 
 async fn insert_due_schedule(pool: &DbPool, kind: &str) -> Result<(), sqlx::Error> {

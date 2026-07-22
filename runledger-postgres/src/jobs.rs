@@ -13,6 +13,7 @@ mod admin;
 mod errors;
 mod logs;
 mod queue;
+mod replay;
 mod row_decode;
 mod rows;
 mod runtime_configs;
@@ -26,7 +27,8 @@ mod workflows;
 #[allow(deprecated)]
 pub use admin::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
-    compare_and_requeue_job_tx, get_job_by_id, get_job_metrics, get_job_payload_by_idempotency_key,
+    compare_and_requeue_job, compare_and_requeue_job_tx, get_job_by_id,
+    get_job_continuation_metrics, get_job_metrics, get_job_payload_by_idempotency_key,
     get_latest_job_payload_for_run, list_job_events, list_jobs, requeue_job,
     update_job_payload_uuid_array_field,
 };
@@ -43,6 +45,10 @@ pub use queue::{
     sync_catalog_job_definitions_tx, update_job_definition, update_job_progress,
     upsert_job_definition_tx,
 };
+pub use replay::{
+    CompareAndReplaySucceededJob, CompareAndReplaySucceededJobOutcome,
+    compare_and_replay_succeeded_job, compare_and_replay_succeeded_job_tx,
+};
 pub use runtime_configs::{
     get_job_runtime_config_by_type, get_required_job_runtime_config_by_type,
     insert_job_runtime_config_if_missing, insert_job_runtime_config_if_missing_tx,
@@ -56,8 +62,9 @@ pub use schedules::{
     upsert_job_schedule_tx,
 };
 pub use types::{
-    CompareAndRequeueJob, CompareAndRequeueJobOutcome, JOB_LIST_PAGE_LIMIT_MAX,
-    JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate, JobContinuationOutcome,
+    CompareAndRequeueJob, CompareAndRequeueJobOutcome, DecodedJobEventPayload,
+    DecodedRequeuedEventPayload, JOB_LIST_PAGE_LIMIT_MAX, JOB_SCHEDULE_MAX_JITTER_SECONDS,
+    JobCompletionUpdate, JobContinuationMetricsRecord, JobContinuationOutcome,
     JobContinuationUpdate, JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate,
     JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition, JobEnqueueOutcome, JobEventRecord,
     JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate, JobListFilter,
@@ -65,9 +72,10 @@ pub use types::{
     JobRequeueStatePolicy, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
     JobRuntimeConfigUpsert, JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport,
     JobScheduleJobTypeReference, JobScheduleRecord, JobScheduleUpsert, JobScope,
-    JobSuccessCompletionOutcome, ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult,
-    ReapExpiredLeasesResult, ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord,
-    RequeueableJobStatus,
+    JobSuccessCompletionOutcome, NonRequeueableJobStatusError, ReapExpiredLeaseDeferredError,
+    ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult, ReapedLeaseDisposition,
+    ReapedLeaseRecord, ReapedTerminalLeaseRecord, RequeueableJobStatus,
+    SuccessfulReplayEnqueuedEventPayload,
 };
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,

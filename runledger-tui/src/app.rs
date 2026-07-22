@@ -372,15 +372,7 @@ impl App {
             Screen::Dashboard => self.dashboard.as_ref().map_or(0, |d| {
                 d.metrics
                     .iter()
-                    .filter(|m| {
-                        self.matches_table_search(vec![
-                            m.job_type.as_str().to_owned(),
-                            m.pending_count.to_string(),
-                            m.leased_count.to_string(),
-                            m.stale_leases.to_string(),
-                            m.dead_lettered_24h.to_string(),
-                        ])
-                    })
+                    .filter(|metric| self.dashboard_metric_matches_search(d, metric))
                     .count()
             }),
             Screen::Queue => self.jobs.as_ref().map_or(0, |d| {
@@ -390,24 +382,16 @@ impl App {
                 JobDetailPane::Events => self.job_detail.as_ref().map_or(0, |d| {
                     d.events
                         .iter()
-                        .filter(|e| {
-                            self.matches_table_search(vec![
-                                e.id.to_string(),
-                                e.event_type.as_db_value().to_owned(),
-                                e.stage.map(|s| s.as_db_value()).unwrap_or("").to_owned(),
-                            ])
-                        })
+                        .filter(|event| self.job_event_matches_search(event))
                         .count()
                 }),
                 JobDetailPane::Logs => self.job_detail.as_ref().map_or(0, |d| {
                     d.logs
                         .iter()
                         .filter(|l| {
-                            self.matches_table_search(vec![
-                                l.id.to_string(),
-                                l.level.clone(),
-                                l.message.clone(),
-                            ])
+                            self.matches_table_search(|| {
+                                vec![l.id.to_string(), l.level.clone(), l.message.clone()]
+                            })
                         })
                         .count()
                 }),
@@ -417,11 +401,13 @@ impl App {
                 d.runs
                     .iter()
                     .filter(|r| {
-                        self.matches_table_search(vec![
-                            r.id.to_string(),
-                            r.workflow_type.as_str().to_owned(),
-                            crate::format::workflow_run_status_label(r.status).to_owned(),
-                        ])
+                        self.matches_table_search(|| {
+                            vec![
+                                r.id.to_string(),
+                                r.workflow_type.as_str().to_owned(),
+                                crate::format::workflow_run_status_label(r.status).to_owned(),
+                            ]
+                        })
                     })
                     .count()
             }),
@@ -429,15 +415,17 @@ impl App {
                 d.steps
                     .iter()
                     .filter(|s| {
-                        self.matches_table_search(vec![
-                            s.step_key.as_str().to_owned(),
-                            crate::format::workflow_step_status_label(s.status).to_owned(),
-                            s.job_type
-                                .as_ref()
-                                .map(|t| t.as_str().to_owned())
-                                .unwrap_or_default(),
-                            s.job_id.map(|id| id.to_string()).unwrap_or_default(),
-                        ])
+                        self.matches_table_search(|| {
+                            vec![
+                                s.step_key.as_str().to_owned(),
+                                crate::format::workflow_step_status_label(s.status).to_owned(),
+                                s.job_type
+                                    .as_ref()
+                                    .map(|t| t.as_str().to_owned())
+                                    .unwrap_or_default(),
+                                s.job_id.map(|id| id.to_string()).unwrap_or_default(),
+                            ]
+                        })
                     })
                     .count()
             }),
@@ -445,16 +433,18 @@ impl App {
                 d.definitions
                     .iter()
                     .filter(|def| {
-                        self.matches_table_search(vec![
-                            def.job_type.as_str().to_owned(),
-                            def.version.to_string(),
-                            if def.is_enabled {
-                                "enabled"
-                            } else {
-                                "disabled"
-                            }
-                            .to_owned(),
-                        ])
+                        self.matches_table_search(|| {
+                            vec![
+                                def.job_type.as_str().to_owned(),
+                                def.version.to_string(),
+                                if def.is_enabled {
+                                    "enabled"
+                                } else {
+                                    "disabled"
+                                }
+                                .to_owned(),
+                            ]
+                        })
                     })
                     .count()
             }),
@@ -527,8 +517,9 @@ impl App {
         self.table_search.as_deref().filter(|q| !q.is_empty())
     }
 
-    pub fn matches_table_search<I, S>(&self, fields: I) -> bool
+    pub fn matches_table_search<I, S, F>(&self, fields: F) -> bool
     where
+        F: FnOnce() -> I,
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
@@ -536,19 +527,47 @@ impl App {
             return true;
         };
         let query = query.to_ascii_lowercase();
-        fields
+        fields()
             .into_iter()
             .any(|field| field.as_ref().to_ascii_lowercase().contains(&query))
     }
 
+    pub(crate) fn dashboard_metric_matches_search(
+        &self,
+        data: &DashboardData,
+        metric: &runledger_postgres::jobs::JobMetricsRecord,
+    ) -> bool {
+        self.matches_table_search(|| data.row_for(metric).into_fields())
+    }
+
+    pub(crate) fn job_event_matches_search(
+        &self,
+        event: &runledger_postgres::jobs::JobEventRecord,
+    ) -> bool {
+        self.matches_table_search(|| {
+            vec![
+                event.id.to_string(),
+                event.event_type.as_db_value().to_owned(),
+                event
+                    .stage
+                    .map(|stage| stage.as_db_value())
+                    .unwrap_or("")
+                    .to_owned(),
+                event.payload.to_string(),
+            ]
+        })
+    }
+
     fn job_matches_search(&self, job: &runledger_postgres::jobs::JobQueueRecord) -> bool {
-        self.matches_table_search(vec![
-            job.id.to_string(),
-            job.job_type.as_str().to_owned(),
-            crate::format::job_status_label(job.status).to_owned(),
-            job.stage.as_db_value().to_owned(),
-            job.worker_id.as_deref().unwrap_or("").to_owned(),
-        ])
+        self.matches_table_search(|| {
+            vec![
+                job.id.to_string(),
+                job.job_type.as_str().to_owned(),
+                crate::format::job_status_label(job.status).to_owned(),
+                job.stage.as_db_value().to_owned(),
+                job.worker_id.as_deref().unwrap_or("").to_owned(),
+            ]
+        })
     }
 }
 
@@ -600,10 +619,14 @@ fn format_duration_short(duration: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use chrono::Utc;
-    use runledger_core::jobs::{JobStage, JobStatus, JobTypeName};
-    use runledger_postgres::jobs::JobQueueRecord;
+    use runledger_core::jobs::{JobEventType, JobStage, JobStatus, JobTypeName};
+    use runledger_postgres::jobs::{JobEventRecord, JobQueueRecord};
+
+    use crate::data::DashboardContinuationMetrics;
 
     fn test_config() -> Config {
         Config {
@@ -647,6 +670,193 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    fn job_metrics(job_type: &str) -> runledger_postgres::jobs::JobMetricsRecord {
+        runledger_postgres::jobs::JobMetricsRecord {
+            job_type: JobTypeName::new(job_type).expect("valid job type"),
+            pending_count: 0,
+            leased_count: 0,
+            stale_leases: 0,
+            succeeded_24h: 0,
+            retryable_24h: 0,
+            terminal_24h: 0,
+            panicked_24h: 0,
+            timeout_24h: 0,
+            dead_lettered_24h: 0,
+            p50_duration_ms_24h: None,
+            p95_duration_ms_24h: None,
+        }
+    }
+
+    fn enqueued_event(id: i64, job_id: Uuid, payload: serde_json::Value) -> JobEventRecord {
+        JobEventRecord {
+            id,
+            job_id,
+            run_number: 1,
+            attempt: None,
+            event_type: JobEventType::Enqueued,
+            stage: Some(JobStage::Queued),
+            progress_done: None,
+            progress_total: None,
+            payload,
+            occurred_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn table_search_does_not_build_fields_without_a_query() {
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let build_count = Cell::new(0);
+
+        assert!(app.matches_table_search(|| {
+            build_count.set(build_count.get() + 1);
+            ["needle"]
+        }));
+        assert_eq!(build_count.get(), 0);
+
+        app.table_search = Some("needle".to_owned());
+        assert!(app.matches_table_search(|| {
+            build_count.set(build_count.get() + 1);
+            ["needle"]
+        }));
+        assert_eq!(build_count.get(), 1);
+    }
+
+    #[test]
+    fn payload_only_event_search_keeps_count_and_selection_aligned() {
+        const SEARCH_SENTINEL: &str = "payload-only-replay-reason";
+
+        let job_id = Uuid::new_v4();
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        app.screen = Screen::JobDetail { job_id };
+        app.job_detail_pane = JobDetailPane::Events;
+        app.table_search = Some(SEARCH_SENTINEL.to_owned());
+        app.job_detail = Some(JobDetailData {
+            job: job_record_with_payload(job_id, serde_json::json!({})),
+            events: vec![
+                enqueued_event(10, job_id, serde_json::json!({"job_type": "jobs.test"})),
+                enqueued_event(
+                    11,
+                    job_id,
+                    serde_json::json!({
+                        "job_type": "jobs.test",
+                        "reason": SEARCH_SENTINEL
+                    }),
+                ),
+            ],
+            logs: Vec::new(),
+            workflow_run_id: None,
+        });
+
+        let matching_event_ids = app
+            .job_detail
+            .as_ref()
+            .expect("job detail")
+            .events
+            .iter()
+            .filter(|event| app.job_event_matches_search(event))
+            .map(|event| event.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(app.list_len(), matching_event_ids.len());
+        assert_eq!(matching_event_ids, vec![11]);
+        assert_eq!(matching_event_ids[app.list_selection], 11);
+    }
+
+    #[test]
+    fn every_rendered_dashboard_field_search_activates_the_matching_job_type() {
+        const TARGET_JOB_TYPE: &str = "jobs.continuation_target";
+        let mut target = job_metrics(TARGET_JOB_TYPE);
+        target.pending_count = 10_101;
+        target.leased_count = 20_202;
+        target.stale_leases = 30_303;
+        target.succeeded_24h = 70_707;
+        target.dead_lettered_24h = 80_808;
+        target.p50_duration_ms_24h = Some(90_909.4);
+        target.p95_duration_ms_24h = Some(100_010.6);
+        let mut other = job_metrics("jobs.other");
+        other.p50_duration_ms_24h = Some(1.0);
+        other.p95_duration_ms_24h = Some(2.0);
+        let dashboard = DashboardData {
+            metrics: vec![other, target],
+            continuation_metrics: std::collections::BTreeMap::from([(
+                TARGET_JOB_TYPE.to_owned(),
+                DashboardContinuationMetrics {
+                    continued_24h: 40_404,
+                    active_continued_count: 50_505,
+                    max_active_run_number: 60_606,
+                },
+            )]),
+            failed_workflows: 0,
+            external_waits: 0,
+        };
+
+        for query in [
+            "continuation_target",
+            "10101",
+            "20202",
+            "30303",
+            "40404",
+            "50505",
+            "60606",
+            "70707",
+            "80808",
+            "90909",
+            "100011",
+        ] {
+            let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+            app.table_search = Some(query.to_owned());
+            app.dashboard = Some(dashboard.clone());
+
+            assert_eq!(app.list_len(), 1, "query {query}");
+
+            let refresh = app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+
+            assert!(refresh, "query {query}");
+            assert_eq!(app.screen, Screen::Queue, "query {query}");
+            assert_eq!(
+                app.job_type_filter.as_deref(),
+                Some(TARGET_JOB_TYPE),
+                "query {query}"
+            );
+        }
+
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        app.table_search = Some("90909.4".to_owned());
+        app.dashboard = Some(dashboard);
+        assert_eq!(app.list_len(), 0, "search uses the rendered rounded value");
+
+        let mut duration_other = job_metrics("jobs.duration_other");
+        duration_other.p50_duration_ms_24h = Some(1.0);
+        duration_other.p95_duration_ms_24h = Some(2.0);
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        app.table_search = Some("—".to_owned());
+        app.dashboard = Some(DashboardData {
+            metrics: vec![duration_other, job_metrics("jobs.no_duration_target")],
+            continuation_metrics: std::collections::BTreeMap::new(),
+            failed_workflows: 0,
+            external_waits: 0,
+        });
+
+        assert_eq!(
+            app.list_len(),
+            1,
+            "rendered em dash matches missing duration"
+        );
+        let refresh = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(refresh);
+        assert_eq!(app.screen, Screen::Queue);
+        assert_eq!(
+            app.job_type_filter.as_deref(),
+            Some("jobs.no_duration_target")
+        );
     }
 
     #[test]

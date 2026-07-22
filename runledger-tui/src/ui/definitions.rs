@@ -31,11 +31,13 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &Defini
         .definitions
         .iter()
         .filter(|d| {
-            app.matches_table_search(vec![
-                d.job_type.as_str().to_owned(),
-                d.version.to_string(),
-                if d.is_enabled { "enabled" } else { "disabled" }.to_owned(),
-            ])
+            app.matches_table_search(|| {
+                vec![
+                    d.job_type.as_str().to_owned(),
+                    d.version.to_string(),
+                    if d.is_enabled { "enabled" } else { "disabled" }.to_owned(),
+                ]
+            })
         })
         .map(|d| {
             TableRow::new(vec![

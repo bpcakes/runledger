@@ -41,13 +41,15 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobsDa
         .jobs
         .iter()
         .filter(|j| {
-            app.matches_table_search(vec![
-                j.id.to_string(),
-                j.job_type.as_str().to_owned(),
-                job_status_label(j.status).to_owned(),
-                j.stage.as_db_value().to_owned(),
-                j.worker_id.as_deref().unwrap_or("").to_owned(),
-            ])
+            app.matches_table_search(|| {
+                vec![
+                    j.id.to_string(),
+                    j.job_type.as_str().to_owned(),
+                    job_status_label(j.status).to_owned(),
+                    j.stage.as_db_value().to_owned(),
+                    j.worker_id.as_deref().unwrap_or("").to_owned(),
+                ]
+            })
         })
         .map(|j| {
             TableRow::new(vec![

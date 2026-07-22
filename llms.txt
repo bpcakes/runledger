@@ -87,6 +87,103 @@ Do not call `requeue_job` on workflow-managed jobs; it returns
 Use `update_job_payload_uuid_array_field` only for direct pending jobs; inspect
 `JobPayloadUuidArrayFieldUpdate` for `Updated`, `NotFound`, or rejected updates.
 
+## Bounded Direct-Job Continuation
+
+Continuation is opt-in at each handler, not a global Runledger feature flag.
+Use `JobCompletion::continue_now()` or `continue_after(delay)` only after a
+bounded, successful, idempotent slice. Version checkpoints, read the committed
+value from `JobContext::checkpoint`, enforce an application-owned logical
+deadline/run limit, and use nonzero delays for polling. Continuation does not
+consume `max_attempts`, cannot carry final output, and is unsupported for
+workflow-managed jobs. Canary by job type or tenant and alert on continuation
+rate, run depth, dead letters, and continuation persistence failures. The
+external-consumer smoke test is the compile-checked continuation example.
+It also exercises pool-owned and caller-transaction recovery, caller-transaction
+successful replay plus an idempotent pool retry, and continuation metrics
+through the packaged crates.
+Use `get_job_continuation_metrics` for stable per-job-type signals:
+`continued_24h`, `active_continued_count`, and `max_active_run_number`. Its
+optional organization filter uses admin aggregation semantics; `None` means all
+scopes, not exact global scope. Active metrics mean the current run was created
+by continuation; later admin recovery does not remain `active` merely because a
+job has older continuation history.
+
+## Direct-Job Recovery And Replay
+
+Use `compare_and_requeue_job` for standalone pool-owning recovery and
+`compare_and_requeue_job_tx` for recovery composed in a caller-owned
+`READ COMMITTED` transaction. Prefer
+`CompareAndRequeueJob::from_observed_job` to copy exact scope, terminal status,
+and run number. Always handle `Requeued`, `ExpectationMismatch`, `NotFound`, and
+`CancellationNotQuiesced`; only `Requeued` mutates the job.
+
+Deprecated `requeue_job` requires a deliberate migration:
+
+- legacy `organization_id: None` was an unconstrained lookup and is not
+  `JobScope::Global`;
+- `ResetProgressAndCheckpoint` matches legacy state-reset behavior;
+- legacy missing/invalid-state/cancellation errors become typed no-mutation
+  outcomes;
+- `SUCCEEDED` uses the separate successful-replay API rather than recovery.
+
+Use `compare_and_replay_succeeded_job` for a standalone successful replay and
+`compare_and_replay_succeeded_job_tx` for replay composed in a caller-owned
+`READ COMMITTED` transaction. `CompareAndReplaySucceededJob` requires exact
+source scope/run expectations, one stable `replay_request_key` per intentional
+replay action, and a reason. Inspect `CompareAndReplaySucceededJobOutcome`:
+`Replayed.replay.disposition` distinguishes a fresh job from an idempotent
+request retry; `ExpectationMismatch` and `NotFound` create nothing. A replay is
+a new run-1 direct job. The replay operation leaves the successful source and
+output unchanged, and Runledger persists lineage in `job_replays` and the
+replay's `ENQUEUED` event.
+Retention cannot delete only the replay queue row while its successful source
+remains, because that would erase the request's idempotency guard. Source
+deletion cascades lineage, and one retention statement may delete both queue
+rows together.
+Workflow-managed jobs cannot use direct replay.
+
+For durable event consumers, call `list_job_events` and prefer
+`JobEventRecord::decoded_payload()` over hand-decoding Runledger-authored JSON.
+Rust consumers should not hand-parse `requeue_kind`,
+`replayed_from_job_id`, `replayed_from_run_number`, `replay_request_key`, or
+their companion replay fields.
+Match `DecodedRequeuedEventPayload::HandlerContinuation` and
+`DecodedJobEventPayload::SuccessfulReplayEnqueued` for continuation and replay
+provenance. The decoded enums and struct variants are non-exhaustive, so use
+`..` in struct patterns, retain final wildcard arms, and inspect
+`JobEventRecord::payload` as the raw fallback for `Unknown`, `Other`, malformed,
+custom, or future payloads.
+
+## Pre-0.6 Rollout Fence
+
+Deploy 0.6 to every worker, reaper, admin, API, CLI, and repair writer with both
+new code paths unused. Activate them independently only after every pre-0.6
+process and old lease has quiesced. Continuation may remain unused forever;
+legacy requeue callers must eventually migrate. After activation, never start a
+pre-0.6 writer until continuations are disabled, no pending or leased job has a
+current run created by continuation, canceled lease fences have quiesced, and
+all 0.6 writers have stopped. Follow the PostgreSQL 18 activation/rollback
+queries in `docs/downstream-agent-guide.md`.
+
+Apply `202607190001_job_replays_and_continuation_metrics` before deploying
+successful-replay or continuation-metrics callers; it creates `job_replays` and
+`job_continuation_metrics_rollup`. SQLx records it, but it intentionally does
+not advance the custom compatibility-fence
+history, so Runledger's filtered released 0.6.0 startup and schema guards can
+coexist during expand-first rollout. For code rollback, choose one strategy:
+
+1. Recommended: leave the additive migration applied and use
+   `migrate_after_idempotency_cutover` or
+   `ensure_schema_compatible_after_idempotency_cutover`; these Runledger paths
+   filter SQLx history to the migrations embedded in the release. Patch startup
+   first if the rollback binary calls raw `MIGRATOR.run(...)`.
+2. An exact older raw `MIGRATOR.run(...)` cannot tolerate the newer SQLx history
+   row. If it cannot be patched, use the newer release artifact to run the newer
+   down migration before startup, only with explicit acceptance that this
+   deletes relational `job_replays` lineage and replay-idempotency state while
+   leaving replay-created queue rows and their lineage-bearing `ENQUEUED` events
+   in place.
+
 ## Catalog Rule
 
 Use `JobCatalogDefinitionOverrides` for per-job definition differences from
@@ -129,4 +226,5 @@ trusted diagnostics.
 - `runledger-postgres/examples/append_workflow_steps.rs`
 - `runledger-postgres/examples/schedule_job.rs`
 - `runledger-runtime/examples/worker_binary.rs`
+- `smoke/external-consumer/tests/smoke.rs`
 - `docs/downstream-agent-guide.md`

@@ -17,10 +17,12 @@ use super::queue::advance::{
 use super::queue::events::{RequeuedEventPayload, RequeuedJobEvent, insert_requeued_event_tx};
 use super::row_decode::{parse_job_event_type, parse_job_stage, parse_job_type_name};
 use super::rows::JobQueueRow;
-use super::transaction_isolation::ensure_read_committed_tx;
+use super::transaction_isolation::{
+    begin_owned_read_committed_tx, ensure_read_committed_tx, finish_owned_transaction,
+};
 use super::types::{
-    CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobEventRecord, JobListFilter,
-    JobMetricsRecord, JobQueueRecord,
+    CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobContinuationMetricsRecord,
+    JobEventRecord, JobListFilter, JobMetricsRecord, JobQueueRecord,
 };
 use super::workflows::on_terminal;
 
@@ -544,6 +546,44 @@ pub async fn get_job_metrics(
         .collect::<Result<Vec<_>>>()
 }
 
+/// Returns continuation-specific canary and runaway-loop signals by job type.
+pub async fn get_job_continuation_metrics(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    job_type: Option<&str>,
+) -> Result<Vec<JobContinuationMetricsRecord>> {
+    let rows = sqlx::query!(
+        "SELECT
+            jd.job_type AS \"job_type!\",
+            COALESCE(SUM(jcmr.continued_24h), 0)::bigint AS \"continued_24h!\",
+            COALESCE(SUM(jcmr.active_continued_count), 0)::bigint AS \"active_continued_count!\",
+            COALESCE(MAX(jcmr.max_active_run_number), 0)::int4 AS \"max_active_run_number!\"
+         FROM job_definitions jd
+         LEFT JOIN job_continuation_metrics_rollup jcmr
+           ON jcmr.job_type = jd.job_type
+          AND ($1::uuid IS NULL OR jcmr.organization_id = $1)
+         WHERE ($2::text IS NULL OR jd.job_type = $2)
+         GROUP BY jd.job_type
+         ORDER BY jd.job_type ASC",
+        organization_id,
+        job_type,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("get job continuation metrics", error))?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(JobContinuationMetricsRecord {
+                job_type: parse_job_type_name(row.job_type)?,
+                continued_24h: row.continued_24h,
+                active_continued_count: row.active_continued_count,
+                max_active_run_number: row.max_active_run_number,
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+}
+
 pub async fn cancel_job(
     pool: &DbPool,
     organization_id: Option<Uuid>,
@@ -705,26 +745,24 @@ struct CompareAndRequeueCandidate {
     canceled_lease_still_active: bool,
 }
 
-async fn load_compare_and_requeue_candidate_tx(
+fn compare_and_requeue_candidate_from_row(
+    row: CompareAndRequeueCandidateRow,
+) -> Result<CompareAndRequeueCandidate> {
+    let job = row.job.into_record()?;
+    let workflow_managed = row.workflow_step_id.is_some();
+    Ok(CompareAndRequeueCandidate {
+        job,
+        workflow_managed,
+        canceled_lease_still_active: row.canceled_lease_still_active,
+    })
+}
+
+async fn lock_compare_and_requeue_candidate_tx(
     tx: &mut DbTx<'_>,
     request: &CompareAndRequeueJob<'_>,
-    lock_terminal_row: bool,
-) -> Result<Option<CompareAndRequeueCandidate>> {
-    // The suffix is fixed internal SQL. A mismatch/no-mutation read
-    // deliberately omits row locking so a caller-owned transaction cannot
-    // stall a live worker or an operator acting on a rejected row.
+) -> Result<Option<JobQueueRecord>> {
     // Requeue never changes the job's identity, so NO KEY UPDATE is sufficient
     // and composes with the legacy keyed-enqueue path's KEY SHARE lock.
-    let lock_clause = if lock_terminal_row {
-        "FOR NO KEY UPDATE"
-    } else {
-        ""
-    };
-    let error_context = if lock_terminal_row {
-        "lock compare-and-requeue job"
-    } else {
-        "read compare-and-requeue mismatch"
-    };
     let sql = format!(
         "SELECT
             {JOB_QUEUE_COLUMNS_SQL},
@@ -737,53 +775,68 @@ async fn load_compare_and_requeue_candidate_tx(
          FROM job_queue
          WHERE id = $1
            AND organization_id IS NOT DISTINCT FROM $2::uuid
-           AND (
-                NOT $5::bool
-                OR (
-                    status::text = $3::text
-                    AND run_number = $4::int4
-                    AND workflow_step_id IS NULL
-                    AND NOT (
-                        status = 'CANCELED'
-                        AND lease_expires_at IS NOT NULL
-                        AND lease_expires_at > clock_timestamp()
-                    )
-                )
+           AND status::text = $3::text
+           AND run_number = $4::int4
+           AND workflow_step_id IS NULL
+           AND NOT (
+                status = 'CANCELED'
+                AND lease_expires_at IS NOT NULL
+                AND lease_expires_at > clock_timestamp()
            )
-         {lock_clause}"
+         FOR NO KEY UPDATE"
     );
     let row = sqlx::query_as::<_, CompareAndRequeueCandidateRow>(&sql)
         .bind(request.job_id)
         .bind(request.scope.organization_id())
         .bind(request.expected_status.as_db_value())
         .bind(request.expected_run_number)
-        .bind(lock_terminal_row)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|error| Error::from_query_sqlx_with_context(error_context, error))?;
+        .map_err(|error| {
+            Error::from_query_sqlx_with_context("lock compare-and-requeue job", error)
+        })?;
 
-    row.map(|row| {
-        let workflow_managed = row.workflow_step_id.is_some();
-        row.job.into_record().map(|job| CompareAndRequeueCandidate {
-            job,
-            workflow_managed,
-            canceled_lease_still_active: row.canceled_lease_still_active,
-        })
-    })
-    .transpose()
+    let Some(candidate) = row
+        .map(compare_and_requeue_candidate_from_row)
+        .transpose()?
+    else {
+        return Ok(None);
+    };
+    debug_assert!(!candidate.workflow_managed);
+    debug_assert!(!candidate.canceled_lease_still_active);
+    Ok(Some(candidate.job))
 }
 
-async fn lock_compare_and_requeue_candidate_tx(
+async fn load_compare_and_requeue_candidate_for_classification_tx(
     tx: &mut DbTx<'_>,
     request: &CompareAndRequeueJob<'_>,
-) -> Result<Option<JobQueueRecord>> {
-    Ok(load_compare_and_requeue_candidate_tx(tx, request, true)
-        .await?
-        .map(|candidate| {
-            debug_assert!(!candidate.workflow_managed);
-            debug_assert!(!candidate.canceled_lease_still_active);
-            candidate.job
-        }))
+) -> Result<Option<CompareAndRequeueCandidate>> {
+    // A mismatch/no-mutation read deliberately omits row locking so a
+    // caller-owned transaction cannot stall a live worker or an operator
+    // acting on a rejected row.
+    let sql = format!(
+        "SELECT
+            {JOB_QUEUE_COLUMNS_SQL},
+            workflow_step_id,
+            (
+                status = 'CANCELED'
+                AND lease_expires_at IS NOT NULL
+                AND lease_expires_at > clock_timestamp()
+            ) AS canceled_lease_still_active
+         FROM job_queue
+         WHERE id = $1
+           AND organization_id IS NOT DISTINCT FROM $2::uuid"
+    );
+    let row = sqlx::query_as::<_, CompareAndRequeueCandidateRow>(&sql)
+        .bind(request.job_id)
+        .bind(request.scope.organization_id())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| {
+            Error::from_query_sqlx_with_context("read compare-and-requeue mismatch", error)
+        })?;
+
+    row.map(compare_and_requeue_candidate_from_row).transpose()
 }
 
 async fn update_compare_and_requeue_candidate_tx(
@@ -806,6 +859,28 @@ async fn update_compare_and_requeue_candidate_tx(
     .await
 }
 
+/// Atomically requeues an exactly observed canceled or dead-lettered job in an
+/// internally owned `READ COMMITTED` transaction.
+///
+/// Prefer this convenience API when recovery does not need to compose with
+/// other database changes. Use [`compare_and_requeue_job_tx`] when the mutation
+/// must be part of a caller-owned transaction.
+///
+/// Every normal [`CompareAndRequeueJobOutcome`] is committed before it is
+/// returned. Database errors are rolled back before returning to the caller.
+pub async fn compare_and_requeue_job(
+    pool: &DbPool,
+    request: CompareAndRequeueJob<'_>,
+) -> Result<CompareAndRequeueJobOutcome> {
+    const OPERATION: &str = "compare-and-requeue";
+
+    let mut tx = begin_owned_read_committed_tx(pool, OPERATION).await?;
+    // `begin_owned_read_committed_tx` established the exact isolation required
+    // by the operation body, so the pool-owned path need not query it again.
+    let result = compare_and_requeue_job_read_committed_tx(&mut tx, request).await;
+    finish_owned_transaction(tx, OPERATION, result).await
+}
+
 /// Atomically requeues an exactly scoped canceled or dead-lettered job only if
 /// its terminal status and run number still match the caller's observation.
 /// `state_policy` explicitly controls whether committed progress/checkpoint
@@ -824,18 +899,6 @@ pub async fn compare_and_requeue_job_tx(
     tx: &mut DbTx<'_>,
     request: CompareAndRequeueJob<'_>,
 ) -> Result<CompareAndRequeueJobOutcome> {
-    compare_and_requeue_job_tx_inner(tx, request, || std::future::ready(Ok::<(), Error>(()))).await
-}
-
-async fn compare_and_requeue_job_tx_inner<AfterLockMiss, AfterLockMissFuture>(
-    tx: &mut DbTx<'_>,
-    request: CompareAndRequeueJob<'_>,
-    mut after_lock_miss: AfterLockMiss,
-) -> Result<CompareAndRequeueJobOutcome>
-where
-    AfterLockMiss: FnMut() -> AfterLockMissFuture,
-    AfterLockMissFuture: Future<Output = Result<()>>,
-{
     ensure_read_committed_tx(
         tx,
         "job compare-and-requeue",
@@ -844,13 +907,37 @@ where
     )
     .await?;
 
+    compare_and_requeue_job_read_committed_tx(tx, request).await
+}
+
+async fn compare_and_requeue_job_read_committed_tx(
+    tx: &mut DbTx<'_>,
+    request: CompareAndRequeueJob<'_>,
+) -> Result<CompareAndRequeueJobOutcome> {
+    compare_and_requeue_job_read_committed_tx_inner(tx, request, || {
+        std::future::ready(Ok::<(), Error>(()))
+    })
+    .await
+}
+
+async fn compare_and_requeue_job_read_committed_tx_inner<AfterLockMiss, AfterLockMissFuture>(
+    tx: &mut DbTx<'_>,
+    request: CompareAndRequeueJob<'_>,
+    mut after_lock_miss: AfterLockMiss,
+) -> Result<CompareAndRequeueJobOutcome>
+where
+    AfterLockMiss: FnMut() -> AfterLockMissFuture,
+    AfterLockMissFuture: Future<Output = Result<()>>,
+{
     let before = loop {
         if let Some(before) = lock_compare_and_requeue_candidate_tx(tx, &request).await? {
             break before;
         }
 
         after_lock_miss().await?;
-        let Some(actual) = load_compare_and_requeue_candidate_tx(tx, &request, false).await? else {
+        let Some(actual) =
+            load_compare_and_requeue_candidate_for_classification_tx(tx, &request).await?
+        else {
             return Ok(CompareAndRequeueJobOutcome::NotFound);
         };
         if actual.job.status == request.expected_status.as_job_status()
@@ -911,7 +998,7 @@ where
 
 #[deprecated(
     since = "0.6.0",
-    note = "use compare_and_requeue_job_tx with exact JobScope and RequeueableJobStatus expectations"
+    note = "use compare_and_requeue_job (or compare_and_requeue_job_tx for caller-owned transactions) with exact JobScope and RequeueableJobStatus expectations"
 )]
 pub async fn requeue_job(
     pool: &DbPool,
@@ -1013,7 +1100,7 @@ mod tests {
     use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
     use serde_json::json;
 
-    use super::compare_and_requeue_job_tx_inner;
+    use super::compare_and_requeue_job_read_committed_tx_inner;
     use crate::jobs::{
         CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobDefinitionUpsert, JobEnqueue,
         JobFailureUpdate, JobRequeueStatePolicy, JobScope, RequeueableJobStatus, claim_jobs,
@@ -1072,7 +1159,7 @@ mod tests {
         let mut transition = Some((claim.id, claim.run_number, claim.attempt, worker_id));
         let transition_pool = pool.clone();
         let mut recovery_tx = pool.begin().await.expect("begin recovery transaction");
-        let outcome = compare_and_requeue_job_tx_inner(
+        let outcome = compare_and_requeue_job_read_committed_tx_inner(
             &mut recovery_tx,
             CompareAndRequeueJob {
                 scope: JobScope::Global,

@@ -41,11 +41,13 @@ pub fn draw_runs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &W
         .runs
         .iter()
         .filter(|r| {
-            app.matches_table_search(vec![
-                r.id.to_string(),
-                r.workflow_type.as_str().to_owned(),
-                workflow_run_status_label(r.status).to_owned(),
-            ])
+            app.matches_table_search(|| {
+                vec![
+                    r.id.to_string(),
+                    r.workflow_type.as_str().to_owned(),
+                    workflow_run_status_label(r.status).to_owned(),
+                ]
+            })
         })
         .map(|r| {
             TableRow::new(vec![
@@ -117,15 +119,17 @@ pub fn draw_detail(
         .steps
         .iter()
         .filter(|s| {
-            app.matches_table_search(vec![
-                s.step_key.as_str().to_owned(),
-                workflow_step_status_label(s.status).to_owned(),
-                s.job_type
-                    .as_ref()
-                    .map(|t| t.as_str().to_owned())
-                    .unwrap_or_default(),
-                s.job_id.map(|id| id.to_string()).unwrap_or_default(),
-            ])
+            app.matches_table_search(|| {
+                vec![
+                    s.step_key.as_str().to_owned(),
+                    workflow_step_status_label(s.status).to_owned(),
+                    s.job_type
+                        .as_ref()
+                        .map(|t| t.as_str().to_owned())
+                        .unwrap_or_default(),
+                    s.job_id.map(|id| id.to_string()).unwrap_or_default(),
+                ]
+            })
         })
         .collect();
     let selected_step_id = filtered_steps

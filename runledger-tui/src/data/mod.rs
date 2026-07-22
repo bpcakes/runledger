@@ -4,6 +4,8 @@ mod job_detail;
 mod jobs;
 mod workflows;
 
+#[cfg(test)]
+pub use dashboard::DashboardContinuationMetrics;
 pub use dashboard::DashboardData;
 pub use definitions::DefinitionsData;
 pub use job_detail::JobDetailData;

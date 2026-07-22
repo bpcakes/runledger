@@ -129,6 +129,17 @@ async fn wait_for_postgres(admin_url: &str) {
             .connect(admin_url)
             .await
         {
+            let server_version_num =
+                sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to read PostgreSQL server_version_num: {error}")
+                    });
+            assert!(
+                server_version_num >= 180_000,
+                "Runledger requires PostgreSQL 18 or later; connected server_version_num was {server_version_num}"
+            );
             let uuidv7_check = sqlx::query_scalar::<_, String>("SELECT uuidv7()::text")
                 .fetch_one(&pool)
                 .await;

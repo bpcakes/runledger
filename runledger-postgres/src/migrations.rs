@@ -5,6 +5,18 @@ use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migrator};
 
 use crate::DbPool;
 
+/// Raw SQLx migrator for the migrations bundled with this crate version.
+///
+/// SQLx's [`Migrator::run`] rejects applied versions absent from this exact
+/// bundle. During an additive compatibility window, an older binary should use
+/// Runledger's filtered [`migrate_after_idempotency_cutover`] or
+/// [`ensure_schema_compatible_after_idempotency_cutover`] startup API instead
+/// of invoking its raw `MIGRATOR`: the filtered APIs also enforce Runledger's
+/// compatibility-fence history. If an exact old binary unavoidably invokes its
+/// raw migrator, use a compatible patched startup path or explicitly accept the
+/// data-loss boundary of reverting newer migrations before starting it. For
+/// the post-v0.6 successful-replay migration, that includes relational replay
+/// lineage and replay-request idempotency state.
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;
@@ -85,6 +97,9 @@ impl From<sqlx::Error> for SchemaCompatibilityError {
 /// This is intentionally named as a hard-cutover API. Downstream applications
 /// upgrading from older Runledger versions must update their startup code and
 /// verify no keyed legacy rows remain without `enqueue_request` snapshots.
+/// Unlike raw [`MIGRATOR`] execution, this filters shared SQLx history through
+/// Runledger's migration compatibility fence so declared additive migrations
+/// can coexist with older compatible startup code.
 pub async fn migrate_after_idempotency_cutover(
     pool: &DbPool,
 ) -> Result<(), SchemaCompatibilityError> {
@@ -148,8 +163,12 @@ pub async fn migrate(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
 /// for deployments that manage DDL outside the application process but still
 /// want a startup guardrail. This check is read-only, but it relies on the
 /// `_sqlx_migrations` history table being present and up to date. When present,
-/// it also uses Runledger's own `runledger_migration_history` table to detect
-/// migrations applied by newer Runledger releases.
+/// it also uses Runledger's own `runledger_migration_history` compatibility
+/// fence to detect newer releases whose schema is not declared backward
+/// compatible. Additive migrations may deliberately rely only on SQLx history
+/// so older guards can coexist during expand-first rollout.
+/// This differs from invoking raw [`MIGRATOR`] execution, which rejects any
+/// applied migration version absent from that exact binary's bundle.
 ///
 /// This read-only path does not validate `NOT VALID` cutover constraints after
 /// legacy rows are remediated. Deployments that apply DDL externally can run

@@ -2,6 +2,8 @@ use crate::{Error, QueryError, QueryErrorCategory, QueryErrorKind, Result};
 
 use super::types::JOB_LIST_PAGE_LIMIT_MAX;
 
+pub(super) const JOB_REPLAY_REQUEST_KEY_MAX_BYTES: usize = 512;
+
 fn invalid_pagination_error(detail: String) -> Error {
     Error::QueryError(QueryError::from_classified(
         QueryErrorCategory::Validation,
@@ -202,6 +204,49 @@ pub(super) fn workflow_requeue_not_supported_error() -> Error {
         "job.workflow_requeue_not_supported",
         "Workflow-managed jobs cannot be requeued directly.",
         "workflow managed job requeue is not supported",
+    ))
+}
+
+pub(super) fn validate_job_replay_request(replay_request_key: &str, reason: &str) -> Result<()> {
+    if replay_request_key.trim().is_empty() {
+        return Err(Error::QueryError(QueryError::from_classified(
+            QueryErrorCategory::Validation,
+            "job.replay_request_key_blank",
+            "Job replay request key must not be blank.",
+            "job replay request key was blank",
+        )));
+    }
+
+    if replay_request_key.len() > JOB_REPLAY_REQUEST_KEY_MAX_BYTES {
+        return Err(Error::QueryError(QueryError::from_classified(
+            QueryErrorCategory::Validation,
+            "job.replay_request_key_too_long",
+            "Job replay request key is too long.",
+            format!(
+                "job replay request key must be at most {JOB_REPLAY_REQUEST_KEY_MAX_BYTES} bytes, got {}",
+                replay_request_key.len()
+            ),
+        )));
+    }
+
+    if reason.trim().is_empty() {
+        return Err(Error::QueryError(QueryError::from_classified(
+            QueryErrorCategory::Validation,
+            "job.replay_reason_blank",
+            "Job replay reason must not be blank.",
+            "job replay reason was blank",
+        )));
+    }
+
+    Ok(())
+}
+
+pub(super) fn job_replay_idempotency_conflict_error() -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Conflict,
+        "job.replay_idempotency_conflict",
+        "Job replay request conflicts with the existing replay key.",
+        "job replay request reused its key with different request metadata",
     ))
 }
 

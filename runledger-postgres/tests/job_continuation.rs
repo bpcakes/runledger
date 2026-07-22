@@ -5,13 +5,16 @@ use runledger_core::jobs::{
     WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
 };
 use runledger_postgres::jobs::{
-    JobContinuationUpdate, complete_job_continuation_with_outcome, enqueue_workflow_run,
-    get_job_by_id, list_job_events, list_workflow_steps,
+    CompareAndRequeueJob, CompareAndRequeueJobOutcome, DecodedJobEventPayload,
+    DecodedRequeuedEventPayload, JobContinuationUpdate, JobRequeueStatePolicy, cancel_job,
+    compare_and_requeue_job, complete_job_continuation_with_outcome, complete_job_success,
+    enqueue_workflow_run, get_job_by_id, get_job_continuation_metrics, list_job_events,
+    list_workflow_steps,
 };
 use runledger_postgres::{Error, QueryErrorKind};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::{Value, json};
-use sqlx::Row;
+use sqlx::{Row, types::Uuid};
 
 mod support;
 
@@ -26,6 +29,21 @@ fn assert_lease_mismatch(error: Error) {
             assert_eq!(error.code(), "job.lease_owner_mismatch");
         }
         other => panic!("expected lease mismatch query error, got {other:?}"),
+    }
+}
+
+fn plan_contains_node_type(value: &Value, expected_node_type: &str) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| plan_contains_node_type(value, expected_node_type)),
+        Value::Object(fields) => {
+            fields.get("Node Type").and_then(Value::as_str) == Some(expected_node_type)
+                || fields
+                    .values()
+                    .any(|value| plan_contains_node_type(value, expected_node_type))
+        }
+        _ => false,
     }
 }
 
@@ -145,8 +163,27 @@ async fn handler_continuation_closes_attempt_and_starts_a_fresh_run() {
     assert_eq!(event.stage, Some(JobStage::Queued));
     assert_eq!(event.progress_done, Some(25));
     assert_eq!(event.progress_total, Some(100));
+    match event.decoded_payload() {
+        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::HandlerContinuation {
+            reason,
+            next_run_number,
+            next_run_at,
+            delay_microseconds,
+            ..
+        }) => {
+            assert_eq!(reason, "HANDLER_CONTINUATION");
+            assert_eq!(next_run_number, 2);
+            assert_eq!(next_run_at, outcome.next_run_at);
+            assert_eq!(delay_microseconds, 100_000);
+        }
+        payload => panic!("expected decoded handler-continuation payload, got {payload:?}"),
+    }
     assert_eq!(
         event.payload.get("reason").and_then(Value::as_str),
+        Some("HANDLER_CONTINUATION")
+    );
+    assert_eq!(
+        event.payload.get("requeue_kind").and_then(Value::as_str),
         Some("HANDLER_CONTINUATION")
     );
     assert_eq!(
@@ -166,6 +203,291 @@ async fn handler_continuation_closes_attempt_and_starts_a_fresh_run() {
     assert_eq!(next_claim.id, job_id);
     assert_eq!(next_claim.run_number, 2);
     assert_eq!(next_claim.attempt, 1);
+
+    let active_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
+        .await
+        .expect("load active continuation metrics")
+        .pop()
+        .expect("registered job type has continuation metrics");
+    assert_eq!(active_metrics.continued_24h, 1);
+    assert_eq!(active_metrics.active_continued_count, 1);
+    assert_eq!(active_metrics.max_active_run_number, 2);
+
+    complete_job_success(
+        &pool,
+        next_claim.id,
+        next_claim.run_number,
+        next_claim.attempt,
+        next_claim
+            .worker_id
+            .as_deref()
+            .expect("next claim has worker id"),
+        None,
+    )
+    .await
+    .expect("complete continued job");
+    let terminal_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
+        .await
+        .expect("load terminal continuation metrics")
+        .pop()
+        .expect("registered job type has continuation metrics");
+    assert_eq!(terminal_metrics.continued_24h, 1);
+    assert_eq!(terminal_metrics.active_continued_count, 0);
+    assert_eq!(terminal_metrics.max_active_run_number, 0);
+
+    #[allow(deprecated)]
+    let admin_requeued = runledger_postgres::jobs::requeue_job(
+        &pool,
+        None,
+        job_id,
+        Some("ordinary admin replay after terminal success"),
+    )
+    .await
+    .expect("legacy admin requeue continued terminal job");
+    assert_eq!(admin_requeued.status, JobStatus::Pending);
+    assert_eq!(admin_requeued.run_number, 3);
+    let admin_events = list_job_events(&pool, None, job_id, 10, None)
+        .await
+        .expect("list ordinary admin requeue events");
+    let admin_event = admin_events.last().expect("ordinary admin requeue event");
+    match admin_event.decoded_payload() {
+        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::Basic { reason, .. }) => {
+            assert_eq!(reason, "ordinary admin replay after terminal success")
+        }
+        payload => panic!("expected decoded basic requeue payload, got {payload:?}"),
+    }
+    assert_eq!(
+        admin_event
+            .payload
+            .get("requeue_kind")
+            .and_then(Value::as_str),
+        Some("BASIC")
+    );
+    let admin_requeue_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
+        .await
+        .expect("load metrics after ordinary admin requeue")
+        .pop()
+        .expect("registered job type has continuation metrics");
+    assert_eq!(admin_requeue_metrics.continued_24h, 1);
+    assert_eq!(admin_requeue_metrics.active_continued_count, 0);
+    assert_eq!(admin_requeue_metrics.max_active_run_number, 0);
+
+    let collision_job_id = enqueue_test_job(
+        &pool,
+        JOB_TYPE,
+        None,
+        &json!({"target": "ordinary-requeue-reason-collision"}),
+    )
+    .await;
+    cancel_job(
+        &pool,
+        None,
+        collision_job_id,
+        Some("prepare ordinary requeue"),
+    )
+    .await
+    .expect("cancel reason-collision job");
+    let canceled = get_job_by_id(&pool, None, collision_job_id)
+        .await
+        .expect("load reason-collision job")
+        .expect("reason-collision job exists");
+    let request = CompareAndRequeueJob::from_observed_job(
+        &canceled,
+        JobRequeueStatePolicy::ResetProgressAndCheckpoint,
+        "HANDLER_CONTINUATION",
+    )
+    .expect("canceled reason-collision job is recoverable");
+    let collision_requeue = compare_and_requeue_job(&pool, request)
+        .await
+        .expect("ordinary requeue may use the same free-form reason");
+    let CompareAndRequeueJobOutcome::Requeued {
+        after: collision_after,
+        ..
+    } = collision_requeue
+    else {
+        panic!("expected reason-collision job to be requeued");
+    };
+    let collision_event = list_job_events(&pool, None, collision_job_id, 10, None)
+        .await
+        .expect("list reason-collision events")
+        .pop()
+        .expect("reason-collision requeue event exists");
+    match collision_event.decoded_payload() {
+        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::CompareAndRequeue {
+            reason,
+            state_policy,
+            ..
+        }) => {
+            assert_eq!(reason, "HANDLER_CONTINUATION");
+            assert_eq!(
+                state_policy,
+                JobRequeueStatePolicy::ResetProgressAndCheckpoint
+            );
+        }
+        payload => panic!("expected decoded compare-and-requeue payload, got {payload:?}"),
+    }
+    assert_eq!(
+        collision_event
+            .payload
+            .get("requeue_kind")
+            .and_then(Value::as_str),
+        Some("COMPARE_AND_REQUEUE")
+    );
+
+    // A future delayed administrative requeue may carry the same schedule
+    // shape. Its stable discriminator must keep it out of continuation metrics
+    // even if an operator also chose the legacy continuation reason string.
+    sqlx::query(
+        "UPDATE job_events
+         SET payload = payload || jsonb_build_object(
+             'next_run_number', $2::int4,
+             'next_run_at', clock_timestamp() + interval '1 hour',
+             'delay_microseconds', 3600000000::bigint
+         )
+         WHERE id = $1",
+    )
+    .bind(collision_event.id)
+    .bind(collision_after.run_number)
+    .execute(&pool)
+    .await
+    .expect("shape future non-continuation requeue event");
+
+    let collision_safe_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
+        .await
+        .expect("load collision-safe continuation metrics")
+        .pop()
+        .expect("registered job type has continuation metrics");
+    assert_eq!(collision_safe_metrics.continued_24h, 1);
+    assert_eq!(collision_safe_metrics.active_continued_count, 0);
+    assert_eq!(collision_safe_metrics.max_active_run_number, 0);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+async fn continue_next_due_job(
+    pool: &runledger_postgres::DbPool,
+    worker_id: &str,
+    delay: Duration,
+) {
+    let claim = claim_one_job(pool, worker_id).await;
+    complete_job_continuation_with_outcome(
+        pool,
+        claim.id,
+        claim.run_number,
+        claim.attempt,
+        claim.worker_id.as_deref().expect("claimed worker id"),
+        &JobContinuationUpdate {
+            delay,
+            progress_done: None,
+            progress_total: None,
+            checkpoint: None,
+        },
+    )
+    .await
+    .expect("continue due metrics job");
+}
+
+#[tokio::test]
+async fn continuation_metrics_filter_exact_tenants_and_aggregate_all_scopes() {
+    let (pool, database) = setup_ephemeral_pool("postgres_continuation_metrics_scope", 4).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let organization_a = Uuid::from_u128(601);
+    let organization_b = Uuid::from_u128(602);
+    let unrelated_organization = Uuid::from_u128(603);
+    let long_delay = Duration::from_secs(3_600);
+
+    enqueue_test_job(&pool, JOB_TYPE, None, &json!({"scope": "global"})).await;
+    continue_next_due_job(&pool, "worker-continuation-metrics-global", long_delay).await;
+
+    enqueue_test_job(
+        &pool,
+        JOB_TYPE,
+        Some(organization_a),
+        &json!({"scope": "organization-a"}),
+    )
+    .await;
+    continue_next_due_job(&pool, "worker-continuation-metrics-org-a", long_delay).await;
+
+    enqueue_test_job(
+        &pool,
+        JOB_TYPE,
+        Some(organization_b),
+        &json!({"scope": "organization-b"}),
+    )
+    .await;
+    continue_next_due_job(
+        &pool,
+        "worker-continuation-metrics-org-b-run-1",
+        Duration::ZERO,
+    )
+    .await;
+    continue_next_due_job(&pool, "worker-continuation-metrics-org-b-run-2", long_delay).await;
+
+    let organization_a_metrics =
+        get_job_continuation_metrics(&pool, Some(organization_a), Some(JOB_TYPE))
+            .await
+            .expect("load organization A continuation metrics")
+            .pop()
+            .expect("registered job type has organization A metrics");
+    assert_eq!(organization_a_metrics.continued_24h, 1);
+    assert_eq!(organization_a_metrics.active_continued_count, 1);
+    assert_eq!(organization_a_metrics.max_active_run_number, 2);
+
+    let organization_b_metrics =
+        get_job_continuation_metrics(&pool, Some(organization_b), Some(JOB_TYPE))
+            .await
+            .expect("load organization B continuation metrics")
+            .pop()
+            .expect("registered job type has organization B metrics");
+    assert_eq!(organization_b_metrics.continued_24h, 2);
+    assert_eq!(organization_b_metrics.active_continued_count, 1);
+    assert_eq!(organization_b_metrics.max_active_run_number, 3);
+
+    let unrelated_metrics =
+        get_job_continuation_metrics(&pool, Some(unrelated_organization), Some(JOB_TYPE))
+            .await
+            .expect("load unrelated organization continuation metrics")
+            .pop()
+            .expect("registered job type has zero-valued unrelated metrics");
+    assert_eq!(unrelated_metrics.continued_24h, 0);
+    assert_eq!(unrelated_metrics.active_continued_count, 0);
+    assert_eq!(unrelated_metrics.max_active_run_number, 0);
+
+    let aggregate_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
+        .await
+        .expect("load aggregate continuation metrics")
+        .pop()
+        .expect("registered job type has aggregate metrics");
+    assert_eq!(aggregate_metrics.continued_24h, 4);
+    assert_eq!(aggregate_metrics.active_continued_count, 3);
+    assert_eq!(aggregate_metrics.max_active_run_number, 3);
+
+    let scoped_plan = sqlx::query_scalar::<_, Value>(
+        "EXPLAIN (FORMAT JSON)
+         SELECT
+            jd.job_type,
+            COALESCE(SUM(jcmr.continued_24h), 0)::bigint AS continued_24h,
+            COALESCE(SUM(jcmr.active_continued_count), 0)::bigint
+                AS active_continued_count,
+            COALESCE(MAX(jcmr.max_active_run_number), 0)::int4
+                AS max_active_run_number
+         FROM job_definitions jd
+         LEFT JOIN job_continuation_metrics_rollup jcmr
+           ON jcmr.job_type = jd.job_type
+          AND ($1::uuid IS NULL OR jcmr.organization_id = $1)
+         WHERE ($2::text IS NULL OR jd.job_type = $2)
+         GROUP BY jd.job_type
+         ORDER BY jd.job_type ASC",
+    )
+    .bind(organization_a)
+    .bind(JOB_TYPE)
+    .fetch_one(&pool)
+    .await
+    .expect("explain scoped continuation metrics query");
+    assert!(
+        !plan_contains_node_type(&scoped_plan, "CTE Scan"),
+        "scoped continuation metrics must not materialize and rescan global aggregates: {scoped_plan}"
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }

@@ -368,6 +368,9 @@ rather than struct literals.
 A direct-job handler that has successfully finished one bounded slice but still
 has more work for the same logical job can return
 `JobCompletion::continue_now()` or `JobCompletion::continue_after(delay)`.
+Continuation is an opt-in handler disposition, not a Runledger-wide feature
+flag. An application may upgrade to 0.6 and never adopt continuation; handlers
+that keep returning terminal success or failure retain their existing behavior.
 Progress and checkpoints can be carried into the next run with the existing
 builders:
 
@@ -385,9 +388,10 @@ run without committed resume state, receives `None`.
 
 Runledger closes the current attempt successfully, changes the exact live lease
 back to `PENDING`, increments `run_number`, resets `attempt` to zero, releases
-the worker/lease, and writes a `REQUEUED` event whose reason is
-`HANDLER_CONTINUATION`. The job ID and payload stay the same. A later claim of
-the next run starts at attempt one with a fresh failure-attempt budget. If the
+the worker/lease, and writes a `REQUEUED` event whose reason and stable
+`requeue_kind` are `HANDLER_CONTINUATION`. The job ID and payload stay the same.
+A later claim of the next run starts at attempt one with a fresh failure-attempt
+budget. If the
 continuation write does not commit, the durable row remains leased and normal
 lease recovery retries the idempotent slice while attempts remain or
 dead-letters an exhausted run. State from an uncommitted slice, including its
@@ -399,7 +403,19 @@ normal workflow step completion rather than continuation.
 Successful continuations deliberately have no implicit run cap and do not
 consume the per-run `max_attempts` failure budget. The handler owns its terminal
 condition; use a nonzero delay for polling-style work and do not return
-`continue_now()` forever.
+`continue_now()` forever. Production handlers should version their checkpoint
+shape, make every slice idempotent, enforce a logical deadline or run limit,
+canary activation by job type or tenant, and alert on continuation rate and run
+depth. `get_job_continuation_metrics` returns a
+`JobContinuationMetricsRecord` per job type with `continued_24h`,
+`active_continued_count`, and `max_active_run_number` for canary and runaway-loop
+alerts. Active counts include only jobs whose current run was created by a
+handler continuation; a later admin recovery is not mislabeled as active
+continuation. The packaged external-consumer
+[`smoke` test](smoke/external-consumer/tests/smoke.rs) is a compile-checked
+continuation, recovery, successful-replay, and metrics example; the
+[`downstream agent guide`](docs/downstream-agent-guide.md) contains the full
+adoption checklist and PostgreSQL 18 operational queries.
 
 Lifecycle observers receive `on_job_continued` after the same run's
 `on_job_running` callback settles, with the completed run identity, duration,
@@ -407,25 +423,30 @@ next run number/time, and committed progress. Observers are best-effort and
 different run numbers may be observed concurrently or out of order; correlate
 by `(job_id, run_number)` and use durable job events for authoritative history.
 
-#### 0.5 to 0.6 continuation and recovery rollout
+#### Pre-0.6 to 0.6 continuation and recovery rollout
 
 Continuation and the new transactional recovery path require a two-phase
-runtime rollout even though 0.6 adds no schema migration:
+runtime rollout even though 0.6.0 added no schema migration:
 
 1. Deploy 0.6 with continuation emission and new recovery calls disabled to
    every process that can participate in job lifecycle state: workers, reapers,
    and admin, API, or repair processes that cancel or requeue jobs. Keep those
-   features disabled until every 0.5 process has stopped and leases created by
-   old workers have quiesced.
+   code paths unused until every pre-0.6 process has stopped and leases created
+   by old workers have quiesced. There is no global continuation switch:
+   "disabled" means no deployed handler returns a continuation disposition.
 2. Only after the fleet is wholly on 0.6, enable handlers that return
    `continue_now()` / `continue_after(...)` and callers of the new recovery API.
+   These can be activated independently. Continuation remains optional; callers
+   that still use deprecated `requeue_job` must plan a typed recovery migration.
 
-Once phase 2 is active, do not partially roll back or run 0.5 and 0.6 job-state
-writers together. A coordinated rollback must first disable new continuations
-and new recovery calls, drain every continuation-descended `PENDING` or `LEASED`
-job to a terminal state, and wait for retained live-lease markers on canceled
-jobs to quiesce. Then stop every 0.6 worker, reaper, and admin/API/repair writer
-before starting any 0.5 process.
+Once phase 2 is active, do not partially roll back or run pre-0.6 and 0.6
+job-state writers together. A coordinated rollback must first disable new
+continuations and new recovery calls, drain every `PENDING` or `LEASED` job
+whose current run was created by a handler continuation to a terminal state,
+and wait for retained live-lease markers on canceled jobs to quiesce. Then stop
+every 0.6 worker, reaper, and admin/API/repair writer before starting any
+pre-0.6 process. Follow the copyable activation and rollback runbook in the
+[`downstream agent guide`](docs/downstream-agent-guide.md#pre-06-to-06-activation-and-rollback-runbook).
 
 The target of `.after_success(...)` / `.after_terminal(...)` must already have
 been added with `.job(...)`; prerequisite steps may be added later in the chain,
@@ -567,6 +588,7 @@ Each example is compile-checked:
 - [Append workflow steps](runledger-postgres/examples/append_workflow_steps.rs)
 - [Scheduled job entrypoint](runledger-postgres/examples/schedule_job.rs)
 - [Worker binary skeleton](runledger-runtime/examples/worker_binary.rs)
+- [Packaged continuation, recovery, and replay smoke test](smoke/external-consumer/tests/smoke.rs)
 
 ## Admin reads
 
@@ -577,6 +599,13 @@ and `count_workflow_runs` with `WorkflowRunCountFilter` for status counters such
 as failed workflows or runs waiting for external completion. These helpers use
 the same optional organization scope and workflow-type substring filtering as
 the TUI.
+
+Use `get_job_continuation_metrics` for continuation canaries and runaway-loop
+alerts. Each `JobContinuationMetricsRecord` reports the prior 24 hours' successful
+continuations, the number of pending/leased jobs whose current run was created
+by continuation, and the highest current run number among those active jobs.
+Passing no organization filter aggregates all scopes; it does not mean exact
+global scope.
 
 `update_job_payload_uuid_array_field` is intentionally narrow: it mutates one
 UUID-array payload field only for direct jobs that are still pending and
@@ -591,6 +620,13 @@ already claimed or terminal.
 It connects to the same database as your workers and surfaces dashboard metrics,
 the job queue, workflow runs, and job definitions through the existing
 `runledger-postgres` admin read APIs.
+
+The dashboard includes continuation volume over 24 hours (`Cont 24h`), active
+continued jobs (`Cont now`), maximum active run depth (`Max run`), and a total
+active-continuation KPI. A selected `REQUEUED` event shows its reason and, for
+handler continuation, the next run number/time and exact microsecond delay. A
+selected successful-replay `ENQUEUED` event shows its source job/run, request
+key, and reason.
 
 By default it uses **global** scope (`organization_id = NULL`) so rows from all
 organizations are visible. Pass `--org <uuid>` at startup, or press `o` at
@@ -649,8 +685,8 @@ The schema is limited to Runledger-owned objects:
   `job_events`, `job_dead_letters`, `job_schedules`
 - **Workflow orchestration:** `workflow_runs`, `workflow_steps`,
   `workflow_step_dependencies`, `workflow_run_mutations`
-- **Operational support:** `job_logs`, `job_runtime_configs`
-- **Derived view:** `job_metrics_rollup`
+- **Operational support:** `job_logs`, `job_runtime_configs`, `job_replays`
+- **Derived views:** `job_metrics_rollup`, `job_continuation_metrics_rollup`
 
 Notable features: idempotent queueing via `idempotency_key`, cron-backed
 schedule materialization, workflow DAG execution with dependency counters,
@@ -681,6 +717,15 @@ forward migrations:
 - `202606030001_workflow_results` — adds job/step output storage and workflow
   result handles. Absent result steps are omitted from canonical workflow
   idempotency snapshots so existing no-result snapshots keep matching.
+- `202607190001_job_replays_and_continuation_metrics` — adds durable successful
+  job replay lineage and a dedicated continuation metrics rollup. SQLx records
+  and checksum-validates this additive migration in `_sqlx_migrations`; it
+  deliberately does not add a
+  compatibility-fence row to `runledger_migration_history`, allowing
+  Runledger's filtered released 0.6.0 startup and schema guards to coexist
+  during expand-first rollout and code rollback. This does not make a raw
+  `MIGRATOR.run(...)` from that exact release tolerate the newer SQLx history
+  row.
 
 Treat the flattened baseline as a from-scratch schema definition, not an
 in-place upgrade from the older multi-file standalone history; apply later
@@ -709,6 +754,26 @@ For consumers of the published crates:
 
 Apply migrations (or call `migrate_after_idempotency_cutover`) before using
 `runledger-postgres` or running DB-backed tests.
+
+Apply `202607190001_job_replays_and_continuation_metrics` before deploying code
+that calls successful-replay or continuation-metrics APIs. Older job-state code
+remains data-plane compatible with the additive table and view, so this is an
+expand-first change, but its startup path matters. Choose one of these code
+rollback strategies:
+
+1. Recommended: leave the migration applied and start the rollback binary with
+   `migrate_after_idempotency_cutover` or
+   `ensure_schema_compatible_after_idempotency_cutover`. These Runledger paths
+   filter SQLx history to the migrations embedded in that release, preserving
+   replay lineage and idempotency state. If the binary directly calls raw
+   `MIGRATOR.run(...)`, patch its startup to use a filtered path first.
+2. An exact older raw `MIGRATOR.run(...)` cannot tolerate the newer SQLx history
+   row. If startup cannot be patched, use the newer release artifact to run its
+   down migration before starting the older binary. This deletes relational
+   `job_replays` lineage and replay-idempotency state while leaving
+   replay-created queue rows and their lineage-bearing `ENQUEUED` events in
+   place. Use this destructive path after replay activation only with explicit
+   acceptance of that data loss.
 
 ### Enqueue-request snapshot cutover
 
@@ -748,8 +813,11 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   existing keyed row. `enqueue_job_tx` remains the UUID-only compatibility API
   and retains key-share concurrency between identical keyed enqueues while
   composing safely with same-transaction compare-and-requeue.
-- **Compare-and-requeue.** Use `compare_and_requeue_job_tx` for transactional
-  recovery of canceled or dead-lettered direct jobs. `JobScope::Global` matches
+- **Compare-and-requeue.** Use pool-owning `compare_and_requeue_job` for a
+  standalone recovery or `compare_and_requeue_job_tx` when recovery must compose
+  atomically with application writes. Build an exact request from an observed
+  `JobQueueRecord` with `CompareAndRequeueJob::from_observed_job`, or provide the
+  expectations explicitly. `JobScope::Global` matches
   only a global row, `JobScope::Organization(id)` matches only that tenant, and
   `RequeueableJobStatus` deliberately cannot represent `SUCCEEDED`. Stale status
   or run expectations and missing rows are returned as no-mutation outcomes
@@ -763,9 +831,34 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   to resume from committed state or `ResetProgressAndCheckpoint` to restart
   from scratch; the selected policy is recorded in the `REQUEUED` event.
   The older pool-owning `requeue_job` API is deprecated for 0.6 compatibility;
-  when a canceled handler's retained lease is still active, it returns the
+  its `organization_id: None` is an unconstrained lookup, not
+  `JobScope::Global`, and its behavior corresponds to
+  `ResetProgressAndCheckpoint`. Migrate every compatibility caller deliberately
+  and handle `NotFound`, `ExpectationMismatch`, and
+  `CancellationNotQuiesced` as no-mutation outcomes. The typed API intentionally
+  does not replay `SUCCEEDED` jobs in place; use the separate successful-replay
+  API described below.
+  When a canceled handler's retained lease is still active, the compatibility
+  API returns the
   conflict code `job.cancellation_not_quiesced` so compatibility callers know
   the recovery may be retried after lease expiry.
+- **Successful replay.** `compare_and_replay_succeeded_job` creates an
+  idempotent fresh job from an exactly scoped successful direct-job run;
+  `compare_and_replay_succeeded_job_tx` composes the same operation with a
+  caller-owned `READ COMMITTED` transaction. The required
+  `replay_request_key` identifies one replay action and the required reason is
+  audited. Reusing the same source run, key, and reason returns the existing
+  replay; reusing the key with a different reason returns
+  `job.replay_idempotency_conflict`. The source row and output remain unchanged.
+  The replay starts at run one with a new ID, copied payload/effective execution
+  settings, no copied progress/checkpoint/output/original idempotency key, and
+  lineage in `job_replays` plus its `ENQUEUED` event. Inspect
+  `CompareAndReplaySucceededJobOutcome::Replayed.replay.disposition` to
+  distinguish insertion from an idempotent retry; `ExpectationMismatch` and
+  `NotFound` do not create a job. Queue retention cannot delete only the replay
+  row while its source remains, because that would erase the idempotency guard.
+  Deleting the source cascades its lineage; a single retention statement may
+  delete both source and replay rows together.
 - **Success stage.** `complete_job_success` persists `JobStage::Completed`; any
   other success stage is rejected as a caller error.
 - **Workflow release conflicts.** Workflow-backed job completion waits for an
@@ -774,7 +867,7 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   may still return `workflow.release_conflict` while cancellation holds the
   exclusive release lock.
 - **Workflow-managed jobs.** Jobs created for workflow steps cannot be requeued
-  directly with either recovery API; that returns
+  or replayed directly with these job-level APIs; that returns
   `job.workflow_requeue_not_supported` so the workflow DAG cannot be bypassed.
   Use workflow cancellation, external completion, or append APIs for
   workflow-level recovery.
@@ -913,7 +1006,7 @@ Observable contract changes to call out in release notes for this line:
   deprecated.
 - `enqueue_job_with_outcome_tx` returns job ID, status, run number, and whether
   the enqueue inserted or resolved an existing keyed row.
-- Release 0.6 changes Rust APIs only and adds no database migration.
+- Release 0.6.0 changes Rust APIs only and adds no database migration.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

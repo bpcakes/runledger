@@ -13,6 +13,7 @@ pub use self::definitions::{
     sync_catalog_job_definitions_exact_tx, sync_catalog_job_definitions_tx, update_job_definition,
     upsert_job_definition_tx,
 };
+pub(in crate::jobs) use self::dispatch::enqueue_replayed_job_with_outcome_tx;
 pub use self::dispatch::{
     claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
     enqueue_job, enqueue_job_tx, enqueue_job_with_outcome_tx,

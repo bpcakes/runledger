@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_events (\n            job_id,\n            run_number,\n            event_type,\n            stage,\n            payload\n         )\n         VALUES (\n            $1,\n            $2,\n            'ENQUEUED',\n            $3,\n            jsonb_strip_nulls(jsonb_build_object(\n                'job_type', $4::text,\n                'replayed_from_job_id', $5::uuid,\n                'replayed_from_run_number', $6::int4,\n                'replay_request_key', $7::text,\n                'reason', $8::text\n            ))\n         )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Text",
+        "Text",
+        "Uuid",
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "59b03d4008fd95abdcce3a22a7afa225c102b63e8dacdcea67f26cb65ce982dd"
+}

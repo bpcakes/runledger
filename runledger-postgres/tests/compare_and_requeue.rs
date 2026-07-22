@@ -5,9 +5,9 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::{
     CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobEnqueue, JobEnqueueDisposition,
     JobFailureUpdate, JobProgressUpdate, JobRequeueStatePolicy, JobScope, RequeueableJobStatus,
-    cancel_job, compare_and_requeue_job_tx, complete_job_failure, enqueue_job_with_outcome_tx,
-    enqueue_workflow_run, get_job_by_id, heartbeat_job, list_job_events, list_workflow_steps,
-    update_job_progress,
+    cancel_job, compare_and_requeue_job, compare_and_requeue_job_tx, complete_job_failure,
+    enqueue_job_with_outcome_tx, enqueue_workflow_run, get_job_by_id, heartbeat_job,
+    list_job_events, list_workflow_steps, update_job_progress,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -73,6 +73,190 @@ async fn assert_job_row_is_not_locked(pool: &DbPool, job_id: Uuid, context: &str
     .unwrap_or_else(|_| panic!("{context}: row-lock probe timed out"))
     .unwrap_or_else(|error| panic!("{context}: row remained locked: {error}"));
     probe_tx.rollback().await.expect("rollback row-lock probe");
+}
+
+#[tokio::test]
+async fn observed_request_preserves_exact_identity_and_rejects_nonrequeueable_statuses() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_compare_requeue_observed_request", 4).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let organization_id = Uuid::from_u128(41);
+
+    let pending_job_id = enqueue_scoped_job(&pool, None, "pending-observation").await;
+    let mut unsupported_observation = get_job_by_id(&pool, None, pending_job_id)
+        .await
+        .expect("load pending job")
+        .expect("pending job exists");
+    for status in [JobStatus::Pending, JobStatus::Leased, JobStatus::Succeeded] {
+        unsupported_observation.status = status;
+        let error = CompareAndRequeueJob::from_observed_job(
+            &unsupported_observation,
+            JobRequeueStatePolicy::ResetProgressAndCheckpoint,
+            "must reject unsupported status",
+        )
+        .expect_err("non-requeueable observations must not seed recovery");
+        assert_eq!(error.status(), status);
+    }
+
+    let global_job_id = enqueue_scoped_job(&pool, None, "global-observation").await;
+    let global = cancel_job(&pool, None, global_job_id, Some("cancel global"))
+        .await
+        .expect("cancel global job");
+    let global_request = CompareAndRequeueJob::from_observed_job(
+        &global,
+        JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
+        "recover global observation",
+    )
+    .expect("canceled global job is requeueable");
+    assert_eq!(global_request.scope, JobScope::Global);
+    assert_eq!(global_request.job_id, global.id);
+    assert_eq!(
+        global_request.expected_status,
+        RequeueableJobStatus::Canceled
+    );
+    assert_eq!(global_request.expected_run_number, global.run_number);
+    assert_eq!(
+        global_request.state_policy,
+        JobRequeueStatePolicy::PreserveProgressAndCheckpoint
+    );
+    assert_eq!(global_request.reason, "recover global observation");
+
+    let mut dead_lettered_observation = global.clone();
+    dead_lettered_observation.status = JobStatus::DeadLettered;
+    let dead_lettered_request = CompareAndRequeueJob::from_observed_job(
+        &dead_lettered_observation,
+        JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
+        "recover dead-lettered observation",
+    )
+    .expect("dead-lettered jobs are requeueable");
+    assert_eq!(
+        dead_lettered_request.expected_status,
+        RequeueableJobStatus::DeadLettered
+    );
+
+    let organization_job_id =
+        enqueue_scoped_job(&pool, Some(organization_id), "organization-observation").await;
+    let organization = cancel_job(
+        &pool,
+        Some(organization_id),
+        organization_job_id,
+        Some("cancel organization job"),
+    )
+    .await
+    .expect("cancel organization job");
+    let organization_request = CompareAndRequeueJob::from_observed_job(
+        &organization,
+        JobRequeueStatePolicy::ResetProgressAndCheckpoint,
+        "recover organization observation",
+    )
+    .expect("canceled organization job is requeueable");
+    assert_eq!(
+        organization_request.scope,
+        JobScope::Organization(organization_id)
+    );
+    assert_eq!(organization_request.job_id, organization.id);
+    assert_eq!(
+        organization_request.expected_status,
+        RequeueableJobStatus::Canceled
+    );
+    assert_eq!(
+        organization_request.expected_run_number,
+        organization.run_number
+    );
+    assert_eq!(
+        organization_request.state_policy,
+        JobRequeueStatePolicy::ResetProgressAndCheckpoint
+    );
+    assert_eq!(
+        organization_request.reason,
+        "recover organization observation"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn pool_owned_compare_and_requeue_sets_read_committed_and_commits_job_and_event() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_compare_requeue_owned_transaction", 1).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let organization_id = Uuid::from_u128(42);
+    let job_id = enqueue_scoped_job(&pool, Some(organization_id), "owned-transaction").await;
+    let canceled = cancel_job(
+        &pool,
+        Some(organization_id),
+        job_id,
+        Some("cancel before owned recovery"),
+    )
+    .await
+    .expect("cancel job");
+    let initial_event_count = event_count(&pool, job_id).await;
+
+    let mut connection = pool.acquire().await.expect("acquire sole pool connection");
+    sqlx::query("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *connection)
+        .await
+        .expect("set a non-default session transaction isolation");
+    let session_isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+        .fetch_one(&mut *connection)
+        .await
+        .expect("read session transaction isolation");
+    assert_eq!(session_isolation, "repeatable read");
+    drop(connection);
+
+    let request = CompareAndRequeueJob::from_observed_job(
+        &canceled,
+        JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
+        "owned recovery",
+    )
+    .expect("canceled observation is requeueable");
+    let outcome = compare_and_requeue_job(&pool, request)
+        .await
+        .expect("owned recovery should establish READ COMMITTED");
+    let CompareAndRequeueJobOutcome::Requeued {
+        before,
+        after,
+        event_id,
+    } = outcome
+    else {
+        panic!("expected requeued outcome");
+    };
+    assert_eq!(before.status, JobStatus::Canceled);
+    assert_eq!(before.run_number, 1);
+    assert_eq!(after.status, JobStatus::Pending);
+    assert_eq!(after.run_number, 2);
+    assert_eq!(after.organization_id, Some(organization_id));
+
+    let persisted = get_job_by_id(&pool, Some(organization_id), job_id)
+        .await
+        .expect("load recovered job")
+        .expect("recovered job exists");
+    assert_eq!(persisted.status, JobStatus::Pending);
+    assert_eq!(persisted.run_number, 2);
+    assert_eq!(persisted.status_reason.as_deref(), Some("owned recovery"));
+
+    let events = list_job_events(&pool, Some(organization_id), job_id, 20, None)
+        .await
+        .expect("list committed recovery events");
+    assert_eq!(events.len(), initial_event_count + 1);
+    let event = events.last().expect("committed requeue event");
+    assert_eq!(event.id, event_id);
+    assert_eq!(event.event_type, JobEventType::Requeued);
+    assert_eq!(event.run_number, 1);
+    assert_eq!(
+        event.payload.get("reason").and_then(Value::as_str),
+        Some("owned recovery")
+    );
+    assert_eq!(
+        event.payload.get("state_policy").and_then(Value::as_str),
+        Some("preserve_progress_and_checkpoint")
+    );
+    assert_eq!(
+        event.payload.get("requeue_kind").and_then(Value::as_str),
+        Some("COMPARE_AND_REQUEUE")
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
 }
 
 #[tokio::test]

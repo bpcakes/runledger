@@ -4,6 +4,94 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add pool-owning `compare_and_requeue_job` for standalone typed recovery; it
+  owns a `READ COMMITTED` transaction and commits every normal typed outcome.
+  Add `CompareAndRequeueJob::from_observed_job`,
+  `NonRequeueableJobStatusError`, and `TryFrom<JobStatus>` for
+  `RequeueableJobStatus` so callers can derive exact scope, terminal status, and
+  run expectations from an observed job without hand-copying them.
+- Add first-class, idempotent successful-job replay through
+  `CompareAndReplaySucceededJob`, `CompareAndReplaySucceededJobOutcome`,
+  `compare_and_replay_succeeded_job`, and
+  `compare_and_replay_succeeded_job_tx`. Replay preserves the successful source
+  and output, creates a fresh run-1 direct job, requires a stable replay request
+  key and reason, and persists source/replay lineage.
+- Add `get_job_continuation_metrics` and `JobContinuationMetricsRecord` with
+  per-job-type 24-hour continuation volume, current continuation-created-run
+  count, and maximum active run-depth signals. Current-run correlation lets the
+  active lookup use the existing job/run event index.
+- Add migration `202607190001_job_replays_and_continuation_metrics`, which
+  creates `job_replays` and the dedicated `job_continuation_metrics_rollup`
+  view. It remains compatible with Runledger's filtered released 0.6.0 startup
+  and schema guards during expand-first rollout by relying on SQLx history
+  without advancing the custom compatibility-fence history.
+- Add a PostgreSQL 18 activation and rollback runbook for the 0.6 continuation
+  and recovery fence, including copyable lease, cancellation-quiescence,
+  current-run continuation-drain, continuation-rate, and run-depth queries.
+- Add a production continuation adoption guide covering versioned checkpoints,
+  idempotent slices, application-owned deadlines, canary rollout, and alerts,
+  backed by a compile-checked external-consumer smoke test that also exercises
+  typed recovery, successful replay, and continuation metrics.
+- Show each `REQUEUED` event's reason in the TUI and show the selected
+  continuation's next run number, timestamp, and microsecond delay; event search
+  now includes payload fields. Add searchable dashboard continuation volume,
+  current continuation-created-run count, and maximum active run depth, with
+  filtering and Enter navigation sharing the same fields.
+- Show successful-replay `ENQUEUED` provenance in the TUI, and add a stable
+  `requeue_kind` discriminator to new `REQUEUED` payloads while retaining the
+  kindless 0.6.0 continuation fallback during mixed-version rollout.
+- Add `JobEventRecord::decoded_payload()` with typed, non-exhaustive views of
+  Runledger-authored requeue and successful-replay payloads. Raw JSON remains
+  available, while malformed and future payloads degrade to compatibility
+  fallbacks instead of failing event reads.
+
+### Changed
+
+- Clarify that the 0.6 rollout fence applies to every pre-0.6 job-state writer,
+  that continuation has no global feature switch and remains optional, and that
+  applications using deprecated `requeue_job` must still complete a typed
+  recovery migration after quiescence.
+- Document the exact legacy recovery migration: an omitted organization was a
+  wildcard rather than global scope, reset state is the compatibility policy,
+  and legacy error cases become typed no-mutation outcomes.
+- Document successful replay as a compare-and-create operation with exact source
+  expectations, required idempotency metadata, source-preserving semantics, a
+  fresh replay job, and Runledger-managed lineage.
+- Document the two additive-migration code-rollback choices: preferably leave it
+  applied and use Runledger's filtered startup or schema guard; an exact older
+  raw `MIGRATOR.run(...)` rejects the newer SQLx history row and therefore needs
+  patched startup or the destructive newer down migration with explicit
+  acceptance of replay-lineage and replay-idempotency loss.
+- Standardize the pool-owned compare/requeue and successful-replay transaction
+  lifecycle so begin/isolation/commit failures use contextual query errors and
+  rejected operations are explicitly rolled back.
+
+### Fixed
+
+- Preserve replay idempotency during queue retention by blocking deletion of a
+  replay job while its successful source remains; source deletion and one-shot
+  retention of both endpoints still remove lineage safely.
+- Avoid global continuation-event aggregation for exact-scope metrics queries by
+  using a predicate-pushable rollup on PostgreSQL 18.
+- Keep TUI event filtering, selection, and rendering on one search predicate,
+  and avoid constructing searchable fields or serializing payloads while search
+  is inactive. Keep dashboard rendering, search, and Enter navigation on one
+  exact formatted row, and admit whole optional column tiers only when their
+  widths, spacing, borders, and selection marker fit the terminal.
+- Reduce dashboard-refresh latency by running its independent reads concurrently
+  with fail-fast sibling cancellation, and avoid rechecking transaction
+  isolation after pool-owned recovery wrappers have already established
+  `READ COMMITTED`.
+- Validate pool-owned successful-replay request identity before acquiring a
+  connection, while retaining the same independent validation for caller-owned
+  transactions.
+
+The Unreleased changes require migration
+`202607190001_job_replays_and_continuation_metrics` before successful-replay or
+continuation-metrics APIs are used.
+
 ## [0.6.0] - 2026-07-18
 [Compare changes](https://github.com/featherenvy/runledger/compare/v0.5.0...v0.6.0)
 
@@ -67,12 +155,13 @@ All notable changes to this workspace are documented here.
   for production use, diagnostics, DB-backed tests, and SQLx metadata; an
   equivalent function supplied by an extension on an older server is not a
   supported substitute.
-- Document the required two-phase 0.5 to 0.6 rollout: deploy 0.6 to workers,
+- Document the required two-phase pre-0.6 to 0.6 rollout: deploy 0.6 to workers,
   reapers, and admin/API/repair writers with continuation and new recovery
-  disabled; wait for all 0.5 processes and old leases to quiesce; then enable.
-  After activation, rollback must disable those features, drain
-  continuation-descended pending/leased rows to terminal, quiesce canceled live
-  lease markers, and stop every 0.6 writer before any 0.5 process starts.
+  disabled; wait for all pre-0.6 processes and old leases to quiesce; then
+  enable. After activation, rollback must disable those features, drain
+  pending/leased jobs whose current run was created by a handler continuation to
+  terminal, quiesce canceled live lease markers, and stop every 0.6 writer
+  before any pre-0.6 process starts.
 
 ### Fixed
 
@@ -111,7 +200,7 @@ All notable changes to this workspace are documented here.
 - Omit a null `lease_quiesces_at` field from pending-job `CANCELED` events while
   preserving the timestamp for cancellation of a live lease.
 
-Release 0.6 requires no database migration.
+Release 0.6.0 requires no database migration.
 
 ## [0.5.0] - 2026-07-09
 [Compare changes](https://github.com/featherenvy/runledger/compare/v0.4.0...v0.5.0)

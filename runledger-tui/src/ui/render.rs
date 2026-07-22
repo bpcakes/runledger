@@ -2,13 +2,18 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs};
+use ratatui::widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, Tabs};
 use runledger_core::jobs::{JobStatus, WorkflowRunStatus, WorkflowStepStatus};
 
 use crate::app::{App, Screen};
 use crate::scope::Scope;
 
 pub const TAB_LABELS: [&str; 4] = ["Dashboard", "Queue", "Workflows", "Definitions"];
+
+const TABLE_COLUMN_SPACING: u16 = 1;
+const TABLE_HIGHLIGHT_SYMBOL: &str = "▶ ";
+const TABLE_HIGHLIGHT_WIDTH: u16 = 2;
+const SELECTED_TABLE_SIDE_BORDER_WIDTH: u16 = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CellAlign {
@@ -277,7 +282,7 @@ fn draw_table_with_selection(
     selected: Option<usize>,
     empty_message: &str,
 ) {
-    let visible_columns = visible_column_indexes(area.width, columns);
+    let visible_columns = visible_column_indexes(area.width, columns, selected.is_some());
     let headers = visible_columns
         .iter()
         .map(|index| table_cell(columns[*index].header, columns[*index].align));
@@ -329,8 +334,10 @@ fn draw_table_with_selection(
                         .alignment(Alignment::Right),
                 ),
         )
+        .column_spacing(TABLE_COLUMN_SPACING)
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(TABLE_HIGHLIGHT_SYMBOL)
+        .highlight_spacing(HighlightSpacing::WhenSelected);
     let mut state = ratatui::widgets::TableState::default();
     if let Some(selected) = selected
         && row_count > 0
@@ -340,20 +347,94 @@ fn draw_table_with_selection(
     f.render_stateful_widget(table, area, &mut state);
 }
 
-fn visible_column_indexes(width: u16, columns: &[TableColumn]) -> Vec<usize> {
-    let max_priority = if width < 64 {
-        0
-    } else if width < 96 {
-        1
-    } else {
-        u8::MAX
-    };
-    let visible = columns
+pub(super) fn visible_column_indexes(
+    width: u16,
+    columns: &[TableColumn],
+    selected: bool,
+) -> Vec<usize> {
+    let mut visible = columns
         .iter()
         .enumerate()
-        .filter_map(|(index, column)| (column.priority <= max_priority).then_some(index))
+        .filter_map(|(index, column)| (column.priority == 0).then_some(index))
         .collect::<Vec<_>>();
-    if visible.is_empty() { vec![0] } else { visible }
+
+    let mut optional_priorities = columns
+        .iter()
+        .filter_map(|column| (column.priority > 0).then_some(column.priority))
+        .collect::<Vec<_>>();
+    optional_priorities.sort_unstable();
+    optional_priorities.dedup();
+
+    for priority in optional_priorities {
+        if width < priority_width_floor(priority)
+            || minimum_table_width(columns, priority, selected) > width
+        {
+            break;
+        }
+        visible = columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| (column.priority <= priority).then_some(index))
+            .collect();
+    }
+
+    if visible.is_empty() && !columns.is_empty() {
+        vec![0]
+    } else {
+        visible
+    }
+}
+
+const fn priority_width_floor(priority: u8) -> u16 {
+    match priority {
+        0 => 0,
+        1 => 64,
+        _ => 96,
+    }
+}
+
+pub(super) fn minimum_table_width(
+    columns: &[TableColumn],
+    max_priority: u8,
+    selected: bool,
+) -> u16 {
+    let visible = columns
+        .iter()
+        .filter(|column| column.priority <= max_priority)
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        return 0;
+    }
+
+    let column_widths = visible.iter().fold(0_u16, |total, column| {
+        total.saturating_add(column_budget_width(column))
+    });
+    let spacing = u16::try_from(visible.len().saturating_sub(1))
+        .unwrap_or(u16::MAX)
+        .saturating_mul(TABLE_COLUMN_SPACING);
+    let selected_table_chrome = if selected {
+        SELECTED_TABLE_SIDE_BORDER_WIDTH + TABLE_HIGHLIGHT_WIDTH
+    } else {
+        0
+    };
+
+    column_widths
+        .saturating_add(spacing)
+        .saturating_add(selected_table_chrome)
+}
+
+fn column_budget_width(column: &TableColumn) -> u16 {
+    match column.width {
+        Constraint::Min(width) | Constraint::Length(width) => width,
+        Constraint::Max(width) => header_budget_width(column).min(width),
+        Constraint::Percentage(_) | Constraint::Ratio(_, _) | Constraint::Fill(_) => {
+            header_budget_width(column)
+        }
+    }
+}
+
+fn header_budget_width(column: &TableColumn) -> u16 {
+    u16::try_from(column.header.chars().count()).unwrap_or(u16::MAX)
 }
 
 pub fn scope_banner(scope: Scope) -> Line<'static> {
@@ -384,14 +465,40 @@ mod tests {
             TableColumn::right("Worker", Constraint::Length(10)).optional(2),
         ];
 
-        assert_eq!(visible_column_indexes(50, &columns), vec![0, 1]);
-        assert_eq!(visible_column_indexes(80, &columns), vec![0, 1, 2]);
-        assert_eq!(visible_column_indexes(120, &columns), vec![0, 1, 2, 3]);
+        assert_eq!(minimum_table_width(&columns, 0, true), 35);
+        assert_eq!(minimum_table_width(&columns, 1, true), 46);
+        assert_eq!(minimum_table_width(&columns, 2, true), 57);
+
+        assert_eq!(visible_column_indexes(63, &columns, true), vec![0, 1]);
+        assert_eq!(visible_column_indexes(64, &columns, true), vec![0, 1, 2]);
+        assert_eq!(visible_column_indexes(95, &columns, true), vec![0, 1, 2]);
+        assert_eq!(visible_column_indexes(96, &columns, true), vec![0, 1, 2, 3]);
     }
 
     #[test]
     fn narrow_tables_always_leave_a_column() {
         let columns = [TableColumn::left("Only", Constraint::Min(10)).optional(2)];
-        assert_eq!(visible_column_indexes(20, &columns), vec![0]);
+        assert_eq!(visible_column_indexes(5, &columns, true), vec![0]);
+    }
+
+    #[test]
+    fn optional_priority_tiers_are_kept_whole() {
+        let columns = [
+            TableColumn::left("Required", Constraint::Length(10)),
+            TableColumn::left("First", Constraint::Length(4)).optional(1),
+            TableColumn::left("Second", Constraint::Length(6)).optional(1),
+            TableColumn::left("Last", Constraint::Length(3)).optional(2),
+        ];
+
+        assert_eq!(minimum_table_width(&columns, 1, true), 26);
+        assert_eq!(visible_column_indexes(63, &columns, true), vec![0]);
+        assert_eq!(visible_column_indexes(64, &columns, true), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn max_constraint_caps_the_header_budget() {
+        let columns = [TableColumn::left("Long header", Constraint::Max(4))];
+
+        assert_eq!(minimum_table_width(&columns, 0, false), 4);
     }
 }

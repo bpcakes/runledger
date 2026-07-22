@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
@@ -10,7 +11,7 @@ use runledger_postgres::{
 };
 use runledger_test_support::{TestDbConnectionBudgetPermit, acquire_test_db_connection_budget};
 use serde_json::{Value, json};
-use sqlx::migrate::{Migrate, MigrateError};
+use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt, core::ContainerPort, runners::AsyncRunner,
@@ -24,6 +25,9 @@ const TEST_ADMIN_DATABASE_URL_ENV: &str = "RUNLEDGER_TEST_ADMIN_DATABASE_URL";
 const MAX_POSTGRES_BOOTSTRAP_ATTEMPTS: u8 = 40;
 const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
 const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
+const V0_6_LATEST_MIGRATION_VERSION: i64 = 202606030001;
+const REPLAY_METRICS_MIGRATION_VERSION: i64 = 202607190001;
+const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[REPLAY_METRICS_MIGRATION_VERSION];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 const TEST_HARNESS_ADMIN_CONNECTIONS: u32 = 1;
 
@@ -153,7 +157,10 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     .fetch_all(&harness.pool)
     .await
     .expect("list recorded runledger migrations");
-    assert_eq!(recorded_runledger_versions, runledger_migration_versions());
+    assert_eq!(
+        recorded_runledger_versions,
+        expected_compatibility_fence_versions()
+    );
 
     let metrics_view_exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
@@ -167,6 +174,373 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     .await
     .expect("query metrics view");
     assert!(metrics_view_exists);
+
+    let continuation_metrics_view_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM information_schema.views
+             WHERE table_schema = 'public'
+               AND table_name = 'job_continuation_metrics_rollup'
+         )",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("query continuation metrics view");
+    assert!(continuation_metrics_view_exists);
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('job_replays')::text")
+            .fetch_one(&harness.pool)
+            .await
+            .expect("query job replay table"),
+        Some("job_replays".to_owned())
+    );
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_boundary() {
+    let harness = TestHarness::fresh("runledger_pg_replay_metrics_upgrade").await;
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read exact PostgreSQL version for migration compatibility regression");
+    eprintln!("migration compatibility regression PostgreSQL server_version={server_version}");
+    apply_runledger_migrations_through(&harness.pool, V0_6_LATEST_MIGRATION_VERSION).await;
+
+    sqlx::query(
+        "INSERT INTO job_definitions (
+            job_type,
+            version,
+            max_attempts,
+            default_timeout_seconds,
+            default_priority,
+            is_enabled
+         )
+         VALUES ('jobs.test.preexisting_continuation', 1, 3, 30, 100, true)",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("insert preexisting continuation definition");
+    let job_id = sqlx::query_scalar::<_, sqlx::types::Uuid>(
+        "INSERT INTO job_queue (
+            job_type,
+            payload,
+            status,
+            run_number,
+            max_attempts,
+            timeout_seconds,
+            next_run_at
+         )
+         VALUES (
+            'jobs.test.preexisting_continuation',
+            '{}'::jsonb,
+            'PENDING',
+            2,
+            3,
+            30,
+            clock_timestamp() + interval '1 hour'
+         )
+         RETURNING id",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("insert preexisting continued job");
+    sqlx::query(
+        "INSERT INTO job_events (
+            job_id,
+            run_number,
+            event_type,
+            payload
+         )
+         VALUES (
+            $1,
+            1,
+            'REQUEUED',
+            jsonb_build_object(
+                'reason', 'HANDLER_CONTINUATION',
+                'next_run_number', 2,
+                'next_run_at', '2026-07-19T12:00:00Z',
+                'delay_microseconds', 1000000
+            )
+         )",
+    )
+    .bind(job_id)
+    .execute(&harness.pool)
+    .await
+    .expect("insert preexisting continuation event");
+
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("upgrade v0.6 schema to replay and metrics migration");
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("latest schema guard accepts upgraded database");
+
+    let metrics = sqlx::query_as::<_, (i64, i64, i32)>(
+        "SELECT continued_24h, active_continued_count, max_active_run_number
+         FROM job_continuation_metrics_rollup
+         WHERE organization_id IS NULL
+           AND job_type = 'jobs.test.preexisting_continuation'",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("load upgraded continuation metrics");
+    assert_eq!(metrics, (1, 1, 2));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_queue WHERE id = $1")
+            .bind(job_id)
+            .fetch_one(&harness.pool)
+            .await
+            .expect("count preserved preexisting job"),
+        1
+    );
+
+    let recorded_runledger_versions = sqlx::query_scalar::<_, i64>(
+        "SELECT version FROM runledger_migration_history ORDER BY version",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .expect("list compatibility-fence migration history");
+    assert_eq!(
+        recorded_runledger_versions,
+        expected_compatibility_fence_versions(),
+        "additive migration must not make released v0.6.0 guards reject the schema"
+    );
+
+    let sqlx_history = sqlx::query_as::<_, (i64, Vec<u8>, bool)>(
+        "SELECT version, checksum, success
+         FROM _sqlx_migrations
+         ORDER BY version",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .expect("load SQLx history after additive upgrade");
+    assert!(
+        sqlx_history
+            .iter()
+            .any(|(version, _, success)| *version == REPLAY_METRICS_MIGRATION_VERSION && *success)
+    );
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .filter(|migration| migration.version <= V0_6_LATEST_MIGRATION_VERSION)
+    {
+        let (_, checksum, success) = sqlx_history
+            .iter()
+            .find(|(version, _, _)| *version == migration.version)
+            .unwrap_or_else(|| panic!("missing v0.6 migration {}", migration.version));
+        assert!(*success, "v0.6 migration {} is dirty", migration.version);
+        assert_eq!(
+            checksum.as_slice(),
+            migration.checksum.as_ref(),
+            "v0.6 migration {} checksum changed",
+            migration.version
+        );
+    }
+
+    let v0_6_migrator = raw_v0_6_migrator();
+    let mut raw_connection = harness
+        .pool
+        .acquire()
+        .await
+        .expect("acquire connection for raw v0.6 migrator");
+    let raw_error = v0_6_migrator
+        .run(&mut *raw_connection)
+        .await
+        .expect_err("raw v0.6 SQLx migrator must reject newer applied history");
+    assert!(
+        matches!(
+            &raw_error,
+            MigrateError::VersionMissing(version)
+                if *version == REPLAY_METRICS_MIGRATION_VERSION
+        ),
+        "unexpected raw v0.6 migration error: {raw_error}"
+    );
+    // SQLx's raw Migrator returns before unlocking on this validation error.
+    // Discard the session so the advisory lock cannot wedge later startup.
+    raw_connection
+        .close()
+        .await
+        .expect("close raw v0.6 migration connection after VersionMissing");
+
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("Runledger's filtered startup guard accepts the additive migration");
+
+    MIGRATOR
+        .undo(&harness.pool, V0_6_LATEST_MIGRATION_VERSION)
+        .await
+        .expect("current migrator can revert the post-v0.6 additive migration");
+    for object in ["job_replays", "job_continuation_metrics_rollup"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
+                .bind(object)
+                .fetch_one(&harness.pool)
+                .await
+                .unwrap_or_else(|error| panic!("query reverted object {object}: {error}")),
+            None,
+            "{object} must be absent after reverting to the raw v0.6 migration set"
+        );
+    }
+
+    v0_6_migrator
+        .run(&harness.pool)
+        .await
+        .expect("raw v0.6 migrator runs after newer history is reverted");
+    let v0_6_versions = v0_6_migrator
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .map(|migration| migration.version)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&harness.pool)
+            .await
+            .expect("list raw v0.6 SQLx history"),
+        v0_6_versions
+    );
+
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current migrator reapplies the additive migration after rollback");
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current guard accepts the reapplied schema");
+    for object in ["job_replays", "job_continuation_metrics_rollup"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
+                .bind(object)
+                .fetch_one(&harness.pool)
+                .await
+                .unwrap_or_else(|error| panic!("query reapplied object {object}: {error}")),
+            Some(object.to_owned()),
+            "{object} must be restored after reapplying current migrations"
+        );
+    }
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, i32)>(
+            "SELECT continued_24h, active_continued_count, max_active_run_number
+             FROM job_continuation_metrics_rollup
+             WHERE organization_id IS NULL
+               AND job_type = 'jobs.test.preexisting_continuation'",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("load continuation metrics after down/up cycle"),
+        (1, 1, 2)
+    );
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn replay_metrics_down_drops_lineage_objects_but_preserves_queue_rows() {
+    let harness = TestHarness::fresh("runledger_pg_replay_metrics_down").await;
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("apply all migrations before replay down test");
+    seed_legacy_job_definition(&harness.pool).await;
+
+    let source_job_id = sqlx::query_scalar::<_, sqlx::types::Uuid>(
+        "INSERT INTO job_queue (
+            job_type, payload, status, max_attempts, timeout_seconds, finished_at
+         )
+         VALUES (
+            'jobs.test.legacy_cutover', '{}'::jsonb, 'SUCCEEDED', 3, 30, now()
+         )
+         RETURNING id",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("insert replay source for down test");
+    let replay_job_id = sqlx::query_scalar::<_, sqlx::types::Uuid>(
+        "INSERT INTO job_queue (
+            job_type, payload, status, max_attempts, timeout_seconds
+         )
+         VALUES (
+            'jobs.test.legacy_cutover', '{}'::jsonb, 'PENDING', 3, 30
+         )
+         RETURNING id",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("insert replay job for down test");
+    sqlx::query(
+        "INSERT INTO job_replays (
+            source_job_id,
+            source_run_number,
+            replay_request_key,
+            replay_job_id,
+            reason
+         )
+         VALUES ($1, 1, 'down-test', $2, 'verify destructive down boundary')",
+    )
+    .bind(source_job_id)
+    .bind(replay_job_id)
+    .execute(&harness.pool)
+    .await
+    .expect("insert replay lineage for down test");
+
+    let replay_delete_policies = sqlx::query_as::<_, (String, String)>(
+        "SELECT conname, confdeltype::text
+         FROM pg_constraint
+         WHERE conname IN (
+            'fk_job_replays_source_job',
+            'fk_job_replays_replay_job'
+         )
+         ORDER BY conname",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .expect("inspect replay lineage delete policy");
+    assert_eq!(
+        replay_delete_policies,
+        vec![
+            ("fk_job_replays_replay_job".to_owned(), "a".to_owned()),
+            ("fk_job_replays_source_job".to_owned(), "c".to_owned()),
+        ],
+        "replay-only deletion must retain the idempotency guard while source deletion removes its lineage"
+    );
+
+    let down_migration = MIGRATOR
+        .iter()
+        .find(|migration| {
+            migration.migration_type.is_down_migration()
+                && migration.version == REPLAY_METRICS_MIGRATION_VERSION
+        })
+        .expect("replay and metrics down migration exists");
+    let mut conn = harness
+        .pool
+        .acquire()
+        .await
+        .expect("acquire revert connection");
+    (*conn)
+        .revert(down_migration)
+        .await
+        .expect("revert replay and metrics migration");
+    drop(conn);
+
+    for object in ["job_replays", "job_continuation_metrics_rollup"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
+                .bind(object)
+                .fetch_one(&harness.pool)
+                .await
+                .unwrap_or_else(|error| panic!("query reverted object {object}: {error}")),
+            None,
+            "{object} must be removed by the down migration"
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_queue WHERE id = ANY($1::uuid[])",)
+            .bind(vec![source_job_id, replay_job_id])
+            .fetch_one(&harness.pool)
+            .await
+            .expect("count queue rows after lineage down migration"),
+        2,
+        "down migration must not delete source or replay queue rows"
+    );
 
     harness.teardown().await;
 }
@@ -280,6 +654,32 @@ fn vendored_migration_copies_match_root_migrations() {
     assert_migration_dir_matches(
         &root_migrations,
         &workspace_root.join("runledger-test-support/migrations"),
+    );
+}
+
+#[test]
+fn compatibility_fence_exemptions_are_explicit_bundled_migrations() {
+    let bundled_versions = runledger_migration_versions()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let exempt_versions = COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        exempt_versions.len(),
+        COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS.len(),
+        "compatibility-fence exemptions must be unique"
+    );
+    assert!(
+        exempt_versions.is_subset(&bundled_versions),
+        "every compatibility-fence exemption must name a bundled up migration"
+    );
+    assert_eq!(
+        expected_compatibility_fence_versions().len() + exempt_versions.len(),
+        bundled_versions.len(),
+        "every bundled up migration must be fenced unless explicitly exempted"
     );
 }
 
@@ -510,20 +910,27 @@ async fn wait_for_postgres(admin_url: &str) {
     for attempt in 1..=MAX_POSTGRES_BOOTSTRAP_ATTEMPTS {
         match connect_admin_pool(admin_url).await {
             Ok(pool) => {
-                if sqlx::query_scalar::<_, i64>("SELECT 1")
-                    .fetch_one(&pool)
-                    .await
-                    .is_ok()
-                {
-                    pool.close().await;
-                    return;
-                }
+                let version_result = sqlx::query_scalar::<_, i32>(
+                    "SELECT current_setting('server_version_num')::int",
+                )
+                .fetch_one(&pool)
+                .await;
                 pool.close().await;
+                match version_result {
+                    Ok(server_version_num) if server_version_num >= 180_000 => return,
+                    Ok(server_version_num) => panic!(
+                        "Runledger migration tests require PostgreSQL 18 or later; connected server_version_num was {server_version_num}"
+                    ),
+                    Err(error) if attempt == MAX_POSTGRES_BOOTSTRAP_ATTEMPTS => panic!(
+                        "read PostgreSQL server_version_num after {MAX_POSTGRES_BOOTSTRAP_ATTEMPTS} attempts: {error}"
+                    ),
+                    Err(_) => {}
+                }
             }
             Err(err) => {
                 if attempt == MAX_POSTGRES_BOOTSTRAP_ATTEMPTS {
                     panic!(
-                        "connect postgres after {MAX_POSTGRES_BOOTSTRAP_ATTEMPTS} attempts: {err}"
+                        "connect to PostgreSQL 18+ after {MAX_POSTGRES_BOOTSTRAP_ATTEMPTS} attempts: {err}"
                     );
                 }
             }
@@ -531,6 +938,8 @@ async fn wait_for_postgres(admin_url: &str) {
 
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+
+    panic!("unexpected PostgreSQL 18 bootstrap loop termination");
 }
 
 fn postgres_admin_url(port: u16) -> String {
@@ -629,6 +1038,33 @@ fn runledger_migration_versions() -> Vec<i64> {
         .collect()
 }
 
+fn raw_v0_6_migrator() -> Migrator {
+    let migrations = MIGRATOR
+        .iter()
+        .filter(|migration| migration.version <= V0_6_LATEST_MIGRATION_VERSION)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        migrations.iter().any(|migration| {
+            migration.version == V0_6_LATEST_MIGRATION_VERSION
+                && migration.migration_type.is_up_migration()
+        }),
+        "raw v0.6 migration fixture must include its final up migration"
+    );
+
+    Migrator {
+        migrations: Cow::Owned(migrations),
+        ..Migrator::DEFAULT
+    }
+}
+
+fn expected_compatibility_fence_versions() -> Vec<i64> {
+    runledger_migration_versions()
+        .into_iter()
+        .filter(|version| !COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS.contains(version))
+        .collect()
+}
+
 fn assert_migration_dir_matches(expected_dir: &Path, actual_dir: &Path) {
     let expected_names = migration_file_names(expected_dir);
     let actual_names = migration_file_names(actual_dir);
@@ -689,6 +1125,10 @@ fn migration_file_names(dir: &Path) -> BTreeSet<String> {
 }
 
 async fn apply_runledger_migrations_before_cutover(pool: &PgPool) {
+    apply_runledger_migrations_through(pool, ENQUEUE_REQUEST_CUTOVER_VERSION - 1).await;
+}
+
+async fn apply_runledger_migrations_through(pool: &PgPool, latest_version: i64) {
     let mut conn = pool.acquire().await.expect("acquire migration connection");
     (*conn)
         .ensure_migrations_table()
@@ -698,11 +1138,11 @@ async fn apply_runledger_migrations_before_cutover(pool: &PgPool) {
     for migration in MIGRATOR
         .iter()
         .filter(|migration| migration.migration_type.is_up_migration())
-        .filter(|migration| migration.version < ENQUEUE_REQUEST_CUTOVER_VERSION)
+        .filter(|migration| migration.version <= latest_version)
     {
         (*conn).apply(migration).await.unwrap_or_else(|error| {
             panic!(
-                "apply pre-cutover Runledger migration {}: {error}",
+                "apply Runledger migration {} through {latest_version}: {error}",
                 migration.version
             )
         });

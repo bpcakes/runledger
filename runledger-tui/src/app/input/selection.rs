@@ -103,21 +103,13 @@ impl App {
     }
 
     fn selected_dashboard_job_type(&self) -> Option<String> {
-        self.dashboard
-            .as_ref()?
+        let dashboard = self.dashboard.as_ref()?;
+        dashboard
             .metrics
             .iter()
-            .filter(|m| {
-                self.matches_table_search(vec![
-                    m.job_type.as_str().to_owned(),
-                    m.pending_count.to_string(),
-                    m.leased_count.to_string(),
-                    m.stale_leases.to_string(),
-                    m.dead_lettered_24h.to_string(),
-                ])
-            })
+            .filter(|metric| self.dashboard_metric_matches_search(dashboard, metric))
             .nth(self.list_selection)
-            .map(|m| m.job_type.as_str().to_owned())
+            .map(|metric| metric.job_type.as_str().to_owned())
     }
 
     fn selected_job_id(&self) -> Option<Uuid> {
@@ -136,11 +128,13 @@ impl App {
             .runs
             .iter()
             .filter(|r| {
-                self.matches_table_search(vec![
-                    r.id.to_string(),
-                    r.workflow_type.as_str().to_owned(),
-                    crate::format::workflow_run_status_label(r.status).to_owned(),
-                ])
+                self.matches_table_search(|| {
+                    vec![
+                        r.id.to_string(),
+                        r.workflow_type.as_str().to_owned(),
+                        crate::format::workflow_run_status_label(r.status).to_owned(),
+                    ]
+                })
             })
             .nth(self.list_selection)
             .map(|r| r.id)
@@ -152,15 +146,17 @@ impl App {
             .steps
             .iter()
             .filter(|s| {
-                self.matches_table_search(vec![
-                    s.step_key.as_str().to_owned(),
-                    crate::format::workflow_step_status_label(s.status).to_owned(),
-                    s.job_type
-                        .as_ref()
-                        .map(|t| t.as_str().to_owned())
-                        .unwrap_or_default(),
-                    s.job_id.map(|id| id.to_string()).unwrap_or_default(),
-                ])
+                self.matches_table_search(|| {
+                    vec![
+                        s.step_key.as_str().to_owned(),
+                        crate::format::workflow_step_status_label(s.status).to_owned(),
+                        s.job_type
+                            .as_ref()
+                            .map(|t| t.as_str().to_owned())
+                            .unwrap_or_default(),
+                        s.job_id.map(|id| id.to_string()).unwrap_or_default(),
+                    ]
+                })
             })
             .nth(self.list_selection)
             .and_then(|s| s.job_id)
@@ -182,16 +178,18 @@ impl App {
                 .definitions
                 .iter()
                 .filter(|def| {
-                    self.matches_table_search(vec![
-                        def.job_type.as_str().to_owned(),
-                        def.version.to_string(),
-                        if def.is_enabled {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        }
-                        .to_owned(),
-                    ])
+                    self.matches_table_search(|| {
+                        vec![
+                            def.job_type.as_str().to_owned(),
+                            def.version.to_string(),
+                            if def.is_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                            .to_owned(),
+                        ]
+                    })
                 })
                 .nth(self.list_selection)
                 .map(|def| def.job_type.as_str().to_owned()),
