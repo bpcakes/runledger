@@ -4,6 +4,9 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-25
+[Compare changes](https://github.com/featherenvy/runledger/compare/v0.6.0...v0.7.0)
+
 ### Added
 
 - Add pool-owning `compare_and_requeue_job` for standalone typed recovery; it
@@ -88,7 +91,7 @@ All notable changes to this workspace are documented here.
   connection, while retaining the same independent validation for caller-owned
   transactions.
 
-The Unreleased changes require migration
+Release 0.7.0 requires migration
 `202607190001_job_replays_and_continuation_metrics` before successful-replay or
 continuation-metrics APIs are used.
 

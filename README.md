@@ -74,12 +74,12 @@ Add the libraries to your service:
 
 ```toml
 [dependencies]
-runledger-core = "0.6"
-runledger-postgres = "0.6"
-runledger-runtime = "0.6"
+runledger-core = "0.7"
+runledger-postgres = "0.7"
+runledger-runtime = "0.7"
 
 [dev-dependencies]
-runledger-test-support = "0.6"
+runledger-test-support = "0.7"
 ```
 
 The published crates require **Rust 1.88+** and **PostgreSQL 18+**. Older
@@ -975,7 +975,7 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.6.0
+./scripts/prepare-release.sh 0.7.0
 ```
 
 The preparation script requires a clean working tree, bumps publishable crate
@@ -988,25 +988,26 @@ packaging the dependent crates locally. If publishing manually, run
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.6.0
+./scripts/publish-release.sh 0.7.0
 ```
 
 The publish script publishes crates in dependency order, dry-runs each once its
-workspace dependencies are indexed, creates a `v0.6.0` tag, and pushes the
+workspace dependencies are indexed, creates a `v0.7.0` tag, and pushes the
 current branch and tag. Set `PUBLISH_REMOTE` to override the git remote for the
 final push.
 
 Observable contract changes to call out in release notes for this line:
 
-- Handlers can continue a successful bounded slice with
-  `JobCompletion::continue_now()` or `continue_after(...)` while retaining
-  progress/checkpoint state on the same job.
-- `compare_and_requeue_job_tx` provides exact-scope, compare-and-set recovery for
-  canceled and dead-lettered jobs; the broad legacy `requeue_job` API is
-  deprecated.
-- `enqueue_job_with_outcome_tx` returns job ID, status, run number, and whether
-  the enqueue inserted or resolved an existing keyed row.
-- Release 0.6.0 changes Rust APIs only and adds no database migration.
+- `compare_and_requeue_job` adds a pool-owning typed recovery path, while
+  `CompareAndRequeueJob::from_observed_job` derives exact recovery expectations
+  from an observed job.
+- Successful direct jobs can be replayed idempotently with compare-and-create
+  APIs that preserve the source job and persist replay lineage.
+- Continuation metrics, typed event-payload decoding, and TUI replay and
+  continuation visibility support production rollout and diagnosis.
+- Release 0.7.0 adds migration
+  `202607190001_job_replays_and_continuation_metrics`; apply it before using
+  successful replay or continuation-metrics APIs.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

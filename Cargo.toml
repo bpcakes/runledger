@@ -20,10 +20,10 @@ default-members = [
 ]
 
 [workspace.dependencies]
-runledger-core = { version = "0.6.0", path = "runledger-core" }
-runledger-postgres = { version = "0.6.0", path = "runledger-postgres" }
-runledger-runtime = { version = "0.6.0", path = "runledger-runtime" }
-runledger-test-support = { version = "0.6.0", path = "runledger-test-support" }
+runledger-core = { version = "0.7.0", path = "runledger-core" }
+runledger-postgres = { version = "0.7.0", path = "runledger-postgres" }
+runledger-runtime = { version = "0.7.0", path = "runledger-runtime" }
+runledger-test-support = { version = "0.7.0", path = "runledger-test-support" }
 cron = "0.16"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = { version = "0.1", features = ["std"] }
