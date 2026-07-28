@@ -33,6 +33,9 @@ pub enum EnqueueActiveWorkflowOutcome {
     /// A new workflow run and active claim were inserted.
     Inserted(WorkflowRunDbRecord),
     /// The active key is still owned by a prior non-quiesced workflow run.
+    ///
+    /// This can be a terminal canceled run whose live handler lease has not
+    /// quiesced yet.
     ExistingActive(WorkflowRunDbRecord),
     /// The permanent idempotency key matched an identical prior request.
     ExistingIdempotent(WorkflowRunDbRecord),
@@ -68,17 +71,27 @@ impl WorkflowRecoveryMode {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct WorkflowRecoveryRequest<'a> {
+    /// Exactly scoped terminal source run.
     pub source_run_id: Uuid,
+    /// Organization scope for the source. `None` selects only a global source,
+    /// not every organization.
     pub organization_id: Option<Uuid>,
     /// Optional source step that motivated this full replay. This is lineage
     /// context and does not reopen the step in place.
     pub source_step_id: Option<Uuid>,
+    /// Stable identity for one intentional recovery, non-blank and at most 512
+    /// bytes.
     pub request_key: &'a str,
     pub mode: WorkflowRecoveryMode,
+    /// Non-blank audit reason.
     pub reason: &'a str,
 }
 
 impl<'a> WorkflowRecoveryRequest<'a> {
+    /// Creates a recovery request for an exactly global source.
+    ///
+    /// Use [`Self::organization_id`] for an organization-owned source and
+    /// [`Self::source_step_id`] to add optional audit lineage.
     #[must_use]
     pub const fn new(
         source_run_id: Uuid,
@@ -96,12 +109,15 @@ impl<'a> WorkflowRecoveryRequest<'a> {
         }
     }
 
+    /// Selects an organization-owned source instead of an exactly global one.
     #[must_use]
     pub const fn organization_id(mut self, organization_id: Uuid) -> Self {
         self.organization_id = Some(organization_id);
         self
     }
 
+    /// Records the source step that motivated recovery without narrowing the
+    /// full-workflow replay.
     #[must_use]
     pub const fn source_step_id(mut self, source_step_id: Uuid) -> Self {
         self.source_step_id = Some(source_step_id);
@@ -109,16 +125,21 @@ impl<'a> WorkflowRecoveryRequest<'a> {
     }
 }
 
+/// Whether a recovery request created a run or resolved idempotently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WorkflowRecoveryDisposition {
+    /// A new recovery run and lineage row were committed.
     Inserted,
+    /// The same source and request key already produced this run.
     Existing,
 }
 
+/// Classified result of immutable workflow recovery.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct WorkflowRecoveryOutcome {
+    /// The newly inserted or previously existing recovery run.
     pub run: WorkflowRunDbRecord,
     pub disposition: WorkflowRecoveryDisposition,
 }

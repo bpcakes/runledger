@@ -4,10 +4,15 @@
 //! one independent retried unit. Use workflow DAG APIs such as
 //! `enqueue_workflow_run`, `WorkflowRunEnqueueBuilder`, and
 //! `WorkflowStepEnqueueBuilder` when work has dependencies, fan-out/fan-in,
-//! external gates, or workflow-level idempotency.
+//! external gates, workflow-level idempotency, active coordination, or
+//! immutable workflow recovery.
 //!
 //! Avoid manually orchestrating ordinary workflows by polling job state,
 //! enqueueing child jobs from handlers, or storing dependency state in payloads.
+//! Use `enqueue_job_with_execution_resource` for lease-fenced mutual exclusion,
+//! `compare_and_requeue_job` for terminal direct-job recovery,
+//! `compare_and_replay_succeeded_job` for intentional successful replay, and
+//! `recover_workflow_run` for a new lineage-linked workflow run.
 
 mod admin;
 mod errors;

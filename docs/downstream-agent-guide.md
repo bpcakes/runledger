@@ -3,8 +3,10 @@
 This guide is for agents integrating Runledger into another application. It is
 not an instruction file for agents maintaining this repository.
 
-Runledger requires PostgreSQL 18 or later. An older PostgreSQL server with an
-extension-provided `uuidv7()` function is not a supported substitute.
+This guide targets Runledger 0.8.0 and retains the operational contracts added
+in 0.6.0 and 0.7.0. Runledger requires Rust 1.88 or later and PostgreSQL 18 or
+later. An older PostgreSQL server with an extension-provided `uuidv7()`
+function is not a supported substitute.
 
 ## Choose The Highest-Level API
 
@@ -31,6 +33,12 @@ together.
 | Human/API approval or another external gate | External workflow steps |
 | Delayed or recurring entrypoint | `runledger_postgres::jobs::upsert_job_schedule` |
 | Provider-directed failure retry/reset time | `JobFailure::retry_not_before_delay(...)` or `JobFailure::retry_not_before(...)` |
+| Another successful bounded slice | `JobCompletion::continue_now()` or `continue_after(...)` |
+| One active workflow per application key | `WorkflowRunEnqueueBuilder::active_key(...)` and `enqueue_or_get_active_workflow` |
+| One job at a time per external resource | `enqueue_job_with_execution_resource` or step `.execution_resource(...)` |
+| Recover a canceled or dead-lettered direct job | `compare_and_requeue_job` |
+| Repeat a successful direct job | `compare_and_replay_succeeded_job` |
+| Recover a terminal workflow | `recover_workflow_run` |
 | Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
 | Admin/status views | `runledger_postgres::jobs` read/list/count APIs |
 
@@ -39,8 +47,8 @@ schedule, and `runledger_postgres::jobs::set_job_schedule_next_fire_at` to
 retime the schedule cursor.
 
 Use `runledger_postgres::jobs::count_workflow_runs` with
-`WorkflowRunCountFilter` for workflow status counters instead of fetching pages
-of runs just to count them.
+`runledger_postgres::jobs::WorkflowRunCountFilter` for workflow status counters
+instead of fetching pages of runs just to count them.
 
 ## Workflow DAG Rule
 
@@ -89,6 +97,14 @@ let absolute = JobFailure::retryable(
 )
 .retry_not_before(provider_reset_at);
 ```
+
+Runledger 0.8 made the optional retry timing private, so construct
+`JobFailure` with `new`, `retryable`, `terminal`, `timeout`, `lease_expired`, or
+`panicked` instead of a struct literal. The deprecated `retry_after` and
+`retry_at` aliases still mean a lower bound and should be migrated to the names
+above. Low-level persistence integrations must construct the non-exhaustive
+`JobFailureUpdate` with `JobFailureUpdate::new(...)` and optional
+`.with_retry_timing(...)`.
 
 The worker first resolves ordinary policy from the registry override for the
 exact job type and failure code or Runledger's exponential fallback. PostgreSQL
@@ -387,11 +403,15 @@ for event in events {
 - Use `enqueue_job_with_execution_resource` for direct jobs or
   `WorkflowStepEnqueueBuilder::execution_resource` for job steps. A blocked
   resource leaves work pending at attempt zero and does not occupy a worker
-  claim slot. Resource keys are global across organizations, so namespace them
-  in the application when tenants must not contend. They guarantee mutual
-  exclusion rather than global FIFO; type-restricted workers order only the
-  eligible types. Mixing claim APIs or workers with different type filters can
-  therefore reorder contenders for one key without weakening mutual exclusion.
+  claim slot. Keys must be non-blank and at most 512 bytes. Resource keys are
+  global across organizations, so namespace them in the application when
+  tenants must not contend. They guarantee mutual exclusion rather than global
+  FIFO; type-restricted workers order only the eligible types. Mixing claim
+  APIs or workers with different type filters can therefore reorder contenders
+  for one key without weakening mutual exclusion.
+  The direct enqueue returns `JobEnqueueOutcome`. For a keyed job, the resource
+  is part of its canonical enqueue snapshot; an idempotent retry cannot silently
+  change it.
   A requested batch is only an upper bound: concurrent resource races and the
   bounded 1,024–16,384-job resource-head window can return short batches,
   especially behind a dense same-key prefix. Exclusivity is lease-scoped: after
@@ -409,18 +429,66 @@ for event in events {
 - Use `recover_workflow_run` for a terminal workflow. It creates a new run and
   durable lineage; it never reopens source steps. Recovery requires a canonical
   enqueue snapshot and replays committed append history while preserving active
-  and resource constraints together with each source step's resolved priority,
-  attempt limit, and timeout. It uses the latest payload persisted on each
-  source step, including a committed pending-step payload correction. Every new
-  workflow retains a canonical snapshot containing step payloads; account for
-  the duplicated JSON in retention planning and store large artifacts
-  externally.
+  and resource constraints, handler-continuation opt-ins, and each source
+  step's resolved priority, attempt limit, and timeout. It uses the latest
+  payload persisted on each source step, including a committed pending-step
+  payload correction. It does not reuse the source workflow's permanent
+  idempotency key. Unknown canonical fields and unsupported mutation kinds are
+  rejected. Every new workflow retains a canonical snapshot containing step
+  payloads; account for the duplicated JSON in retention planning and store
+  large artifacts externally.
 - Treat recovery `request_key` as an idempotency boundary. Identical retries
   return the existing recovery; changed source-step, mode, or reason fields
   conflict. Keys must be non-blank and at most 512 bytes. Deleting only the
   recovery run is blocked while the source remains so retention cannot erase
   that idempotency guard; delete the complete lineage in a source-led
   statement.
+
+Construct recovery inputs through the non-exhaustive request's constructor:
+
+```rust
+let request = WorkflowRecoveryRequest::new(
+    source_run_id,
+    request_key,
+    WorkflowRecoveryMode::FullReplay,
+    "operator-approved retry",
+)
+.organization_id(organization_id)
+.source_step_id(failed_step_id);
+
+let outcome = recover_workflow_run(&pool, &request).await?;
+match outcome.disposition {
+    WorkflowRecoveryDisposition::Inserted => { /* new run */ }
+    WorkflowRecoveryDisposition::Existing => { /* idempotent retry */ }
+    _ => { /* future disposition */ }
+}
+```
+
+Omit `.organization_id(...)` only for an exactly global source.
+`source_step_id` is optional lineage context; recovery still replays the full
+workflow. Use `recover_workflow_run_tx` when recovery must share a transaction
+with application writes. That transaction must be `READ COMMITTED`, and the
+function neither commits nor rolls it back. An active-key recovery can remain
+blocked until the source claim is quiescent, or while another run owns the key.
+
+## Release Upgrade Map: 0.6 Through 0.8
+
+When an integration skips versions, preserve every intermediate runtime and
+schema boundary:
+
+| Release | Required schema | Runtime/source migration |
+| --- | --- | --- |
+| 0.6.0 | No migration. | Deploy all job-state writers with direct continuation and typed compare-and-requeue unused. Quiesce every pre-0.6 process and live lease before activation. Move deprecated `requeue_job` callers to exact scope, typed no-mutation outcomes, and an explicit state policy. |
+| 0.7.0 | `202607190001_job_replays_and_continuation_metrics` before successful replay or metrics calls. | Replay creates a fresh lineage-linked job rather than mutating a successful source. Prefer decoded event payloads and Runledger's filtered schema helpers during expand-first rollout. |
+| 0.8.0 | `202607250001_harden_continuation_metrics_payload_validation` plus `202607280001` through `202607280005` before any 0.8 runtime loop or persistence API runs. | Deploy every writer with workflow continuation, active keys, resources, retry hints, and workflow recovery unused; quiesce all pre-0.8 processes and leases, then canary each path. |
+
+For 0.8 source compatibility, construct the now non-exhaustive
+`WorkflowDagStepValidationInput` through
+`WorkflowDagStepValidationInput::new(...)` and its option setters. Its new
+handler-continuation and execution-resource settings are also present on
+`WorkflowStepDbRecord`, so direct struct-literal consumers must update.
+Construct workflow recovery requests and match recovery outcomes as shown
+above, retaining wildcard arms for non-exhaustive enums.
 
 ## 0.7 To 0.8 Activation And Rollback Runbook
 
@@ -432,10 +500,12 @@ APIs; Runledger has no global switch.
 
 For activation:
 
-1. Apply the additive migrations through
-   `202607280005_workflow_recoveries`, including the workflow continuation,
-   active-claim, retry-audit, and execution-resource migrations. Existing 0.7
-   binaries remain data-plane compatible only while the new paths are unused.
+1. Apply
+   `202607250001_harden_continuation_metrics_payload_validation` and the
+   additive migrations through `202607280005_workflow_recoveries`, including
+   workflow continuation, active-claim, retry-audit, execution-resource, and
+   workflow-recovery state. Existing 0.7 binaries remain data-plane compatible
+   only while the new paths are unused.
    Existing older binaries remain data-plane compatible with the
    additive table and views when startup uses Runledger's filtered migration or
    schema-compatibility helper. SQLx records the migrations, while their
@@ -450,8 +520,9 @@ For activation:
 2. Deploy 0.8 to every worker, reaper, admin, API, CLI, and repair process that
    writes job lifecycle state. Keep the new paths unused.
 3. Prove from deployment inventory or process telemetry that every 0.7
-   process has stopped. Runledger rows do not record a process's crate version,
-   so a database query alone cannot prove this condition.
+   process has stopped. If the upgrade skips releases, prove that every
+   pre-0.8 process has stopped. Runledger rows do not record a process's crate
+   version, so a database query alone cannot prove this condition.
 4. Record the authoritative server version:
 
    ```sql
@@ -577,22 +648,30 @@ partial rollback. For a coordinated rollback:
 
 Choose one migration-history strategy before starting the rollback binary:
 
-1. Recommended: leave
-   `202607190001_job_replays_and_continuation_metrics` and
-   `202607250001_harden_continuation_metrics_payload_validation` applied and use
+1. Recommended: leave every migration through
+   `202607280005_workflow_recoveries` applied and use
    `migrate_after_idempotency_cutover` or
    `ensure_schema_compatible_after_idempotency_cutover` at startup. These
    Runledger paths filter SQLx history to the migrations embedded in that
-   release and preserve replay lineage and idempotency state. Patch the rollback
-   binary's startup first if it directly calls raw `MIGRATOR.run(...)`.
-2. If that exact older raw-MIGRATOR startup cannot be patched, close its failed
-   connection or pool, then use the newer release artifact to run the newer down
-   migrations before starting it. Reverting `202607250001` only restores the
-   prior metrics view. Reverting `202607190001` is destructive: it deletes
-   relational `job_replays` lineage and replay-idempotency state while leaving
-   replay-created jobs in `job_queue` and their lineage-bearing `ENQUEUED` events
-   intact. Choose that path after replay activation only with explicit
-   acceptance of the data loss.
+   release. Patch the rollback binary's startup first if it directly calls raw
+   `MIGRATOR.run(...)`.
+2. A raw 0.7 `MIGRATOR.run(...)` rejects
+   `202607250001_harden_continuation_metrics_payload_validation` and all five
+   `20260728000*` history rows because they are absent from its bundle. If it
+   cannot be patched, close the failed connection or pool, then use the 0.8
+   artifact to revert those six migrations in reverse order before starting
+   0.7.
+
+The raw down-migration path erases 0.8 state: workflow-recovery lineage and
+request idempotency, active claims, execution-resource keys and claims,
+retry-timing audit columns, and workflow-step continuation opt-ins. It leaves
+the underlying workflow and job rows, so recovery-created runs lose lineage and
+retained work loses its resource constraint. A further rollback to pre-0.7 raw
+code also requires reverting
+`202607190001_job_replays_and_continuation_metrics`; that deletes relational
+replay lineage and replay-request idempotency while leaving replay-created jobs
+and their lineage-bearing `ENQUEUED` events. Use either destructive path only
+with explicit acceptance of these losses.
 
 Use these SQL statements only for diagnosis and rollout gates. Drain or mutate
 jobs through Runledger APIs; do not repair `job_queue` or `job_events` with
@@ -771,6 +850,16 @@ payload can be safely mutated. Inspect `JobPayloadUuidArrayFieldUpdate`; rejecte
 updates distinguish workflow-managed jobs, idempotent request snapshots, and jobs
 that are no longer pending or unclaimed.
 
+## Error Boundary
+
+Expose `QueryError::code()` and `QueryError::client_message()` at public
+boundaries. `Display` and `Debug` are sanitized; use
+`QueryError::internal_message()` and `source_arc()` only for trusted
+diagnostics. `QueryError::kind()` covers a deliberately small set of
+compile-checked cross-crate runtime decisions. Application and protocol logic
+should normally branch on the stable string code, not broad categories or
+database text.
+
 ## Catalog Rule
 
 Use `JobCatalog` as the worker startup source of truth when handlers,
@@ -815,3 +904,6 @@ Other compile-checked examples and integration references:
 - [`runledger-runtime/examples/worker_binary.rs`](../runledger-runtime/examples/worker_binary.rs)
 - [`smoke/external-consumer/tests/smoke.rs`](../smoke/external-consumer/tests/smoke.rs)
 - [`runledger-postgres/tests/succeeded_job_replay.rs`](../runledger-postgres/tests/succeeded_job_replay.rs)
+- [`runledger-postgres/tests/workflow_active_claims.rs`](../runledger-postgres/tests/workflow_active_claims.rs)
+- [`runledger-postgres/tests/job_execution_resources.rs`](../runledger-postgres/tests/job_execution_resources.rs)
+- [`runledger-postgres/tests/workflow_recovery.rs`](../runledger-postgres/tests/workflow_recovery.rs)

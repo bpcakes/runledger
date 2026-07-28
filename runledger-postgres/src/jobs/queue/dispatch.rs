@@ -101,7 +101,11 @@ pub async fn enqueue_job_with_outcome_tx(
 /// attempt nor a returned claim slot. Claim ordering is evaluated within a
 /// worker's allowed job-type set, so workers with different type filters can
 /// choose different heads for the same resource; the resource claim still
-/// enforces mutual exclusion.
+/// enforces mutual exclusion. Keys must be non-blank and at most 512 bytes.
+/// Their scope is global across organizations; namespace them in the
+/// application when tenants must not coordinate. For an idempotently keyed
+/// job, the resource key is part of the canonical enqueue request and cannot
+/// change on retry.
 pub async fn enqueue_job_with_execution_resource_tx(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
@@ -573,6 +577,9 @@ pub async fn enqueue_job(pool: &DbPool, payload: &JobEnqueue<'_>) -> Result<Uuid
 }
 
 /// Enqueues a resource-constrained job in its own transaction.
+///
+/// See [`enqueue_job_with_execution_resource_tx`] for key scope, validation,
+/// and claim behavior.
 pub async fn enqueue_job_with_execution_resource(
     pool: &DbPool,
     payload: &JobEnqueue<'_>,

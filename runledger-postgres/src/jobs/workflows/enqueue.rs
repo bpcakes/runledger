@@ -144,6 +144,13 @@ fn workflow_run_from_classified_outcome(
 
 /// Enqueues a workflow under a reusable active key and explicitly classifies
 /// insertion, active collision, and permanent idempotency collision.
+///
+/// Active-key scope is global when `organization_id` is absent and otherwise
+/// organization-local; workflow type is not part of the scope. Claims remain
+/// reserved until terminal work and canceled leases are quiescent, so
+/// [`EnqueueActiveWorkflowOutcome::ExistingActive`] may carry a terminal
+/// canceled run. Callers must make their decision from the outcome rather than
+/// status alone.
 pub async fn enqueue_or_get_active_workflow(
     pool: &DbPool,
     payload: &WorkflowRunEnqueue<'_>,
@@ -163,6 +170,9 @@ pub async fn enqueue_or_get_active_workflow(
 }
 
 /// Caller-transaction counterpart to [`enqueue_or_get_active_workflow`].
+///
+/// The transaction must use `READ COMMITTED`. This function neither commits nor
+/// rolls it back.
 pub async fn enqueue_or_get_active_workflow_tx(
     tx: &mut DbTx<'_>,
     payload: &WorkflowRunEnqueue<'_>,

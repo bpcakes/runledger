@@ -66,36 +66,46 @@ impl<'a> WorkflowDagStepValidationInput<'a> {
         }
     }
 
+    /// Sets the optional queue-priority override used by validation.
     #[must_use]
     pub const fn priority(mut self, priority: Option<i32>) -> Self {
         self.priority = priority;
         self
     }
 
+    /// Sets the optional positive max-attempts override used by validation.
     #[must_use]
     pub const fn max_attempts(mut self, max_attempts: Option<i32>) -> Self {
         self.max_attempts = max_attempts;
         self
     }
 
+    /// Sets the optional positive timeout override, in seconds.
     #[must_use]
     pub const fn timeout_seconds(mut self, timeout_seconds: Option<i32>) -> Self {
         self.timeout_seconds = timeout_seconds;
         self
     }
 
+    /// Sets the queued job's initial stage.
     #[must_use]
     pub const fn stage(mut self, stage: Option<JobStage>) -> Self {
         self.stage = stage;
         self
     }
 
+    /// Sets whether the job-backed step may use successful handler continuation.
+    ///
+    /// External steps cannot enable this setting.
     #[must_use]
     pub const fn allow_handler_continuation(mut self, allow: bool) -> Self {
         self.allow_handler_continuation = allow;
         self
     }
 
+    /// Sets the optional non-blank, at-most-512-byte execution-resource key.
+    ///
+    /// External steps cannot supply this setting.
     #[must_use]
     pub const fn execution_resource_key(mut self, resource_key: Option<&'a str>) -> Self {
         self.execution_resource_key = resource_key;

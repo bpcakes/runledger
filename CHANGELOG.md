@@ -127,6 +127,13 @@ All notable changes to this workspace are documented here.
 - Show compact-table and workflow-detail keyboard hints only when the selected
   row actually opens a detail view.
 
+Release 0.8.0 requires
+`202607250001_harden_continuation_metrics_payload_validation` and migrations
+`202607280001_workflow_step_handler_continuation` through
+`202607280005_workflow_recoveries` before any 0.8 runtime loop or persistence
+API runs. Keep the new write paths unused until the documented 0.7-to-0.8
+writer and lease quiescence fence has completed.
+
 ## [0.7.0] - 2026-07-25
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.6.0...v0.7.0)
 

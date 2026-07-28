@@ -4,10 +4,12 @@
 //! Use this crate for the storage-agnostic pieces of the job system:
 //! - [`jobs::JobHandler`] and [`jobs::JobHandlerRegistry`] for handler contracts
 //! - [`jobs::JobContext`], [`jobs::JobCompletion`], and [`jobs::JobFailure`] for
-//!   execution-time state
+//!   execution-time state, successful bounded continuation, and
+//!   handler-selected retry lower bounds
 //! - workflow enqueue builders and validation helpers such as
 //!   [`jobs::WorkflowDagBuilder`], [`jobs::WorkflowRunEnqueueBuilder`], and
-//!   [`jobs::validate_workflow_run_enqueue`]
+//!   [`jobs::validate_workflow_run_enqueue`], including active-workflow keys,
+//!   execution resources, result steps, and per-step continuation opt-in
 //!
 //! Use workflow builders when work has dependencies, fan-out/fan-in, external
 //! gates, or workflow-level idempotency. A single direct job is appropriate only
@@ -24,6 +26,7 @@
 //! - [Use an external workflow gate](https://github.com/bpcakes/runledger/blob/master/runledger-postgres/examples/external_gate.rs)
 //! - [Run a worker binary](https://github.com/bpcakes/runledger/blob/master/runledger-runtime/examples/worker_binary.rs)
 //! - [Create a scheduled job entrypoint](https://github.com/bpcakes/runledger/blob/master/runledger-postgres/examples/schedule_job.rs)
+//! - [Adopt continuation, coordination, replay, and recovery](https://github.com/bpcakes/runledger/blob/master/docs/downstream-agent-guide.md)
 //!
 //! # Prelude
 //!

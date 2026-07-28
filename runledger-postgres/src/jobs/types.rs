@@ -800,7 +800,9 @@ impl ReapExpiredLeaseCleanupOperation {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ReapExpiredLeaseCleanupError {
+    /// Bounded cleanup operation that failed after lease transitions committed.
     pub operation: ReapExpiredLeaseCleanupOperation,
+    /// Persistence error text for trusted operator diagnostics.
     pub error: String,
 }
 
@@ -812,12 +814,18 @@ pub struct ReapExpiredLeasesResult {
 
 #[non_exhaustive]
 #[derive(Debug, Clone)]
+/// Detailed lease-reaper outcome, including post-commit coordination cleanup.
+///
+/// Lease transitions commit before active/resource claim cleanup. A non-empty
+/// `cleanup_errors` therefore does not roll back the reaped jobs in `summary`.
 pub struct ReapExpiredLeasesDetailedResult {
     pub summary: ReapExpiredLeasesResult,
     pub reaped_leases: Vec<ReapedLeaseRecord>,
     pub deferred_row_error_count: usize,
     pub deferred_row_errors: Vec<ReapExpiredLeaseDeferredError>,
+    /// Quiesced reusable workflow claims removed in the bounded cleanup pass.
     pub workflow_active_claims_released: u64,
+    /// Stale execution-resource claims removed in the bounded cleanup pass.
     pub execution_resource_claims_released: u64,
     pub cleanup_errors: Vec<ReapExpiredLeaseCleanupError>,
 }
@@ -952,6 +960,8 @@ pub struct JobFailureUpdate<'a> {
 }
 
 impl<'a> JobFailureUpdate<'a> {
+    /// Creates a failure update with ordinary policy backoff and no handler
+    /// lower bound.
     #[must_use]
     pub const fn new(
         kind: JobFailureKind,
@@ -968,6 +978,7 @@ impl<'a> JobFailureUpdate<'a> {
         }
     }
 
+    /// Adds the handler-selected retry lower bound.
     #[must_use]
     pub const fn with_retry_timing(mut self, retry_timing: JobRetryTiming) -> Self {
         self.retry_timing = Some(retry_timing);

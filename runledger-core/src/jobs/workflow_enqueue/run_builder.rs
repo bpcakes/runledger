@@ -15,6 +15,8 @@ use super::types::{WorkflowRunEnqueue, WorkflowStepEnqueue};
 /// Defaults:
 /// - `organization_id`: `None`
 /// - `idempotency_key`: `None`
+/// - `active_key`: `None`
+/// - `result_step_key`: `None`
 /// - `steps`: empty
 ///
 /// # Examples
@@ -179,7 +181,10 @@ impl<'a> WorkflowRunEnqueueBuilder<'a> {
     ///
     /// The scope is intentionally shared across workflow types. Namespace the
     /// key by workflow type unless different workflow types should coordinate.
-    /// Use the resulting payload with `enqueue_or_get_active_workflow`.
+    /// The key must be non-blank and at most 512 bytes. Use the resulting
+    /// payload with `enqueue_or_get_active_workflow`, whose classified outcome
+    /// preserves the difference between an active collision and permanent
+    /// request idempotency.
     #[must_use]
     pub fn active_key(mut self, active_key: &'a str) -> Self {
         self.active_key = Some(active_key);

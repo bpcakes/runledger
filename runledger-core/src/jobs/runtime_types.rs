@@ -27,6 +27,13 @@ impl Default for JobCompletionDisposition {
 
 /// A handler's in-process completion result.
 ///
+/// Direct jobs may return a continuation disposition without enqueue-time
+/// configuration. A workflow job step may do so only when it was persisted
+/// with
+/// [`WorkflowStepEnqueueBuilder::allow_handler_continuation`](crate::jobs::WorkflowStepEnqueueBuilder::allow_handler_continuation).
+/// Continuation is invalid for external workflow steps and cannot carry final
+/// output.
+///
 /// Its serde representation supports same-version use and reading older stored
 /// values with newer Runledger versions. It is not a rolling-upgrade wire
 /// protocol: an older consumer cannot safely interpret dispositions introduced
@@ -89,18 +96,21 @@ impl JobCompletion {
         }
     }
 
-    /// Successfully finishes this bounded slice of a direct job and makes the
-    /// same logical job immediately eligible for another run.
+    /// Successfully finishes this bounded slice and makes the same logical job
+    /// immediately eligible for another run.
+    ///
+    /// Workflow job steps require a persisted handler-continuation opt-in.
     #[must_use]
     pub fn continue_now() -> Self {
         Self::continue_after(Duration::ZERO)
     }
 
-    /// Successfully finishes this bounded slice of a direct job and schedules
-    /// the same logical job for another run after `delay`.
+    /// Successfully finishes this bounded slice and schedules the same logical
+    /// job for another run after `delay`.
     ///
     /// Continuations cannot carry final output; that state is not constructible
-    /// through this API and is rejected during deserialization.
+    /// through this API and is rejected during deserialization. Workflow job
+    /// steps require a persisted handler-continuation opt-in.
     #[must_use]
     pub fn continue_after(delay: Duration) -> Self {
         Self {
@@ -347,6 +357,11 @@ pub enum JobRetryTiming {
     At(DateTime<Utc>),
 }
 
+/// A handler failure and optional retry not-before request.
+///
+/// Construct failures with [`Self::new`] or the kind-specific constructors.
+/// Retry timing is deliberately private because it is a lower bound combined
+/// with persistence policy, not an exact schedule override.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JobFailure {
     pub kind: JobFailureKind,

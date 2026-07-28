@@ -105,6 +105,20 @@ struct RecoveryDependencySnapshot {
 
 /// Replays a terminal workflow as a new lineage-linked run in an internally
 /// owned `READ COMMITTED` transaction.
+///
+/// Recovery reconstructs the canonical enqueue request plus committed append
+/// history, then overlays each source step's latest persisted payload and
+/// resolved queue settings. Active-workflow constraints, execution resources,
+/// result selection, and handler-continuation opt-ins are preserved. The new
+/// run uses recovery request identity rather than the source's permanent
+/// workflow idempotency key. The source run and steps are never reopened or
+/// mutated.
+///
+/// `(source_run_id, request_key)` is an idempotency boundary. An identical
+/// retry returns [`WorkflowRecoveryDisposition::Existing`]; reusing the key
+/// with a different source-step context, mode, or reason is a conflict. Legacy
+/// sources without a safe canonical snapshot, snapshots with unknown fields,
+/// and unsupported mutation kinds are rejected.
 pub async fn recover_workflow_run(
     pool: &DbPool,
     request: &WorkflowRecoveryRequest<'_>,
@@ -122,7 +136,8 @@ pub async fn recover_workflow_run(
 /// Transactional counterpart to [`recover_workflow_run`].
 ///
 /// The caller transaction must use `READ COMMITTED`. This function neither
-/// commits nor rolls back.
+/// commits nor rolls back. Equal recovery requests that wait behind one another
+/// rely on a fresh `READ COMMITTED` snapshot to load the committed lineage.
 pub async fn recover_workflow_run_tx(
     tx: &mut DbTx<'_>,
     request: &WorkflowRecoveryRequest<'_>,

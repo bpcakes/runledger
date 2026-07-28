@@ -10,6 +10,8 @@
 //! - [`registry::JobRegistry`] stores concrete handlers directly for advanced
 //!   setups that manage definitions separately
 //! - [`config::JobsConfig`] centralizes poll, lease, and concurrency settings
+//! - [`observer::JobLifecycleObserver`] receives best-effort post-commit
+//!   running, success, continuation, failure, lease-loss, and reaper outcomes
 //!
 //! A typical service builds a shared PostgreSQL pool, registers handlers in a
 //! [`catalog::JobCatalog`], syncs definitions during startup, and starts a
@@ -31,6 +33,7 @@
 //! - [Enqueue a workflow DAG](https://github.com/bpcakes/runledger/blob/master/runledger-postgres/examples/workflow_dag.rs)
 //! - [Use an external workflow gate](https://github.com/bpcakes/runledger/blob/master/runledger-postgres/examples/external_gate.rs)
 //! - [Create a scheduled job entrypoint](https://github.com/bpcakes/runledger/blob/master/runledger-postgres/examples/schedule_job.rs)
+//! - [Adopt continuation, retry timing, coordination, and recovery](https://github.com/bpcakes/runledger/blob/master/docs/downstream-agent-guide.md)
 //!
 //! # Prelude
 //!

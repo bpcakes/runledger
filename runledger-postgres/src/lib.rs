@@ -3,9 +3,11 @@
 //! This crate owns the SQLx-backed storage and query helpers used by the
 //! runtime and application crates. The main entrypoint is the [`jobs`] module,
 //! which exposes APIs for:
-//! - queueing, claiming, heartbeating, and completing jobs
-//! - listing admin/job log data and runtime configuration
-//! - enqueueing and querying workflow runs and steps
+//! - queueing, resource-aware claiming, heartbeating, and completing jobs
+//! - typed direct-job recovery, successful-job replay, events, metrics, and
+//!   admin reads
+//! - enqueueing, actively coordinating, querying, and immutably recovering
+//!   workflow runs and steps
 //! - applying or validating the bundled Runledger schema migrations
 //!
 //! Typical consumers share a [`DbPool`] with `runledger-runtime`, then call the
@@ -57,6 +59,7 @@
 //! - [Enqueue a workflow DAG](https://github.com/bpcakes/runledger/blob/master/runledger-postgres/examples/workflow_dag.rs)
 //! - [Use an external workflow gate](https://github.com/bpcakes/runledger/blob/master/runledger-postgres/examples/external_gate.rs)
 //! - [Create a scheduled job entrypoint](https://github.com/bpcakes/runledger/blob/master/runledger-postgres/examples/schedule_job.rs)
+//! - [Adopt continuation, coordination, replay, and recovery](https://github.com/bpcakes/runledger/blob/master/docs/downstream-agent-guide.md)
 //!
 //! Import `runledger_runtime::prelude::*` and use
 //! [the worker binary example](https://github.com/bpcakes/runledger/blob/master/runledger-runtime/examples/worker_binary.rs)
@@ -205,6 +208,25 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Coordinate And Recover Durable Work
+//!
+//! - Use [`jobs::enqueue_job_with_execution_resource`] or
+//!   `runledger_core::jobs::WorkflowStepEnqueueBuilder::execution_resource`
+//!   for lease-scoped single-permit resources.
+//! - Use [`jobs::enqueue_or_get_active_workflow`] with a workflow
+//!   `runledger_core::jobs::WorkflowRunEnqueueBuilder::active_key` and inspect every
+//!   [`jobs::EnqueueActiveWorkflowOutcome`].
+//! - Use [`jobs::compare_and_requeue_job`] for a failed/canceled/dead-lettered
+//!   direct job and [`jobs::compare_and_replay_succeeded_job`] for intentional
+//!   successful replay.
+//! - Use [`jobs::recover_workflow_run`] to reconstruct a terminal workflow as a
+//!   new lineage-linked run rather than rewriting source history.
+//!
+//! The caller-transaction variants of recovery and replay require PostgreSQL
+//! `READ COMMITTED`. See the
+//! [downstream guide](https://github.com/bpcakes/runledger/blob/master/docs/downstream-agent-guide.md)
+//! for rollout fences, request idempotency, and retention behavior.
 //!
 //! # Handle Errors Safely
 //!

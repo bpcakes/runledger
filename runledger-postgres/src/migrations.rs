@@ -23,9 +23,12 @@ use crate::DbPool;
 ///
 /// During an additive compatibility window, an exact older binary that cannot
 /// use the filtered API must be patched before startup or explicitly accept the
-/// data-loss boundary of reverting newer migrations. For the post-v0.6
-/// successful-replay migration, that includes relational replay lineage and
-/// replay-request idempotency state.
+/// data-loss boundary of reverting newer migrations. Reverting the 0.8
+/// migrations erases workflow-recovery lineage/idempotency, active claims,
+/// execution-resource keys and claims, retry audit fields, and workflow-step
+/// continuation opt-ins. Reverting the post-v0.6 successful-replay migration
+/// also erases relational replay lineage and replay-request idempotency state
+/// while retaining the underlying replay-created queue rows.
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;

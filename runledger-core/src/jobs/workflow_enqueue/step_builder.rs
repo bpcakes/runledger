@@ -150,6 +150,12 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
 
     /// Requires exclusive ownership of one durable resource while this step's
     /// job is leased.
+    ///
+    /// Keys must be non-blank and at most 512 bytes. Resource scope is global
+    /// across workflow and organization boundaries, so callers should
+    /// namespace keys when independent tenants must not contend. External
+    /// steps cannot own execution resources and are rejected at
+    /// [`Self::try_build`].
     #[must_use]
     pub fn execution_resource(mut self, resource_key: &'a str) -> Self {
         self.execution_resource_key = Some(resource_key);
@@ -295,7 +301,8 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
     /// [`JobCompletion::continue_after`](crate::jobs::JobCompletion::continue_after).
     ///
     /// Continuation is disabled by default so a handler cannot accidentally
-    /// keep a workflow active indefinitely. External steps cannot opt in.
+    /// keep a workflow active indefinitely. The opt-in is persisted with the
+    /// step; external steps cannot enable it.
     #[must_use]
     pub fn allow_handler_continuation(mut self) -> Self {
         self.allow_handler_continuation = true;

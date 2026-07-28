@@ -183,8 +183,11 @@ impl JobFailedEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JobCompletionPersistenceOperation {
+    /// Terminal-success persistence failed.
     Success,
+    /// Successful handler-continuation persistence failed.
     Continuation,
+    /// Failure/retry/dead-letter persistence failed.
     Failure,
 }
 
