@@ -981,7 +981,7 @@ async fn dead_lettered_status_is_requeueable_with_an_exact_run_match() {
             kind: JobFailureKind::Terminal,
             code: "job.test.dead_letter",
             message: "dead letter before recovery",
-            retry_delay_ms: None,
+            retry_timing: None,
         },
     )
     .await
@@ -1029,7 +1029,7 @@ async fn dead_lettered_status_is_requeueable_with_an_exact_run_match() {
             kind: JobFailureKind::Terminal,
             code: "job.test.dead_letter_again",
             message: "dead letter before reset recovery",
-            retry_delay_ms: None,
+            retry_timing: None,
         },
     )
     .await

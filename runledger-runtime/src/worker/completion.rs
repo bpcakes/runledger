@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use runledger_core::jobs::{
     JobCompletion, JobCompletionDisposition, JobContext, JobDeadLetterInfo, JobFailure,
-    JobFailureKind,
+    JobFailureKind, JobRetryTiming,
 };
 use runledger_postgres::QueryErrorKind;
 use runledger_postgres::jobs::{
@@ -326,123 +326,160 @@ pub(super) async fn complete_job_failure_after_handler(
     registry: &JobRegistry,
     context: &JobContext,
     job: &jobs::JobQueueRecord,
-    failure: JobFailure,
+    mut failure: JobFailure,
     observation: CompletionObservation<'_>,
 ) {
-    let retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
-        None
-    } else {
-        Some(retry_delay_ms_for_failure(registry, job, &failure))
-    };
-    let failure_payload = JobFailureUpdate {
-        kind: failure.kind,
-        code: failure.code,
-        message: failure.message.as_ref(),
-        retry_delay_ms,
-    };
-    match jobs::complete_job_failure_with_outcome(
-        pool,
-        job.id,
-        job.run_number,
-        job.attempt,
-        &context.worker_id,
-        &failure_payload,
-    )
-    .await
-    {
-        Ok(outcome) => {
-            let dead_letter = match &outcome.disposition {
-                jobs::JobFailureCompletionDisposition::DeadLettered { reason } => Some(
-                    JobDeadLetterInfo::new(failure.clone(), *reason, Some(outcome.max_attempts)),
-                ),
-                jobs::JobFailureCompletionDisposition::RetryScheduled { .. } => None,
-                #[allow(unreachable_patterns)]
-                _ => None,
+    let mut invalid_retry_timing_rewritten = false;
+    loop {
+        let retry_timing = if is_non_retryable_failure_kind(failure.kind) {
+            None
+        } else {
+            Some(retry_timing_for_failure(registry, job, &failure))
+        };
+        let completion_result = {
+            let failure_payload = JobFailureUpdate {
+                kind: failure.kind,
+                code: failure.code,
+                message: failure.message.as_ref(),
+                retry_timing,
             };
-            let disposition = match outcome.disposition {
-                jobs::JobFailureCompletionDisposition::RetryScheduled {
-                    retry_delay_ms,
-                    next_run_at,
-                } => JobFailureDisposition::RetryScheduled {
-                    retry_delay_ms,
-                    next_run_at,
-                },
-                jobs::JobFailureCompletionDisposition::DeadLettered { reason } => {
-                    JobFailureDisposition::DeadLettered { reason }
-                }
-                #[allow(unreachable_patterns)]
-                _ => {
+            jobs::complete_job_failure_with_outcome(
+                pool,
+                job.id,
+                job.run_number,
+                job.attempt,
+                &context.worker_id,
+                &failure_payload,
+            )
+            .await
+        };
+
+        match completion_result {
+            Ok(outcome) => {
+                let dead_letter = match &outcome.disposition {
+                    jobs::JobFailureCompletionDisposition::DeadLettered { reason } => {
+                        Some(JobDeadLetterInfo::new(
+                            failure.clone(),
+                            *reason,
+                            Some(outcome.max_attempts),
+                        ))
+                    }
+                    jobs::JobFailureCompletionDisposition::RetryScheduled { .. }
+                    | jobs::JobFailureCompletionDisposition::RetryScheduledAt { .. } => None,
+                    #[allow(unreachable_patterns)]
+                    _ => None,
+                };
+                let disposition = match outcome.disposition {
+                    jobs::JobFailureCompletionDisposition::RetryScheduled {
+                        retry_delay_ms,
+                        next_run_at,
+                    } => JobFailureDisposition::RetryScheduled {
+                        retry_delay_ms,
+                        next_run_at,
+                    },
+                    jobs::JobFailureCompletionDisposition::RetryScheduledAt {
+                        requested_retry_at,
+                        next_run_at,
+                    } => JobFailureDisposition::RetryScheduledAt {
+                        requested_retry_at,
+                        next_run_at,
+                    },
+                    jobs::JobFailureCompletionDisposition::DeadLettered { reason } => {
+                        JobFailureDisposition::DeadLettered { reason }
+                    }
+                    #[allow(unreachable_patterns)]
+                    _ => {
+                        warn!(
+                            job_id = %job.id,
+                            job_type = %job.job_type,
+                            run_number = job.run_number,
+                            attempt = job.attempt,
+                            "postgres returned an unknown job failure completion disposition; reporting unknown observer disposition"
+                        );
+                        JobFailureDisposition::Unknown
+                    }
+                };
+                observation
+                    .running_notification
+                    .spawn_terminal_observer(
+                        observation.terminal_observer_tasks,
+                        job,
+                        observation.observers.clone(),
+                        TerminalJobObserverEvent::Failed(JobFailedEvent {
+                            job: ObservedJob {
+                                job_id: outcome.job_id,
+                                job_type: outcome.job_type,
+                                organization_id: outcome.organization_id,
+                                run_number: outcome.run_number,
+                                attempt: outcome.attempt,
+                                max_attempts: outcome.max_attempts,
+                                worker_id: context.worker_id.clone(),
+                            },
+                            duration: observation.duration,
+                            failure: failure.clone(),
+                            disposition,
+                        }),
+                    )
+                    .await;
+
+                if let Some(dead_letter) = dead_letter {
                     warn!(
                         job_id = %job.id,
                         job_type = %job.job_type,
                         run_number = job.run_number,
                         attempt = job.attempt,
-                        "postgres returned an unknown job failure completion disposition; reporting unknown observer disposition"
+                        max_attempts = job.max_attempts,
+                        organization_id = ?job.organization_id,
+                        worker_id = %context.worker_id,
+                        dead_letter_reason = ?dead_letter.reason,
+                        failure_kind = ?dead_letter.failure.kind,
+                        failure_code = dead_letter.failure.code,
+                        failure_message = %dead_letter.failure.message,
+                        "job dead lettered after handler failure"
                     );
-                    JobFailureDisposition::Unknown
+                    let mut dead_letter_context = context.clone();
+                    dead_letter_context.checkpoint = outcome.checkpoint;
+                    notify_handler_of_dead_letter(registry, &dead_letter_context, job, dead_letter)
+                        .await;
                 }
-            };
-            observation
-                .running_notification
-                .spawn_terminal_observer(
-                    observation.terminal_observer_tasks,
+                return;
+            }
+            Err(error) => {
+                if !invalid_retry_timing_rewritten
+                    && let Some(invalid_failure) = invalid_retry_timing_failure_from_error(&error)
+                {
+                    warn!(
+                        job_id = %job.id,
+                        attempt = job.attempt,
+                        original_failure_code = failure.code,
+                        invalid_retry_timing = ?failure.retry_timing(),
+                        replacement_failure_code = invalid_failure.code,
+                        replacement_failure_message = %invalid_failure.message,
+                        "handler returned invalid retry timing; marking job terminal"
+                    );
+                    failure = invalid_failure;
+                    invalid_retry_timing_rewritten = true;
+                    continue;
+                }
+
+                let release_conflict = is_workflow_release_conflict_error(&error);
+                handle_completion_persist_failure(
+                    observation,
                     job,
-                    observation.observers.clone(),
-                    TerminalJobObserverEvent::Failed(JobFailedEvent {
-                        job: ObservedJob {
-                            job_id: outcome.job_id,
-                            job_type: outcome.job_type,
-                            organization_id: outcome.organization_id,
-                            run_number: outcome.run_number,
-                            attempt: outcome.attempt,
-                            max_attempts: outcome.max_attempts,
-                            worker_id: context.worker_id.clone(),
-                        },
-                        duration: observation.duration,
-                        failure: failure.clone(),
-                        disposition,
-                    }),
+                    JobCompletionPersistenceOperation::Failure,
+                    error,
+                    |error, lease_owner_mismatch| {
+                        log_completion_failure_persist_error(
+                            job,
+                            error,
+                            release_conflict,
+                            lease_owner_mismatch,
+                        );
+                    },
                 )
                 .await;
-
-            if let Some(dead_letter) = dead_letter {
-                warn!(
-                    job_id = %job.id,
-                    job_type = %job.job_type,
-                    run_number = job.run_number,
-                    attempt = job.attempt,
-                    max_attempts = job.max_attempts,
-                    organization_id = ?job.organization_id,
-                    worker_id = %context.worker_id,
-                    dead_letter_reason = ?dead_letter.reason,
-                    failure_kind = ?dead_letter.failure.kind,
-                    failure_code = dead_letter.failure.code,
-                    failure_message = %dead_letter.failure.message,
-                    "job dead lettered after handler failure"
-                );
-                let mut dead_letter_context = context.clone();
-                dead_letter_context.checkpoint = outcome.checkpoint;
-                notify_handler_of_dead_letter(registry, &dead_letter_context, job, dead_letter)
-                    .await;
+                return;
             }
-        }
-        Err(error) => {
-            let release_conflict = is_workflow_release_conflict_error(&error);
-            handle_completion_persist_failure(
-                observation,
-                job,
-                JobCompletionPersistenceOperation::Failure,
-                error,
-                |error, lease_owner_mismatch| {
-                    log_completion_failure_persist_error(
-                        job,
-                        error,
-                        release_conflict,
-                        lease_owner_mismatch,
-                    );
-                },
-            )
-            .await;
         }
     }
 }
@@ -514,11 +551,31 @@ fn invalid_continuation_failure_from_error(
         )),
         Some(
             QueryErrorKind::JobLeaseOwnerMismatch
+            | QueryErrorKind::JobInvalidRetryTiming
             | QueryErrorKind::JobUnstartedClaimReleaseNotApplicable
             | QueryErrorKind::WorkflowReleaseConflict,
         )
         | None => None,
     }
+}
+
+fn invalid_retry_timing_failure_from_error(
+    error: &runledger_postgres::Error,
+) -> Option<JobFailure> {
+    let runledger_postgres::Error::QueryError(query_error) = error else {
+        return None;
+    };
+    if query_error.kind() != Some(QueryErrorKind::JobInvalidRetryTiming) {
+        return None;
+    }
+
+    Some(JobFailure::terminal(
+        query_error.code(),
+        format!(
+            "Handler returned retry timing that cannot be persisted: {}.",
+            query_error.internal_message()
+        ),
+    ))
 }
 
 fn is_workflow_release_conflict_error(error: &runledger_postgres::Error) -> bool {
@@ -533,14 +590,17 @@ fn is_non_retryable_failure_kind(kind: JobFailureKind) -> bool {
     matches!(kind, JobFailureKind::Terminal | JobFailureKind::Panicked)
 }
 
-fn retry_delay_ms_for_failure(
+fn retry_timing_for_failure(
     registry: &JobRegistry,
     job: &jobs::JobQueueRecord,
     failure: &JobFailure,
-) -> i32 {
-    registry
-        .retry_delay_override(job.job_type.as_borrowed(), failure.code)
-        .unwrap_or_else(|| compute_retry_delay_ms(job.attempt, job.id))
+) -> JobRetryTiming {
+    failure.retry_timing().unwrap_or_else(|| {
+        let retry_delay_ms = registry
+            .retry_delay_override(job.job_type.as_borrowed(), failure.code)
+            .unwrap_or_else(|| compute_retry_delay_ms(job.attempt, job.id));
+        JobRetryTiming::After(Duration::from_millis(retry_delay_ms as u64))
+    })
 }
 
 fn log_completion_success_persist_error(

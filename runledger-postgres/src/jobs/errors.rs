@@ -106,6 +106,16 @@ fn invalid_retry_delay_error(detail: String) -> Error {
     ))
 }
 
+pub(super) fn invalid_retry_timing_error(detail: String) -> Error {
+    Error::QueryError(QueryError::from_classified_with_kind(
+        QueryErrorCategory::Validation,
+        QueryErrorKind::JobInvalidRetryTiming,
+        "job.invalid_retry_timing",
+        "Job retry timing is invalid.",
+        detail,
+    ))
+}
+
 pub(super) fn validate_positive_retry_delay(retry_delay_ms: i32) -> Result<()> {
     if retry_delay_ms > 0 {
         return Ok(());
@@ -114,17 +124,6 @@ pub(super) fn validate_positive_retry_delay(retry_delay_ms: i32) -> Result<()> {
     Err(invalid_retry_delay_error(format!(
         "retry_delay_ms must be greater than zero, got {retry_delay_ms}"
     )))
-}
-
-pub(super) fn require_positive_retry_delay(retry_delay_ms: Option<i32>) -> Result<i32> {
-    let Some(retry_delay_ms) = retry_delay_ms else {
-        return Err(invalid_retry_delay_error(
-            "retry_delay_ms is required and must be greater than zero".to_string(),
-        ));
-    };
-
-    validate_positive_retry_delay(retry_delay_ms)?;
-    Ok(retry_delay_ms)
 }
 
 fn invalid_completion_progress_error(detail: String) -> Error {

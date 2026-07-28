@@ -748,7 +748,7 @@ async fn workflow_handle_reports_unsuccessful_terminal_run() {
             kind: JobFailureKind::Terminal,
             code: "job.test.terminal_failure",
             message: "result step failed terminally",
-            retry_delay_ms: None,
+            retry_timing: None,
         },
     )
     .await

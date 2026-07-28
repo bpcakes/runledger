@@ -30,6 +30,7 @@ together.
 | Fan-out, fan-in, or ordered stages | Workflow DAG APIs |
 | Human/API approval or another external gate | External workflow steps |
 | Delayed or recurring entrypoint | `runledger_postgres::jobs::upsert_job_schedule` |
+| Provider-directed failure retry/reset time | `JobFailure::retry_after(...)` or `JobFailure::retry_at(...)` |
 | Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
 | Admin/status views | `runledger_postgres::jobs` read/list/count APIs |
 
@@ -66,6 +67,61 @@ Its stable code is `workflow.result_missing`. Other handle error codes include
 `workflow.result_wait_timeout`. `WorkflowRunWaitOptions::default()` waits up to
 five minutes; set `timeout: None` only when the caller intentionally wants to
 wait indefinitely and can afford the pending PostgreSQL listener connection.
+
+## Handler-Selected Retry Timing
+
+Use `JobFailure::retry_after(delay)` when the provider returns a relative
+`Retry-After` value, or `JobFailure::retry_at(reset_at)` when it returns an
+absolute UTC reset timestamp:
+
+```rust
+use std::time::Duration;
+
+let relative = JobFailure::retryable(
+    "provider.temporarily_unavailable",
+    "Provider asked the client to retry later.",
+)
+.retry_after(Duration::from_secs(retry_after_seconds));
+
+let absolute = JobFailure::retryable(
+    "provider.rate_limited",
+    "Provider rate limit reached.",
+)
+.retry_at(provider_reset_at);
+```
+
+The worker resolves retry timing in this order:
+
+1. timing attached by the handler;
+2. the registry override for the exact job type and failure code;
+3. Runledger's exponential backoff.
+
+Timing is consulted only when another attempt will actually be scheduled.
+Terminal and panicked failures, and retryable failures that exhaust
+`max_attempts`, are dead-lettered without applying or validating it. A relative
+delay is measured from PostgreSQL's completion clock; positive sub-millisecond
+values round up to one millisecond, while zero or an unrepresentable delay
+becomes a terminal `job.invalid_retry_timing` handler failure. An absolute time
+is rounded up only to PostgreSQL microsecond precision. If it is at or before
+the database completion time, `next_run_at` is that completion time and the job
+is immediately eligible. Absolute timestamps outside PostgreSQL's supported
+range also become `job.invalid_retry_timing`.
+
+This API controls another failed attempt; it is not successful continuation:
+
+| Handler result | Durable effect |
+| --- | --- |
+| `Err(JobFailure::retryable(...).retry_after(...))` or `.retry_at(...)` | Closes the attempt as failed, keeps `run_number`, consumes attempt budget, and leaves workflow dependents blocked. |
+| `Ok(JobCompletion::continue_after(...))` | Closes a direct-job slice successfully, advances `run_number`, and starts the new run with a fresh attempt budget. |
+
+For relative timing, `job_attempts.retry_delay_ms` and the `RETRY_SCHEDULED`
+event retain the selected delay. For absolute timing, the attempt delay stays
+null and the event records `requested_retry_at` together with the effective
+`next_run_at`. In lifecycle observers, match
+`JobFailureDisposition::RetryScheduled` for a committed relative delay and
+`RetryScheduledAt` for a committed absolute request. The observer disposition
+is authoritative for what was persisted; `JobFailure::retry_timing()` reports
+what the handler requested.
 
 ## Bounded Direct-Job Continuation
 

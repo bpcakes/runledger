@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use runledger_core::jobs::{
-    JobFailureKind, JobStatus, JobType, StepKey, WorkflowRunEnqueueBuilder,
+    JobFailureKind, JobRetryTiming, JobStatus, JobType, StepKey, WorkflowRunEnqueueBuilder,
     WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
 };
 use runledger_postgres::jobs::test_support::workflow_run_release_lock_key;
@@ -1301,7 +1301,7 @@ async fn retryable_workflow_job_failure_returns_step_to_enqueued() {
             kind: JobFailureKind::Retryable,
             code: "test.retryable",
             message: "retryable failure",
-            retry_delay_ms: Some(1),
+            retry_timing: Some(JobRetryTiming::After(Duration::from_millis(1))),
         },
     )
     .await

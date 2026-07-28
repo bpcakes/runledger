@@ -2286,6 +2286,7 @@ name = "runledger-core"
 version = "0.7.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "proptest",
  "serde",
  "serde_json",

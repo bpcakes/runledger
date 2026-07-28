@@ -91,12 +91,13 @@ pub mod prelude {
     pub use crate::jobs::{
         IdentifierValidationError, JobCompletion, JobCompletionDisposition, JobContext,
         JobDeadLetterInfo, JobDeadLetterReason, JobEventType, JobFailure, JobFailureKind,
-        JobHandler, JobHandlerRegistry, JobStage, JobStatus, JobType, JobTypeName, StepKey,
-        StepKeyName, WorkflowBuildError, WorkflowDagBuilder, WorkflowDagDependencyValidationInput,
-        WorkflowDagStepValidationInput, WorkflowDagValidationError, WorkflowDependencyReleaseMode,
-        WorkflowRunEnqueue, WorkflowRunEnqueueBuilder, WorkflowRunStatus,
-        WorkflowStepDependencySpec, WorkflowStepEnqueue, WorkflowStepEnqueueBuilder,
-        WorkflowStepExecutionKind, WorkflowStepStatus, WorkflowType, WorkflowTypeName,
-        validate_workflow_dag, validate_workflow_run_enqueue, validate_workflow_step_append,
+        JobHandler, JobHandlerRegistry, JobRetryTiming, JobStage, JobStatus, JobType, JobTypeName,
+        StepKey, StepKeyName, WorkflowBuildError, WorkflowDagBuilder,
+        WorkflowDagDependencyValidationInput, WorkflowDagStepValidationInput,
+        WorkflowDagValidationError, WorkflowDependencyReleaseMode, WorkflowRunEnqueue,
+        WorkflowRunEnqueueBuilder, WorkflowRunStatus, WorkflowStepDependencySpec,
+        WorkflowStepEnqueue, WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind,
+        WorkflowStepStatus, WorkflowType, WorkflowTypeName, validate_workflow_dag,
+        validate_workflow_run_enqueue, validate_workflow_step_append,
     };
 }

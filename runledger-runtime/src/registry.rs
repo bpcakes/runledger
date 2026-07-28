@@ -52,6 +52,16 @@ impl JobRegistry {
         Ok(())
     }
 
+    /// Registers a fallback relative retry delay for one job type and failure
+    /// code.
+    ///
+    /// Timing attached directly to [`runledger_core::jobs::JobFailure`] takes
+    /// precedence over this override. The worker uses its exponential backoff
+    /// only when neither handler timing nor a matching override exists.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `retry_delay_ms` is not positive.
     pub fn register_retry_delay_override(
         &mut self,
         job_type: JobType<'static>,
@@ -71,6 +81,11 @@ impl JobRegistry {
         self.handlers.get(job_type.as_str()).cloned()
     }
 
+    /// Returns the configured fallback retry delay for an exact job type and
+    /// failure code.
+    ///
+    /// A returned override is ignored when the handler attached its own retry
+    /// timing to the failure.
     #[must_use]
     pub fn retry_delay_override(&self, job_type: JobType<'_>, failure_code: &str) -> Option<i32> {
         self.retry_delay_overrides

@@ -1184,7 +1184,7 @@ mod tests {
                                 kind: JobFailureKind::Terminal,
                                 code: "job.test.snapshot_race",
                                 message: "terminal transition between recovery reads",
-                                retry_delay_ms: None,
+                                retry_timing: None,
                             },
                         )
                         .await?;

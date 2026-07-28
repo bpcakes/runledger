@@ -6,7 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{
-    JobCompletion, JobContext, JobDeadLetterInfo, JobFailure, JobStage, JobStatus, JobType,
+    JobCompletion, JobContext, JobDeadLetterInfo, JobEventType, JobFailure, JobStage, JobStatus,
+    JobType,
 };
 use runledger_postgres::jobs::{
     self, CompareAndReplaySucceededJob, CompareAndReplaySucceededJobOutcome, CompareAndRequeueJob,
@@ -40,6 +41,8 @@ const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
 const CONTINUATION_CHECKPOINT_VERSION: i64 = 1;
 const CONTINUATION_MAX_RUNS: i64 = 2;
 const HANDLER_CONTINUATION_REASON: &str = "HANDLER_CONTINUATION";
+const HANDLER_RETRY_AFTER: Duration = Duration::from_millis(25);
+const HANDLER_RETRY_AFTER_MS: i64 = 25;
 const REPLAY_REQUEST_KEY: &str = "external-smoke-success-replay";
 const REPLAY_REASON: &str = "prove fresh successful replay from a packaged consumer";
 
@@ -254,6 +257,12 @@ async fn packaged_crates_support_external_consumer_embedding() {
     )
     .await;
     let terminal_job_id = enqueue_kind(&harness.pool, "terminal").await;
+    let retry_after_job_id =
+        enqueue_payload_with_max_attempts(&harness.pool, &json!({"kind": "retry-after"}), Some(2))
+            .await;
+    let retry_at_job_id =
+        enqueue_payload_with_max_attempts(&harness.pool, &json!({"kind": "retry-at"}), Some(2))
+            .await;
     insert_due_schedule(&harness.pool, "scheduled-success")
         .await
         .expect("insert due schedule");
@@ -361,6 +370,23 @@ async fn packaged_crates_support_external_consumer_embedding() {
     assert_eq!(continuation_metrics.max_active_run_number, 0);
     assert_eq!(completed_continuation_slices.lock().await.len(), 2);
 
+    let retry_after_job =
+        wait_for_status(&harness.pool, retry_after_job_id, JobStatus::Succeeded).await;
+    assert_eq!(retry_after_job.run_number, 1);
+    assert_eq!(retry_after_job.attempt, 2);
+    let retry_after_events = list_job_events(&harness.pool, None, retry_after_job_id, 100, None)
+        .await
+        .expect("list handler-selected relative retry events");
+    assert_relative_retry_event(&retry_after_events, retry_after_job_id);
+
+    let retry_at_job = wait_for_status(&harness.pool, retry_at_job_id, JobStatus::Succeeded).await;
+    assert_eq!(retry_at_job.run_number, 1);
+    assert_eq!(retry_at_job.attempt, 2);
+    let retry_at_events = list_job_events(&harness.pool, None, retry_at_job_id, 100, None)
+        .await
+        .expect("list handler-selected absolute retry events");
+    assert_absolute_retry_event(&retry_at_events, retry_at_job_id);
+
     let recovered_job = wait_for_status(
         &harness.pool,
         inserted_recovery.job_id,
@@ -404,8 +430,8 @@ async fn packaged_crates_support_external_consumer_embedding() {
     wait_for_dead_letter(&dead_letters, "hang").await;
 
     assert!(
-        execution_count.load(Ordering::SeqCst) >= 9,
-        "worker should execute direct, continued, recovered, replayed, scheduled, and hanging jobs"
+        execution_count.load(Ordering::SeqCst) >= 13,
+        "worker should execute direct, retried, continued, recovered, replayed, scheduled, and hanging jobs"
     );
 
     hang_release.notify_waiters();
@@ -527,6 +553,18 @@ impl JobHandler for SmokeHandler {
         match payload_kind(&payload) {
             "success" | "scheduled-success" => Ok(JobCompletion::success()),
             "continuation" => self.execute_continuation(context, &payload).await,
+            "retry-after" if context.attempt == 1 => Err(JobFailure::retryable(
+                "smoke.provider_temporarily_unavailable",
+                "Smoke provider requested a relative retry.",
+            )
+            .retry_after(HANDLER_RETRY_AFTER)),
+            "retry-after" => Ok(JobCompletion::success()),
+            "retry-at" if context.attempt == 1 => Err(JobFailure::retryable(
+                "smoke.provider_rate_limited",
+                "Smoke provider supplied an absolute reset timestamp.",
+            )
+            .retry_at(Utc::now() + ChronoDuration::milliseconds(HANDLER_RETRY_AFTER_MS))),
+            "retry-at" => Ok(JobCompletion::success()),
             "terminal" => Err(JobFailure::terminal(
                 "smoke.terminal_failure",
                 "Smoke handler returned a terminal failure.",
@@ -692,6 +730,14 @@ async fn enqueue_kind(pool: &DbPool, kind: &str) -> sqlx::types::Uuid {
 }
 
 async fn enqueue_payload(pool: &DbPool, payload: &Value) -> sqlx::types::Uuid {
+    enqueue_payload_with_max_attempts(pool, payload, None).await
+}
+
+async fn enqueue_payload_with_max_attempts(
+    pool: &DbPool,
+    payload: &Value,
+    max_attempts: Option<i32>,
+) -> sqlx::types::Uuid {
     jobs::enqueue_job(
         pool,
         &JobEnqueue {
@@ -699,7 +745,7 @@ async fn enqueue_payload(pool: &DbPool, payload: &Value) -> sqlx::types::Uuid {
             organization_id: None,
             payload,
             priority: None,
-            max_attempts: None,
+            max_attempts,
             timeout_seconds: None,
             next_run_at: None,
             idempotency_key: None,
@@ -708,6 +754,59 @@ async fn enqueue_payload(pool: &DbPool, payload: &Value) -> sqlx::types::Uuid {
     )
     .await
     .expect("enqueue smoke job")
+}
+
+fn retry_scheduled_event(
+    events: &[JobEventRecord],
+    expected_job_id: sqlx::types::Uuid,
+) -> &JobEventRecord {
+    let event = events
+        .iter()
+        .find(|event| event.event_type == JobEventType::RetryScheduled)
+        .expect("handler-selected retry should record RETRY_SCHEDULED");
+    assert_eq!(event.job_id, expected_job_id);
+    event
+}
+
+fn assert_relative_retry_event(events: &[JobEventRecord], expected_job_id: sqlx::types::Uuid) {
+    let event = retry_scheduled_event(events, expected_job_id);
+    assert_eq!(
+        event.payload.get("retry_delay_ms").and_then(Value::as_i64),
+        Some(HANDLER_RETRY_AFTER_MS)
+    );
+    assert_eq!(event.payload.get("requested_retry_at"), None);
+    assert!(
+        event
+            .payload
+            .get("next_run_at")
+            .and_then(Value::as_str)
+            .is_some(),
+        "relative retry audit should retain next_run_at"
+    );
+}
+
+fn assert_absolute_retry_event(events: &[JobEventRecord], expected_job_id: sqlx::types::Uuid) {
+    let event = retry_scheduled_event(events, expected_job_id);
+    assert_eq!(event.payload.get("retry_delay_ms"), None);
+
+    let requested_retry_at = event
+        .payload
+        .get("requested_retry_at")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .expect("absolute retry audit should retain requested_retry_at");
+    let next_run_at = event
+        .payload
+        .get("next_run_at")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .expect("absolute retry audit should retain next_run_at");
+    assert!(
+        next_run_at >= requested_retry_at,
+        "effective absolute retry time must not precede the requested provider reset"
+    );
 }
 
 async fn create_consumer_audit_table(pool: &DbPool) -> Result<(), sqlx::Error> {

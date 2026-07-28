@@ -356,7 +356,7 @@ async fn admin_payload_update_rejects_leased_and_terminal_jobs() {
             kind: JobFailureKind::Terminal,
             code: "terminal",
             message: "terminal failure",
-            retry_delay_ms: None,
+            retry_timing: None,
         },
     )
     .await

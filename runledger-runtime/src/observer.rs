@@ -123,16 +123,32 @@ impl JobContinuedEvent {
     }
 }
 
+/// The failure transition that was durably committed before observer delivery.
+///
+/// This is authoritative for the effective retry schedule. The timing retained
+/// on [`JobFailedEvent::failure`] is the handler's request, which may be ignored
+/// when the failure is dead-lettered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JobFailureDisposition {
+    /// Another attempt was scheduled from a relative delay.
     RetryScheduled {
+        /// Persisted positive delay, rounded up to millisecond precision.
         retry_delay_ms: i32,
+        /// Effective claim time calculated from the PostgreSQL completion clock.
         next_run_at: DateTime<Utc>,
     },
-    DeadLettered {
-        reason: JobDeadLetterReason,
+    /// Another attempt was scheduled from an absolute provider reset timestamp.
+    RetryScheduledAt {
+        /// Handler timestamp, rounded up to PostgreSQL microsecond precision.
+        requested_retry_at: DateTime<Utc>,
+        /// Effective claim time. This is the database completion time when the
+        /// requested timestamp had already passed.
+        next_run_at: DateTime<Utc>,
     },
+    /// No retry was scheduled and the job was dead-lettered.
+    DeadLettered { reason: JobDeadLetterReason },
+    /// A future persistence disposition unknown to this runtime version.
     Unknown,
 }
 
@@ -141,7 +157,9 @@ pub enum JobFailureDisposition {
 pub struct JobFailedEvent {
     pub job: ObservedJob,
     pub duration: Duration,
+    /// Handler failure, including any requested retry timing.
     pub failure: JobFailure,
+    /// Authoritative post-commit retry or dead-letter outcome.
     pub disposition: JobFailureDisposition,
 }
 

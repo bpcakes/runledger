@@ -2,7 +2,8 @@ use std::{fmt, time::Duration};
 
 use chrono::{DateTime, Utc};
 use runledger_core::jobs::{
-    JobEventType, JobFailure, JobFailureKind, JobStage, JobStatus, JobType, JobTypeName,
+    JobEventType, JobFailure, JobFailureKind, JobRetryTiming, JobStage, JobStatus, JobType,
+    JobTypeName,
 };
 use serde_json::Value;
 use sqlx::types::Uuid;
@@ -907,19 +908,38 @@ pub struct JobSuccessCompletionOutcome {
     pub progress_total: Option<i64>,
 }
 
+/// Failure details supplied to the persistence lifecycle.
+///
+/// `retry_timing` is a requested schedule. The returned completion disposition
+/// reports the effective schedule committed by PostgreSQL.
 #[derive(Debug, Clone)]
 pub struct JobFailureUpdate<'a> {
     pub kind: JobFailureKind,
     pub code: &'a str,
     pub message: &'a str,
-    pub retry_delay_ms: Option<i32>,
+    /// Required when the failure remains retryable. Terminal, panicked, and
+    /// attempts-exhausted failures ignore this value.
+    pub retry_timing: Option<JobRetryTiming>,
 }
 
+/// Durable outcome of completing one failed attempt.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobFailureCompletionDisposition {
+    /// Another attempt was scheduled from a relative delay.
     RetryScheduled {
+        /// Persisted positive delay, rounded up to millisecond precision.
         retry_delay_ms: i32,
+        /// Effective claim time calculated from the PostgreSQL completion clock.
+        next_run_at: DateTime<Utc>,
+    },
+    /// Another attempt was scheduled from an absolute provider reset timestamp.
+    RetryScheduledAt {
+        /// Absolute UTC time requested by the handler, rounded up to
+        /// PostgreSQL microsecond precision when necessary.
+        requested_retry_at: DateTime<Utc>,
+        /// Effective claim time. This equals the database completion clock when
+        /// `requested_retry_at` has already passed.
         next_run_at: DateTime<Utc>,
     },
     DeadLettered {

@@ -6,6 +6,13 @@ All notable changes to this workspace are documented here.
 
 ### Added
 
+- Add handler-selected retry timing with `JobRetryTiming`,
+  `JobFailure::retry_after`, and `JobFailure::retry_at`. Handler timing takes
+  precedence over registry overrides and exponential backoff; relative timing
+  uses the PostgreSQL completion clock, while absolute timing preserves provider
+  reset timestamps and makes past timestamps immediately eligible. Relative and
+  absolute schedules have distinct audit payloads and observer dispositions.
+  This uses the existing queue and attempt columns and requires no migration.
 - Add a forward continuation-metrics view migration that rejects malformed
   continuation event payloads while preserving both kindless 0.6 and
   discriminated 0.7 event compatibility.
@@ -15,6 +22,12 @@ All notable changes to this workspace are documented here.
 
 ### Changed
 
+- Breaking for direct struct-literal consumers: `JobFailure` now carries private
+  optional retry timing and must be built with its constructors, while
+  `JobFailureUpdate` replaces `retry_delay_ms` with `retry_timing`. Exhausted,
+  terminal, and panicked failures ignore timing; successfully scheduled
+  absolute retries use the new `RetryScheduledAt` completion and observer
+  dispositions.
 - Harden release preparation and publication with resumable version
   preparation, locked external-consumer resolution, packaged TUI verification,
   remote branch/tag preflights, and a dry-run push before crate publication.

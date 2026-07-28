@@ -13,9 +13,9 @@ handlers, process model, and admin surface.
 
 ## Features
 
-- **Durable Postgres-backed queue** — enqueue, claim, heartbeat, retry,
-  succeed, cancel, dead-letter, and requeue jobs. Survives restarts; no separate
-  broker.
+- **Durable Postgres-backed queue** — enqueue, claim, heartbeat, retry with
+  provider-directed timing, succeed, cancel, dead-letter, and requeue jobs.
+  Survives restarts; no separate broker.
 - **Worker runtime** — a `Supervisor` that runs worker, scheduler, and reaper
   loops with lease-based ownership, lease expiry recovery, and graceful shutdown.
 - **Workflow DAGs** — model dependent work declaratively. The engine validates
@@ -362,6 +362,53 @@ completion type was removed; use `JobCompletion::success()` or
 `JobProgressUpdate`. Completion disposition and final output are intentionally
 private; inspect them with `disposition()` / `output()` and use constructors
 rather than struct literals.
+
+### Handler-selected retry timing
+
+When a provider supplies a dynamic reset time, a handler can attach either a
+relative delay or an absolute UTC timestamp to a retryable failure:
+
+```rust
+use std::time::Duration;
+
+let transport_failure = JobFailure::retryable(
+    "provider.temporarily_unavailable",
+    "Provider asked the client to retry later.",
+)
+.retry_after(Duration::from_secs(30));
+
+let rate_limit_failure = JobFailure::retryable(
+    "provider.rate_limited",
+    "Provider rate limit reached.",
+)
+.retry_at(provider_reset_at);
+```
+
+This is a failed attempt, not an attempt-neutral defer or a successful
+continuation. It consumes the current run's attempt budget, keeps the same
+`run_number`, and does not release workflow dependents. If the failure remains
+retryable, handler-selected timing takes precedence over a registered
+job-type/failure-code retry-delay override, which takes precedence over
+Runledger's exponential backoff. Terminal and panicked failures, and failures
+that exhaust `max_attempts`, are dead-lettered without applying or validating
+the timing.
+
+`retry_after` is measured from the PostgreSQL completion clock; positive
+sub-millisecond values round up to one millisecond. Zero or unrepresentable
+relative delays become the terminal `job.invalid_retry_timing` handler failure.
+`retry_at` uses the supplied provider timestamp directly, rounded up only when
+needed for PostgreSQL microsecond precision. A timestamp at or before the
+database completion time makes the job immediately eligible, avoiding a
+worker-clock conversion. Timestamps outside PostgreSQL's supported range become
+the terminal `job.invalid_retry_timing` handler failure.
+
+Relative retries retain `retry_delay_ms` in the attempt and `RETRY_SCHEDULED`
+event. Absolute retries leave the attempt's relative-delay field empty and
+record `requested_retry_at` plus the effective `next_run_at` in the event.
+Lifecycle observers likewise distinguish
+`JobFailureDisposition::RetryScheduled` from `RetryScheduledAt`; the
+disposition is the committed schedule, while `JobFailure::retry_timing()` is the
+handler's request.
 
 ### Bounded job continuation
 

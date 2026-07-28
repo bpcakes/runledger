@@ -23,6 +23,7 @@ pub enum QueryErrorKind {
     JobLeaseOwnerMismatch,
     JobInvalidCompletionProgress,
     JobInvalidContinuationDelay,
+    JobInvalidRetryTiming,
     JobUnstartedClaimReleaseNotApplicable,
     JobWorkflowRequeueNotSupported,
     WorkflowReleaseConflict,

@@ -12,7 +12,7 @@ pub use identifiers::{
 };
 pub use runtime_types::{
     JobCompletion, JobCompletionDisposition, JobContext, JobDeadLetterInfo, JobDeadLetterReason,
-    JobFailure,
+    JobFailure, JobRetryTiming,
 };
 pub use status::{
     JobEventType, JobFailureKind, JobStage, JobStatus, WorkflowRunStatus, WorkflowStepStatus,

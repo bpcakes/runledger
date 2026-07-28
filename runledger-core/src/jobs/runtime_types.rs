@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -154,9 +155,10 @@ impl JobCompletion {
 mod tests {
     use std::time::Duration;
 
+    use chrono::{TimeZone, Utc};
     use serde_json::json;
 
-    use super::{JobCompletion, JobCompletionDisposition, JobContext};
+    use super::{JobCompletion, JobCompletionDisposition, JobContext, JobFailure, JobRetryTiming};
 
     #[test]
     fn continuation_constructors_preserve_progress_and_checkpoint_builders() {
@@ -239,6 +241,110 @@ mod tests {
 
         assert_eq!(context.checkpoint, None);
     }
+
+    #[test]
+    fn retry_timing_builders_use_the_last_selection() {
+        let retry_at = Utc
+            .with_ymd_and_hms(2026, 7, 28, 12, 30, 0)
+            .single()
+            .expect("valid reset timestamp");
+        let absolute = JobFailure::retryable("provider.rate_limited", "retry at reset")
+            .retry_after(Duration::from_secs(30))
+            .retry_at(retry_at);
+        assert_eq!(absolute.retry_timing(), Some(JobRetryTiming::At(retry_at)));
+
+        let relative = JobFailure::retryable("provider.rate_limited", "retry later")
+            .retry_at(retry_at)
+            .retry_after(Duration::from_secs(45));
+        assert_eq!(
+            relative.retry_timing(),
+            Some(JobRetryTiming::After(Duration::from_secs(45)))
+        );
+    }
+
+    #[test]
+    fn ordinary_failure_serialization_keeps_the_legacy_shape() {
+        let serialized = serde_json::to_value(JobFailure::retryable(
+            "job.test.retryable",
+            "retryable failure",
+        ))
+        .expect("serialize retryable failure");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "kind": "RETRYABLE",
+                "code": "job.test.retryable",
+                "message": "retryable failure"
+            })
+        );
+    }
+
+    #[test]
+    fn relative_retry_timing_serializes_exactly() {
+        let serialized = serde_json::to_value(
+            JobFailure::retryable("provider.rate_limited", "retry later")
+                .retry_after(Duration::from_millis(250)),
+        )
+        .expect("serialize timed retryable failure");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "kind": "RETRYABLE",
+                "code": "provider.rate_limited",
+                "message": "retry later",
+                "retry_timing": {
+                    "after": {
+                        "secs": 0,
+                        "nanos": 250_000_000
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn absolute_retry_timing_serializes_exactly() {
+        let retry_at = Utc
+            .with_ymd_and_hms(2026, 7, 28, 12, 30, 0)
+            .single()
+            .expect("valid reset timestamp");
+        let serialized = serde_json::to_value(
+            JobFailure::retryable("provider.rate_limited", "retry at reset").retry_at(retry_at),
+        )
+        .expect("serialize absolute retry timing");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "kind": "RETRYABLE",
+                "code": "provider.rate_limited",
+                "message": "retry at reset",
+                "retry_timing": {
+                    "at": "2026-07-28T12:30:00Z"
+                }
+            })
+        );
+    }
+}
+
+/// A handler-selected schedule for another attempt after a retryable failure.
+///
+/// This timing is consulted only when the failed attempt remains retryable.
+/// Terminal failures and failures that exhaust `max_attempts` are dead-lettered
+/// without validating or applying the requested timing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum JobRetryTiming {
+    /// Schedule another attempt after this duration, measured from the
+    /// persistence database's completion clock.
+    After(Duration),
+    /// Schedule another attempt at this absolute UTC provider reset time.
+    ///
+    /// A time that has already passed is treated as immediately eligible.
+    At(DateTime<Utc>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -246,6 +352,8 @@ pub struct JobFailure {
     pub kind: JobFailureKind,
     pub code: &'static str,
     pub message: Cow<'static, str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_timing: Option<JobRetryTiming>,
 }
 
 impl JobFailure {
@@ -259,6 +367,7 @@ impl JobFailure {
             kind,
             code,
             message: message.into(),
+            retry_timing: None,
         }
     }
 
@@ -285,6 +394,36 @@ impl JobFailure {
     #[must_use]
     pub fn panicked(code: &'static str, message: impl Into<Cow<'static, str>>) -> Self {
         Self::new(JobFailureKind::Panicked, code, message)
+    }
+
+    /// Requests another attempt after `delay` when this failure remains
+    /// retryable.
+    ///
+    /// The failed attempt still consumes the job's attempt budget. A positive
+    /// sub-millisecond delay is rounded up to one millisecond by persistence.
+    /// Zero or unrepresentable delays are converted into a terminal
+    /// `job.invalid_retry_timing` failure by the runtime.
+    #[must_use]
+    pub fn retry_after(mut self, delay: Duration) -> Self {
+        self.retry_timing = Some(JobRetryTiming::After(delay));
+        self
+    }
+
+    /// Requests another attempt at an absolute UTC provider reset time when
+    /// this failure remains retryable.
+    ///
+    /// The failed attempt still consumes the job's attempt budget. A timestamp
+    /// at or before persistence is treated as immediately eligible.
+    #[must_use]
+    pub fn retry_at(mut self, retry_at: DateTime<Utc>) -> Self {
+        self.retry_timing = Some(JobRetryTiming::At(retry_at));
+        self
+    }
+
+    /// Returns the handler-selected retry timing, if one was supplied.
+    #[must_use]
+    pub const fn retry_timing(&self) -> Option<JobRetryTiming> {
+        self.retry_timing
     }
 }
 
