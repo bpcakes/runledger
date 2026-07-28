@@ -16,7 +16,8 @@ pub use self::definitions::{
 pub(in crate::jobs) use self::dispatch::enqueue_replayed_job_with_outcome_tx;
 pub use self::dispatch::{
     claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
-    enqueue_job, enqueue_job_tx, enqueue_job_with_outcome_tx,
+    enqueue_job, enqueue_job_tx, enqueue_job_with_execution_resource,
+    enqueue_job_with_execution_resource_tx, enqueue_job_with_outcome_tx,
 };
 pub use self::lifecycle::{
     complete_job_continuation, complete_job_continuation_with_outcome, complete_job_failure,

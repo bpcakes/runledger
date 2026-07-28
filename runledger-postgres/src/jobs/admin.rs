@@ -1180,12 +1180,12 @@ mod tests {
                             run_number,
                             attempt,
                             &worker_id,
-                            &JobFailureUpdate {
-                                kind: JobFailureKind::Terminal,
-                                code: "job.test.snapshot_race",
-                                message: "terminal transition between recovery reads",
-                                retry_timing: None,
-                            },
+                            &JobFailureUpdate::new(
+                                JobFailureKind::Terminal,
+                                "job.test.snapshot_race",
+                                "terminal transition between recovery reads",
+                                None,
+                            ),
                         )
                         .await?;
                     }

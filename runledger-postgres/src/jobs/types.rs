@@ -780,6 +780,30 @@ pub struct ReapExpiredLeaseDeferredError {
     pub sqlstate: Option<String>,
 }
 
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReapExpiredLeaseCleanupOperation {
+    WorkflowActiveClaims,
+    ExecutionResourceClaims,
+}
+
+impl ReapExpiredLeaseCleanupOperation {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkflowActiveClaims => "workflow_active_claims",
+            Self::ExecutionResourceClaims => "execution_resource_claims",
+        }
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct ReapExpiredLeaseCleanupError {
+    pub operation: ReapExpiredLeaseCleanupOperation,
+    pub error: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReapExpiredLeasesResult {
     pub processed: i64,
@@ -793,6 +817,9 @@ pub struct ReapExpiredLeasesDetailedResult {
     pub reaped_leases: Vec<ReapedLeaseRecord>,
     pub deferred_row_error_count: usize,
     pub deferred_row_errors: Vec<ReapExpiredLeaseDeferredError>,
+    pub workflow_active_claims_released: u64,
+    pub execution_resource_claims_released: u64,
+    pub cleanup_errors: Vec<ReapExpiredLeaseCleanupError>,
 }
 
 #[derive(Debug, Clone)]
@@ -910,16 +937,42 @@ pub struct JobSuccessCompletionOutcome {
 
 /// Failure details supplied to the persistence lifecycle.
 ///
-/// `retry_timing` is a requested schedule. The returned completion disposition
-/// reports the effective schedule committed by PostgreSQL.
+/// `policy_retry_delay_ms` supplies the ordinary retry policy. `retry_timing`
+/// is an optional handler lower bound. PostgreSQL commits the later schedule.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct JobFailureUpdate<'a> {
     pub kind: JobFailureKind,
     pub code: &'a str,
     pub message: &'a str,
-    /// Required when the failure remains retryable. Terminal, panicked, and
-    /// attempts-exhausted failures ignore this value.
+    /// Optional handler-selected not-before lower bound.
     pub retry_timing: Option<JobRetryTiming>,
+    /// Required ordinary policy backoff when the failure remains retryable.
+    pub policy_retry_delay_ms: Option<i32>,
+}
+
+impl<'a> JobFailureUpdate<'a> {
+    #[must_use]
+    pub const fn new(
+        kind: JobFailureKind,
+        code: &'a str,
+        message: &'a str,
+        policy_retry_delay_ms: Option<i32>,
+    ) -> Self {
+        Self {
+            kind,
+            code,
+            message,
+            retry_timing: None,
+            policy_retry_delay_ms,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_retry_timing(mut self, retry_timing: JobRetryTiming) -> Self {
+        self.retry_timing = Some(retry_timing);
+        self
+    }
 }
 
 /// Durable outcome of completing one failed attempt.
@@ -933,13 +986,12 @@ pub enum JobFailureCompletionDisposition {
         /// Effective claim time calculated from the PostgreSQL completion clock.
         next_run_at: DateTime<Utc>,
     },
-    /// Another attempt was scheduled from an absolute provider reset timestamp.
+    /// The handler's lower bound selected the effective retry schedule.
     RetryScheduledAt {
-        /// Absolute UTC time requested by the handler, rounded up to
-        /// PostgreSQL microsecond precision when necessary.
+        /// Handler not-before time, rounded up to PostgreSQL microsecond
+        /// precision when necessary.
         requested_retry_at: DateTime<Utc>,
-        /// Effective claim time. This equals the database completion clock when
-        /// `requested_retry_at` has already passed.
+        /// Effective claim time. This is never earlier than policy backoff.
         next_run_at: DateTime<Utc>,
     },
     DeadLettered {

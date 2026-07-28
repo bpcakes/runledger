@@ -21,6 +21,9 @@ pub(super) enum WorkflowStepBuildValidationError {
         step_key: String,
         timeout_seconds: i32,
     },
+    InvalidStepExecutionResourceKey {
+        step_key: String,
+    },
     ExternalStepJobTypeNotAllowed {
         step_key: String,
     },
@@ -62,6 +65,9 @@ impl From<WorkflowStepBuildValidationError> for WorkflowBuildError {
                 step_key,
                 timeout_seconds,
             },
+            WorkflowStepBuildValidationError::InvalidStepExecutionResourceKey { step_key } => {
+                Self::InvalidStepExecutionResourceKey { step_key }
+            }
             WorkflowStepBuildValidationError::ExternalStepJobTypeNotAllowed { step_key } => {
                 Self::ExternalStepJobTypeNotAllowed { step_key }
             }
@@ -124,6 +130,15 @@ pub(super) fn validate_step_enqueue(
                     },
                 );
             }
+            if let Some(resource_key) = step.execution_resource_key
+                && (resource_key.trim().is_empty() || resource_key.len() > 512)
+            {
+                return Err(
+                    WorkflowStepBuildValidationError::InvalidStepExecutionResourceKey {
+                        step_key: step.step_key.as_str().to_owned(),
+                    },
+                );
+            }
         }
         WorkflowStepExecutionKind::External => {
             if step.job_type.is_some() {
@@ -137,6 +152,8 @@ pub(super) fn validate_step_enqueue(
                 || step.max_attempts.is_some()
                 || step.timeout_seconds.is_some()
                 || step.stage.is_some()
+                || step.allow_handler_continuation
+                || step.execution_resource_key.is_some()
             {
                 return Err(
                     WorkflowStepBuildValidationError::ExternalStepQueueSettingsNotAllowed {

@@ -9,12 +9,15 @@ use sqlx::types::Uuid;
 use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::{DbTx, Error, Result};
 
+use super::super::errors::workflow_handler_continuation_not_enabled_error;
 use super::super::row_decode::{
     parse_job_stage, parse_job_type_name, parse_workflow_release_mode, parse_workflow_run_status,
     parse_workflow_step_execution_kind, parse_workflow_step_status,
 };
 use super::super::rows::WorkflowStepRow;
+use super::super::types::HANDLER_CONTINUATION_REASON;
 use super::super::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowStepDbRecord};
+use super::active_claims::release_or_defer_workflow_active_claim_tx;
 use super::errors::{
     workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
     workflow_external_completion_metadata_conflict_error,
@@ -180,6 +183,101 @@ pub(crate) async fn mark_workflow_step_enqueued_for_retry_tx(
     .map_err(|error| {
         Error::from_query_sqlx_with_context("mark workflow step enqueued for retry", error)
     })?;
+
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct WorkflowHandlerContinuationRow {
+    id: Uuid,
+    job_id: Option<Uuid>,
+    execution_kind: String,
+    status: String,
+    allow_handler_continuation: bool,
+}
+
+pub(crate) async fn mark_workflow_step_enqueued_for_handler_continuation_tx(
+    tx: &mut DbTx<'_>,
+    job_id: Uuid,
+    workflow_step_id: Uuid,
+) -> Result<()> {
+    // Lifecycle continuation already owns job_queue(id), preserving the
+    // repository-wide job-row-before-workflow-step lock order.
+    let row = sqlx::query_as::<_, WorkflowHandlerContinuationRow>(
+        "SELECT
+            id,
+            job_id,
+            execution_kind::text AS execution_kind,
+            status::text AS status,
+            allow_handler_continuation
+         FROM workflow_steps
+         WHERE id = $1
+         /* runledger:lock_workflow_step_for_handler_continuation */
+         FOR UPDATE",
+    )
+    .bind(workflow_step_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("lock workflow step for handler continuation", error)
+    })?
+    .ok_or_else(|| {
+        workflow_internal_state_error(format!(
+            "workflow-managed job {job_id} links to missing workflow step {workflow_step_id}"
+        ))
+    })?;
+
+    let execution_kind = parse_workflow_step_execution_kind(row.execution_kind)?;
+    let status = parse_workflow_step_status(row.status)?;
+    if row.id != workflow_step_id
+        || row.job_id != Some(job_id)
+        || execution_kind != WorkflowStepExecutionKind::Job
+        || status != WorkflowStepStatus::Running
+    {
+        return Err(workflow_internal_state_error(format!(
+            "workflow handler continuation linkage/status mismatch: job_id={job_id}, workflow_step_id={workflow_step_id}, stored_job_id={:?}, execution_kind={}, status={}",
+            row.job_id,
+            execution_kind.as_db_value(),
+            status.as_db_value()
+        )));
+    }
+    if !row.allow_handler_continuation {
+        return Err(workflow_handler_continuation_not_enabled_error());
+    }
+
+    let updated_step_id = sqlx::query_scalar!(
+        "UPDATE workflow_steps
+         SET status = 'ENQUEUED',
+             finished_at = NULL,
+             status_reason = $3,
+             last_error_code = NULL,
+             last_error_message = NULL,
+             output = NULL,
+             updated_at = now()
+         WHERE id = $1
+           AND job_id = $2
+           AND execution_kind = 'JOB'
+           AND status = 'RUNNING'
+           AND allow_handler_continuation
+         RETURNING id",
+        workflow_step_id,
+        job_id,
+        HANDLER_CONTINUATION_REASON,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context(
+            "mark workflow step enqueued for handler continuation",
+            error,
+        )
+    })?;
+
+    if updated_step_id != Some(workflow_step_id) {
+        return Err(workflow_internal_state_error(format!(
+            "workflow handler continuation expected exactly one workflow step update for job_id={job_id}, workflow_step_id={workflow_step_id}"
+        )));
+    }
 
     Ok(())
 }
@@ -355,6 +453,8 @@ pub async fn complete_external_workflow_step_tx(
             ws.max_attempts,
             ws.timeout_seconds,
             ws.stage,
+            ws.allow_handler_continuation,
+            ws.execution_resource_key,
             ws.status::text AS \"status!\",
             ws.job_id,
             ws.released_at,
@@ -457,6 +557,8 @@ pub async fn complete_external_workflow_step_tx(
             max_attempts,
             timeout_seconds,
             stage,
+            allow_handler_continuation,
+            execution_resource_key,
             status::text AS \"status!\",
             job_id,
             released_at,
@@ -546,6 +648,7 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                     max_attempts,
                     timeout_seconds,
                     stage,
+                    execution_resource_key,
                     status::text AS \"status!\",
                     dependency_count_pending,
                     dependency_count_unsatisfied",
@@ -572,6 +675,7 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                 max_attempts: row.max_attempts,
                 timeout_seconds: row.timeout_seconds,
                 stage: row.stage.map(parse_job_stage).transpose()?,
+                execution_resource_key: row.execution_resource_key,
             });
             let status = parse_workflow_step_status(row.status)?;
             let dependency_count_pending: i32 = row.dependency_count_pending;
@@ -745,6 +849,7 @@ pub(crate) async fn recompute_workflow_run_statuses_tx(
             && next_status.is_terminal()
             && !previous_status.is_terminal()
         {
+            release_or_defer_workflow_active_claim_tx(tx, *workflow_run_id).await?;
             notify_workflow_run_terminal_tx(tx, *workflow_run_id, next_status).await?;
         }
     }

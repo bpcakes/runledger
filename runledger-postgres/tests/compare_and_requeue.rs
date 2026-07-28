@@ -934,6 +934,10 @@ async fn workflow_managed_job_is_rejected_from_the_locked_candidate() {
         panic!("expected workflow requeue validation error");
     };
     assert_eq!(error.code(), "job.workflow_requeue_not_supported");
+    assert_eq!(
+        error.client_message(),
+        "Workflow-managed jobs cannot be requeued directly."
+    );
     assert_job_row_is_not_locked(&pool, job_id, "workflow rejection").await;
     tx.rollback().await.expect("rollback rejected recovery");
 
@@ -977,12 +981,12 @@ async fn dead_lettered_status_is_requeueable_with_an_exact_run_match() {
         claim.run_number,
         claim.attempt,
         worker_id,
-        &JobFailureUpdate {
-            kind: JobFailureKind::Terminal,
-            code: "job.test.dead_letter",
-            message: "dead letter before recovery",
-            retry_timing: None,
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Terminal,
+            "job.test.dead_letter",
+            "dead letter before recovery",
+            None,
+        ),
     )
     .await
     .expect("dead-letter job");
@@ -1025,12 +1029,12 @@ async fn dead_lettered_status_is_requeueable_with_an_exact_run_match() {
             .worker_id
             .as_deref()
             .expect("second claimed worker id"),
-        &JobFailureUpdate {
-            kind: JobFailureKind::Terminal,
-            code: "job.test.dead_letter_again",
-            message: "dead letter before reset recovery",
-            retry_timing: None,
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Terminal,
+            "job.test.dead_letter_again",
+            "dead letter before reset recovery",
+            None,
+        ),
     )
     .await
     .expect("dead-letter preserved recovery run");

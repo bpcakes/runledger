@@ -8,6 +8,7 @@ use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::jobs::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowRunDbRecord};
 use crate::{DbTx, Error, Result};
 
+use super::super::active_claims::release_or_defer_workflow_active_claim_tx;
 use super::super::errors::workflow_internal_state_error;
 use super::super::locking::{
     LockedWorkflowStepState, lock_workflow_run_for_update_tx,
@@ -129,6 +130,10 @@ pub async fn cancel_workflow_run_tx(
     }
 
     recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
+    // Cancellation marks the run terminal before recompute, so recompute does
+    // not observe a nonterminal-to-terminal transition for this run. Release
+    // (or defer) its active claim explicitly after all jobs are canceled.
+    release_or_defer_workflow_active_claim_tx(tx, workflow_run.id).await?;
     load_workflow_run_by_id_tx(tx, workflow_run.id, "load workflow run after cancel").await
 }
 

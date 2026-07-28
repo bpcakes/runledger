@@ -61,11 +61,13 @@ struct ReplayCandidateRow {
     #[sqlx(flatten)]
     job: JobQueueRow,
     workflow_step_id: Option<Uuid>,
+    execution_resource_key: Option<String>,
 }
 
 struct ReplayCandidate {
     job: JobQueueRecord,
     workflow_managed: bool,
+    execution_resource_key: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -165,6 +167,7 @@ fn replay_candidate_from_row(row: ReplayCandidateRow) -> Result<ReplayCandidate>
     Ok(ReplayCandidate {
         job,
         workflow_managed,
+        execution_resource_key: row.execution_resource_key,
     })
 }
 
@@ -177,7 +180,8 @@ async fn lock_eligible_replay_source_tx(
     let sql = format!(
         "SELECT
             {JOB_QUEUE_COLUMNS_SQL},
-            workflow_step_id
+            workflow_step_id,
+            execution_resource_key
          FROM job_queue
          WHERE id = $1
            AND organization_id IS NOT DISTINCT FROM $2::uuid
@@ -208,7 +212,8 @@ async fn load_replay_source_for_classification_tx(
     let sql = format!(
         "SELECT
             {JOB_QUEUE_COLUMNS_SQL},
-            workflow_step_id
+            workflow_step_id,
+            execution_resource_key
          FROM job_queue
          WHERE id = $1
            AND organization_id IS NOT DISTINCT FROM $2::uuid"
@@ -228,11 +233,11 @@ async fn load_replay_source_for_classification_tx(
 async fn lock_replay_source_tx(
     tx: &mut DbTx<'_>,
     request: &CompareAndReplaySucceededJob<'_>,
-) -> Result<std::result::Result<JobQueueRecord, CompareAndReplaySucceededJobOutcome>> {
+) -> Result<std::result::Result<ReplayCandidate, CompareAndReplaySucceededJobOutcome>> {
     loop {
         if let Some(candidate) = lock_eligible_replay_source_tx(tx, request).await? {
             debug_assert!(!candidate.workflow_managed);
-            return Ok(Ok(candidate.job));
+            return Ok(Ok(candidate));
         }
 
         let Some(actual) = load_replay_source_for_classification_tx(tx, request).await? else {
@@ -302,12 +307,12 @@ async fn compare_and_replay_succeeded_job_read_committed_tx(
     }
 
     let replay_payload = JobEnqueue {
-        job_type: source.job_type.as_borrowed(),
-        organization_id: source.organization_id,
-        payload: &source.payload,
-        priority: Some(source.priority),
-        max_attempts: Some(source.max_attempts),
-        timeout_seconds: Some(source.timeout_seconds),
+        job_type: source.job.job_type.as_borrowed(),
+        organization_id: source.job.organization_id,
+        payload: &source.job.payload,
+        priority: Some(source.job.priority),
+        max_attempts: Some(source.job.max_attempts),
+        timeout_seconds: Some(source.job.timeout_seconds),
         next_run_at: None,
         idempotency_key: None,
         stage: Some(JobStage::Queued),
@@ -315,9 +320,10 @@ async fn compare_and_replay_succeeded_job_read_committed_tx(
     let replay = enqueue_replayed_job_with_outcome_tx(
         tx,
         &replay_payload,
+        source.execution_resource_key.as_deref(),
         EnqueuedEventPayload::SuccessfulReplay {
-            replayed_from_job_id: source.id,
-            replayed_from_run_number: source.run_number,
+            replayed_from_job_id: source.job.id,
+            replayed_from_run_number: source.job.run_number,
             replay_request_key: request.replay_request_key,
             reason: request.reason,
         },
@@ -335,8 +341,8 @@ async fn compare_and_replay_succeeded_job_read_committed_tx(
          )
          VALUES ($1, $2, $3, $4, $5)",
     )
-    .bind(source.id)
-    .bind(source.run_number)
+    .bind(source.job.id)
+    .bind(source.job.run_number)
     .bind(request.replay_request_key)
     .bind(replay.job_id)
     .bind(request.reason)
@@ -345,8 +351,8 @@ async fn compare_and_replay_succeeded_job_read_committed_tx(
     .map_err(|error| Error::from_query_sqlx_with_context("record successful job replay", error))?;
 
     Ok(CompareAndReplaySucceededJobOutcome::Replayed {
-        source_job_id: source.id,
-        source_run_number: source.run_number,
+        source_job_id: source.job.id,
+        source_run_number: source.job.run_number,
         replay,
     })
 }

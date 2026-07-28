@@ -105,6 +105,8 @@ pub(in crate::jobs::workflows) async fn insert_workflow_step_record_tx(
             max_attempts,
             timeout_seconds,
             stage,
+            allow_handler_continuation,
+            execution_resource_key,
             status,
             dependency_count_total,
             dependency_count_pending,
@@ -121,10 +123,12 @@ pub(in crate::jobs::workflows) async fn insert_workflow_step_record_tx(
             $8,
             $9,
             $10,
-            'BLOCKED',
             $11,
             $12,
-            $13
+            'BLOCKED',
+            $13,
+            $14,
+            $15
          )
          RETURNING id",
         workflow_run_id,
@@ -137,6 +141,8 @@ pub(in crate::jobs::workflows) async fn insert_workflow_step_record_tx(
         max_attempts,
         timeout_seconds,
         stage,
+        step.allows_handler_continuation(),
+        step.execution_resource_key(),
         dependency_count_total,
         dependency_count_pending,
         dependency_count_unsatisfied,

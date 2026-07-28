@@ -25,6 +25,7 @@ pub enum QueryErrorKind {
     JobInvalidContinuationDelay,
     JobInvalidRetryTiming,
     JobUnstartedClaimReleaseNotApplicable,
+    JobWorkflowHandlerContinuationNotEnabled,
     JobWorkflowRequeueNotSupported,
     WorkflowReleaseConflict,
 }

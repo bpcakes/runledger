@@ -17,6 +17,7 @@ pub struct WorkflowDagDependencyValidationInput<'a> {
 /// This DTO lets callers validate a workflow DAG without first constructing a
 /// full [`WorkflowRunEnqueue`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct WorkflowDagStepValidationInput<'a> {
     /// Unique key for this step within the workflow.
     pub step_key: StepKey<'a>,
@@ -34,8 +35,72 @@ pub struct WorkflowDagStepValidationInput<'a> {
     pub timeout_seconds: Option<i32>,
     /// Initial job stage for queued job steps.
     pub stage: Option<JobStage>,
+    /// Whether a queued job step may continue as another handler-owned run.
+    pub allow_handler_continuation: bool,
+    /// Optional single-permit resource owned while a queued job is leased.
+    pub execution_resource_key: Option<&'a str>,
     /// Dependencies declared by this step.
     pub dependencies: Vec<WorkflowDagDependencyValidationInput<'a>>,
+}
+
+impl<'a> WorkflowDagStepValidationInput<'a> {
+    /// Creates a lightweight DAG step with optional queue settings disabled.
+    #[must_use]
+    pub fn new(
+        step_key: StepKey<'a>,
+        execution_kind: WorkflowStepExecutionKind,
+        job_type: Option<JobType<'a>>,
+        dependencies: Vec<WorkflowDagDependencyValidationInput<'a>>,
+    ) -> Self {
+        Self {
+            step_key,
+            execution_kind,
+            job_type,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            stage: None,
+            allow_handler_continuation: false,
+            execution_resource_key: None,
+            dependencies,
+        }
+    }
+
+    #[must_use]
+    pub const fn priority(mut self, priority: Option<i32>) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    #[must_use]
+    pub const fn max_attempts(mut self, max_attempts: Option<i32>) -> Self {
+        self.max_attempts = max_attempts;
+        self
+    }
+
+    #[must_use]
+    pub const fn timeout_seconds(mut self, timeout_seconds: Option<i32>) -> Self {
+        self.timeout_seconds = timeout_seconds;
+        self
+    }
+
+    #[must_use]
+    pub const fn stage(mut self, stage: Option<JobStage>) -> Self {
+        self.stage = stage;
+        self
+    }
+
+    #[must_use]
+    pub const fn allow_handler_continuation(mut self, allow: bool) -> Self {
+        self.allow_handler_continuation = allow;
+        self
+    }
+
+    #[must_use]
+    pub const fn execution_resource_key(mut self, resource_key: Option<&'a str>) -> Self {
+        self.execution_resource_key = resource_key;
+        self
+    }
 }
 
 /// Error returned by workflow DAG validation helpers.
@@ -58,6 +123,10 @@ pub enum WorkflowDagValidationError {
     },
     /// The workflow idempotency key was blank.
     BlankIdempotencyKey,
+    /// The reusable workflow active key was blank.
+    BlankActiveKey,
+    /// The reusable workflow active key exceeded 512 bytes.
+    ActiveKeyTooLong,
     /// The workflow result step key was blank.
     BlankResultStepKey,
     /// The workflow result step key does not match any step.
@@ -78,6 +147,11 @@ pub enum WorkflowDagValidationError {
         step_key: String,
         /// The invalid timeout value in seconds.
         timeout_seconds: i32,
+    },
+    /// A job step execution-resource key was blank or exceeded 512 bytes.
+    InvalidStepExecutionResourceKey {
+        /// The step with the invalid resource key.
+        step_key: String,
     },
     /// An external step incorrectly supplied a job type.
     ExternalStepJobTypeNotAllowed {
@@ -175,6 +249,15 @@ pub fn validate_workflow_dag(
                         timeout_seconds,
                     });
                 }
+                if let Some(resource_key) = step.execution_resource_key
+                    && (resource_key.trim().is_empty() || resource_key.len() > 512)
+                {
+                    return Err(
+                        WorkflowDagValidationError::InvalidStepExecutionResourceKey {
+                            step_key: step.step_key.as_str().to_owned(),
+                        },
+                    );
+                }
             }
             WorkflowStepExecutionKind::External => {
                 if step.job_type.is_some() {
@@ -186,6 +269,8 @@ pub fn validate_workflow_dag(
                     || step.max_attempts.is_some()
                     || step.timeout_seconds.is_some()
                     || step.stage.is_some()
+                    || step.allow_handler_continuation
+                    || step.execution_resource_key.is_some()
                 {
                     return Err(
                         WorkflowDagValidationError::ExternalStepQueueSettingsNotAllowed {
@@ -288,6 +373,18 @@ pub fn validate_workflow_run_enqueue(
         return Err(WorkflowDagValidationError::BlankIdempotencyKey);
     }
     if payload
+        .active_key()
+        .is_some_and(|active_key| active_key.trim().is_empty())
+    {
+        return Err(WorkflowDagValidationError::BlankActiveKey);
+    }
+    if payload
+        .active_key()
+        .is_some_and(|active_key| active_key.len() > 512)
+    {
+        return Err(WorkflowDagValidationError::ActiveKeyTooLong);
+    }
+    if payload
         .result_step_key()
         .is_some_and(|step_key| step_key.as_str().trim().is_empty())
     {
@@ -297,21 +394,26 @@ pub fn validate_workflow_run_enqueue(
     let steps = payload
         .steps()
         .iter()
-        .map(|step| WorkflowDagStepValidationInput {
-            step_key: step.step_key(),
-            execution_kind: step.execution_kind(),
-            job_type: step.job_type(),
-            priority: step.priority(),
-            max_attempts: step.max_attempts(),
-            timeout_seconds: step.timeout_seconds(),
-            stage: step.stage(),
-            dependencies: step
+        .map(|step| {
+            let dependencies = step
                 .dependencies()
                 .iter()
                 .map(|dependency| WorkflowDagDependencyValidationInput {
                     prerequisite_step_key: dependency.prerequisite_step_key,
                 })
-                .collect(),
+                .collect();
+            WorkflowDagStepValidationInput::new(
+                step.step_key(),
+                step.execution_kind(),
+                step.job_type(),
+                dependencies,
+            )
+            .priority(step.priority())
+            .max_attempts(step.max_attempts())
+            .timeout_seconds(step.timeout_seconds())
+            .stage(step.stage())
+            .allow_handler_continuation(step.allows_handler_continuation())
+            .execution_resource_key(step.execution_resource_key())
         })
         .collect::<Vec<_>>();
 
@@ -374,6 +476,9 @@ pub fn validate_workflow_step_append(
                 step_key,
                 timeout_seconds,
             },
+            WorkflowStepBuildValidationError::InvalidStepExecutionResourceKey { step_key } => {
+                WorkflowDagValidationError::InvalidStepExecutionResourceKey { step_key }
+            }
             WorkflowStepBuildValidationError::ExternalStepJobTypeNotAllowed { step_key } => {
                 WorkflowDagValidationError::ExternalStepJobTypeNotAllowed { step_key }
             }

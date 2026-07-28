@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use runledger_core::jobs::{
     JobCompletion, JobCompletionDisposition, JobContext, JobDeadLetterInfo, JobFailure,
-    JobFailureKind, JobRetryTiming,
+    JobFailureKind,
 };
 use runledger_postgres::QueryErrorKind;
 use runledger_postgres::jobs::{
@@ -331,17 +331,21 @@ pub(super) async fn complete_job_failure_after_handler(
 ) {
     let mut invalid_retry_timing_rewritten = false;
     loop {
-        let retry_timing = if is_non_retryable_failure_kind(failure.kind) {
+        let policy_retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
             None
         } else {
-            Some(retry_timing_for_failure(registry, job, &failure))
+            Some(policy_retry_delay_ms_for_failure(registry, job, &failure))
         };
         let completion_result = {
-            let failure_payload = JobFailureUpdate {
-                kind: failure.kind,
-                code: failure.code,
-                message: failure.message.as_ref(),
-                retry_timing,
+            let failure_payload = JobFailureUpdate::new(
+                failure.kind,
+                failure.code,
+                failure.message.as_ref(),
+                policy_retry_delay_ms,
+            );
+            let failure_payload = match failure.retry_timing() {
+                Some(retry_timing) => failure_payload.with_retry_timing(retry_timing),
+                None => failure_payload,
             };
             jobs::complete_job_failure_with_outcome(
                 pool,
@@ -545,14 +549,17 @@ fn invalid_continuation_failure_from_error(
                 query_error.internal_message()
             ),
         )),
-        Some(QueryErrorKind::JobWorkflowRequeueNotSupported) => Some(JobFailure::terminal(
-            query_error.code(),
-            "Handler continuation is supported only for direct jobs, not workflow-managed jobs.",
-        )),
+        Some(QueryErrorKind::JobWorkflowHandlerContinuationNotEnabled) => {
+            Some(JobFailure::terminal(
+                query_error.code(),
+                "Workflow step handler continuation is not enabled for this job.",
+            ))
+        }
         Some(
             QueryErrorKind::JobLeaseOwnerMismatch
             | QueryErrorKind::JobInvalidRetryTiming
             | QueryErrorKind::JobUnstartedClaimReleaseNotApplicable
+            | QueryErrorKind::JobWorkflowRequeueNotSupported
             | QueryErrorKind::WorkflowReleaseConflict,
         )
         | None => None,
@@ -590,17 +597,14 @@ fn is_non_retryable_failure_kind(kind: JobFailureKind) -> bool {
     matches!(kind, JobFailureKind::Terminal | JobFailureKind::Panicked)
 }
 
-fn retry_timing_for_failure(
+fn policy_retry_delay_ms_for_failure(
     registry: &JobRegistry,
     job: &jobs::JobQueueRecord,
     failure: &JobFailure,
-) -> JobRetryTiming {
-    failure.retry_timing().unwrap_or_else(|| {
-        let retry_delay_ms = registry
-            .retry_delay_override(job.job_type.as_borrowed(), failure.code)
-            .unwrap_or_else(|| compute_retry_delay_ms(job.attempt, job.id));
-        JobRetryTiming::After(Duration::from_millis(retry_delay_ms as u64))
-    })
+) -> i32 {
+    registry
+        .retry_delay_override(job.job_type.as_borrowed(), failure.code)
+        .unwrap_or_else(|| compute_retry_delay_ms(job.attempt, job.id))
 }
 
 fn log_completion_success_persist_error(

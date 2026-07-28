@@ -8,11 +8,15 @@ use crate::{DbPool, DbTx, Error, Result};
 use super::super::errors::validate_positive_retry_delay;
 use super::super::row_decode::parse_job_type_name;
 use super::super::types::{
-    ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult,
-    ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord,
+    ReapExpiredLeaseCleanupError, ReapExpiredLeaseCleanupOperation, ReapExpiredLeaseDeferredError,
+    ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult, ReapedLeaseDisposition,
+    ReapedLeaseRecord, ReapedTerminalLeaseRecord,
 };
-use super::super::workflows::{on_retry_scheduled, on_terminal};
+use super::super::workflows::{
+    on_retry_scheduled, on_terminal, release_quiesced_workflow_active_claims_tx,
+};
 use super::attempts::ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART;
+use super::dispatch::release_expired_execution_resource_claims_tx;
 use super::release::{
     TryReleaseUnstartedClaimResult, UnstartedClaimIdentity, try_release_unstarted_job_claim_tx,
 };
@@ -187,6 +191,30 @@ pub async fn reap_expired_leases_with_diagnostics(
     tx.commit()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
+
+    let mut cleanup_errors = Vec::new();
+    let workflow_active_claims_released =
+        match cleanup_quiesced_workflow_active_claims(pool, limit).await {
+            Ok(released) => released,
+            Err(error) => {
+                cleanup_errors.push(ReapExpiredLeaseCleanupError {
+                    operation: ReapExpiredLeaseCleanupOperation::WorkflowActiveClaims,
+                    error: error.to_string(),
+                });
+                0
+            }
+        };
+    let execution_resource_claims_released =
+        match cleanup_expired_execution_resource_claims(pool, limit).await {
+            Ok(released) => released,
+            Err(error) => {
+                cleanup_errors.push(ReapExpiredLeaseCleanupError {
+                    operation: ReapExpiredLeaseCleanupOperation::ExecutionResourceClaims,
+                    error: error.to_string(),
+                });
+                0
+            }
+        };
     let terminal_dead_lettered = terminal_dead_lettered_from(&reaped_leases);
 
     Ok(ReapExpiredLeasesDetailedResult {
@@ -197,7 +225,34 @@ pub async fn reap_expired_leases_with_diagnostics(
         reaped_leases,
         deferred_row_error_count,
         deferred_row_errors,
+        workflow_active_claims_released,
+        execution_resource_claims_released,
+        cleanup_errors,
     })
+}
+
+async fn cleanup_quiesced_workflow_active_claims(pool: &DbPool, limit: i64) -> Result<u64> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    let released = release_quiesced_workflow_active_claims_tx(&mut tx, limit).await?;
+    tx.commit()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    Ok(released)
+}
+
+async fn cleanup_expired_execution_resource_claims(pool: &DbPool, limit: i64) -> Result<u64> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    let released = release_expired_execution_resource_claims_tx(&mut tx, limit).await?;
+    tx.commit()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    Ok(released)
 }
 
 struct ReapExpiredLeaseRow {

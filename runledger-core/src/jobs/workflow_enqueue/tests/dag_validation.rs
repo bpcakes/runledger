@@ -18,23 +18,21 @@ fn dag_step<'a>(
     stage: Option<JobStage>,
     dependencies: Vec<&'a str>,
 ) -> WorkflowDagStepValidationInput<'a> {
-    WorkflowDagStepValidationInput {
-        step_key: StepKey::new(step_key),
+    let dependencies = dependencies
+        .into_iter()
+        .map(
+            |prerequisite_step_key| WorkflowDagDependencyValidationInput {
+                prerequisite_step_key: StepKey::new(prerequisite_step_key),
+            },
+        )
+        .collect();
+    WorkflowDagStepValidationInput::new(
+        StepKey::new(step_key),
         execution_kind,
-        job_type: job_type.map(JobType::new),
-        priority: None,
-        max_attempts: None,
-        timeout_seconds: None,
-        stage,
-        dependencies: dependencies
-            .into_iter()
-            .map(
-                |prerequisite_step_key| WorkflowDagDependencyValidationInput {
-                    prerequisite_step_key: StepKey::new(prerequisite_step_key),
-                },
-            )
-            .collect(),
-    }
+        job_type.map(JobType::new),
+        dependencies,
+    )
+    .stage(stage)
 }
 
 #[test]
@@ -42,28 +40,20 @@ fn workflow_dag_validation_rejects_missing_dependencies() {
     let result = validate_workflow_dag(
         WorkflowType::new("workflow.test"),
         &[
-            WorkflowDagStepValidationInput {
-                step_key: StepKey::new("a"),
-                execution_kind: WorkflowStepExecutionKind::Job,
-                job_type: Some(JobType::new("jobs.test.a")),
-                priority: None,
-                max_attempts: None,
-                timeout_seconds: None,
-                stage: Some(JobStage::Queued),
-                dependencies: Vec::new(),
-            },
-            WorkflowDagStepValidationInput {
-                step_key: StepKey::new("b"),
-                execution_kind: WorkflowStepExecutionKind::Job,
-                job_type: Some(JobType::new("jobs.test.b")),
-                priority: None,
-                max_attempts: None,
-                timeout_seconds: None,
-                stage: Some(JobStage::Queued),
-                dependencies: vec![WorkflowDagDependencyValidationInput {
-                    prerequisite_step_key: StepKey::new("missing"),
-                }],
-            },
+            dag_step(
+                "a",
+                WorkflowStepExecutionKind::Job,
+                Some("jobs.test.a"),
+                Some(JobStage::Queued),
+                vec![],
+            ),
+            dag_step(
+                "b",
+                WorkflowStepExecutionKind::Job,
+                Some("jobs.test.b"),
+                Some(JobStage::Queued),
+                vec!["missing"],
+            ),
         ],
     );
 
@@ -267,6 +257,7 @@ fn validate_workflow_run_enqueue_returns_dag_errors() {
         organization_id: None,
         metadata: &metadata,
         idempotency_key: None,
+        active_key: None,
         result_step_key: None,
         steps: vec![WorkflowStepEnqueue {
             step_key: StepKey::new("a"),
@@ -278,6 +269,8 @@ fn validate_workflow_run_enqueue_returns_dag_errors() {
             max_attempts: None,
             timeout_seconds: None,
             stage: Some(JobStage::Queued),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
             dependencies: vec![WorkflowStepDependencySpec {
                 prerequisite_step_key: StepKey::new("a"),
                 release_mode: None,
@@ -299,6 +292,7 @@ fn validate_workflow_run_enqueue_rejects_blank_result_step_key() {
         organization_id: None,
         metadata: &metadata,
         idempotency_key: None,
+        active_key: None,
         result_step_key: Some(StepKey::new(" ")),
         steps: vec![WorkflowStepEnqueue {
             step_key: StepKey::new("a"),
@@ -310,6 +304,8 @@ fn validate_workflow_run_enqueue_rejects_blank_result_step_key() {
             max_attempts: None,
             timeout_seconds: None,
             stage: Some(JobStage::Queued),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
             dependencies: Vec::new(),
         }],
     };
@@ -328,6 +324,7 @@ fn validate_workflow_run_enqueue_rejects_unknown_result_step_key() {
         organization_id: None,
         metadata: &metadata,
         idempotency_key: None,
+        active_key: None,
         result_step_key: Some(StepKey::new("missing")),
         steps: vec![WorkflowStepEnqueue {
             step_key: StepKey::new("a"),
@@ -339,6 +336,8 @@ fn validate_workflow_run_enqueue_rejects_unknown_result_step_key() {
             max_attempts: None,
             timeout_seconds: None,
             stage: Some(JobStage::Queued),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
             dependencies: Vec::new(),
         }],
     };
@@ -367,6 +366,8 @@ fn validate_workflow_step_append_rejects_blank_new_step_key() {
         max_attempts: None,
         timeout_seconds: None,
         stage: Some(JobStage::Queued),
+        allow_handler_continuation: false,
+        execution_resource_key: None,
         dependencies: Vec::new(),
     }];
 
@@ -392,6 +393,8 @@ fn validate_workflow_step_append_rejects_duplicate_existing_step_key() {
         max_attempts: None,
         timeout_seconds: None,
         stage: Some(JobStage::Queued),
+        allow_handler_continuation: false,
+        execution_resource_key: None,
         dependencies: Vec::new(),
     }];
 
@@ -430,16 +433,36 @@ fn workflow_dag_validation_rejects_job_type_on_external_step() {
 fn workflow_dag_validation_rejects_queue_settings_on_external_step() {
     let result = validate_workflow_dag(
         WorkflowType::new("workflow.test"),
-        &[WorkflowDagStepValidationInput {
-            step_key: StepKey::new("a"),
-            execution_kind: WorkflowStepExecutionKind::External,
-            job_type: None,
-            priority: Some(10),
-            max_attempts: None,
-            timeout_seconds: None,
-            stage: None,
-            dependencies: Vec::new(),
-        }],
+        &[WorkflowDagStepValidationInput::new(
+            StepKey::new("a"),
+            WorkflowStepExecutionKind::External,
+            None,
+            Vec::new(),
+        )
+        .priority(Some(10))],
+    );
+
+    assert_eq!(
+        result,
+        Err(
+            WorkflowDagValidationError::ExternalStepQueueSettingsNotAllowed {
+                step_key: "a".to_owned(),
+            }
+        )
+    );
+}
+
+#[test]
+fn workflow_dag_validation_rejects_handler_continuation_on_external_step() {
+    let result = validate_workflow_dag(
+        WorkflowType::new("workflow.test"),
+        &[WorkflowDagStepValidationInput::new(
+            StepKey::new("a"),
+            WorkflowStepExecutionKind::External,
+            None,
+            Vec::new(),
+        )
+        .allow_handler_continuation(true)],
     );
 
     assert_eq!(

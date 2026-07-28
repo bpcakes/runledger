@@ -557,13 +557,15 @@ impl JobHandler for SmokeHandler {
                 "smoke.provider_temporarily_unavailable",
                 "Smoke provider requested a relative retry.",
             )
-            .retry_after(HANDLER_RETRY_AFTER)),
+            .retry_not_before_delay(HANDLER_RETRY_AFTER)),
             "retry-after" => Ok(JobCompletion::success()),
             "retry-at" if context.attempt == 1 => Err(JobFailure::retryable(
                 "smoke.provider_rate_limited",
                 "Smoke provider supplied an absolute reset timestamp.",
             )
-            .retry_at(Utc::now() + ChronoDuration::milliseconds(HANDLER_RETRY_AFTER_MS))),
+            .retry_not_before(
+                Utc::now() + ChronoDuration::milliseconds(HANDLER_RETRY_AFTER_MS),
+            )),
             "retry-at" => Ok(JobCompletion::success()),
             "terminal" => Err(JobFailure::terminal(
                 "smoke.terminal_failure",
@@ -770,28 +772,39 @@ fn retry_scheduled_event(
 
 fn assert_relative_retry_event(events: &[JobEventRecord], expected_job_id: sqlx::types::Uuid) {
     let event = retry_scheduled_event(events, expected_job_id);
-    assert_eq!(
-        event.payload.get("retry_delay_ms").and_then(Value::as_i64),
-        Some(HANDLER_RETRY_AFTER_MS)
-    );
-    assert_eq!(event.payload.get("requested_retry_at"), None);
     assert!(
         event
             .payload
-            .get("next_run_at")
-            .and_then(Value::as_str)
-            .is_some(),
-        "relative retry audit should retain next_run_at"
+            .get("retry_delay_ms")
+            .and_then(Value::as_i64)
+            .is_some_and(|delay_ms| delay_ms > 0),
+        "relative retry audit should retain the positive policy delay"
+    );
+    let requested_retry_not_before = event
+        .payload
+        .get("requested_retry_not_before")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .expect("relative retry audit should retain the handler lower bound");
+    let next_run_at = event
+        .payload
+        .get("next_run_at")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .expect("relative retry audit should retain next_run_at");
+    assert!(
+        next_run_at >= requested_retry_not_before,
+        "effective relative retry time must not precede the handler lower bound"
     );
 }
 
 fn assert_absolute_retry_event(events: &[JobEventRecord], expected_job_id: sqlx::types::Uuid) {
     let event = retry_scheduled_event(events, expected_job_id);
-    assert_eq!(event.payload.get("retry_delay_ms"), None);
-
     let requested_retry_at = event
         .payload
-        .get("requested_retry_at")
+        .get("requested_retry_not_before")
         .and_then(Value::as_str)
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.with_timezone(&Utc))

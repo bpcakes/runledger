@@ -20,6 +20,7 @@ use super::super::workflow_types::{
     WorkflowRunResultRecord, WorkflowRunWaitOptions,
 };
 use super::enqueue::enqueue_workflow_run;
+use super::errors::workflow_active_key_api_required_error;
 use super::read::get_workflow_run_by_id;
 use super::runtime::WORKFLOW_RUN_TERMINAL_CHANNEL;
 
@@ -258,6 +259,9 @@ pub async fn enqueue_workflow_run_handle(
     pool: &DbPool,
     payload: &WorkflowRunEnqueue<'_>,
 ) -> Result<WorkflowRunHandle> {
+    if payload.active_key().is_some() {
+        return Err(workflow_active_key_api_required_error());
+    }
     let workflow_run = enqueue_workflow_run(pool, payload).await?;
     let scope = workflow_run
         .organization_id

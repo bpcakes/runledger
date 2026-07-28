@@ -65,6 +65,40 @@ fn workflow_run_enqueue_builder_rejects_blank_idempotency_key() {
 }
 
 #[test]
+fn workflow_run_enqueue_builder_sets_and_validates_active_key() {
+    let payload = serde_json::json!({"test": true});
+    let metadata = serde_json::json!({"source": "builder-test"});
+    let step = WorkflowStepEnqueueBuilder::new(
+        StepKey::new("step.a"),
+        JobType::new("jobs.test.a"),
+        &payload,
+    )
+    .try_build()
+    .expect("build active-key step");
+    let enqueue = WorkflowRunEnqueueBuilder::new(WorkflowType::new("workflow.test"), &metadata)
+        .active_key("daily-cycle")
+        .step(step.clone())
+        .try_build()
+        .expect("build active-key workflow");
+    assert_eq!(enqueue.active_key(), Some("daily-cycle"));
+
+    let error = WorkflowRunEnqueueBuilder::new(WorkflowType::new("workflow.test"), &metadata)
+        .active_key("  ")
+        .step(step.clone())
+        .try_build()
+        .expect_err("blank active key should be rejected");
+    assert_eq!(error, WorkflowBuildError::BlankActiveKey);
+
+    let oversized_active_key = "x".repeat(513);
+    let error = WorkflowRunEnqueueBuilder::new(WorkflowType::new("workflow.test"), &metadata)
+        .active_key(&oversized_active_key)
+        .step(step)
+        .try_build()
+        .expect_err("oversized active key should be rejected");
+    assert_eq!(error, WorkflowBuildError::ActiveKeyTooLong);
+}
+
+#[test]
 fn workflow_step_enqueue_builder_defaults_stage_to_queued() {
     let payload = serde_json::json!({"test": true});
     let step = WorkflowStepEnqueueBuilder::new(
@@ -79,6 +113,66 @@ fn workflow_step_enqueue_builder_defaults_stage_to_queued() {
     assert_eq!(step.organization_id(), None);
     assert_eq!(step.execution_kind(), WorkflowStepExecutionKind::Job);
     assert_eq!(step.job_type(), Some(JobType::new("jobs.test.a")));
+    assert!(!step.allows_handler_continuation());
+    assert_eq!(step.execution_resource_key(), None);
+}
+
+#[test]
+fn workflow_step_enqueue_builder_explicitly_opts_job_step_into_handler_continuation() {
+    let payload = serde_json::json!({"test": true});
+    let step = WorkflowStepEnqueueBuilder::new(
+        StepKey::new("step.a"),
+        JobType::new("jobs.test.a"),
+        &payload,
+    )
+    .allow_handler_continuation()
+    .try_build()
+    .expect("continuation-enabled job step should be valid");
+
+    assert!(step.allows_handler_continuation());
+}
+
+#[test]
+fn workflow_step_enqueue_builder_sets_and_validates_execution_resource() {
+    let payload = serde_json::json!({"test": true});
+    let step = WorkflowStepEnqueueBuilder::new(
+        StepKey::new("step.a"),
+        JobType::new("jobs.test.a"),
+        &payload,
+    )
+    .execution_resource("provider-account:123")
+    .try_build()
+    .expect("resource-constrained job step should be valid");
+    assert_eq!(step.execution_resource_key(), Some("provider-account:123"));
+
+    assert_eq!(
+        WorkflowStepEnqueueBuilder::new(
+            StepKey::new("step.a"),
+            JobType::new("jobs.test.a"),
+            &payload,
+        )
+        .execution_resource(" ")
+        .try_build()
+        .expect_err("blank execution resource should be rejected"),
+        WorkflowBuildError::InvalidStepExecutionResourceKey {
+            step_key: "step.a".to_owned(),
+        }
+    );
+
+    let oversized_resource_key = "x".repeat(513);
+    assert_eq!(
+        WorkflowStepEnqueueBuilder::new(
+            StepKey::new("step.a"),
+            JobType::new("jobs.test.a"),
+            &payload,
+        )
+        .execution_resource(&oversized_resource_key)
+        .try_build()
+        .expect_err("oversized execution resource should be rejected"),
+        WorkflowBuildError::InvalidStepExecutionResourceKey {
+            step_key: "step.a".to_owned(),
+        }
+    );
 }
 
 #[test]
@@ -195,6 +289,40 @@ fn workflow_step_enqueue_builder_rejects_queue_settings_on_external_steps() {
         .priority(10)
         .try_build()
         .expect_err("external step queue settings should be rejected");
+
+    assert_eq!(
+        error,
+        WorkflowBuildError::ExternalStepQueueSettingsNotAllowed {
+            step_key: "step.external".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_step_enqueue_builder_rejects_execution_resources_on_external_steps() {
+    let payload = serde_json::json!({"test": true});
+
+    let error = WorkflowStepEnqueueBuilder::new_external(StepKey::new("step.external"), &payload)
+        .execution_resource("provider-account:123")
+        .try_build()
+        .expect_err("external step execution resources should be rejected");
+
+    assert_eq!(
+        error,
+        WorkflowBuildError::ExternalStepQueueSettingsNotAllowed {
+            step_key: "step.external".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_step_enqueue_builder_rejects_handler_continuation_on_external_steps() {
+    let payload = serde_json::json!({"test": true});
+
+    let error = WorkflowStepEnqueueBuilder::new_external(StepKey::new("step.external"), &payload)
+        .allow_handler_continuation()
+        .try_build()
+        .expect_err("external step continuation opt-in should be rejected");
 
     assert_eq!(
         error,

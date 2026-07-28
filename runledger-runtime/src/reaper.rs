@@ -68,6 +68,7 @@ pub async fn run_reaper_loop_with_observer(
                     );
                 }
                 log_deferred_row_errors(&result);
+                log_claim_cleanup(&result, config.claim_batch_size);
 
                 let fanout_result = notify_reaped_lease_side_effects(
                     registry.as_ref(),
@@ -139,6 +140,41 @@ fn log_deferred_row_errors(result: &runledger_postgres::jobs::ReapExpiredLeasesD
             deferred_row_error_count = result.deferred_row_error_count,
             logged_deferred_row_errors = result.deferred_row_errors.len(),
             "reaper deferred additional expired leased jobs after row-level processing errors"
+        );
+    }
+}
+
+fn log_claim_cleanup(
+    result: &runledger_postgres::jobs::ReapExpiredLeasesDetailedResult,
+    batch_size: i64,
+) {
+    if result.workflow_active_claims_released > 0 || result.execution_resource_claims_released > 0 {
+        info!(
+            workflow_active_claims_released = result.workflow_active_claims_released,
+            execution_resource_claims_released = result.execution_resource_claims_released,
+            "reaper released quiesced coordination claims"
+        );
+    }
+
+    for error in &result.cleanup_errors {
+        warn!(
+            operation = error.operation.as_str(),
+            error = %error.error,
+            "reaper coordination-claim cleanup failed after the lease batch committed"
+        );
+    }
+
+    let Ok(batch_size) = u64::try_from(batch_size) else {
+        return;
+    };
+    if result.workflow_active_claims_released >= batch_size
+        || result.execution_resource_claims_released >= batch_size
+    {
+        warn!(
+            workflow_active_claims_released = result.workflow_active_claims_released,
+            execution_resource_claims_released = result.execution_resource_claims_released,
+            cleanup_batch_size = batch_size,
+            "reaper coordination-claim cleanup saturated its batch limit"
         );
     }
 }

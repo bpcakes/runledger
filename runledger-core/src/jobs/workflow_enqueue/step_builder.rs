@@ -22,6 +22,8 @@ use super::types::{
 /// - `max_attempts`: `None`
 /// - `timeout_seconds`: `None`
 /// - `stage`: `Some(JobStage::Queued)`
+/// - `allow_handler_continuation`: `false`
+/// - `execution_resource_key`: `None`
 /// - `dependencies`: empty
 ///
 /// # Examples
@@ -51,6 +53,8 @@ pub struct WorkflowStepEnqueueBuilder<'a> {
     max_attempts: Option<i32>,
     timeout_seconds: Option<i32>,
     stage: Option<JobStage>,
+    allow_handler_continuation: bool,
+    execution_resource_key: Option<&'a str>,
     dependencies: Vec<WorkflowStepDependencySpec<'a>>,
 }
 
@@ -86,6 +90,8 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
             max_attempts: None,
             timeout_seconds: None,
             stage: Some(JobStage::Queued),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
             dependencies: Vec::new(),
         }
     }
@@ -122,6 +128,8 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
             max_attempts: None,
             timeout_seconds: None,
             stage: None,
+            allow_handler_continuation: false,
+            execution_resource_key: None,
             dependencies: Vec::new(),
         }
     }
@@ -137,6 +145,21 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
     #[must_use]
     pub fn clear_organization_id(mut self) -> Self {
         self.organization_id = None;
+        self
+    }
+
+    /// Requires exclusive ownership of one durable resource while this step's
+    /// job is leased.
+    #[must_use]
+    pub fn execution_resource(mut self, resource_key: &'a str) -> Self {
+        self.execution_resource_key = Some(resource_key);
+        self
+    }
+
+    /// Clears a previously configured execution resource.
+    #[must_use]
+    pub fn clear_execution_resource(mut self) -> Self {
+        self.execution_resource_key = None;
         self
     }
 
@@ -268,6 +291,24 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
         self
     }
 
+    /// Explicitly allows this job-backed step to return
+    /// [`JobCompletion::continue_after`](crate::jobs::JobCompletion::continue_after).
+    ///
+    /// Continuation is disabled by default so a handler cannot accidentally
+    /// keep a workflow active indefinitely. External steps cannot opt in.
+    #[must_use]
+    pub fn allow_handler_continuation(mut self) -> Self {
+        self.allow_handler_continuation = true;
+        self
+    }
+
+    /// Disables handler continuation after a previous opt-in.
+    #[must_use]
+    pub fn disallow_handler_continuation(mut self) -> Self {
+        self.allow_handler_continuation = false;
+        self
+    }
+
     /// Replaces all previously configured dependencies with `dependencies`.
     #[must_use]
     pub fn set_dependencies(
@@ -385,6 +426,8 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
             max_attempts: self.max_attempts,
             timeout_seconds: self.timeout_seconds,
             stage: self.stage,
+            allow_handler_continuation: self.allow_handler_continuation,
+            execution_resource_key: self.execution_resource_key,
             dependencies: self.dependencies,
         };
         validate_step_enqueue(&step, None)?;

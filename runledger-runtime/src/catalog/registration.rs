@@ -155,10 +155,11 @@ impl JobCatalog {
             })
     }
 
-    /// Registers a fallback retry-delay override for a catalog job type.
+    /// Registers a policy retry-delay override for a catalog job type.
     ///
-    /// Timing attached directly to a handler's
-    /// [`runledger_core::jobs::JobFailure`] takes precedence over this value.
+    /// A lower bound attached directly to a handler's
+    /// [`runledger_core::jobs::JobFailure`] may extend this delay but cannot
+    /// shorten it.
     ///
     /// # Errors
     /// Returns [`CatalogError`] when the job type is unknown or override values are invalid.
@@ -179,11 +180,12 @@ impl JobCatalog {
         Ok(self)
     }
 
-    /// Registers a fallback retry-delay override, panicking when validation
+    /// Registers a policy retry-delay override, panicking when validation
     /// fails.
     ///
-    /// Timing attached directly to a handler's
-    /// [`runledger_core::jobs::JobFailure`] takes precedence over this value.
+    /// A lower bound attached directly to a handler's
+    /// [`runledger_core::jobs::JobFailure`] may extend this delay but cannot
+    /// shorten it.
     #[must_use]
     pub fn retry_delay_override(
         self,

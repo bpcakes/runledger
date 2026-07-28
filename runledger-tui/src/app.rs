@@ -748,6 +748,8 @@ mod tests {
                 max_attempts: None,
                 timeout_seconds: None,
                 stage: is_job.then_some(JobStage::Queued),
+                allow_handler_continuation: false,
+                execution_resource_key: None,
                 status: if is_job {
                     WorkflowStepStatus::Enqueued
                 } else {

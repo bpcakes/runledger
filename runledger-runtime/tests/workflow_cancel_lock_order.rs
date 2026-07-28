@@ -6,8 +6,9 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::jobs::test_support::workflow_run_release_lock_key;
 use runledger_postgres::jobs::{
-    CompleteExternalWorkflowStepInput, JobFailureUpdate, WorkflowStepDbRecord,
-    cancel_workflow_run_tx, claim_jobs_for_types, complete_external_workflow_step_tx,
+    CompleteExternalWorkflowStepInput, JobContinuationUpdate, JobFailureUpdate, JobQueueRecord,
+    WorkflowRunDbRecord, WorkflowStepDbRecord, cancel_workflow_run_tx, claim_jobs_for_types,
+    complete_external_workflow_step_tx, complete_job_continuation_with_outcome,
     complete_job_failure, complete_job_success, enqueue_workflow_run, get_job_by_id,
     list_workflow_steps,
 };
@@ -17,7 +18,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 use support::{query_error_code, register_job_definition};
-use test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
+use test_support::{EphemeralDatabase, setup_ephemeral_pool, teardown_ephemeral_pool};
 
 mod support;
 #[path = "../test_support.rs"]
@@ -41,6 +42,49 @@ async fn await_spawned_task<T>(
             panic!("{timeout_message}");
         }
     }
+}
+
+async fn setup_claimed_continuation_workflow(
+    database_name: &str,
+) -> (
+    sqlx::PgPool,
+    EphemeralDatabase,
+    WorkflowRunDbRecord,
+    WorkflowStepDbRecord,
+    JobQueueRecord,
+) {
+    let (pool, database) = setup_ephemeral_pool(database_name, 8).await;
+    let job_type = JobType::new("jobs.test.workflow_continuation_cancel_race");
+    register_job_definition(&pool, job_type).await;
+    let payload = json!({"test": "workflow_continuation_cancel_race"});
+    let metadata = json!({});
+    let step = WorkflowStepEnqueueBuilder::new(StepKey::new("root"), job_type, &payload)
+        .allow_handler_continuation()
+        .try_build()
+        .expect("build continuation-enabled workflow step");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.continuation_cancel_race"),
+        &metadata,
+    )
+    .step(step)
+    .try_build()
+    .expect("build continuation cancellation workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue continuation cancellation workflow");
+    let step = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list continuation cancellation steps")
+        .into_iter()
+        .next()
+        .expect("continuation cancellation step exists");
+    let mut jobs =
+        claim_jobs_for_types(&pool, "worker-continuation-cancel-race", 30, 1, &[job_type])
+            .await
+            .expect("claim continuation cancellation job");
+    let job = jobs.pop().expect("continuation job should be claimable");
+
+    (pool, database, run, step, job)
 }
 
 #[tokio::test]
@@ -261,6 +305,180 @@ async fn cancel_workflow_run_locks_job_rows_before_workflow_steps() {
     )
     .await
     .expect("cancel workflow run should succeed");
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn handler_continuation_wins_job_lock_before_workflow_cancellation() {
+    let (pool, database, run, step, job) =
+        setup_claimed_continuation_workflow("workflow_continuation_then_cancel").await;
+    let worker_id = job.worker_id.clone().expect("claimed job has worker id");
+    let mut held_step_tx = pool.begin().await.expect("begin held step tx");
+    sqlx::query!(
+        "SELECT id FROM workflow_steps WHERE id = $1 FOR UPDATE",
+        step.id
+    )
+    .fetch_one(&mut *held_step_tx)
+    .await
+    .expect("hold workflow step row");
+
+    let continuation_pool = pool.clone();
+    let mut continuation_task = tokio::spawn(async move {
+        let checkpoint = json!({"cursor": 1});
+        complete_job_continuation_with_outcome(
+            &continuation_pool,
+            job.id,
+            job.run_number,
+            job.attempt,
+            &worker_id,
+            &JobContinuationUpdate {
+                delay: Duration::ZERO,
+                progress_done: Some(1),
+                progress_total: Some(2),
+                checkpoint: Some(&checkpoint),
+            },
+        )
+        .await
+    });
+    wait_for_handler_continuation_to_block_on_workflow_step(&pool).await;
+
+    let cancel_pool = pool.clone();
+    let mut cancel_task = tokio::spawn(async move {
+        let mut tx = cancel_pool.begin().await.expect("begin cancel tx");
+        let result =
+            cancel_workflow_run_tx(&mut tx, run.id, None, Some("test.cancel"), None, None).await;
+        if result.is_ok() {
+            tx.commit().await.expect("commit cancel tx");
+        } else {
+            tx.rollback().await.expect("rollback cancel tx");
+        }
+        result.map(|_| ())
+    });
+    wait_for_cancel_to_block_on_job_lock(&pool).await;
+
+    held_step_tx
+        .rollback()
+        .await
+        .expect("release held workflow step");
+    await_spawned_task(
+        &mut continuation_task,
+        Duration::from_secs(5),
+        "continuation should finish after workflow step lock release",
+        "continuation task should not panic",
+    )
+    .await
+    .expect("continuation should commit before cancellation");
+    await_spawned_task(
+        &mut cancel_task,
+        Duration::from_secs(5),
+        "cancellation should finish after continuation releases the job row",
+        "cancellation task should not panic",
+    )
+    .await
+    .expect("cancellation should succeed after continuation");
+
+    let canceled_job = get_job_by_id(&pool, None, step.job_id.expect("step has job id"))
+        .await
+        .expect("load canceled continued job")
+        .expect("continued job exists");
+    assert_eq!(canceled_job.status, JobStatus::Canceled);
+    assert_eq!(canceled_job.run_number, 2);
+    let canceled_steps = list_workflow_steps(&pool, None, step.workflow_run_id)
+        .await
+        .expect("list canceled steps");
+    assert_eq!(canceled_steps[0].status, WorkflowStepStatus::Canceled);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn workflow_cancellation_wins_job_lock_before_handler_continuation() {
+    let (pool, database, run, step, job) =
+        setup_claimed_continuation_workflow("workflow_cancel_then_continuation").await;
+    let worker_id = job.worker_id.clone().expect("claimed job has worker id");
+    let mut held_step_tx = pool.begin().await.expect("begin held step tx");
+    sqlx::query!(
+        "SELECT id FROM workflow_steps WHERE id = $1 FOR UPDATE",
+        step.id
+    )
+    .fetch_one(&mut *held_step_tx)
+    .await
+    .expect("hold workflow step row");
+
+    let cancel_pool = pool.clone();
+    let mut cancel_task = tokio::spawn(async move {
+        let mut tx = cancel_pool.begin().await.expect("begin cancel tx");
+        let result =
+            cancel_workflow_run_tx(&mut tx, run.id, None, Some("test.cancel"), None, None).await;
+        if result.is_ok() {
+            tx.commit().await.expect("commit cancel tx");
+        } else {
+            tx.rollback().await.expect("rollback cancel tx");
+        }
+        result.map(|_| ())
+    });
+    wait_for_cancel_to_block_on_workflow_step_lock(&pool).await;
+
+    let continuation_pool = pool.clone();
+    let mut continuation_task = tokio::spawn(async move {
+        complete_job_continuation_with_outcome(
+            &continuation_pool,
+            job.id,
+            job.run_number,
+            job.attempt,
+            &worker_id,
+            &JobContinuationUpdate {
+                delay: Duration::ZERO,
+                progress_done: None,
+                progress_total: None,
+                checkpoint: None,
+            },
+        )
+        .await
+    });
+    assert!(
+        timeout(Duration::from_millis(200), &mut continuation_task)
+            .await
+            .is_err(),
+        "continuation should wait while cancellation owns the job row"
+    );
+
+    held_step_tx
+        .rollback()
+        .await
+        .expect("release held workflow step");
+    await_spawned_task(
+        &mut cancel_task,
+        Duration::from_secs(5),
+        "cancellation should finish after workflow step lock release",
+        "cancellation task should not panic",
+    )
+    .await
+    .expect("cancellation should commit");
+    let continuation_error = await_spawned_task(
+        &mut continuation_task,
+        Duration::from_secs(5),
+        "continuation should return after cancellation releases the job row",
+        "continuation task should not panic",
+    )
+    .await
+    .expect_err("canceled lease cannot continue");
+    assert_eq!(
+        query_error_code(&continuation_error),
+        Some("job.lease_owner_mismatch")
+    );
+
+    let canceled_job = get_job_by_id(&pool, None, step.job_id.expect("step has job id"))
+        .await
+        .expect("load canceled job")
+        .expect("job exists");
+    assert_eq!(canceled_job.status, JobStatus::Canceled);
+    assert_eq!(canceled_job.run_number, 1);
+    let canceled_steps = list_workflow_steps(&pool, None, step.workflow_run_id)
+        .await
+        .expect("list canceled steps");
+    assert_eq!(canceled_steps[0].status, WorkflowStepStatus::Canceled);
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -1297,12 +1515,13 @@ async fn retryable_workflow_job_failure_returns_step_to_enqueued() {
         job.run_number,
         job.attempt,
         job.worker_id.as_deref().expect("claimed job has worker id"),
-        &JobFailureUpdate {
-            kind: JobFailureKind::Retryable,
-            code: "test.retryable",
-            message: "retryable failure",
-            retry_timing: Some(JobRetryTiming::After(Duration::from_millis(1))),
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Retryable,
+            "test.retryable",
+            "retryable failure",
+            Some(1),
+        )
+        .with_retry_timing(JobRetryTiming::After(Duration::from_millis(1))),
     )
     .await
     .expect("complete job with retryable failure");
@@ -1455,6 +1674,31 @@ async fn wait_for_cancel_to_block_on_workflow_step_lock(pool: &sqlx::PgPool) {
     }
 
     panic!("cancel workflow run did not block on the workflow step lock");
+}
+
+async fn wait_for_handler_continuation_to_block_on_workflow_step(pool: &sqlx::PgPool) {
+    for _ in 0..100 {
+        let waiting = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE wait_event_type = 'Lock'
+                   AND query LIKE '%runledger:lock_workflow_step_for_handler_continuation%'
+                   AND query NOT LIKE '%pg_stat_activity%'
+             )",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("query waiting handler continuation activity");
+
+        if waiting {
+            return;
+        }
+
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("handler continuation did not block on the workflow step lock");
 }
 
 async fn wait_for_completion_to_block_on_shared_release_lock(pool: &sqlx::PgPool) {

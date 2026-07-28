@@ -28,9 +28,27 @@ const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
 const V0_6_LATEST_MIGRATION_VERSION: i64 = 202606030001;
 const REPLAY_METRICS_MIGRATION_VERSION: i64 = 202607190001;
 const CONTINUATION_METRICS_VALIDATION_MIGRATION_VERSION: i64 = 202607250001;
+const WORKFLOW_CONTINUATION_MIGRATION_VERSION: i64 = 202607280001;
+const WORKFLOW_ACTIVE_CLAIMS_MIGRATION_VERSION: i64 = 202607280002;
+const HANDLER_RETRY_AUDIT_MIGRATION_VERSION: i64 = 202607280003;
+const JOB_EXECUTION_RESOURCES_MIGRATION_VERSION: i64 = 202607280004;
+const WORKFLOW_RECOVERIES_MIGRATION_VERSION: i64 = 202607280005;
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
+    // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,
+    // Replaces only the metrics view definition; queue storage is unchanged.
     CONTINUATION_METRICS_VALIDATION_MIGRATION_VERSION,
+    // Adds opt-in columns and constraints whose defaults preserve legacy behavior.
+    WORKFLOW_CONTINUATION_MIGRATION_VERSION,
+    // Adds a claim table that is unused until the coordinated enqueue API is called.
+    WORKFLOW_ACTIVE_CLAIMS_MIGRATION_VERSION,
+    // Adds nullable retry-audit columns that legacy writers leave empty.
+    HANDLER_RETRY_AUDIT_MIGRATION_VERSION,
+    // Adds nullable resource columns; legacy leasing remains compatible until
+    // an application opts a row into resource coordination.
+    JOB_EXECUTION_RESOURCES_MIGRATION_VERSION,
+    // Adds recovery lineage and snapshots that legacy writers never invoke.
+    WORKFLOW_RECOVERIES_MIGRATION_VERSION,
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 const TEST_HARNESS_ADMIN_CONNECTIONS: u32 = 1;
@@ -197,6 +215,54 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
             .await
             .expect("query job replay table"),
         Some("job_replays".to_owned())
+    );
+
+    let resource_claim_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_queue_execution_resource_claim_order'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read execution-resource claim-order index");
+    assert!(
+        resource_claim_index.contains(
+            "(priority DESC, next_run_at, created_at, id) \
+             INCLUDE (execution_resource_key, job_type)"
+        ),
+        "resource-head lookup must use a bounded queue-order index scan: {resource_claim_index}"
+    );
+
+    let active_cleanup_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_workflow_active_claims_release_pending'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read active-claim cleanup index");
+    assert!(active_cleanup_index.contains("WHERE release_pending"));
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'trg_workflow_runs_mark_active_claim_release_pending'
+                  AND NOT tgisinternal
+             )",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read terminal active-claim trigger")
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'trg_job_queue_enforce_execution_resource_claim'
+                  AND NOT tgisinternal
+             )",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read execution-resource lease enforcement trigger")
     );
 
     harness.teardown().await;

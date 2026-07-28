@@ -12,11 +12,13 @@ use super::super::row_decode::{
     parse_job_stage, parse_job_type_name, parse_workflow_step_execution_kind,
 };
 use super::super::rows::WorkflowRunEnqueueRow;
-use super::super::workflow_types::WorkflowRunDbRecord;
+use super::super::workflow_types::{EnqueueActiveWorkflowOutcome, WorkflowRunDbRecord};
 use super::errors::{
+    workflow_active_key_api_required_error, workflow_active_key_required_error,
     workflow_enqueue_conflicting_retry_error, workflow_internal_state_error,
     workflow_legacy_idempotency_snapshot_missing_error,
 };
+use super::is_false;
 use super::read::load_workflow_run_by_id_tx;
 use super::release::{StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx};
 use super::runtime::recompute_workflow_run_statuses_tx;
@@ -36,6 +38,8 @@ struct WorkflowRunInsertOutcome {
 struct CanonicalWorkflowRunEnqueueRequest<'a> {
     metadata: &'a JsonValue,
     #[serde(skip_serializing_if = "Option::is_none")]
+    active_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     result_step_key: Option<&'a str>,
     steps: Vec<CanonicalWorkflowStep<'a>>,
 }
@@ -51,6 +55,10 @@ struct CanonicalWorkflowStep<'a> {
     max_attempts: Option<i32>,
     timeout_seconds: Option<i32>,
     stage: Option<&'static str>,
+    #[serde(skip_serializing_if = "is_false")]
+    allow_handler_continuation: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_resource_key: Option<&'a str>,
     dependencies: Vec<CanonicalWorkflowDependency<'a>>,
 }
 
@@ -78,11 +86,15 @@ pub async fn enqueue_workflow_run(
     pool: &DbPool,
     payload: &WorkflowRunEnqueue<'_>,
 ) -> Result<WorkflowRunDbRecord> {
+    if payload.active_key().is_some() {
+        return Err(workflow_active_key_api_required_error());
+    }
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
-    let workflow_run = enqueue_workflow_run_tx(&mut tx, payload).await?;
+    let outcome = enqueue_workflow_run_classified_tx(&mut tx, payload).await?;
+    let workflow_run = workflow_run_from_classified_outcome(outcome)?;
     tx.commit()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
@@ -99,8 +111,8 @@ pub async fn enqueue_workflow_run(
 /// compared instead of live workflow step rows because steps and dependencies
 /// can be legitimately appended or mutated after initial enqueue. Strict
 /// workflow idempotency applies to keyed rows with an `enqueue_request`
-/// snapshot; unkeyed rows do not store snapshots, and keyed rows without
-/// snapshots are rejected by the idempotency cutover.
+/// snapshot. New unkeyed rows also store snapshots for workflow recovery, while
+/// keyed legacy rows without snapshots are rejected by the idempotency cutover.
 /// Job-step stage is part of the canonical initial request after normalizing an
 /// omitted stage to `Queued`; changing the requested initial stage is treated as
 /// a different enqueue request.
@@ -111,23 +123,110 @@ pub async fn enqueue_workflow_run_tx(
     tx: &mut DbTx<'_>,
     payload: &WorkflowRunEnqueue<'_>,
 ) -> Result<WorkflowRunDbRecord> {
+    if payload.active_key().is_some() {
+        return Err(workflow_active_key_api_required_error());
+    }
+    let outcome = enqueue_workflow_run_classified_tx(tx, payload).await?;
+    workflow_run_from_classified_outcome(outcome)
+}
+
+fn workflow_run_from_classified_outcome(
+    outcome: EnqueueActiveWorkflowOutcome,
+) -> Result<WorkflowRunDbRecord> {
+    match outcome {
+        EnqueueActiveWorkflowOutcome::Inserted(run)
+        | EnqueueActiveWorkflowOutcome::ExistingIdempotent(run) => Ok(run),
+        EnqueueActiveWorkflowOutcome::ExistingActive(_) => Err(workflow_internal_state_error(
+            "active workflow collision was returned for a payload without active_key",
+        )),
+    }
+}
+
+/// Enqueues a workflow under a reusable active key and explicitly classifies
+/// insertion, active collision, and permanent idempotency collision.
+pub async fn enqueue_or_get_active_workflow(
+    pool: &DbPool,
+    payload: &WorkflowRunEnqueue<'_>,
+) -> Result<EnqueueActiveWorkflowOutcome> {
+    if payload.active_key().is_none() {
+        return Err(workflow_active_key_required_error());
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    let outcome = enqueue_workflow_run_classified_tx(&mut tx, payload).await?;
+    tx.commit()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    Ok(outcome)
+}
+
+/// Caller-transaction counterpart to [`enqueue_or_get_active_workflow`].
+pub async fn enqueue_or_get_active_workflow_tx(
+    tx: &mut DbTx<'_>,
+    payload: &WorkflowRunEnqueue<'_>,
+) -> Result<EnqueueActiveWorkflowOutcome> {
+    if payload.active_key().is_none() {
+        return Err(workflow_active_key_required_error());
+    }
+    enqueue_workflow_run_classified_tx(tx, payload).await
+}
+
+async fn enqueue_workflow_run_classified_tx(
+    tx: &mut DbTx<'_>,
+    payload: &WorkflowRunEnqueue<'_>,
+) -> Result<EnqueueActiveWorkflowOutcome> {
     validate_workflow_run_enqueue(payload).map_err(workflow_dag_validation_error)?;
-    if payload.idempotency_key().is_some() {
+    if payload.idempotency_key().is_some() || payload.active_key().is_some() {
         ensure_read_committed_tx(
             tx,
-            "workflow idempotent enqueue",
+            "workflow coordinated enqueue",
             "workflow.enqueue_idempotency_unsupported_isolation",
-            "Workflow idempotent enqueue requires READ COMMITTED transaction isolation.",
+            "Workflow idempotent or active-key enqueue requires READ COMMITTED transaction isolation.",
         )
         .await?;
     }
+    let enqueue_request = canonical_workflow_enqueue_request(payload)?;
 
-    let workflow_run_insert = insert_workflow_run_record_tx(tx, payload).await?;
+    if let Some(active_key) = payload.active_key() {
+        lock_workflow_active_key_tx(tx, payload.organization_id(), active_key).await?;
+
+        if let Some(idempotency_key) = payload.idempotency_key() {
+            if let Some(existing) = try_load_existing_idempotent_workflow_run_tx(
+                tx,
+                payload,
+                idempotency_key,
+                &enqueue_request,
+            )
+            .await?
+            {
+                validate_existing_idempotent_workflow_run(&existing)?;
+                return Ok(EnqueueActiveWorkflowOutcome::ExistingIdempotent(
+                    existing.into_record()?,
+                ));
+            }
+        }
+
+        if let Some(existing) =
+            load_existing_active_workflow_run_tx(tx, payload.organization_id(), active_key).await?
+        {
+            return Ok(EnqueueActiveWorkflowOutcome::ExistingActive(existing));
+        }
+    }
+
+    let workflow_run_insert = insert_workflow_run_record_tx(tx, payload, &enqueue_request).await?;
     let workflow_run = workflow_run_insert.record;
     if !workflow_run_insert.inserted {
         // Existing idempotent runs already have their steps and initial releases
         // committed; never replay workflow initialization for a retry.
-        return Ok(workflow_run);
+        return Ok(EnqueueActiveWorkflowOutcome::ExistingIdempotent(
+            workflow_run,
+        ));
+    }
+    if let Some(active_key) = payload.active_key() {
+        insert_workflow_active_claim_tx(tx, payload.organization_id(), active_key, workflow_run.id)
+            .await?;
     }
 
     let defaults_by_job_type = fetch_job_definition_defaults_tx(tx, payload.steps()).await?;
@@ -139,22 +238,101 @@ pub async fn enqueue_workflow_run_tx(
     recompute_workflow_run_statuses_tx(tx, &std::collections::BTreeSet::from([workflow_run.id]))
         .await?;
 
-    load_workflow_run_by_id_tx(
+    let workflow_run = load_workflow_run_by_id_tx(
         tx,
         workflow_run.id,
         "load workflow run after enqueue recompute",
     )
+    .await?;
+    Ok(EnqueueActiveWorkflowOutcome::Inserted(workflow_run))
+}
+
+fn workflow_active_claim_scope(organization_id: Option<Uuid>) -> String {
+    organization_id.map_or_else(
+        || "global".to_owned(),
+        |organization_id| format!("organization:{organization_id}"),
+    )
+}
+
+async fn lock_workflow_active_key_tx(
+    tx: &mut DbTx<'_>,
+    organization_id: Option<Uuid>,
+    active_key: &str,
+) -> Result<()> {
+    let scope = workflow_active_claim_scope(organization_id);
+    // Hash collisions only over-serialize; the (scope, active_key) primary key
+    // remains the authoritative ownership guard.
+    sqlx::query_scalar::<_, ()>("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
+        .bind(&scope)
+        .bind(active_key)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| Error::from_query_sqlx_with_context("lock workflow active key", error))?;
+    Ok(())
+}
+
+async fn load_existing_active_workflow_run_tx(
+    tx: &mut DbTx<'_>,
+    organization_id: Option<Uuid>,
+    active_key: &str,
+) -> Result<Option<WorkflowRunDbRecord>> {
+    let scope = workflow_active_claim_scope(organization_id);
+    let workflow_run_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT workflow_run_id
+         FROM workflow_active_claims
+         WHERE scope = $1
+           AND active_key = $2
+         FOR UPDATE",
+    )
+    .bind(&scope)
+    .bind(active_key)
+    .fetch_optional(&mut **tx)
     .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("load existing workflow active claim", error)
+    })?;
+
+    let Some(workflow_run_id) = workflow_run_id else {
+        return Ok(None);
+    };
+    load_workflow_run_by_id_tx(tx, workflow_run_id, "load existing active workflow run")
+        .await
+        .map(Some)
+}
+
+async fn insert_workflow_active_claim_tx(
+    tx: &mut DbTx<'_>,
+    organization_id: Option<Uuid>,
+    active_key: &str,
+    workflow_run_id: Uuid,
+) -> Result<()> {
+    let scope = workflow_active_claim_scope(organization_id);
+    sqlx::query(
+        "INSERT INTO workflow_active_claims (
+            scope,
+            active_key,
+            workflow_run_id,
+            release_pending
+         )
+         VALUES ($1, $2, $3, false)",
+    )
+    .bind(&scope)
+    .bind(active_key)
+    .bind(workflow_run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("insert workflow active claim", error))?;
+    Ok(())
 }
 
 async fn insert_workflow_run_record_tx(
     tx: &mut DbTx<'_>,
     payload: &WorkflowRunEnqueue<'_>,
+    enqueue_request: &JsonValue,
 ) -> Result<WorkflowRunInsertOutcome> {
-    let enqueue_request = payload
-        .idempotency_key()
-        .map(|_| canonical_workflow_enqueue_request(payload))
-        .transpose()?;
+    // Every new workflow stores its canonical request so a future recovery can
+    // reconstruct the original DAG safely. Idempotency still only applies when
+    // an idempotency key is present.
     // The conflict clause is selected from static literals only; all request
     // data remains bound below. This dynamic SQL is not SQLx macro-checked, so
     // keep the returned columns and bind order aligned with WorkflowRunEnqueueRow
@@ -193,7 +371,7 @@ async fn insert_workflow_run_record_tx(
         .bind(payload.idempotency_key())
         .bind(payload.result_step_key().map(|step_key| step_key.as_str()))
         .bind(payload.metadata())
-        .bind(enqueue_request.as_ref())
+        .bind(enqueue_request)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|error| Error::from_query_sqlx_with_context("enqueue workflow run", error))?;
@@ -205,9 +383,7 @@ async fn insert_workflow_run_record_tx(
         });
     }
 
-    let (Some(idempotency_key), Some(enqueue_request)) =
-        (payload.idempotency_key(), enqueue_request.as_ref())
-    else {
+    let Some(idempotency_key) = payload.idempotency_key() else {
         return Err(workflow_internal_state_error(
             "workflow run insert returned no row without an idempotency key conflict",
         ));
@@ -230,9 +406,23 @@ async fn load_existing_idempotent_workflow_run_tx(
     idempotency_key: &str,
     enqueue_request: &JsonValue,
 ) -> Result<WorkflowRunEnqueueRow> {
-    // After INSERT ... ON CONFLICT reports an existing keyed run, this locks the
-    // matched committed row while the enqueue transaction compares and returns
-    // the idempotent result.
+    try_load_existing_idempotent_workflow_run_tx(tx, payload, idempotency_key, enqueue_request)
+        .await?
+        .ok_or_else(|| {
+            workflow_internal_state_error(
+                "workflow run insert conflicted but matching idempotent workflow run was not found",
+            )
+        })
+}
+
+async fn try_load_existing_idempotent_workflow_run_tx(
+    tx: &mut DbTx<'_>,
+    payload: &WorkflowRunEnqueue<'_>,
+    idempotency_key: &str,
+    enqueue_request: &JsonValue,
+) -> Result<Option<WorkflowRunEnqueueRow>> {
+    // Lock a matched committed row while the enqueue transaction compares and
+    // returns the idempotent result.
     let run = if let Some(organization_id) = payload.organization_id() {
         sqlx::query_as!(
             WorkflowRunEnqueueRow,
@@ -294,11 +484,6 @@ async fn load_existing_idempotent_workflow_run_tx(
 
     run.map_err(|error| {
         Error::from_query_sqlx_with_context("load idempotent workflow enqueue", error)
-    })?
-    .ok_or_else(|| {
-        workflow_internal_state_error(
-            "workflow run insert conflicted but matching idempotent workflow run was not found",
-        )
     })
 }
 
@@ -370,6 +555,8 @@ fn canonical_workflow_enqueue_request(payload: &WorkflowRunEnqueue<'_>) -> Resul
                 max_attempts: step.max_attempts(),
                 timeout_seconds: step.timeout_seconds(),
                 stage: workflow_step_effective_stage(step),
+                allow_handler_continuation: step.allows_handler_continuation(),
+                execution_resource_key: step.execution_resource_key(),
                 dependencies,
             }
         })
@@ -378,6 +565,7 @@ fn canonical_workflow_enqueue_request(payload: &WorkflowRunEnqueue<'_>) -> Resul
 
     serde_json::to_value(CanonicalWorkflowRunEnqueueRequest {
         metadata: payload.metadata(),
+        active_key: payload.active_key(),
         result_step_key: payload.result_step_key().map(|step_key| step_key.as_str()),
         steps,
     })
@@ -400,7 +588,8 @@ pub(crate) async fn enqueue_root_steps_tx(tx: &mut DbTx<'_>, workflow_run_id: Uu
             priority,
             max_attempts,
             timeout_seconds,
-            stage
+            stage,
+            execution_resource_key
          FROM workflow_steps
          WHERE workflow_run_id = $1
            AND status = 'BLOCKED'
@@ -427,6 +616,7 @@ pub(crate) async fn enqueue_root_steps_tx(tx: &mut DbTx<'_>, workflow_run_id: Uu
             max_attempts: row.max_attempts,
             timeout_seconds: row.timeout_seconds,
             stage: row.stage.map(parse_job_stage).transpose()?,
+            execution_resource_key: row.execution_resource_key,
         });
         release_candidate_step_tx(tx, &candidate).await?;
     }

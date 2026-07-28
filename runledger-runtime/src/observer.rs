@@ -138,12 +138,12 @@ pub enum JobFailureDisposition {
         /// Effective claim time calculated from the PostgreSQL completion clock.
         next_run_at: DateTime<Utc>,
     },
-    /// Another attempt was scheduled from an absolute provider reset timestamp.
+    /// The handler's lower bound selected the effective retry schedule.
     RetryScheduledAt {
-        /// Handler timestamp, rounded up to PostgreSQL microsecond precision.
+        /// Handler not-before time, rounded up to PostgreSQL microsecond
+        /// precision.
         requested_retry_at: DateTime<Utc>,
-        /// Effective claim time. This is the database completion time when the
-        /// requested timestamp had already passed.
+        /// Effective claim time. This is never earlier than policy backoff.
         next_run_at: DateTime<Utc>,
     },
     /// No retry was scheduled and the job was dead-lettered.

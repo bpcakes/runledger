@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workflow_steps (\n            workflow_run_id,\n            step_key,\n            execution_kind,\n            job_type,\n            organization_id,\n            payload,\n            priority,\n            max_attempts,\n            timeout_seconds,\n            stage,\n            allow_handler_continuation,\n            execution_resource_key,\n            status,\n            dependency_count_total,\n            dependency_count_pending,\n            dependency_count_unsatisfied\n         )\n         VALUES (\n            $1,\n            $2,\n            $3::text::workflow_step_execution_kind,\n            $4,\n            $5,\n            $6::jsonb,\n            $7,\n            $8,\n            $9,\n            $10,\n            $11,\n            $12,\n            'BLOCKED',\n            $13,\n            $14,\n            $15\n         )\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid",
+        "Jsonb",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Text",
+        "Bool",
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6c5d8cb4f663423a38334a1418faf9050dee8d8fd943820afd0bcb6e0bc32565"
+}

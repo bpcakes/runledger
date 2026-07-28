@@ -26,6 +26,103 @@ pub struct WorkflowRunDbRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Classified result of enqueueing with a reusable workflow active key.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum EnqueueActiveWorkflowOutcome {
+    /// A new workflow run and active claim were inserted.
+    Inserted(WorkflowRunDbRecord),
+    /// The active key is still owned by a prior non-quiesced workflow run.
+    ExistingActive(WorkflowRunDbRecord),
+    /// The permanent idempotency key matched an identical prior request.
+    ExistingIdempotent(WorkflowRunDbRecord),
+}
+
+impl EnqueueActiveWorkflowOutcome {
+    #[must_use]
+    pub const fn workflow_run(&self) -> &WorkflowRunDbRecord {
+        match self {
+            Self::Inserted(run) | Self::ExistingActive(run) | Self::ExistingIdempotent(run) => run,
+        }
+    }
+}
+
+/// Recovery shape. New modes may be added without changing lineage storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WorkflowRecoveryMode {
+    /// Reconstruct and enqueue the complete original DAG plus append history.
+    FullReplay,
+}
+
+impl WorkflowRecoveryMode {
+    #[must_use]
+    pub const fn as_db_value(self) -> &'static str {
+        match self {
+            Self::FullReplay => "FULL_REPLAY",
+        }
+    }
+}
+
+/// Request for an immutable, lineage-linked workflow replay.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct WorkflowRecoveryRequest<'a> {
+    pub source_run_id: Uuid,
+    pub organization_id: Option<Uuid>,
+    /// Optional source step that motivated this full replay. This is lineage
+    /// context and does not reopen the step in place.
+    pub source_step_id: Option<Uuid>,
+    pub request_key: &'a str,
+    pub mode: WorkflowRecoveryMode,
+    pub reason: &'a str,
+}
+
+impl<'a> WorkflowRecoveryRequest<'a> {
+    #[must_use]
+    pub const fn new(
+        source_run_id: Uuid,
+        request_key: &'a str,
+        mode: WorkflowRecoveryMode,
+        reason: &'a str,
+    ) -> Self {
+        Self {
+            source_run_id,
+            organization_id: None,
+            source_step_id: None,
+            request_key,
+            mode,
+            reason,
+        }
+    }
+
+    #[must_use]
+    pub const fn organization_id(mut self, organization_id: Uuid) -> Self {
+        self.organization_id = Some(organization_id);
+        self
+    }
+
+    #[must_use]
+    pub const fn source_step_id(mut self, source_step_id: Uuid) -> Self {
+        self.source_step_id = Some(source_step_id);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WorkflowRecoveryDisposition {
+    Inserted,
+    Existing,
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct WorkflowRecoveryOutcome {
+    pub run: WorkflowRunDbRecord,
+    pub disposition: WorkflowRecoveryDisposition,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkflowStepDbRecord {
     pub id: Uuid,
@@ -39,6 +136,8 @@ pub struct WorkflowStepDbRecord {
     pub max_attempts: Option<i32>,
     pub timeout_seconds: Option<i32>,
     pub stage: Option<JobStage>,
+    pub allow_handler_continuation: bool,
+    pub execution_resource_key: Option<String>,
     pub status: WorkflowStepStatus,
     pub job_id: Option<Uuid>,
     pub released_at: Option<DateTime<Utc>>,

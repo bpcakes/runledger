@@ -18,6 +18,7 @@ pub(in crate::jobs::workflows) struct StepReleaseCandidate {
     max_attempts: Option<i32>,
     timeout_seconds: Option<i32>,
     stage: Option<JobStage>,
+    execution_resource_key: Option<String>,
 }
 
 impl StepReleaseCandidate {
@@ -34,6 +35,7 @@ impl StepReleaseCandidate {
             max_attempts: init.max_attempts,
             timeout_seconds: init.timeout_seconds,
             stage: init.stage,
+            execution_resource_key: init.execution_resource_key,
         }
     }
 
@@ -59,6 +61,7 @@ pub(in crate::jobs::workflows) struct StepReleaseCandidateInit {
     pub(in crate::jobs::workflows) max_attempts: Option<i32>,
     pub(in crate::jobs::workflows) timeout_seconds: Option<i32>,
     pub(in crate::jobs::workflows) stage: Option<JobStage>,
+    pub(in crate::jobs::workflows) execution_resource_key: Option<String>,
 }
 
 fn job_release_fields(
@@ -132,9 +135,10 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                     timeout_seconds,
                     next_run_at,
                     workflow_step_id,
-                    stage
+                    stage,
+                    execution_resource_key
                  )
-                 VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8)
+                 VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8, $9)
                  RETURNING id, run_number",
                 job_type.as_str(),
                 candidate.organization_id,
@@ -144,6 +148,7 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                 timeout_seconds,
                 candidate.id,
                 stage.as_db_value(),
+                candidate.execution_resource_key,
             )
             .fetch_one(&mut **tx)
             .await

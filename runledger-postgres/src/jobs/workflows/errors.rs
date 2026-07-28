@@ -23,6 +23,24 @@ pub(in crate::jobs::workflows) fn workflow_internal_state_error(
     ))
 }
 
+pub(in crate::jobs::workflows) fn workflow_active_key_required_error() -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Validation,
+        "workflow.active_key_required",
+        "Active workflow enqueue requires an active key.",
+        "enqueue_or_get_active_workflow payload did not include active_key",
+    ))
+}
+
+pub(in crate::jobs::workflows) fn workflow_active_key_api_required_error() -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Validation,
+        "workflow.active_key_api_required",
+        "Use the active workflow enqueue API for payloads with an active key.",
+        "enqueue_workflow_run cannot discard the explicit active-collision outcome",
+    ))
+}
+
 pub(in crate::jobs::workflows) fn workflow_release_conflict_error(workflow_run_id: Uuid) -> Error {
     Error::QueryError(QueryError::from_classified_with_kind(
         QueryErrorCategory::Conflict,

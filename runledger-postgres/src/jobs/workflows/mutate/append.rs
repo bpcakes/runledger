@@ -385,6 +385,7 @@ async fn load_appended_step_states_tx(
             max_attempts,
             timeout_seconds,
             stage,
+            execution_resource_key,
             dependency_count_pending,
             dependency_count_unsatisfied
          FROM workflow_steps
@@ -417,6 +418,7 @@ async fn load_appended_step_states_tx(
                         max_attempts: row.max_attempts,
                         timeout_seconds: row.timeout_seconds,
                         stage,
+                        execution_resource_key: row.execution_resource_key,
                     }),
                     dependency_count_pending: row.dependency_count_pending,
                     dependency_count_unsatisfied: row.dependency_count_unsatisfied,
@@ -450,6 +452,8 @@ async fn load_workflow_steps_by_keys_tx(
             ws.max_attempts,
             ws.timeout_seconds,
             ws.stage,
+            ws.allow_handler_continuation,
+            ws.execution_resource_key,
             ws.status::text AS \"status!\",
             ws.job_id,
             ws.released_at,

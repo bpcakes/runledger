@@ -6,6 +6,7 @@ use sqlx::types::Uuid;
 use crate::{DbTx, Error, Result};
 
 use super::super::errors::workflow_internal_state_error;
+use super::super::is_false;
 use super::super::steps::{workflow_step_effective_organization_id, workflow_step_effective_stage};
 
 #[derive(Serialize)]
@@ -33,6 +34,10 @@ struct StoredCanonicalStep {
     max_attempts: Option<i32>,
     timeout_seconds: Option<i32>,
     stage: Option<String>,
+    #[serde(default)]
+    allow_handler_continuation: bool,
+    #[serde(default)]
+    execution_resource_key: Option<String>,
     dependencies: Vec<StoredCanonicalDependency>,
 }
 
@@ -53,6 +58,10 @@ struct CanonicalStep<'a> {
     max_attempts: Option<i32>,
     timeout_seconds: Option<i32>,
     stage: Option<&'static str>,
+    #[serde(skip_serializing_if = "is_false")]
+    allow_handler_continuation: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_resource_key: Option<&'a str>,
     dependencies: Vec<CanonicalDependency<'a>>,
 }
 
@@ -100,6 +109,8 @@ pub(super) fn canonical_append_request(
                 max_attempts: step.max_attempts(),
                 timeout_seconds: step.timeout_seconds(),
                 stage: workflow_step_effective_stage(step),
+                allow_handler_continuation: step.allows_handler_continuation(),
+                execution_resource_key: step.execution_resource_key(),
                 dependencies,
             }
         })
@@ -240,6 +251,8 @@ fn stored_append_step_fields_match(
         && left.max_attempts == right.max_attempts
         && left.timeout_seconds == right.timeout_seconds
         && left.stage == right.stage
+        && left.allow_handler_continuation == right.allow_handler_continuation
+        && left.execution_resource_key == right.execution_resource_key
         && left.dependencies == right.dependencies
 }
 
@@ -268,6 +281,7 @@ pub(super) async fn load_existing_mutation_request_tx(
          FROM workflow_run_mutations
          WHERE workflow_run_id = $1
            AND mutation_key = $2
+           AND mutation_kind = 'APPEND_STEPS'
          LIMIT 1",
         workflow_run_id,
         mutation_key,
@@ -290,10 +304,11 @@ pub(super) async fn insert_workflow_mutation_row_tx(
         "INSERT INTO workflow_run_mutations (
             workflow_run_id,
             mutation_key,
+            mutation_kind,
             metadata,
             request
          )
-         VALUES ($1, $2, $3::jsonb, $4::jsonb)",
+         VALUES ($1, $2, 'APPEND_STEPS', $3::jsonb, $4::jsonb)",
         workflow_run_id,
         mutation_key,
         mutation_metadata,

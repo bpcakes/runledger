@@ -5,8 +5,10 @@ use sqlx::types::Uuid;
 use crate::{DbTx, Result};
 
 use super::runtime::{
-    mark_workflow_step_enqueued_for_claim_release_tx, mark_workflow_step_enqueued_for_retry_tx,
-    mark_workflow_step_running_for_claim_tx, process_workflow_step_terminal_by_job_id_tx,
+    mark_workflow_step_enqueued_for_claim_release_tx,
+    mark_workflow_step_enqueued_for_handler_continuation_tx,
+    mark_workflow_step_enqueued_for_retry_tx, mark_workflow_step_running_for_claim_tx,
+    process_workflow_step_terminal_by_job_id_tx,
 };
 
 pub(crate) async fn on_claimed(tx: &mut DbTx<'_>, job_id: Uuid) -> Result<()> {
@@ -36,6 +38,14 @@ pub(crate) async fn on_retry_scheduled(
         last_error_message,
     )
     .await
+}
+
+pub(crate) async fn on_handler_continuation(
+    tx: &mut DbTx<'_>,
+    job_id: Uuid,
+    workflow_step_id: Uuid,
+) -> Result<()> {
+    mark_workflow_step_enqueued_for_handler_continuation_tx(tx, job_id, workflow_step_id).await
 }
 
 pub(crate) async fn on_terminal(

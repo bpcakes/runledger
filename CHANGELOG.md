@@ -4,15 +4,46 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-28
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.7.0...v0.8.0)
+
 ### Added
 
+- Add explicit, persisted workflow-step handler continuation through
+  `WorkflowStepEnqueueBuilder::allow_handler_continuation()`. The default
+  remains disabled, external steps cannot opt in, and a committed continuation
+  atomically advances the same job to a fresh run while returning its workflow
+  step from `RUNNING` to `ENQUEUED` without releasing dependencies or
+  recomputing terminal workflow state.
 - Add handler-selected retry timing with `JobRetryTiming`,
-  `JobFailure::retry_after`, and `JobFailure::retry_at`. Handler timing takes
-  precedence over registry overrides and exponential backoff; relative timing
-  uses the PostgreSQL completion clock, while absolute timing preserves provider
-  reset timestamps and makes past timestamps immediately eligible. Relative and
-  absolute schedules have distinct audit payloads and observer dispositions.
-  This uses the existing queue and attempt columns and requires no migration.
+  `JobFailure::retry_not_before_delay`, and
+  `JobFailure::retry_not_before`. Handler timing is a lower bound: PostgreSQL
+  schedules the later of ordinary policy backoff and the handler hint, using the
+  database clock. Attempts and events persist the requested not-before time,
+  effective time, policy delay, and winning source.
+- Add reusable workflow active keys with explicit `Inserted`,
+  `ExistingActive`, and `ExistingIdempotent` enqueue outcomes. Claims are
+  scoped globally or by organization (not by workflow type) and release only
+  after terminal work is quiescent; collision classification remains atomic
+  across terminal handoff, and keys are limited to 512 bytes.
+- Add durable single-permit execution resources. A job acquires its optional
+  resource atomically before leasing; blocked jobs consume neither an attempt
+  nor a worker claim slot, and exact run/attempt/worker ownership is released
+  across every lease-ending lifecycle path. Keys coordinate globally across
+  organizations, claim batches deduplicate queued heads per key before applying
+  their limit, and successful direct-job replay preserves the source resource
+  constraint. Resource-head discovery uses a bounded window rather than an
+  unbounded backlog scan; concurrent claimers or a dense same-key window may
+  therefore return a short batch. PostgreSQL rejects a constrained lease that
+  lacks its exact durable claim, so an older worker fails loudly rather than
+  silently bypassing mutual exclusion.
+- Add immutable workflow recovery through `recover_workflow_run`. Recovery
+  creates a new run, records durable source lineage, replays the canonical
+  enqueue snapshot plus append history, preserves active/resource constraints,
+  retains resolved per-step queue settings when job-definition defaults change,
+  uses each source step's latest persisted payload, rejects legacy runs that
+  cannot be reconstructed safely, bounds request keys, and prevents
+  recovery-only retention from erasing request idempotency.
 - Add a forward continuation-metrics view migration that rejects malformed
   continuation event payloads while preserving both kindless 0.6 and
   discriminated 0.7 event compatibility.
@@ -24,10 +55,39 @@ All notable changes to this workspace are documented here.
 
 - Breaking for direct struct-literal consumers: `JobFailure` now carries private
   optional retry timing and must be built with its constructors, while
-  `JobFailureUpdate` replaces `retry_delay_ms` with `retry_timing`. Exhausted,
-  terminal, and panicked failures ignore timing; successfully scheduled
-  absolute retries use the new `RetryScheduledAt` completion and observer
-  dispositions.
+  non-exhaustive `JobFailureUpdate` carries both `policy_retry_delay_ms` and the
+  optional handler `retry_timing`; construct it with `JobFailureUpdate::new`
+  and `with_retry_timing`. Exhausted, terminal, and panicked failures ignore
+  timing.
+- Breaking for direct struct-literal consumers:
+  `WorkflowDagStepValidationInput` adds handler-continuation and execution-
+  resource fields, while `WorkflowStepDbRecord` adds the corresponding
+  persisted fields. `WorkflowDagStepValidationInput` is now non-exhaustive and
+  constructed with `WorkflowDagStepValidationInput::new`.
+- `WorkflowRecoveryRequest` and `WorkflowRecoveryOutcome` are non-exhaustive;
+  construct requests with `WorkflowRecoveryRequest::new` and its scope/source
+  step setters.
+- Deprecate `JobFailure::retry_after` and `JobFailure::retry_at` in favor of
+  `JobFailure::retry_not_before_delay` and `JobFailure::retry_not_before`,
+  making the lower-bound scheduling semantics a compile-time migration signal.
+- `RetryScheduledAt` now represents any handler-selected not-before lower
+  bound, including a relative delay converted to its database-clock timestamp;
+  `requested_retry_at` carries that resolved absolute boundary.
+- `job_attempts.retry_delay_ms` and the matching retry-event field now retain
+  ordinary policy delay even when a handler not-before bound wins. Existing
+  dashboards must use `effective_next_run_at` and `retry_timing_source` instead
+  of deriving the committed schedule from `retry_delay_ms`. Retry events retain
+  `requested_retry_at` and `next_run_at` as legacy aliases alongside the
+  clarified `requested_retry_not_before` and `effective_next_run_at` fields.
+- Harmless zero or pre-PostgreSQL-range handler lower bounds now fall back to
+  ordinary retry policy instead of turning an otherwise retryable failure into
+  a terminal invalid-timing failure.
+- Every new workflow now persists a canonical enqueue snapshot for safe
+  recovery, duplicating step payload JSON in `workflow_runs.enqueue_request`;
+  high-volume operators should account for the additional retained storage.
+- Workflow recovery now rejects unknown canonical snapshot fields, and
+  `workflow_run_mutations.mutation_kind` enforces the currently supported
+  `APPEND_STEPS` history shape.
 - Harden release preparation and publication with resumable version
   preparation, locked external-consumer resolution, packaged TUI verification,
   remote branch/tag preflights, and a dry-run push before crate publication.
@@ -36,6 +96,32 @@ All notable changes to this workspace are documented here.
 
 ### Fixed
 
+- Require caller-owned workflow recovery transactions to use `READ COMMITTED`
+  so a retry that waits behind an equal request reloads the committed lineage
+  instead of reaching the recovery uniqueness constraint with a stale snapshot.
+  The pool-owning recovery API now establishes that isolation explicitly.
+- Preserve workflow dependency blocking, attempt history, checkpoint/progress,
+  lease fencing, and job-row-before-step-row lock order across handler
+  continuation, including continuation/cancellation races in both lock orders.
+- Keep reusable workflow active keys reserved when a single leased workflow job
+  is canceled, deferring release until the canceled handler's lease quiesces.
+- Reconcile terminal workflow active claims during bounded reaper sweeps even
+  when a custom writer does not call the Rust release hook. A database trigger
+  marks terminal claims release-pending so idle sweeps use the partial cleanup
+  index instead of scanning every live active claim.
+- Fill execution-resource claim batches after per-key deduplication and reclaim
+  stale resource ownership when its fenced lease has expired. Resource-claim
+  inserts use consistent resource-key order to reduce cross-filter deadlock
+  risk, resource-head windows use queue-order index scans rather than sorting
+  the complete keyed backlog, already-owned dense keys do not starve unrelated
+  resources, and cleanup does not get ahead of an owning job row awaiting its
+  reaper turn. Reaped lease transitions now commit before bounded
+  coordination-claim cleanup; detailed results report released-claim counts and
+  cleanup errors, while the runtime logs failures and batch saturation.
+- Reject Unicode-whitespace-only active, execution-resource, and recovery keys
+  in database constraints as well as Rust validation.
+- Mirror handler-continuation restrictions in both workflow-step and lightweight
+  DAG validation.
 - Exclude null, wrong-typed, and otherwise malformed handler-continuation event
   payloads from 24-hour and active-continuation metrics.
 - Show compact-table and workflow-detail keyboard hints only when the selected

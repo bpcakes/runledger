@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use runledger_core::jobs::{
     JobDeadLetterReason, JobEventType, JobFailureKind, JobRetryTiming, JobStatus, JobType,
 };
@@ -94,6 +94,9 @@ struct JobAttemptMutationSnapshot {
     error_code: Option<String>,
     error_message: Option<String>,
     retry_delay_ms: Option<i32>,
+    requested_retry_not_before: Option<DateTime<Utc>>,
+    effective_next_run_at: Option<DateTime<Utc>>,
+    retry_timing_source: Option<String>,
 }
 
 async fn load_attempt_mutation_snapshot(
@@ -108,7 +111,10 @@ async fn load_attempt_mutation_snapshot(
             outcome::text AS outcome,
             error_code,
             error_message,
-            retry_delay_ms
+            retry_delay_ms,
+            requested_retry_not_before,
+            effective_next_run_at,
+            retry_timing_source
          FROM job_attempts
          WHERE job_id = $1
            AND run_number = $2
@@ -129,6 +135,15 @@ async fn load_attempt_mutation_snapshot(
         retry_delay_ms: row
             .try_get("retry_delay_ms")
             .expect("retry_delay_ms column"),
+        requested_retry_not_before: row
+            .try_get("requested_retry_not_before")
+            .expect("requested_retry_not_before column"),
+        effective_next_run_at: row
+            .try_get("effective_next_run_at")
+            .expect("effective_next_run_at column"),
+        retry_timing_source: row
+            .try_get("retry_timing_source")
+            .expect("retry_timing_source column"),
     }
 }
 
@@ -238,6 +253,9 @@ async fn retryable_failure_rejects_invalid_retry_timing_without_mutating_lease()
             error_code: None,
             error_message: None,
             retry_delay_ms: None,
+            requested_retry_not_before: None,
+            effective_next_run_at: None,
+            retry_timing_source: None,
         }
     );
     assert_event_types(
@@ -248,10 +266,10 @@ async fn retryable_failure_rejects_invalid_retry_timing_without_mutating_lease()
     .await;
 
     let too_large_delay = Duration::from_millis(i32::MAX as u64 + 1);
-    for retry_timing in [
-        None,
-        Some(JobRetryTiming::After(Duration::ZERO)),
-        Some(JobRetryTiming::After(too_large_delay)),
+    for (retry_timing, policy_retry_delay_ms) in [
+        (None, None),
+        (None, Some(0)),
+        (Some(JobRetryTiming::After(too_large_delay)), Some(1_000)),
     ] {
         assert_invalid_retry_timing_error(
             complete_job_failure(
@@ -260,11 +278,20 @@ async fn retryable_failure_rejects_invalid_retry_timing_without_mutating_lease()
                 job.run_number,
                 job.attempt,
                 &worker_id,
-                &JobFailureUpdate {
-                    kind: JobFailureKind::Retryable,
-                    code: "job.test.retry_timing_invalid",
-                    message: "retryable failure timing should be rejected",
-                    retry_timing,
+                &match retry_timing {
+                    Some(retry_timing) => JobFailureUpdate::new(
+                        JobFailureKind::Retryable,
+                        "job.test.retry_timing_invalid",
+                        "retryable failure timing should be rejected",
+                        policy_retry_delay_ms,
+                    )
+                    .with_retry_timing(retry_timing),
+                    None => JobFailureUpdate::new(
+                        JobFailureKind::Retryable,
+                        "job.test.retry_timing_invalid",
+                        "retryable failure timing should be rejected",
+                        policy_retry_delay_ms,
+                    ),
                 },
             )
             .await
@@ -289,12 +316,12 @@ async fn retryable_failure_rejects_invalid_retry_timing_without_mutating_lease()
         job.run_number,
         job.attempt,
         &worker_id,
-        &JobFailureUpdate {
-            kind: JobFailureKind::Terminal,
-            code: "job.test.terminal_without_retry_delay",
-            message: "terminal failure does not need retry delay",
-            retry_timing: None,
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Terminal,
+            "job.test.terminal_without_retry_delay",
+            "terminal failure does not need retry delay",
+            None,
+        ),
     )
     .await
     .expect("terminal failure should allow absent retry delay");
@@ -358,12 +385,13 @@ async fn terminal_panicked_and_exhausted_failures_ignore_invalid_retry_timing() 
             job.run_number,
             job.attempt,
             &worker_id,
-            &JobFailureUpdate {
+            &JobFailureUpdate::new(
                 kind,
-                code: failure_code,
-                message: "original failure should survive ignored invalid timing",
-                retry_timing: Some(JobRetryTiming::After(Duration::ZERO)),
-            },
+                failure_code,
+                "original failure should survive ignored invalid timing",
+                None,
+            )
+            .with_retry_timing(JobRetryTiming::After(Duration::ZERO)),
         )
         .await
         .expect("terminal or exhausted failure should bypass retry timing validation");
@@ -413,7 +441,7 @@ async fn terminal_panicked_and_exhausted_failures_ignore_invalid_retry_timing() 
 }
 
 #[tokio::test]
-async fn relative_retry_timing_rounds_up_and_keeps_existing_audit_shape() {
+async fn shorter_handler_retry_hint_is_audited_while_policy_backoff_wins() {
     let (pool, database) = setup_ephemeral_pool("postgres_retry_timing_relative", 4).await;
     register_job_definition(&pool).await;
     let job_id = enqueue_test_job(&pool, "relative_retry_timing").await;
@@ -426,12 +454,13 @@ async fn relative_retry_timing_rounds_up_and_keeps_existing_audit_shape() {
         job.run_number,
         job.attempt,
         &worker_id,
-        &JobFailureUpdate {
-            kind: JobFailureKind::Retryable,
-            code: "job.test.relative_retry_timing",
-            message: "retry after a positive sub-millisecond delay",
-            retry_timing: Some(JobRetryTiming::After(Duration::from_nanos(1))),
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Retryable,
+            "job.test.relative_retry_timing",
+            "retry after a positive sub-millisecond delay",
+            Some(1_000),
+        )
+        .with_retry_timing(JobRetryTiming::After(Duration::from_nanos(1))),
     )
     .await
     .expect("persist relative retry timing");
@@ -443,21 +472,15 @@ async fn relative_retry_timing_rounds_up_and_keeps_existing_audit_shape() {
     else {
         panic!("expected relative retry disposition");
     };
-    assert_eq!(retry_delay_ms, 1);
+    assert_eq!(retry_delay_ms, 1_000);
     assert_eq!(load_job(&pool, job_id).await.next_run_at, next_run_at);
 
-    let persisted_delay = sqlx::query_scalar::<_, Option<i32>>(
-        "SELECT retry_delay_ms
-         FROM job_attempts
-         WHERE job_id = $1 AND run_number = $2 AND attempt = $3",
-    )
-    .bind(job.id)
-    .bind(job.run_number)
-    .bind(job.attempt)
-    .fetch_one(&pool)
-    .await
-    .expect("load persisted relative retry delay");
-    assert_eq!(persisted_delay, Some(1));
+    let attempt = load_attempt_mutation_snapshot(&pool, job.id, job.run_number, job.attempt).await;
+    assert_eq!(attempt.retry_delay_ms, Some(1_000));
+    assert!(attempt.requested_retry_not_before.is_some());
+    assert_eq!(attempt.effective_next_run_at, Some(next_run_at));
+    assert_eq!(attempt.retry_timing_source.as_deref(), Some("POLICY"));
+    assert!(attempt.requested_retry_not_before < attempt.effective_next_run_at);
 
     let event = list_job_events(&pool, None, job_id, 10, None)
         .await
@@ -465,12 +488,29 @@ async fn relative_retry_timing_rounds_up_and_keeps_existing_audit_shape() {
         .into_iter()
         .find(|event| event.event_type == JobEventType::RetryScheduled)
         .expect("retry event exists");
-    assert_event_payload_keys(&event.payload, &["retry_delay_ms", "next_run_at"]);
+    assert_event_payload_keys(
+        &event.payload,
+        &[
+            "effective_next_run_at",
+            "next_run_at",
+            "requested_retry_at",
+            "requested_retry_not_before",
+            "retry_delay_ms",
+            "retry_timing_source",
+        ],
+    );
     assert_eq!(
         event.payload.get("retry_delay_ms").and_then(Value::as_i64),
-        Some(1)
+        Some(1_000)
     );
     assert_eq!(event_timestamp(&event.payload, "next_run_at"), next_run_at);
+    assert_eq!(
+        event
+            .payload
+            .get("retry_timing_source")
+            .and_then(Value::as_str),
+        Some("POLICY")
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -497,12 +537,13 @@ async fn absolute_retry_timing_preserves_provider_reset_time_without_a_delay_lim
         job.run_number,
         job.attempt,
         &worker_id,
-        &JobFailureUpdate {
-            kind: JobFailureKind::Retryable,
-            code: "provider.rate_limited",
-            message: "retry at provider reset",
-            retry_timing: Some(JobRetryTiming::At(requested_retry_at)),
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Retryable,
+            "provider.rate_limited",
+            "retry at provider reset",
+            Some(1_000),
+        )
+        .with_retry_timing(JobRetryTiming::At(requested_retry_at)),
     )
     .await
     .expect("persist absolute retry timing");
@@ -521,18 +562,14 @@ async fn absolute_retry_timing_preserves_provider_reset_time_without_a_delay_lim
         persisted_retry_at
     );
 
-    let persisted_delay = sqlx::query_scalar::<_, Option<i32>>(
-        "SELECT retry_delay_ms
-         FROM job_attempts
-         WHERE job_id = $1 AND run_number = $2 AND attempt = $3",
-    )
-    .bind(job.id)
-    .bind(job.run_number)
-    .bind(job.attempt)
-    .fetch_one(&pool)
-    .await
-    .expect("load absolute retry attempt");
-    assert_eq!(persisted_delay, None);
+    let attempt = load_attempt_mutation_snapshot(&pool, job.id, job.run_number, job.attempt).await;
+    assert_eq!(attempt.retry_delay_ms, Some(1_000));
+    assert_eq!(attempt.requested_retry_not_before, Some(persisted_retry_at));
+    assert_eq!(attempt.effective_next_run_at, Some(persisted_retry_at));
+    assert_eq!(
+        attempt.retry_timing_source.as_deref(),
+        Some("HANDLER_NOT_BEFORE")
+    );
 
     let event = list_job_events(&pool, None, job_id, 10, None)
         .await
@@ -540,7 +577,21 @@ async fn absolute_retry_timing_preserves_provider_reset_time_without_a_delay_lim
         .into_iter()
         .find(|event| event.event_type == JobEventType::RetryScheduled)
         .expect("absolute retry event exists");
-    assert_event_payload_keys(&event.payload, &["requested_retry_at", "next_run_at"]);
+    assert_event_payload_keys(
+        &event.payload,
+        &[
+            "effective_next_run_at",
+            "next_run_at",
+            "requested_retry_at",
+            "requested_retry_not_before",
+            "retry_delay_ms",
+            "retry_timing_source",
+        ],
+    );
+    assert_eq!(
+        event_timestamp(&event.payload, "requested_retry_not_before"),
+        persisted_retry_at
+    );
     assert_eq!(
         event_timestamp(&event.payload, "requested_retry_at"),
         persisted_retry_at
@@ -549,18 +600,28 @@ async fn absolute_retry_timing_preserves_provider_reset_time_without_a_delay_lim
         event_timestamp(&event.payload, "next_run_at"),
         persisted_retry_at
     );
+    assert_eq!(
+        event
+            .payload
+            .get("retry_timing_source")
+            .and_then(Value::as_str),
+        Some("HANDLER_NOT_BEFORE")
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }
 
 #[tokio::test]
-async fn past_absolute_retry_time_becomes_immediately_eligible_on_the_database_clock() {
+async fn past_handler_not_before_cannot_shorten_policy_backoff() {
     let (pool, database) = setup_ephemeral_pool("postgres_retry_timing_past_absolute", 4).await;
     register_job_definition(&pool).await;
     let job_id = enqueue_test_job(&pool, "past_absolute_retry_timing").await;
     let job = claim_one_job(&pool, "worker-past-absolute-retry-timing").await;
     let worker_id = job.worker_id.clone().expect("claimed job has worker id");
-    let requested_retry_at = Utc::now() - chrono::Duration::hours(1);
+    let requested_retry_at = Utc::now()
+        .with_nanosecond(0)
+        .expect("whole-second timestamp")
+        - chrono::Duration::hours(1);
     let database_before = sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp()")
         .fetch_one(&pool)
         .await
@@ -572,12 +633,13 @@ async fn past_absolute_retry_time_becomes_immediately_eligible_on_the_database_c
         job.run_number,
         job.attempt,
         &worker_id,
-        &JobFailureUpdate {
-            kind: JobFailureKind::Retryable,
-            code: "provider.reset_already_passed",
-            message: "provider reset has already passed",
-            retry_timing: Some(JobRetryTiming::At(requested_retry_at)),
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Retryable,
+            "provider.reset_already_passed",
+            "provider reset has already passed",
+            Some(1_000),
+        )
+        .with_retry_timing(JobRetryTiming::At(requested_retry_at)),
     )
     .await
     .expect("persist past absolute retry timing");
@@ -586,21 +648,29 @@ async fn past_absolute_retry_time_becomes_immediately_eligible_on_the_database_c
         .await
         .expect("load database clock after completion");
 
-    let JobFailureCompletionDisposition::RetryScheduledAt { next_run_at, .. } = outcome.disposition
+    let JobFailureCompletionDisposition::RetryScheduled {
+        retry_delay_ms,
+        next_run_at,
+    } = outcome.disposition
     else {
-        panic!("expected absolute retry disposition");
+        panic!("expected policy retry disposition");
     };
-    assert!(next_run_at >= database_before);
-    assert!(next_run_at <= database_after);
+    assert_eq!(retry_delay_ms, 1_000);
+    assert!(next_run_at >= database_before + chrono::Duration::seconds(1));
+    assert!(next_run_at <= database_after + chrono::Duration::seconds(1));
     let pending = load_job(&pool, job_id).await;
     assert_eq!(pending.status, JobStatus::Pending);
     assert_eq!(pending.next_run_at, next_run_at);
-
-    let next_claim = claim_one_job(&pool, "worker-past-absolute-retry-claim").await;
-    assert_eq!(next_claim.id, job_id);
-    assert_eq!(next_claim.run_number, job.run_number);
-    assert_eq!(next_claim.attempt, job.attempt + 1);
-    assert_eq!(next_claim.status, JobStatus::Leased);
+    assert!(
+        claim_jobs(&pool, "worker-past-absolute-retry-claim", 30, 1)
+            .await
+            .expect("attempt claim before policy backoff")
+            .is_empty()
+    );
+    let attempt = load_attempt_mutation_snapshot(&pool, job.id, job.run_number, job.attempt).await;
+    assert_eq!(attempt.requested_retry_not_before, Some(requested_retry_at));
+    assert_eq!(attempt.effective_next_run_at, Some(next_run_at));
+    assert_eq!(attempt.retry_timing_source.as_deref(), Some("POLICY"));
 
     teardown_ephemeral_pool(pool, database).await;
 }

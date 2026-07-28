@@ -15,6 +15,10 @@ use super::super::workflows::on_claimed;
 use super::attempts::{ATTEMPT_CLAIM_ORIGIN_DIRECT, ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART};
 use super::events::{EnqueuedEventPayload, EnqueuedJobEvent, insert_enqueued_event_tx};
 
+const MIN_RESOURCE_HEAD_WINDOW: i64 = 1_024;
+const MAX_RESOURCE_HEAD_WINDOW: i64 = 16_384;
+const RESOURCE_HEAD_WINDOW_PER_CLAIM: i64 = 64;
+
 #[derive(sqlx::FromRow)]
 struct EnqueuedJobRow {
     id: Uuid,
@@ -38,6 +42,8 @@ struct CanonicalJobEnqueueRequest<'a> {
     timeout_seconds: Option<i32>,
     next_run_at: Option<String>,
     stage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_resource_key: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +87,30 @@ pub async fn enqueue_job_with_outcome_tx(
     enqueue_job_with_existing_lock_tx(
         tx,
         payload,
+        None,
+        ExistingJobLock::MutationReady,
+        EnqueuedEventPayload::Ordinary,
+    )
+    .await
+}
+
+/// Enqueues a job that must exclusively own one durable execution resource
+/// while leased.
+///
+/// Jobs blocked by an existing owner remain pending and consume neither an
+/// attempt nor a returned claim slot. Claim ordering is evaluated within a
+/// worker's allowed job-type set, so workers with different type filters can
+/// choose different heads for the same resource; the resource claim still
+/// enforces mutual exclusion.
+pub async fn enqueue_job_with_execution_resource_tx(
+    tx: &mut DbTx<'_>,
+    payload: &JobEnqueue<'_>,
+    execution_resource_key: &str,
+) -> Result<JobEnqueueOutcome> {
+    enqueue_job_with_existing_lock_tx(
+        tx,
+        payload,
+        Some(execution_resource_key),
         ExistingJobLock::MutationReady,
         EnqueuedEventPayload::Ordinary,
     )
@@ -90,6 +120,7 @@ pub async fn enqueue_job_with_outcome_tx(
 pub(in crate::jobs) async fn enqueue_replayed_job_with_outcome_tx(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
+    execution_resource_key: Option<&str>,
     event_payload: EnqueuedEventPayload<'_>,
 ) -> Result<JobEnqueueOutcome> {
     debug_assert!(payload.idempotency_key.is_none());
@@ -97,13 +128,20 @@ pub(in crate::jobs) async fn enqueue_replayed_job_with_outcome_tx(
         &event_payload,
         EnqueuedEventPayload::SuccessfulReplay { .. }
     ));
-    enqueue_job_with_existing_lock_tx(tx, payload, ExistingJobLock::MutationReady, event_payload)
-        .await
+    enqueue_job_with_existing_lock_tx(
+        tx,
+        payload,
+        execution_resource_key,
+        ExistingJobLock::MutationReady,
+        event_payload,
+    )
+    .await
 }
 
 async fn enqueue_job_with_existing_lock_tx(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
+    execution_resource_key: Option<&str>,
     existing_job_lock: ExistingJobLock,
     event_payload: EnqueuedEventPayload<'_>,
 ) -> Result<JobEnqueueOutcome> {
@@ -111,6 +149,9 @@ async fn enqueue_job_with_existing_lock_tx(
         .stage
         .unwrap_or(runledger_core::jobs::JobStage::Queued)
         .as_db_value();
+    if let Some(execution_resource_key) = execution_resource_key {
+        validate_execution_resource_key(execution_resource_key)?;
+    }
     if payload.idempotency_key.is_some() {
         ensure_read_committed_tx(
             tx,
@@ -122,7 +163,7 @@ async fn enqueue_job_with_existing_lock_tx(
     }
     let enqueue_request = payload
         .idempotency_key
-        .map(|_| canonical_job_enqueue_request(payload, stage))
+        .map(|_| canonical_job_enqueue_request(payload, stage, execution_resource_key))
         .transpose()?;
     // The conflict clause is selected from static literals only; all request
     // data remains bound below. This dynamic SQL is not SQLx macro-checked, so
@@ -149,7 +190,8 @@ async fn enqueue_job_with_existing_lock_tx(
             next_run_at,
             idempotency_key,
             stage,
-            enqueue_request
+            enqueue_request,
+            execution_resource_key
          )
          SELECT
             $1,
@@ -161,7 +203,8 @@ async fn enqueue_job_with_existing_lock_tx(
             COALESCE($7, now()),
             $8,
             $9,
-            $10::jsonb
+            $10::jsonb,
+            $11
          FROM defaults d
          {}
          RETURNING id, status::text AS status, run_number",
@@ -178,6 +221,7 @@ async fn enqueue_job_with_existing_lock_tx(
         .bind(payload.idempotency_key)
         .bind(stage)
         .bind(enqueue_request.as_ref())
+        .bind(execution_resource_key)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|error| Error::from_query_sqlx_with_context("enqueue job", error))?;
@@ -219,6 +263,7 @@ pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Resu
     enqueue_job_with_existing_lock_tx(
         tx,
         payload,
+        None,
         ExistingJobLock::KeyShare,
         EnqueuedEventPayload::Ordinary,
     )
@@ -435,7 +480,11 @@ fn validate_existing_idempotent_job(
     }
 }
 
-fn canonical_job_enqueue_request(payload: &JobEnqueue<'_>, stage: &'static str) -> Result<Value> {
+fn canonical_job_enqueue_request(
+    payload: &JobEnqueue<'_>,
+    stage: &'static str,
+    execution_resource_key: Option<&str>,
+) -> Result<Value> {
     serde_json::to_value(CanonicalJobEnqueueRequest {
         payload: payload.payload,
         priority: payload.priority,
@@ -447,6 +496,7 @@ fn canonical_job_enqueue_request(payload: &JobEnqueue<'_>, stage: &'static str) 
             .next_run_at
             .map(|next_run_at| next_run_at.to_rfc3339_opts(SecondsFormat::Micros, true)),
         stage,
+        execution_resource_key,
     })
     .map_err(|error| {
         Error::QueryError(QueryError::from_classified(
@@ -456,6 +506,18 @@ fn canonical_job_enqueue_request(payload: &JobEnqueue<'_>, stage: &'static str) 
             format!("failed to serialize canonical job enqueue request: {error}"),
         ))
     })
+}
+
+fn validate_execution_resource_key(execution_resource_key: &str) -> Result<()> {
+    if execution_resource_key.trim().is_empty() || execution_resource_key.len() > 512 {
+        return Err(Error::QueryError(QueryError::from_classified(
+            QueryErrorCategory::Validation,
+            "job.invalid_execution_resource_key",
+            "Execution resource key must be non-blank and at most 512 bytes.",
+            "job enqueue execution_resource_key was blank or exceeded 512 bytes",
+        )));
+    }
+    Ok(())
 }
 
 fn idempotent_job_conflict_error(job_type: &str, field: &str) -> Error {
@@ -508,6 +570,24 @@ pub async fn enqueue_job(pool: &DbPool, payload: &JobEnqueue<'_>) -> Result<Uuid
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     Ok(id)
+}
+
+/// Enqueues a resource-constrained job in its own transaction.
+pub async fn enqueue_job_with_execution_resource(
+    pool: &DbPool,
+    payload: &JobEnqueue<'_>,
+    execution_resource_key: &str,
+) -> Result<JobEnqueueOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    let outcome =
+        enqueue_job_with_execution_resource_tx(&mut tx, payload, execution_resource_key).await?;
+    tx.commit()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    Ok(outcome)
 }
 
 pub async fn claim_jobs(
@@ -609,7 +689,14 @@ async fn claim_jobs_inner(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    let claim_ids = fetch_claim_ids(&mut tx, limit, allowed_job_types).await?;
+    let claim_ids = fetch_claim_ids(
+        &mut tx,
+        worker_id,
+        lease_duration_seconds,
+        limit,
+        allowed_job_types,
+    )
+    .await?;
 
     if claim_ids.is_empty() {
         tx.commit()
@@ -734,9 +821,12 @@ async fn claim_jobs_inner(
 
 async fn fetch_claim_ids(
     tx: &mut DbTx<'_>,
+    worker_id: &str,
+    lease_duration_seconds: i32,
     limit: i64,
     allowed_job_types: Option<&[JobType<'_>]>,
 ) -> Result<Vec<Uuid>> {
+    let resource_head_window = resource_head_window_limit(limit);
     let query_result = match allowed_job_types {
         Some(allowed_job_types) => {
             let allowed_job_types = allowed_job_types
@@ -744,30 +834,215 @@ async fn fetch_claim_ids(
                 .map(|job_type| job_type.as_str().to_string())
                 .collect::<Vec<_>>();
             sqlx::query_scalar!(
-                "SELECT id
-                 FROM job_queue
-                 WHERE status = 'PENDING'
-                   AND next_run_at <= now()
-                   AND job_type = ANY($2::text[])
-                 ORDER BY priority DESC, next_run_at ASC, created_at ASC
-                 FOR UPDATE SKIP LOCKED
-                 LIMIT $1",
+                r#"WITH eligible_resource_jobs AS MATERIALIZED (
+                    SELECT
+                        jq.id,
+                        jq.execution_resource_key,
+                        jq.priority,
+                        jq.next_run_at,
+                        jq.created_at
+                    FROM job_queue jq
+                    WHERE jq.status = 'PENDING'
+                      AND jq.next_run_at <= now()
+                      AND jq.job_type = ANY($4::text[])
+                      AND jq.execution_resource_key IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM job_execution_resource_claims rc
+                          WHERE rc.resource_key = jq.execution_resource_key
+                      )
+                    ORDER BY
+                        jq.priority DESC,
+                        jq.next_run_at ASC,
+                        jq.created_at ASC,
+                        jq.id ASC
+                    LIMIT $5
+                 ),
+                 resource_heads AS MATERIALIZED (
+                    SELECT DISTINCT ON (eligible.execution_resource_key)
+                        eligible.id
+                    FROM eligible_resource_jobs eligible
+                    ORDER BY
+                        eligible.execution_resource_key,
+                        eligible.priority DESC,
+                        eligible.next_run_at ASC,
+                        eligible.created_at ASC,
+                        eligible.id ASC
+                 ),
+                 candidates AS MATERIALIZED (
+                    SELECT
+                        jq.id,
+                        jq.execution_resource_key,
+                        jq.run_number,
+                        jq.attempt,
+                        jq.priority,
+                        jq.next_run_at,
+                        jq.created_at
+                    FROM job_queue jq
+                    WHERE jq.status = 'PENDING'
+                      AND jq.next_run_at <= now()
+                      AND jq.job_type = ANY($4::text[])
+                      AND (
+                          jq.execution_resource_key IS NULL
+                          OR (
+                              NOT EXISTS (
+                                  SELECT 1
+                                  FROM job_execution_resource_claims rc
+                                  WHERE rc.resource_key = jq.execution_resource_key
+                              )
+                              AND jq.id IN (SELECT id FROM resource_heads)
+                          )
+                      )
+                    ORDER BY
+                        jq.priority DESC,
+                        jq.next_run_at ASC,
+                        jq.created_at ASC,
+                        jq.id ASC
+                    FOR UPDATE OF jq SKIP LOCKED
+                    LIMIT $1
+                 ),
+                 acquired AS (
+                    INSERT INTO job_execution_resource_claims (
+                        resource_key,
+                        job_id,
+                        run_number,
+                        attempt,
+                        worker_id,
+                        lease_expires_at
+                    )
+                    SELECT
+                        execution_resource_key,
+                        id,
+                        run_number,
+                        attempt + 1,
+                        $2,
+                        now() + make_interval(secs => $3::int4)
+                    FROM candidates
+                    WHERE execution_resource_key IS NOT NULL
+                    ORDER BY execution_resource_key
+                    ON CONFLICT DO NOTHING
+                    RETURNING job_id
+                 )
+                 SELECT c.id AS "id!"
+                 FROM candidates c
+                 LEFT JOIN acquired a ON a.job_id = c.id
+                 WHERE c.execution_resource_key IS NULL OR a.job_id IS NOT NULL
+                 ORDER BY
+                    c.priority DESC,
+                    c.next_run_at ASC,
+                    c.created_at ASC,
+                    c.id ASC"#,
                 limit,
+                worker_id,
+                lease_duration_seconds,
                 allowed_job_types.as_slice(),
+                resource_head_window,
             )
             .fetch_all(&mut **tx)
             .await
         }
         None => {
             sqlx::query_scalar!(
-                "SELECT id
-                 FROM job_queue
-                 WHERE status = 'PENDING'
-                   AND next_run_at <= now()
-                 ORDER BY priority DESC, next_run_at ASC, created_at ASC
-                 FOR UPDATE SKIP LOCKED
-                 LIMIT $1",
+                r#"WITH eligible_resource_jobs AS MATERIALIZED (
+                    SELECT
+                        jq.id,
+                        jq.execution_resource_key,
+                        jq.priority,
+                        jq.next_run_at,
+                        jq.created_at
+                    FROM job_queue jq
+                    WHERE jq.status = 'PENDING'
+                      AND jq.next_run_at <= now()
+                      AND jq.execution_resource_key IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM job_execution_resource_claims rc
+                          WHERE rc.resource_key = jq.execution_resource_key
+                      )
+                    ORDER BY
+                        jq.priority DESC,
+                        jq.next_run_at ASC,
+                        jq.created_at ASC,
+                        jq.id ASC
+                    LIMIT $4
+                 ),
+                 resource_heads AS MATERIALIZED (
+                    SELECT DISTINCT ON (eligible.execution_resource_key)
+                        eligible.id
+                    FROM eligible_resource_jobs eligible
+                    ORDER BY
+                        eligible.execution_resource_key,
+                        eligible.priority DESC,
+                        eligible.next_run_at ASC,
+                        eligible.created_at ASC,
+                        eligible.id ASC
+                 ),
+                 candidates AS MATERIALIZED (
+                    SELECT
+                        jq.id,
+                        jq.execution_resource_key,
+                        jq.run_number,
+                        jq.attempt,
+                        jq.priority,
+                        jq.next_run_at,
+                        jq.created_at
+                    FROM job_queue jq
+                    WHERE jq.status = 'PENDING'
+                      AND jq.next_run_at <= now()
+                      AND (
+                          jq.execution_resource_key IS NULL
+                          OR (
+                              NOT EXISTS (
+                                  SELECT 1
+                                  FROM job_execution_resource_claims rc
+                                  WHERE rc.resource_key = jq.execution_resource_key
+                              )
+                              AND jq.id IN (SELECT id FROM resource_heads)
+                          )
+                      )
+                    ORDER BY
+                        jq.priority DESC,
+                        jq.next_run_at ASC,
+                        jq.created_at ASC,
+                        jq.id ASC
+                    FOR UPDATE OF jq SKIP LOCKED
+                    LIMIT $1
+                 ),
+                 acquired AS (
+                    INSERT INTO job_execution_resource_claims (
+                        resource_key,
+                        job_id,
+                        run_number,
+                        attempt,
+                        worker_id,
+                        lease_expires_at
+                    )
+                    SELECT
+                        execution_resource_key,
+                        id,
+                        run_number,
+                        attempt + 1,
+                        $2,
+                        now() + make_interval(secs => $3::int4)
+                    FROM candidates
+                    WHERE execution_resource_key IS NOT NULL
+                    ORDER BY execution_resource_key
+                    ON CONFLICT DO NOTHING
+                    RETURNING job_id
+                 )
+                 SELECT c.id AS "id!"
+                 FROM candidates c
+                 LEFT JOIN acquired a ON a.job_id = c.id
+                 WHERE c.execution_resource_key IS NULL OR a.job_id IS NOT NULL
+                 ORDER BY
+                    c.priority DESC,
+                    c.next_run_at ASC,
+                    c.created_at ASC,
+                    c.id ASC"#,
                 limit,
+                worker_id,
+                lease_duration_seconds,
+                resource_head_window,
             )
             .fetch_all(&mut **tx)
             .await
@@ -778,13 +1053,73 @@ async fn fetch_claim_ids(
         .map_err(|error| Error::from_query_sqlx_with_context("claim jobs candidate list", error))
 }
 
+fn resource_head_window_limit(claim_limit: i64) -> i64 {
+    claim_limit
+        .saturating_mul(RESOURCE_HEAD_WINDOW_PER_CLAIM)
+        .clamp(MIN_RESOURCE_HEAD_WINDOW, MAX_RESOURCE_HEAD_WINDOW)
+}
+
+pub(super) async fn release_expired_execution_resource_claims_tx(
+    tx: &mut DbTx<'_>,
+    limit: i64,
+) -> Result<u64> {
+    let released = sqlx::query(
+        "WITH expired AS MATERIALIZED (
+            SELECT resource_key
+            FROM job_execution_resource_claims
+            WHERE (
+                release_after IS NOT NULL
+                AND release_after <= clock_timestamp()
+            )
+            OR (
+                release_after IS NULL
+                AND lease_expires_at <= clock_timestamp()
+            )
+            ORDER BY COALESCE(release_after, lease_expires_at) ASC, resource_key ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT $1
+         )
+         DELETE FROM job_execution_resource_claims claim
+         USING expired
+         WHERE claim.resource_key = expired.resource_key
+           AND (
+               claim.release_after IS NOT NULL
+               OR NOT EXISTS (
+                   SELECT 1
+                   FROM job_queue jq
+                   WHERE jq.id = claim.job_id
+                     AND jq.run_number = claim.run_number
+                     AND jq.attempt = claim.attempt
+                     AND jq.worker_id = claim.worker_id
+                     AND jq.status = 'LEASED'
+               )
+           )",
+    )
+    .bind(limit)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("release expired execution resource claims", error)
+    })?
+    .rows_affected();
+    Ok(released)
+}
+
 #[cfg(test)]
 mod idempotency_tests {
     use chrono::{TimeZone, Utc};
     use runledger_core::jobs::{JobStage, JobType};
     use serde_json::json;
 
-    use super::{JobEnqueue, canonical_job_enqueue_request};
+    use super::{JobEnqueue, canonical_job_enqueue_request, resource_head_window_limit};
+
+    #[test]
+    fn resource_head_window_scales_with_claim_size_within_fixed_bounds() {
+        assert_eq!(resource_head_window_limit(1), 1_024);
+        assert_eq!(resource_head_window_limit(16), 1_024);
+        assert_eq!(resource_head_window_limit(100), 6_400);
+        assert_eq!(resource_head_window_limit(i64::MAX), 16_384);
+    }
 
     #[test]
     fn canonical_job_enqueue_request_matches_golden_snapshot() {
@@ -805,8 +1140,9 @@ mod idempotency_tests {
             stage: Some(JobStage::Scheduled),
         };
 
-        let canonical = canonical_job_enqueue_request(&enqueue, JobStage::Scheduled.as_db_value())
-            .expect("canonicalize job enqueue");
+        let canonical =
+            canonical_job_enqueue_request(&enqueue, JobStage::Scheduled.as_db_value(), None)
+                .expect("canonicalize job enqueue");
 
         assert_eq!(
             canonical,

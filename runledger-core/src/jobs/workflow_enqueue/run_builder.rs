@@ -53,6 +53,7 @@ pub struct WorkflowRunEnqueueBuilder<'a> {
     organization_id: Option<Uuid>,
     metadata: &'a serde_json::Value,
     idempotency_key: Option<&'a str>,
+    active_key: Option<&'a str>,
     result_step_key: Option<StepKey<'a>>,
     steps: Vec<WorkflowStepEnqueue<'a>>,
 }
@@ -86,6 +87,7 @@ impl<'a> WorkflowRunEnqueueBuilder<'a> {
             organization_id: None,
             metadata,
             idempotency_key: None,
+            active_key: None,
             result_step_key: None,
             steps: Vec::new(),
         }
@@ -169,6 +171,25 @@ impl<'a> WorkflowRunEnqueueBuilder<'a> {
     #[must_use]
     pub fn clear_idempotency_key(mut self) -> Self {
         self.idempotency_key = None;
+        self
+    }
+
+    /// Sets a reusable coordination key for one active workflow cycle in the
+    /// global or organization scope.
+    ///
+    /// The scope is intentionally shared across workflow types. Namespace the
+    /// key by workflow type unless different workflow types should coordinate.
+    /// Use the resulting payload with `enqueue_or_get_active_workflow`.
+    #[must_use]
+    pub fn active_key(mut self, active_key: &'a str) -> Self {
+        self.active_key = Some(active_key);
+        self
+    }
+
+    /// Clears any previously configured reusable active key.
+    #[must_use]
+    pub fn clear_active_key(mut self) -> Self {
+        self.active_key = None;
         self
     }
 
@@ -327,6 +348,7 @@ impl<'a> WorkflowRunEnqueueBuilder<'a> {
             organization_id: self.organization_id,
             metadata: self.metadata,
             idempotency_key: self.idempotency_key,
+            active_key: self.active_key,
             result_step_key: self.result_step_key,
             steps: self.steps,
         };

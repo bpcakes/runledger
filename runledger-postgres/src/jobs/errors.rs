@@ -206,6 +206,16 @@ pub(super) fn workflow_requeue_not_supported_error() -> Error {
     ))
 }
 
+pub(super) fn workflow_handler_continuation_not_enabled_error() -> Error {
+    Error::QueryError(QueryError::from_classified_with_kind(
+        QueryErrorCategory::Validation,
+        QueryErrorKind::JobWorkflowHandlerContinuationNotEnabled,
+        "job.workflow_handler_continuation_not_enabled",
+        "Workflow step handler continuation is not enabled.",
+        "workflow-managed job continuation requires allow_handler_continuation",
+    ))
+}
+
 pub(super) fn validate_job_replay_request(replay_request_key: &str, reason: &str) -> Result<()> {
     if replay_request_key.trim().is_empty() {
         return Err(Error::QueryError(QueryError::from_classified(

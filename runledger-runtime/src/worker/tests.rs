@@ -2094,7 +2094,7 @@ where
         .and_then(Value::as_i64);
     let retry_event_requested_retry_at = retry_events
         .first()
-        .and_then(|event| event.payload.get("requested_retry_at"))
+        .and_then(|event| event.payload.get("requested_retry_not_before"))
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<DateTime<Utc>>().ok());
     let failed_event_error_code = events
@@ -2427,7 +2427,7 @@ async fn success_and_failure_lease_mismatches_report_lease_loss() {
 }
 
 #[tokio::test]
-async fn workflow_managed_handler_continuation_fails_terminally_without_requeueing() {
+async fn opted_in_workflow_managed_handler_continuation_runs_again_then_succeeds() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_workflow_continuation", 8).await;
     let job_type = JobType::new("jobs.test.continue_then_success");
     let mut tx = pool.begin().await.expect("begin definition transaction");
@@ -2449,6 +2449,7 @@ async fn workflow_managed_handler_continuation_fails_terminally_without_requeuei
     let payload = json!({"kind": "workflow-continuation"});
     let metadata = json!({"test": "workflow-continuation"});
     let step = WorkflowStepEnqueueBuilder::new(StepKey::new("step"), job_type, &payload)
+        .allow_handler_continuation()
         .try_build()
         .expect("build workflow step");
     let workflow =
@@ -2474,18 +2475,19 @@ async fn workflow_managed_handler_continuation_fails_terminally_without_requeuei
     registry.register(ContinueThenSuccessHandler {
         executions: executions.clone(),
     });
-    process_claimed_job(pool.clone(), Arc::new(registry), claim, 30).await;
+    let registry = Arc::new(registry);
+    process_claimed_job(pool.clone(), registry.clone(), claim, 30).await;
 
-    let persisted = get_job_by_id(&pool, None, job_id)
+    let continued = get_job_by_id(&pool, None, job_id)
         .await
         .expect("load workflow job")
         .expect("workflow job exists");
-    assert_eq!(persisted.status, JobStatus::DeadLettered);
-    assert_eq!(persisted.run_number, 1);
-    assert_eq!(
-        persisted.last_error_code.as_deref(),
-        Some("job.workflow_requeue_not_supported")
-    );
+    assert_eq!(continued.status, JobStatus::Pending);
+    assert_eq!(continued.run_number, 2);
+    assert_eq!(continued.attempt, 0);
+    assert_eq!(continued.progress_done, Some(1));
+    assert_eq!(continued.progress_total, Some(2));
+    assert_eq!(continued.checkpoint, Some(json!({"cursor": 1})));
     assert_eq!(
         *executions
             .lock()
@@ -2496,16 +2498,53 @@ async fn workflow_managed_handler_continuation_fails_terminally_without_requeuei
             checkpoint: None,
         }]
     );
+    let continued_steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list continued workflow steps");
+    assert_eq!(continued_steps[0].status, WorkflowStepStatus::Enqueued);
+
+    let second_claim = claim_one_job(&pool, "worker-workflow-continuation-final").await;
+    assert_eq!(second_claim.id, job_id);
+    assert_eq!(second_claim.run_number, 2);
+    assert_eq!(second_claim.attempt, 1);
+    process_claimed_job(pool.clone(), registry, second_claim, 30).await;
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load terminal workflow job")
+        .expect("workflow job exists");
+    assert_eq!(persisted.status, JobStatus::Succeeded);
+    assert_eq!(persisted.run_number, 2);
+    assert_eq!(persisted.attempt, 1);
+    assert_eq!(
+        *executions
+            .lock()
+            .expect("continuation executions lock should not be poisoned"),
+        vec![
+            ContinuationExecution {
+                run_number: 1,
+                attempt: 1,
+                checkpoint: None,
+            },
+            ContinuationExecution {
+                run_number: 2,
+                attempt: 1,
+                checkpoint: Some(json!({"cursor": 1})),
+            },
+        ]
+    );
     let steps = list_workflow_steps(&pool, None, run.id)
         .await
         .expect("list terminal workflow steps");
-    assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
-    assert!(
+    assert_eq!(steps[0].status, WorkflowStepStatus::Succeeded);
+    assert_eq!(
         list_job_events(&pool, None, job_id, 20, None)
             .await
             .expect("list workflow job events")
             .iter()
-            .all(|event| event.event_type != JobEventType::Requeued)
+            .filter(|event| event.event_type == JobEventType::Requeued)
+            .count(),
+        1
     );
 
     teardown_ephemeral_pool(pool, database).await;
@@ -2831,7 +2870,7 @@ async fn process_claimed_job_observer_reports_absolute_retry_time_after_commit()
             "job.test.provider_rate_limited",
             "provider supplied an absolute reset time",
         )
-        .retry_at(requested_retry_at),
+        .retry_not_before(requested_retry_at),
         runs: runs.clone(),
     });
     let observer = RecordingObserver::default();
@@ -2894,7 +2933,7 @@ async fn process_claimed_job_observer_reports_dead_letter_failure_from_completio
             "job.test.retryable_exhausted",
             "retryable failure should exhaust attempts",
         )
-        .retry_after(Duration::ZERO),
+        .retry_not_before_delay(Duration::ZERO),
         runs: runs.clone(),
     });
     let observer = RecordingObserver::default();
@@ -3063,8 +3102,7 @@ async fn process_claimed_job_uses_registered_retry_delay_override() {
 }
 
 #[tokio::test]
-async fn process_claimed_job_handler_retry_after_takes_precedence_over_registered_override() {
-    const HANDLER_RETRY_DELAY_MS: i32 = 45_000;
+async fn process_claimed_job_handler_retry_after_cannot_shorten_registered_override() {
     const OVERRIDE_RETRY_DELAY_MS: i32 = 120_000;
 
     let observation = observe_retry_delay_override_failure(
@@ -3075,7 +3113,7 @@ async fn process_claimed_job_handler_retry_after_takes_precedence_over_registere
                 "job.test.waiting_for_external_refresh",
                 "provider supplied a relative reset delay",
             )
-            .retry_after(Duration::from_secs(45))
+            .retry_not_before_delay(Duration::from_secs(45))
         },
         3,
         Some((
@@ -3090,19 +3128,19 @@ async fn process_claimed_job_handler_retry_after_takes_precedence_over_registere
     assert_eq!(observation.status, JobStatus::Pending);
     assert_eq!(
         observation.retry_event_delay_ms,
-        Some(i64::from(HANDLER_RETRY_DELAY_MS))
+        Some(i64::from(OVERRIDE_RETRY_DELAY_MS))
     );
-    assert_eq!(observation.retry_event_requested_retry_at, None);
+    assert!(observation.retry_event_requested_retry_at.is_some());
     assert_eq!(observation.retry_event_count, 1);
     assert_eq!(
         observation.attempt_retry_delay_ms,
-        Some(HANDLER_RETRY_DELAY_MS)
+        Some(OVERRIDE_RETRY_DELAY_MS)
     );
-    assert_next_run_at_around_delay(&observation, HANDLER_RETRY_DELAY_MS);
+    assert_next_run_at_around_delay(&observation, OVERRIDE_RETRY_DELAY_MS);
 }
 
 #[tokio::test]
-async fn process_claimed_job_handler_retry_at_takes_precedence_over_registered_override() {
+async fn process_claimed_job_handler_not_before_sets_effective_schedule_beyond_override() {
     const OVERRIDE_RETRY_DELAY_MS: i32 = 120_000;
 
     let observation = observe_retry_delay_override_failure(
@@ -3113,7 +3151,7 @@ async fn process_claimed_job_handler_retry_at_takes_precedence_over_registered_o
                 "job.test.waiting_for_external_refresh",
                 "provider supplied an absolute reset time",
             )
-            .retry_at(db_now_before + ChronoDuration::minutes(5))
+            .retry_not_before(db_now_before + ChronoDuration::minutes(5))
         },
         3,
         Some((
@@ -3129,9 +3167,15 @@ async fn process_claimed_job_handler_retry_at_takes_precedence_over_registered_o
         .expect("absolute retry event should record the provider reset time");
     assert_eq!(observation.runs, 1);
     assert_eq!(observation.status, JobStatus::Pending);
-    assert_eq!(observation.retry_event_delay_ms, None);
+    assert_eq!(
+        observation.retry_event_delay_ms,
+        Some(i64::from(OVERRIDE_RETRY_DELAY_MS))
+    );
     assert_eq!(observation.retry_event_count, 1);
-    assert_eq!(observation.attempt_retry_delay_ms, None);
+    assert_eq!(
+        observation.attempt_retry_delay_ms,
+        Some(OVERRIDE_RETRY_DELAY_MS)
+    );
     assert_eq!(observation.next_run_at, requested_retry_at);
     assert_eq!(
         requested_retry_at,
@@ -3140,7 +3184,7 @@ async fn process_claimed_job_handler_retry_at_takes_precedence_over_registered_o
 }
 
 #[tokio::test]
-async fn process_claimed_job_invalid_handler_retry_timing_does_not_fall_back_to_override() {
+async fn process_claimed_job_zero_handler_retry_bound_falls_back_to_override() {
     const OVERRIDE_RETRY_DELAY_MS: i32 = 120_000;
 
     let observation = observe_retry_delay_override_failure(
@@ -3149,9 +3193,9 @@ async fn process_claimed_job_invalid_handler_retry_timing_does_not_fall_back_to_
         |_| {
             JobFailure::retryable(
                 "job.test.waiting_for_external_refresh",
-                "provider supplied an invalid reset delay",
+                "provider supplied an empty reset delay",
             )
-            .retry_after(Duration::ZERO)
+            .retry_not_before_delay(Duration::ZERO)
         },
         3,
         Some((
@@ -3163,14 +3207,20 @@ async fn process_claimed_job_invalid_handler_retry_timing_does_not_fall_back_to_
     .await;
 
     assert_eq!(observation.runs, 1);
-    assert_eq!(observation.status, JobStatus::DeadLettered);
-    assert_eq!(observation.retry_event_count, 0);
-    assert_eq!(observation.retry_event_delay_ms, None);
+    assert_eq!(observation.status, JobStatus::Pending);
+    assert_eq!(observation.retry_event_count, 1);
+    assert_eq!(
+        observation.retry_event_delay_ms,
+        Some(i64::from(OVERRIDE_RETRY_DELAY_MS))
+    );
     assert_eq!(observation.retry_event_requested_retry_at, None);
-    assert_eq!(observation.attempt_retry_delay_ms, None);
+    assert_eq!(
+        observation.attempt_retry_delay_ms,
+        Some(OVERRIDE_RETRY_DELAY_MS)
+    );
     assert_eq!(
         observation.failed_event_error_code.as_deref(),
-        Some("job.invalid_retry_timing")
+        Some("job.test.waiting_for_external_refresh")
     );
 }
 
@@ -3260,7 +3310,7 @@ async fn process_claimed_job_ignores_retry_delay_override_for_terminal_failure()
                 "job.test.waiting_for_external_refresh",
                 "terminal failure with matching code",
             )
-            .retry_after(Duration::ZERO)
+            .retry_not_before_delay(Duration::ZERO)
         },
         3,
         Some((
@@ -3392,12 +3442,13 @@ async fn expired_lease_rejects_worker_lifecycle_updates() {
             .worker_id
             .as_deref()
             .expect("claimed job has worker id"),
-        &JobFailureUpdate {
-            kind: JobFailureKind::Retryable,
-            code: "job.test.expired_failure",
-            message: "expired failure should not persist",
-            retry_timing: Some(JobRetryTiming::After(Duration::from_millis(1_000))),
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Retryable,
+            "job.test.expired_failure",
+            "expired failure should not persist",
+            Some(1_000),
+        )
+        .with_retry_timing(JobRetryTiming::After(Duration::from_millis(1_000))),
     )
     .await
     .expect_err("expired lease failure completion should fail");
@@ -4180,7 +4231,7 @@ async fn process_claimed_job_reports_attempt_exhaustion_to_dead_letter_hook() {
             "job.test.retryable_exhausted",
             "retryable failure should exhaust attempts",
         )
-        .retry_after(Duration::ZERO),
+        .retry_not_before_delay(Duration::ZERO),
         runs: runs.clone(),
         dead_letters: dead_letters.clone(),
     });
@@ -4272,7 +4323,7 @@ async fn process_claimed_job_reports_non_retryable_failure_to_dead_letter_hook()
             "job.test.non_retryable",
             "terminal failure should remain non-retryable",
         )
-        .retry_after(Duration::ZERO),
+        .retry_not_before_delay(Duration::ZERO),
         runs: runs.clone(),
         dead_letters: dead_letters.clone(),
     });

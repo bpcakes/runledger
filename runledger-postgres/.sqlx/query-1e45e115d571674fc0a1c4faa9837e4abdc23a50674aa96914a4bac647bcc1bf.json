@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT request\n         FROM workflow_run_mutations\n         WHERE workflow_run_id = $1\n           AND mutation_key = $2\n           AND mutation_kind = 'APPEND_STEPS'\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "request",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1e45e115d571674fc0a1c4faa9837e4abdc23a50674aa96914a4bac647bcc1bf"
+}

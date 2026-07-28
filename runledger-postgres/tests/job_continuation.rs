@@ -7,9 +7,9 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::{
     CompareAndRequeueJob, CompareAndRequeueJobOutcome, DecodedJobEventPayload,
     DecodedRequeuedEventPayload, JobContinuationUpdate, JobRequeueStatePolicy, cancel_job,
-    compare_and_requeue_job, complete_job_continuation_with_outcome, complete_job_success,
-    enqueue_workflow_run, get_job_by_id, get_job_continuation_metrics, list_job_events,
-    list_workflow_steps,
+    claim_jobs, compare_and_requeue_job, complete_job_continuation_with_outcome,
+    complete_job_success, enqueue_workflow_run, get_job_by_id, get_job_continuation_metrics,
+    get_workflow_run_by_id, list_job_events, list_workflow_steps,
 };
 use runledger_postgres::{Error, QueryErrorKind};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -625,9 +625,16 @@ async fn handler_continuation_rejects_workflow_managed_jobs_without_mutation() {
         Error::QueryError(error) => {
             assert_eq!(
                 error.kind(),
-                Some(QueryErrorKind::JobWorkflowRequeueNotSupported)
+                Some(QueryErrorKind::JobWorkflowHandlerContinuationNotEnabled)
             );
-            assert_eq!(error.code(), "job.workflow_requeue_not_supported");
+            assert_eq!(
+                error.code(),
+                "job.workflow_handler_continuation_not_enabled"
+            );
+            assert_eq!(
+                error.client_message(),
+                "Workflow step handler continuation is not enabled."
+            );
         }
         other => panic!("expected workflow requeue rejection, got {other:?}"),
     }
@@ -654,6 +661,500 @@ async fn handler_continuation_rejects_workflow_managed_jobs_without_mutation() {
     );
 
     teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn opted_in_workflow_step_continuation_atomically_requeues_job_and_step() {
+    let (pool, database) = setup_ephemeral_pool("postgres_workflow_continuation_enabled", 4).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"target": "workflow-continuation"});
+    let metadata = json!({"test": "workflow-continuation-enabled"});
+    let step =
+        WorkflowStepEnqueueBuilder::new(StepKey::new("step"), JobType::new(JOB_TYPE), &payload)
+            .allow_handler_continuation()
+            .try_build()
+            .expect("build continuation-enabled workflow step");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.continuation-enabled"),
+        &metadata,
+    )
+    .step(step)
+    .try_build()
+    .expect("build workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue workflow");
+    let initial_step = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list initial workflow steps")
+        .into_iter()
+        .next()
+        .expect("workflow step exists");
+    assert!(initial_step.allow_handler_continuation);
+    let job_id = initial_step
+        .job_id
+        .expect("root step job should be released");
+    let claim = claim_one_job(&pool, "worker-workflow-continuation-enabled").await;
+    assert_eq!(claim.id, job_id);
+    let checkpoint = json!({"cursor": 1});
+
+    let outcome = complete_job_continuation_with_outcome(
+        &pool,
+        claim.id,
+        claim.run_number,
+        claim.attempt,
+        claim.worker_id.as_deref().expect("claimed worker id"),
+        &JobContinuationUpdate {
+            delay: Duration::ZERO,
+            progress_done: Some(1),
+            progress_total: Some(2),
+            checkpoint: Some(&checkpoint),
+        },
+    )
+    .await
+    .expect("continue opted-in workflow step");
+
+    assert_eq!(outcome.job_id, job_id);
+    assert_eq!(outcome.completed_run_number, 1);
+    assert_eq!(outcome.next_run_number, 2);
+    let continued = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load continued workflow job")
+        .expect("workflow job exists");
+    assert_eq!(continued.status, JobStatus::Pending);
+    assert_eq!(continued.run_number, 2);
+    assert_eq!(continued.attempt, 0);
+    assert_eq!(continued.progress_done, Some(1));
+    assert_eq!(continued.progress_total, Some(2));
+    assert_eq!(continued.checkpoint, Some(checkpoint));
+
+    let continued_steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list continued workflow steps");
+    assert_eq!(continued_steps.len(), 1);
+    assert_eq!(continued_steps[0].id, initial_step.id);
+    assert_eq!(continued_steps[0].job_id, Some(job_id));
+    assert_eq!(continued_steps[0].status, WorkflowStepStatus::Enqueued);
+    assert!(continued_steps[0].finished_at.is_none());
+    assert_eq!(
+        continued_steps[0].status_reason.as_deref(),
+        Some("HANDLER_CONTINUATION")
+    );
+
+    let second_claim = claim_one_job(&pool, "worker-workflow-continuation-final").await;
+    assert_eq!(second_claim.id, job_id);
+    assert_eq!(second_claim.run_number, 2);
+    assert_eq!(second_claim.attempt, 1);
+    complete_job_success(
+        &pool,
+        second_claim.id,
+        second_claim.run_number,
+        second_claim.attempt,
+        second_claim
+            .worker_id
+            .as_deref()
+            .expect("second claim worker id"),
+        None,
+    )
+    .await
+    .expect("complete continued workflow step");
+    let terminal_steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list terminal workflow steps");
+    assert_eq!(terminal_steps[0].status, WorkflowStepStatus::Succeeded);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn delayed_workflow_step_continuation_stays_active_and_unclaimable() {
+    let (pool, database) = setup_ephemeral_pool("postgres_workflow_continuation_delayed", 4).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"target": "delayed-workflow-continuation"});
+    let metadata = json!({"test": "delayed-workflow-continuation"});
+    let step =
+        WorkflowStepEnqueueBuilder::new(StepKey::new("step"), JobType::new(JOB_TYPE), &payload)
+            .allow_handler_continuation()
+            .try_build()
+            .expect("build delayed continuation step");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.continuation-delayed"),
+        &metadata,
+    )
+    .step(step)
+    .try_build()
+    .expect("build delayed continuation workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue delayed continuation workflow");
+    let job_id = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list delayed workflow steps")[0]
+        .job_id
+        .expect("root job should be released");
+    let claim = claim_one_job(&pool, "worker-delayed-workflow-continuation").await;
+    let database_time_before =
+        sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>("SELECT clock_timestamp()")
+            .fetch_one(&pool)
+            .await
+            .expect("load database time");
+    let outcome = complete_job_continuation_with_outcome(
+        &pool,
+        claim.id,
+        claim.run_number,
+        claim.attempt,
+        claim.worker_id.as_deref().expect("delayed worker id"),
+        &JobContinuationUpdate {
+            delay: Duration::from_secs(60),
+            progress_done: None,
+            progress_total: None,
+            checkpoint: None,
+        },
+    )
+    .await
+    .expect("schedule delayed workflow continuation");
+
+    assert!(outcome.next_run_at >= database_time_before + chrono::Duration::seconds(60));
+    assert!(
+        claim_jobs(&pool, "worker-too-early", 30, 1)
+            .await
+            .expect("attempt early claim")
+            .is_empty()
+    );
+    assert_eq!(
+        get_workflow_run_by_id(&pool, None, run.id)
+            .await
+            .expect("load active delayed workflow")
+            .expect("workflow exists")
+            .status,
+        runledger_core::jobs::WorkflowRunStatus::Running
+    );
+    let steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list delayed workflow steps");
+    assert_eq!(steps[0].status, WorkflowStepStatus::Enqueued);
+    assert_eq!(
+        get_job_by_id(&pool, None, job_id)
+            .await
+            .expect("load delayed job")
+            .expect("delayed job exists")
+            .status,
+        JobStatus::Pending
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn workflow_step_continuation_event_failure_rolls_back_job_step_and_checkpoint() {
+    let (pool, database) = setup_ephemeral_pool("postgres_workflow_continuation_rollback", 4).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"target": "workflow-continuation-rollback"});
+    let metadata = json!({"test": "workflow-continuation-rollback"});
+    let step =
+        WorkflowStepEnqueueBuilder::new(StepKey::new("step"), JobType::new(JOB_TYPE), &payload)
+            .allow_handler_continuation()
+            .try_build()
+            .expect("build continuation rollback step");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.continuation-rollback"),
+        &metadata,
+    )
+    .step(step)
+    .try_build()
+    .expect("build continuation rollback workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue continuation rollback workflow");
+    let initial_step = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list rollback workflow steps")
+        .into_iter()
+        .next()
+        .expect("rollback workflow step exists");
+    let job_id = initial_step.job_id.expect("root job should be released");
+    let claim = claim_one_job(&pool, "worker-workflow-continuation-rollback").await;
+    sqlx::query(
+        "CREATE FUNCTION fail_handler_continuation_event()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             IF NEW.event_type = 'REQUEUED' THEN
+                 RAISE EXCEPTION 'injected continuation event failure';
+             END IF;
+             RETURN NEW;
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("create injected failure function");
+    sqlx::query(
+        "CREATE TRIGGER fail_handler_continuation_event
+         BEFORE INSERT ON job_events
+         FOR EACH ROW
+         EXECUTE FUNCTION fail_handler_continuation_event()",
+    )
+    .execute(&pool)
+    .await
+    .expect("create injected failure trigger");
+    let checkpoint = json!({"cursor": "must-roll-back"});
+
+    complete_job_continuation_with_outcome(
+        &pool,
+        claim.id,
+        claim.run_number,
+        claim.attempt,
+        claim.worker_id.as_deref().expect("rollback worker id"),
+        &JobContinuationUpdate {
+            delay: Duration::ZERO,
+            progress_done: Some(1),
+            progress_total: Some(2),
+            checkpoint: Some(&checkpoint),
+        },
+    )
+    .await
+    .expect_err("injected event failure must abort continuation");
+
+    let unchanged_job = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load rolled-back job")
+        .expect("job exists");
+    assert_eq!(unchanged_job.status, JobStatus::Leased);
+    assert_eq!(unchanged_job.run_number, 1);
+    assert_eq!(unchanged_job.attempt, 1);
+    assert!(unchanged_job.progress_done.is_none());
+    assert!(unchanged_job.progress_total.is_none());
+    assert!(unchanged_job.checkpoint.is_none());
+    let unchanged_steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list rolled-back steps");
+    assert_eq!(unchanged_steps[0].id, initial_step.id);
+    assert_eq!(unchanged_steps[0].status, WorkflowStepStatus::Running);
+    assert!(
+        unchanged_steps[0].status_reason.is_none(),
+        "continuation step update must roll back with event failure"
+    );
+    let attempt_finished_at = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+        "SELECT finished_at
+             FROM job_attempts
+             WHERE job_id = $1 AND run_number = 1 AND attempt = 1",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .expect("load rolled-back attempt");
+    assert!(attempt_finished_at.is_none());
+    assert!(
+        list_job_events(&pool, None, job_id, 20, None)
+            .await
+            .expect("list rolled-back events")
+            .iter()
+            .all(|event| event.event_type != JobEventType::Requeued)
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+async fn assert_continuing_prerequisite_releases_dependent_once(
+    database_name: &str,
+    release_on_success: bool,
+) {
+    let (pool, database) = setup_ephemeral_pool(database_name, 4).await;
+    let prerequisite_job_type = "jobs.test.workflow_continuation.prerequisite";
+    let dependent_job_type = "jobs.test.workflow_continuation.dependent";
+    register_test_job_definition(&pool, prerequisite_job_type).await;
+    register_test_job_definition(&pool, dependent_job_type).await;
+    let prerequisite_payload = json!({"step": "a"});
+    let dependent_payload = json!({"step": "b"});
+    let metadata = json!({
+        "test": "workflow-continuation-dependency",
+        "release_on_success": release_on_success
+    });
+    let prerequisite = WorkflowStepEnqueueBuilder::new(
+        StepKey::new("a"),
+        JobType::new(prerequisite_job_type),
+        &prerequisite_payload,
+    )
+    .allow_handler_continuation()
+    .try_build()
+    .expect("build continuing prerequisite");
+    let dependent_builder = WorkflowStepEnqueueBuilder::new(
+        StepKey::new("b"),
+        JobType::new(dependent_job_type),
+        &dependent_payload,
+    );
+    let dependent_builder = if release_on_success {
+        dependent_builder.depends_on_success(&[StepKey::new("a")])
+    } else {
+        dependent_builder.depends_on_terminal(&[StepKey::new("a")])
+    };
+    let dependent = dependent_builder.try_build().expect("build dependent step");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.continuation-dependency"),
+        &metadata,
+    )
+    .step(prerequisite)
+    .step(dependent)
+    .try_build()
+    .expect("build dependency workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue dependency workflow");
+    let initial_steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list initial steps");
+    let prerequisite_step = initial_steps
+        .iter()
+        .find(|step| step.step_key.as_str() == "a")
+        .expect("prerequisite step exists");
+    let prerequisite_step_id = prerequisite_step.id;
+    let prerequisite_job_id = prerequisite_step
+        .job_id
+        .expect("prerequisite job should be released");
+    let dependent_step = initial_steps
+        .iter()
+        .find(|step| step.step_key.as_str() == "b")
+        .expect("dependent step exists");
+    assert_eq!(dependent_step.status, WorkflowStepStatus::Blocked);
+    assert_eq!(dependent_step.job_id, None);
+    assert_eq!(dependent_step.dependency_count_pending, 1);
+
+    for completed_run_number in 1..=3 {
+        let claim = claim_one_job(
+            &pool,
+            &format!("worker-prerequisite-{completed_run_number}"),
+        )
+        .await;
+        assert_eq!(claim.id, prerequisite_job_id);
+        assert_eq!(claim.run_number, completed_run_number);
+        let checkpoint = json!({"slice": completed_run_number});
+        complete_job_continuation_with_outcome(
+            &pool,
+            claim.id,
+            claim.run_number,
+            claim.attempt,
+            claim.worker_id.as_deref().expect("prerequisite worker id"),
+            &JobContinuationUpdate {
+                delay: Duration::ZERO,
+                progress_done: Some(i64::from(completed_run_number)),
+                progress_total: Some(4),
+                checkpoint: Some(&checkpoint),
+            },
+        )
+        .await
+        .expect("continue prerequisite");
+
+        let steps = list_workflow_steps(&pool, None, run.id)
+            .await
+            .expect("list steps after continuation");
+        let continued_prerequisite = steps
+            .iter()
+            .find(|step| step.step_key.as_str() == "a")
+            .expect("continued prerequisite exists");
+        let blocked_dependent = steps
+            .iter()
+            .find(|step| step.step_key.as_str() == "b")
+            .expect("blocked dependent exists");
+        assert_eq!(continued_prerequisite.id, prerequisite_step_id);
+        assert_eq!(continued_prerequisite.status, WorkflowStepStatus::Enqueued);
+        assert_eq!(continued_prerequisite.job_id, Some(prerequisite_job_id));
+        assert_eq!(blocked_dependent.status, WorkflowStepStatus::Blocked);
+        assert_eq!(blocked_dependent.job_id, None);
+        assert_eq!(blocked_dependent.dependency_count_pending, 1);
+        assert_eq!(
+            get_workflow_run_by_id(&pool, None, run.id)
+                .await
+                .expect("load active workflow")
+                .expect("workflow exists")
+                .status,
+            runledger_core::jobs::WorkflowRunStatus::Running
+        );
+    }
+
+    let final_claim = claim_one_job(&pool, "worker-prerequisite-final").await;
+    assert_eq!(final_claim.id, prerequisite_job_id);
+    assert_eq!(final_claim.run_number, 4);
+    complete_job_success(
+        &pool,
+        final_claim.id,
+        final_claim.run_number,
+        final_claim.attempt,
+        final_claim
+            .worker_id
+            .as_deref()
+            .expect("final prerequisite worker id"),
+        None,
+    )
+    .await
+    .expect("complete prerequisite");
+
+    let released_steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list released steps");
+    let released_dependent = released_steps
+        .iter()
+        .find(|step| step.step_key.as_str() == "b")
+        .expect("released dependent exists");
+    assert_eq!(released_dependent.status, WorkflowStepStatus::Enqueued);
+    assert_eq!(released_dependent.dependency_count_pending, 0);
+    let dependent_job_id = released_dependent
+        .job_id
+        .expect("dependent job should be released exactly once");
+    assert_eq!(
+        list_job_events(&pool, None, dependent_job_id, 20, None)
+            .await
+            .expect("list dependent events")
+            .iter()
+            .filter(|event| event.event_type == JobEventType::Enqueued)
+            .count(),
+        1
+    );
+
+    let dependent_claim = claim_one_job(&pool, "worker-dependent").await;
+    assert_eq!(dependent_claim.id, dependent_job_id);
+    complete_job_success(
+        &pool,
+        dependent_claim.id,
+        dependent_claim.run_number,
+        dependent_claim.attempt,
+        dependent_claim
+            .worker_id
+            .as_deref()
+            .expect("dependent worker id"),
+        None,
+    )
+    .await
+    .expect("complete dependent");
+    assert_eq!(
+        get_workflow_run_by_id(&pool, None, run.id)
+            .await
+            .expect("load terminal workflow")
+            .expect("workflow exists")
+            .status,
+        runledger_core::jobs::WorkflowRunStatus::Succeeded
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn continuing_prerequisite_keeps_on_success_dependent_blocked_until_final_success() {
+    assert_continuing_prerequisite_releases_dependent_once(
+        "postgres_workflow_continuation_on_success",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn continuing_prerequisite_keeps_on_terminal_dependent_blocked_until_final_success() {
+    assert_continuing_prerequisite_releases_dependent_once(
+        "postgres_workflow_continuation_on_terminal",
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]

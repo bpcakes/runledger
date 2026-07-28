@@ -41,42 +41,36 @@ struct FailureOutcome<'a> {
     code: &'a str,
     message: &'a str,
     retry_timing: Option<JobRetryTiming>,
+    policy_retry_delay_ms: Option<i32>,
     dead_letter_reason: Option<JobDeadLetterReason>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetryTimingSource {
+    Policy,
+    HandlerNotBefore,
+}
+
+impl RetryTimingSource {
+    const fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Policy => "POLICY",
+            Self::HandlerNotBefore => "HANDLER_NOT_BEFORE",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
-enum ResolvedRetryTiming {
-    After {
-        retry_delay_ms: i32,
-        next_run_at: DateTime<Utc>,
-    },
-    At {
-        requested_retry_at: DateTime<Utc>,
-        next_run_at: DateTime<Utc>,
-    },
+struct ResolvedRetryTiming {
+    policy_retry_delay_ms: i32,
+    requested_retry_not_before: Option<DateTime<Utc>>,
+    next_run_at: DateTime<Utc>,
+    source: RetryTimingSource,
 }
 
 impl ResolvedRetryTiming {
-    const fn retry_delay_ms(self) -> Option<i32> {
-        match self {
-            Self::After { retry_delay_ms, .. } => Some(retry_delay_ms),
-            Self::At { .. } => None,
-        }
-    }
-
-    const fn requested_retry_at(self) -> Option<DateTime<Utc>> {
-        match self {
-            Self::After { .. } => None,
-            Self::At {
-                requested_retry_at, ..
-            } => Some(requested_retry_at),
-        }
-    }
-
     const fn next_run_at(self) -> DateTime<Utc> {
-        match self {
-            Self::After { next_run_at, .. } | Self::At { next_run_at, .. } => next_run_at,
-        }
+        self.next_run_at
     }
 }
 
@@ -148,6 +142,7 @@ fn failure_outcome<'a>(
         code: failure.code,
         message: failure.message,
         retry_timing: failure.retry_timing,
+        policy_retry_delay_ms: failure.policy_retry_delay_ms,
         dead_letter_reason,
     }
 }
@@ -198,41 +193,83 @@ fn round_retry_at_to_postgres_precision(retry_at: DateTime<Utc>) -> Result<DateT
 
 fn resolve_retry_timing(
     completion_base_at: DateTime<Utc>,
-    retry_timing: Option<JobRetryTiming>,
+    policy_retry_delay_ms: Option<i32>,
+    handler_retry_timing: Option<JobRetryTiming>,
 ) -> Result<ResolvedRetryTiming> {
-    let Some(retry_timing) = retry_timing else {
+    let Some(policy_retry_delay_ms) = policy_retry_delay_ms else {
         return Err(invalid_retry_timing_error(
-            "retry timing is required for a retryable failure".to_owned(),
+            "policy retry delay is required for a retryable failure".to_owned(),
         ));
     };
+    if policy_retry_delay_ms <= 0 {
+        return Err(invalid_retry_timing_error(format!(
+            "policy retry delay must be greater than zero, got {policy_retry_delay_ms}"
+        )));
+    }
+    let policy_next_run_at = completion_base_at
+        .checked_add_signed(chrono::Duration::milliseconds(i64::from(
+            policy_retry_delay_ms,
+        )))
+        .ok_or_else(|| {
+            invalid_retry_timing_error(format!(
+                "policy retry delay produces an unrepresentable timestamp: base={completion_base_at}, delay_ms={policy_retry_delay_ms}"
+            ))
+        })?;
 
-    match retry_timing {
-        JobRetryTiming::After(delay) => {
-            let retry_delay_ms = retry_delay_milliseconds(delay)?;
-            let next_run_at = completion_base_at
-                .checked_add_signed(chrono::Duration::milliseconds(i64::from(retry_delay_ms)))
-                .ok_or_else(|| {
-                    invalid_retry_timing_error(format!(
-                        "handler-selected retry delay produces an unrepresentable timestamp: base={completion_base_at}, delay={delay:?}"
-                    ))
-                })?;
-            Ok(ResolvedRetryTiming::After {
-                retry_delay_ms,
-                next_run_at,
-            })
+    let requested_retry_not_before = match handler_retry_timing {
+        None => None,
+        Some(JobRetryTiming::After(delay)) => {
+            if delay.is_zero() {
+                None
+            } else {
+                let handler_delay_ms = retry_delay_milliseconds(delay)?;
+                Some(
+                    completion_base_at
+                        .checked_add_signed(chrono::Duration::milliseconds(i64::from(
+                            handler_delay_ms,
+                        )))
+                        .ok_or_else(|| {
+                            invalid_retry_timing_error(format!(
+                                "handler-selected retry delay produces an unrepresentable timestamp: base={completion_base_at}, delay={delay:?}"
+                            ))
+                        })?,
+                )
+            }
         }
-        JobRetryTiming::At(requested_retry_at) => {
-            let requested_retry_at = round_retry_at_to_postgres_precision(requested_retry_at)?;
-            Ok(ResolvedRetryTiming::At {
-                requested_retry_at,
-                next_run_at: requested_retry_at.max(completion_base_at),
-            })
+        Some(JobRetryTiming::At(requested_retry_at)) => {
+            match round_retry_at_to_postgres_precision(requested_retry_at) {
+                Ok(requested_retry_at) => Some(requested_retry_at),
+                Err(_) if requested_retry_at <= policy_next_run_at => None,
+                Err(error) => return Err(error),
+            }
         }
         #[allow(unreachable_patterns)]
-        _ => Err(invalid_retry_timing_error(
-            "handler selected an unsupported retry timing variant".to_owned(),
-        )),
-    }
+        _ => {
+            return Err(invalid_retry_timing_error(
+                "handler selected an unsupported retry timing variant".to_owned(),
+            ));
+        }
+    };
+    let (next_run_at, source) = requested_retry_not_before.map_or(
+        (policy_next_run_at, RetryTimingSource::Policy),
+        |requested_retry_not_before| {
+            if requested_retry_not_before > policy_next_run_at {
+                (
+                    requested_retry_not_before,
+                    RetryTimingSource::HandlerNotBefore,
+                )
+            } else {
+                (policy_next_run_at, RetryTimingSource::Policy)
+            }
+        },
+    );
+
+    Ok(ResolvedRetryTiming {
+        policy_retry_delay_ms,
+        requested_retry_not_before,
+        next_run_at,
+        source,
+    })
 }
 
 async fn apply_terminal_failure(
@@ -439,8 +476,7 @@ async fn apply_retryable_failure(
 ) -> Result<()> {
     mark_retryable_job_queue_for_failure_tx(tx, identity, outcome, retry_timing.next_run_at())
         .await?;
-    update_failed_attempt_retryable_tx(tx, identity, outcome, retry_timing.retry_delay_ms())
-        .await?;
+    update_failed_attempt_retryable_tx(tx, identity, outcome, retry_timing).await?;
     insert_failed_event_for_failure_tx(tx, identity, outcome, INSERT_FAILED_EVENT_RETRY_CONTEXT)
         .await?;
     insert_retry_scheduled_event_for_failure_tx(tx, identity, retry_timing).await?;
@@ -498,7 +534,7 @@ async fn update_failed_attempt_retryable_tx(
     tx: &mut DbTx<'_>,
     identity: FailureJobIdentity<'_>,
     outcome: FailureOutcome<'_>,
-    retry_delay_ms: Option<i32>,
+    retry_timing: ResolvedRetryTiming,
 ) -> Result<()> {
     sqlx::query!(
         "UPDATE job_attempts
@@ -506,7 +542,10 @@ async fn update_failed_attempt_retryable_tx(
              outcome = $4::text::job_failure_kind,
              error_code = $5,
              error_message = $6,
-             retry_delay_ms = $7
+             retry_delay_ms = $7,
+             requested_retry_not_before = $8,
+             effective_next_run_at = $9,
+             retry_timing_source = $10
          WHERE job_id = $1
            AND run_number = $2
            AND attempt = $3",
@@ -516,7 +555,10 @@ async fn update_failed_attempt_retryable_tx(
         outcome.kind_db_value,
         outcome.code,
         outcome.message,
-        retry_delay_ms,
+        retry_timing.policy_retry_delay_ms,
+        retry_timing.requested_retry_not_before,
+        retry_timing.next_run_at,
+        retry_timing.source.as_db_value(),
     )
     .execute(&mut **tx)
     .await
@@ -530,9 +572,9 @@ async fn insert_retry_scheduled_event_for_failure_tx(
     identity: FailureJobIdentity<'_>,
     retry_timing: ResolvedRetryTiming,
 ) -> Result<()> {
-    let retry_delay_ms = retry_timing.retry_delay_ms();
-    let requested_retry_at = retry_timing.requested_retry_at();
-    let next_run_at = retry_timing.next_run_at();
+    // Keep the requested_retry_at and next_run_at field names as aliases for
+    // 0.7 consumers. retry_delay_ms intentionally carries the policy delay
+    // under the new semantics; the changelog documents that value change.
     sqlx::query!(
         "INSERT INTO job_events (job_id, run_number, attempt, event_type, payload)
          VALUES (
@@ -543,7 +585,10 @@ async fn insert_retry_scheduled_event_for_failure_tx(
             jsonb_strip_nulls(
                 jsonb_build_object(
                     'retry_delay_ms', $4::int4,
+                    'requested_retry_not_before', $5::timestamptz,
                     'requested_retry_at', $5::timestamptz,
+                    'effective_next_run_at', $6::timestamptz,
+                    'retry_timing_source', $7::text,
                     'next_run_at', $6::timestamptz
                 )
             )
@@ -551,9 +596,10 @@ async fn insert_retry_scheduled_event_for_failure_tx(
         identity.job_id,
         identity.run_number,
         identity.attempt,
-        retry_delay_ms,
-        requested_retry_at,
-        next_run_at,
+        retry_timing.policy_retry_delay_ms,
+        retry_timing.requested_retry_not_before,
+        retry_timing.next_run_at,
+        retry_timing.source.as_db_value(),
     )
     .execute(&mut **tx)
     .await
@@ -606,22 +652,22 @@ pub async fn complete_job_failure_with_outcome(
         apply_terminal_failure(&mut tx, identity, &lookup, outcome).await?;
         JobFailureCompletionDisposition::DeadLettered { reason }
     } else {
-        let retry_timing = resolve_retry_timing(lookup.completion_base_at, outcome.retry_timing)?;
+        let retry_timing = resolve_retry_timing(
+            lookup.completion_base_at,
+            outcome.policy_retry_delay_ms,
+            outcome.retry_timing,
+        )?;
         apply_retryable_failure(&mut tx, identity, outcome, retry_timing).await?;
-        match retry_timing {
-            ResolvedRetryTiming::After {
-                retry_delay_ms,
-                next_run_at,
-            } => JobFailureCompletionDisposition::RetryScheduled {
-                retry_delay_ms,
-                next_run_at,
-            },
-            ResolvedRetryTiming::At {
-                requested_retry_at,
-                next_run_at,
-            } => JobFailureCompletionDisposition::RetryScheduledAt {
-                requested_retry_at,
-                next_run_at,
+        match (retry_timing.source, retry_timing.requested_retry_not_before) {
+            (RetryTimingSource::HandlerNotBefore, Some(requested_retry_at)) => {
+                JobFailureCompletionDisposition::RetryScheduledAt {
+                    requested_retry_at,
+                    next_run_at: retry_timing.next_run_at,
+                }
+            }
+            _ => JobFailureCompletionDisposition::RetryScheduled {
+                retry_delay_ms: retry_timing.policy_retry_delay_ms,
+                next_run_at: retry_timing.next_run_at,
             },
         }
     };
@@ -702,22 +748,21 @@ mod tests {
         let completion_base_at = completion_base_at();
         let resolved = resolve_retry_timing(
             completion_base_at,
+            Some(1),
             Some(JobRetryTiming::After(
                 Duration::from_millis(1) + Duration::from_nanos(1),
             )),
         )
         .expect("relative retry timing should resolve");
 
-        let ResolvedRetryTiming::After {
-            retry_delay_ms,
-            next_run_at,
-        } = resolved
-        else {
-            panic!("expected relative retry timing");
-        };
-        assert_eq!(retry_delay_ms, 2);
+        assert_eq!(resolved.policy_retry_delay_ms, 1);
+        assert_eq!(resolved.source, RetryTimingSource::HandlerNotBefore);
         assert_eq!(
-            next_run_at,
+            resolved.requested_retry_not_before,
+            Some(completion_base_at + ChronoDuration::milliseconds(2))
+        );
+        assert_eq!(
+            resolved.next_run_at,
             completion_base_at + ChronoDuration::milliseconds(2)
         );
     }
@@ -728,19 +773,17 @@ mod tests {
         let requested_retry_at = completion_base_at + ChronoDuration::microseconds(2_123_456);
         let resolved = resolve_retry_timing(
             completion_base_at,
+            Some(1_000),
             Some(JobRetryTiming::At(requested_retry_at)),
         )
         .expect("absolute retry timing should resolve");
 
-        let ResolvedRetryTiming::At {
-            requested_retry_at: resolved_request,
-            next_run_at,
-        } = resolved
-        else {
-            panic!("expected absolute retry timing");
-        };
-        assert_eq!(resolved_request, requested_retry_at);
-        assert_eq!(next_run_at, requested_retry_at);
+        assert_eq!(
+            resolved.requested_retry_not_before,
+            Some(requested_retry_at)
+        );
+        assert_eq!(resolved.next_run_at, requested_retry_at);
+        assert_eq!(resolved.source, RetryTimingSource::HandlerNotBefore);
     }
 
     #[test]
@@ -750,23 +793,17 @@ mod tests {
         let expected_retry_at = completion_base_at + ChronoDuration::nanoseconds(2_123_457_000);
         let resolved = resolve_retry_timing(
             completion_base_at,
+            Some(1_000),
             Some(JobRetryTiming::At(requested_retry_at)),
         )
         .expect("sub-microsecond absolute retry timing should resolve");
 
-        let ResolvedRetryTiming::At {
-            requested_retry_at,
-            next_run_at,
-        } = resolved
-        else {
-            panic!("expected absolute retry timing");
-        };
-        assert_eq!(requested_retry_at, expected_retry_at);
-        assert_eq!(next_run_at, expected_retry_at);
+        assert_eq!(resolved.requested_retry_not_before, Some(expected_retry_at));
+        assert_eq!(resolved.next_run_at, expected_retry_at);
     }
 
     #[test]
-    fn past_and_equal_absolute_retry_times_are_immediately_eligible() {
+    fn policy_backoff_wins_over_past_or_equal_handler_not_before() {
         let completion_base_at = completion_base_at();
 
         for requested_retry_at in [
@@ -775,26 +812,60 @@ mod tests {
         ] {
             let resolved = resolve_retry_timing(
                 completion_base_at,
+                Some(1_000),
                 Some(JobRetryTiming::At(requested_retry_at)),
             )
             .expect("past or equal absolute retry timing should resolve");
 
-            let ResolvedRetryTiming::At {
-                requested_retry_at: resolved_request,
-                next_run_at,
-            } = resolved
-            else {
-                panic!("expected absolute retry timing");
-            };
-            assert_eq!(resolved_request, requested_retry_at);
-            assert_eq!(next_run_at, completion_base_at);
+            assert_eq!(
+                resolved.requested_retry_not_before,
+                Some(requested_retry_at)
+            );
+            assert_eq!(
+                resolved.next_run_at,
+                completion_base_at + ChronoDuration::seconds(1)
+            );
+            assert_eq!(resolved.source, RetryTimingSource::Policy);
         }
+    }
+
+    #[test]
+    fn policy_backoff_applies_without_a_handler_hint() {
+        let completion_base_at = completion_base_at();
+        let resolved = resolve_retry_timing(completion_base_at, Some(2_500), None)
+            .expect("policy-only retry should resolve");
+
+        assert_eq!(resolved.requested_retry_not_before, None);
+        assert_eq!(resolved.source, RetryTimingSource::Policy);
+        assert_eq!(
+            resolved.next_run_at,
+            completion_base_at + ChronoDuration::milliseconds(2_500)
+        );
+    }
+
+    #[test]
+    fn zero_relative_retry_hint_falls_back_to_policy() {
+        let completion_base_at = completion_base_at();
+        let resolved = resolve_retry_timing(
+            completion_base_at,
+            Some(2_500),
+            Some(JobRetryTiming::After(Duration::ZERO)),
+        )
+        .expect("zero lower bound should fall back to policy");
+
+        assert_eq!(resolved.requested_retry_not_before, None);
+        assert_eq!(resolved.source, RetryTimingSource::Policy);
+        assert_eq!(
+            resolved.next_run_at,
+            completion_base_at + ChronoDuration::milliseconds(2_500)
+        );
     }
 
     #[test]
     fn retry_resolution_rejects_timestamp_overflow() {
         assert_invalid_retry_timing(resolve_retry_timing(
             DateTime::<Utc>::MAX_UTC,
+            Some(1),
             Some(JobRetryTiming::After(Duration::from_millis(1))),
         ));
     }
@@ -811,10 +882,20 @@ mod tests {
     }
 
     #[test]
-    fn absolute_retry_resolution_rejects_timestamp_before_postgres_range() {
-        assert_invalid_retry_timing(resolve_retry_timing(
-            completion_base_at(),
+    fn absolute_retry_before_postgres_range_falls_back_to_policy() {
+        let completion_base_at = completion_base_at();
+        let resolved = resolve_retry_timing(
+            completion_base_at,
+            Some(1_000),
             Some(JobRetryTiming::At(DateTime::<Utc>::MIN_UTC)),
-        ));
+        )
+        .expect("irrelevant past lower bound should fall back to policy");
+
+        assert_eq!(resolved.requested_retry_not_before, None);
+        assert_eq!(resolved.source, RetryTimingSource::Policy);
+        assert_eq!(
+            resolved.next_run_at,
+            completion_base_at + ChronoDuration::seconds(1)
+        );
     }
 }

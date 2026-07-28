@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_attempts\n         SET finished_at = now(),\n             outcome = $4::text::job_failure_kind,\n             error_code = $5,\n             error_message = $6,\n             retry_delay_ms = $7,\n             requested_retry_not_before = $8,\n             effective_next_run_at = $9,\n             retry_timing_source = $10\n         WHERE job_id = $1\n           AND run_number = $2\n           AND attempt = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "09c0d0eb4133a6309186a4b37271b9fcc899324ac89d1afdb039d8118bdca317"
+}

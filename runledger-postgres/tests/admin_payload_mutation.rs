@@ -352,12 +352,12 @@ async fn admin_payload_update_rejects_leased_and_terminal_jobs() {
         dead_lettered_job.run_number,
         dead_lettered_job.attempt,
         dead_lettered_worker,
-        &JobFailureUpdate {
-            kind: JobFailureKind::Terminal,
-            code: "terminal",
-            message: "terminal failure",
-            retry_timing: None,
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Terminal,
+            "terminal",
+            "terminal failure",
+            None,
+        ),
     )
     .await
     .expect("complete dead-lettered job");

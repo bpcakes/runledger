@@ -22,6 +22,10 @@ pub enum WorkflowBuildError {
     },
     /// The workflow idempotency key was blank.
     BlankIdempotencyKey,
+    /// The reusable workflow active key was blank.
+    BlankActiveKey,
+    /// The reusable workflow active key exceeded 512 bytes.
+    ActiveKeyTooLong,
     /// The workflow result step key was blank.
     BlankResultStepKey,
     /// The workflow result step key does not match a step in the workflow.
@@ -42,6 +46,11 @@ pub enum WorkflowBuildError {
         step_key: String,
         /// The invalid timeout value in seconds.
         timeout_seconds: i32,
+    },
+    /// A job step execution-resource key was blank or exceeded 512 bytes.
+    InvalidStepExecutionResourceKey {
+        /// The step with the invalid resource key.
+        step_key: String,
     },
     /// An external step incorrectly supplied a job type.
     ExternalStepJobTypeNotAllowed {
@@ -103,6 +112,8 @@ impl From<WorkflowDagValidationError> for WorkflowBuildError {
                 Self::BlankStepJobType { step_key }
             }
             WorkflowDagValidationError::BlankIdempotencyKey => Self::BlankIdempotencyKey,
+            WorkflowDagValidationError::BlankActiveKey => Self::BlankActiveKey,
+            WorkflowDagValidationError::ActiveKeyTooLong => Self::ActiveKeyTooLong,
             WorkflowDagValidationError::BlankResultStepKey => Self::BlankResultStepKey,
             WorkflowDagValidationError::UnknownResultStepKey { step_key } => {
                 Self::UnknownResultStepKey { step_key }
@@ -121,6 +132,9 @@ impl From<WorkflowDagValidationError> for WorkflowBuildError {
                 step_key,
                 timeout_seconds,
             },
+            WorkflowDagValidationError::InvalidStepExecutionResourceKey { step_key } => {
+                Self::InvalidStepExecutionResourceKey { step_key }
+            }
             WorkflowDagValidationError::ExternalStepJobTypeNotAllowed { step_key } => {
                 Self::ExternalStepJobTypeNotAllowed { step_key }
             }
@@ -172,6 +186,8 @@ impl fmt::Display for WorkflowBuildError {
                 write!(f, "job_type for step '{step_key}' must be non-empty")
             }
             Self::BlankIdempotencyKey => write!(f, "idempotency_key must be non-empty"),
+            Self::BlankActiveKey => write!(f, "active_key must be non-empty"),
+            Self::ActiveKeyTooLong => write!(f, "active_key must be at most 512 bytes"),
             Self::BlankResultStepKey => write!(f, "result_step_key must be non-empty"),
             Self::UnknownResultStepKey { step_key } => {
                 write!(f, "result step '{step_key}' must exist in the workflow")
@@ -192,6 +208,12 @@ impl fmt::Display for WorkflowBuildError {
                 write!(
                     f,
                     "timeout_seconds for step '{step_key}' must be positive; got {timeout_seconds}"
+                )
+            }
+            Self::InvalidStepExecutionResourceKey { step_key } => {
+                write!(
+                    f,
+                    "execution_resource_key for step '{step_key}' must be non-blank and at most 512 bytes"
                 )
             }
             Self::ExternalStepJobTypeNotAllowed { step_key } => {

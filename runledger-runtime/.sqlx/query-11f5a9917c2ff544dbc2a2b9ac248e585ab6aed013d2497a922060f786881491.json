@@ -1,0 +1,180 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            ws.id,\n            ws.workflow_run_id,\n            ws.step_key,\n            ws.execution_kind::text AS \"execution_kind!\",\n            ws.job_type,\n            ws.organization_id,\n            ws.payload,\n            ws.priority,\n            ws.max_attempts,\n            ws.timeout_seconds,\n            ws.stage,\n            ws.allow_handler_continuation,\n            ws.execution_resource_key,\n            ws.status::text AS \"status!\",\n            ws.job_id,\n            ws.released_at,\n            ws.started_at,\n            ws.finished_at,\n            ws.dependency_count_total,\n            ws.dependency_count_pending,\n            ws.dependency_count_unsatisfied,\n            ws.status_reason,\n            ws.last_error_code,\n            ws.last_error_message,\n            ws.output,\n            ws.created_at,\n            ws.updated_at\n         FROM workflow_steps ws\n         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id\n         WHERE ws.workflow_run_id = $1\n           AND ws.step_key = ANY($2::text[])\n           AND ($3::uuid IS NULL OR wr.organization_id = $3)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "workflow_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "step_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "execution_kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "allow_handler_continuation",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 12,
+        "name": "execution_resource_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 15,
+        "name": "released_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "dependency_count_total",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 19,
+        "name": "dependency_count_pending",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 20,
+        "name": "dependency_count_unsatisfied",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 21,
+        "name": "status_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 22,
+        "name": "last_error_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 23,
+        "name": "last_error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 24,
+        "name": "output",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 25,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 26,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      null,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "11f5a9917c2ff544dbc2a2b9ac248e585ab6aed013d2497a922060f786881491"
+}

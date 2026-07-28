@@ -744,12 +744,12 @@ async fn workflow_handle_reports_unsuccessful_terminal_run() {
         job.run_number,
         job.attempt,
         &worker_id,
-        &JobFailureUpdate {
-            kind: JobFailureKind::Terminal,
-            code: "job.test.terminal_failure",
-            message: "result step failed terminally",
-            retry_timing: None,
-        },
+        &JobFailureUpdate::new(
+            JobFailureKind::Terminal,
+            "job.test.terminal_failure",
+            "result step failed terminally",
+            None,
+        ),
     )
     .await
     .expect("fail result job terminally");

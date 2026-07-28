@@ -6,10 +6,11 @@ use crate::{DbPool, Error, Result};
 
 use super::super::super::errors::{
     ensure_rejection_rollback_succeeded, invalid_continuation_delay_error,
-    validate_completion_progress, workflow_requeue_not_supported_error,
+    validate_completion_progress,
 };
 use super::super::super::row_decode::parse_job_type_name;
 use super::super::super::types::{JobContinuationOutcome, JobContinuationUpdate};
+use super::super::super::workflows::on_handler_continuation;
 use super::super::advance::{
     AdvanceJobToNextRun, LiveLeaseGuard, advance_live_lease_to_next_run_tx,
 };
@@ -54,8 +55,8 @@ fn continuation_next_run_at(base_at: DateTime<Utc>, delay_us: i64) -> Result<Dat
 /// The transition applies only while the exact `(job_id, run_number, attempt,
 /// worker_id)` lease is still live. Progress and checkpoint values are retained
 /// across the run boundary, while the failure-attempt budget resets.
-/// Workflow-managed jobs are rejected with
-/// `job.workflow_requeue_not_supported`.
+/// Workflow-managed steps that did not opt in are rejected with
+/// `job.workflow_handler_continuation_not_enabled`.
 pub async fn complete_job_continuation(
     pool: &DbPool,
     job_id: Uuid,
@@ -112,9 +113,11 @@ pub async fn complete_job_continuation_with_outcome(
         )
         .await;
     };
-    if lookup.workflow_step_id.is_some() {
+    if let Some(workflow_step_id) = lookup.workflow_step_id
+        && let Err(error) = on_handler_continuation(&mut tx, job_id, workflow_step_id).await
+    {
         ensure_rejection_rollback_succeeded(tx.rollback().await)?;
-        return Err(workflow_requeue_not_supported_error());
+        return Err(error);
     }
     if let Err(validation_error) = coalesce_completion_progress(
         &mut progress.progress_done,

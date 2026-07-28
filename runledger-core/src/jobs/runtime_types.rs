@@ -249,13 +249,13 @@ mod tests {
             .single()
             .expect("valid reset timestamp");
         let absolute = JobFailure::retryable("provider.rate_limited", "retry at reset")
-            .retry_after(Duration::from_secs(30))
-            .retry_at(retry_at);
+            .retry_not_before_delay(Duration::from_secs(30))
+            .retry_not_before(retry_at);
         assert_eq!(absolute.retry_timing(), Some(JobRetryTiming::At(retry_at)));
 
         let relative = JobFailure::retryable("provider.rate_limited", "retry later")
-            .retry_at(retry_at)
-            .retry_after(Duration::from_secs(45));
+            .retry_not_before(retry_at)
+            .retry_not_before_delay(Duration::from_secs(45));
         assert_eq!(
             relative.retry_timing(),
             Some(JobRetryTiming::After(Duration::from_secs(45)))
@@ -284,7 +284,7 @@ mod tests {
     fn relative_retry_timing_serializes_exactly() {
         let serialized = serde_json::to_value(
             JobFailure::retryable("provider.rate_limited", "retry later")
-                .retry_after(Duration::from_millis(250)),
+                .retry_not_before_delay(Duration::from_millis(250)),
         )
         .expect("serialize timed retryable failure");
 
@@ -311,7 +311,8 @@ mod tests {
             .single()
             .expect("valid reset timestamp");
         let serialized = serde_json::to_value(
-            JobFailure::retryable("provider.rate_limited", "retry at reset").retry_at(retry_at),
+            JobFailure::retryable("provider.rate_limited", "retry at reset")
+                .retry_not_before(retry_at),
         )
         .expect("serialize absolute retry timing");
 
@@ -329,7 +330,7 @@ mod tests {
     }
 }
 
-/// A handler-selected schedule for another attempt after a retryable failure.
+/// A handler-selected lower bound for another attempt after a retryable failure.
 ///
 /// This timing is consulted only when the failed attempt remains retryable.
 /// Terminal failures and failures that exhaust `max_attempts` are dead-lettered
@@ -338,12 +339,11 @@ mod tests {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum JobRetryTiming {
-    /// Schedule another attempt after this duration, measured from the
-    /// persistence database's completion clock.
+    /// Do not schedule another attempt before this duration has elapsed from
+    /// the persistence database's completion clock.
     After(Duration),
-    /// Schedule another attempt at this absolute UTC provider reset time.
-    ///
-    /// A time that has already passed is treated as immediately eligible.
+    /// Do not schedule another attempt before this absolute UTC provider reset
+    /// time.
     At(DateTime<Utc>),
 }
 
@@ -396,31 +396,61 @@ impl JobFailure {
         Self::new(JobFailureKind::Panicked, code, message)
     }
 
-    /// Requests another attempt after `delay` when this failure remains
-    /// retryable.
+    /// Deprecated name for [`Self::retry_not_before_delay`].
     ///
-    /// The failed attempt still consumes the job's attempt budget. A positive
-    /// sub-millisecond delay is rounded up to one millisecond by persistence.
-    /// Zero or unrepresentable delays are converted into a terminal
-    /// `job.invalid_retry_timing` failure by the runtime.
+    /// This method does not override policy backoff: the duration is a lower
+    /// bound, despite the older `retry_after` name.
+    #[deprecated(
+        since = "0.8.0",
+        note = "use retry_not_before_delay; relative retry timing is a lower bound, not an exact override"
+    )]
     #[must_use]
     pub fn retry_after(mut self, delay: Duration) -> Self {
         self.retry_timing = Some(JobRetryTiming::After(delay));
         self
     }
 
-    /// Requests another attempt at an absolute UTC provider reset time when
+    /// Requests that another attempt not run before `delay` has elapsed when
     /// this failure remains retryable.
     ///
-    /// The failed attempt still consumes the job's attempt budget. A timestamp
-    /// at or before persistence is treated as immediately eligible.
+    /// The failed attempt still consumes the job's attempt budget. A positive
+    /// sub-millisecond delay is rounded up to one millisecond by persistence.
+    /// Zero supplies no additional lower bound. A winning delay that cannot be
+    /// represented is converted into a terminal `job.invalid_retry_timing`
+    /// failure by the runtime. The effective schedule is the later of ordinary
+    /// policy backoff and this lower bound.
+    #[must_use]
+    pub fn retry_not_before_delay(mut self, delay: Duration) -> Self {
+        self.retry_timing = Some(JobRetryTiming::After(delay));
+        self
+    }
+
+    /// Deprecated name for [`Self::retry_not_before`].
+    ///
+    /// This method does not override policy backoff: the timestamp is a lower
+    /// bound, despite the older `retry_at` name.
+    #[deprecated(
+        since = "0.8.0",
+        note = "use retry_not_before; absolute retry timing is a lower bound, not an exact override"
+    )]
     #[must_use]
     pub fn retry_at(mut self, retry_at: DateTime<Utc>) -> Self {
         self.retry_timing = Some(JobRetryTiming::At(retry_at));
         self
     }
 
-    /// Returns the handler-selected retry timing, if one was supplied.
+    /// Requests that another attempt not run before `retry_not_before`.
+    ///
+    /// The failed attempt still consumes the job's attempt budget. The
+    /// timestamp is a lower bound; the effective schedule is the later of
+    /// ordinary policy backoff and this hint.
+    #[must_use]
+    pub fn retry_not_before(mut self, retry_not_before: DateTime<Utc>) -> Self {
+        self.retry_timing = Some(JobRetryTiming::At(retry_not_before));
+        self
+    }
+
+    /// Returns the handler-selected retry lower bound, if one was supplied.
     #[must_use]
     pub const fn retry_timing(&self) -> Option<JobRetryTiming> {
         self.retry_timing

@@ -30,7 +30,7 @@ together.
 | Fan-out, fan-in, or ordered stages | Workflow DAG APIs |
 | Human/API approval or another external gate | External workflow steps |
 | Delayed or recurring entrypoint | `runledger_postgres::jobs::upsert_job_schedule` |
-| Provider-directed failure retry/reset time | `JobFailure::retry_after(...)` or `JobFailure::retry_at(...)` |
+| Provider-directed failure retry/reset time | `JobFailure::retry_not_before_delay(...)` or `JobFailure::retry_not_before(...)` |
 | Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
 | Admin/status views | `runledger_postgres::jobs` read/list/count APIs |
 
@@ -70,8 +70,8 @@ wait indefinitely and can afford the pending PostgreSQL listener connection.
 
 ## Handler-Selected Retry Timing
 
-Use `JobFailure::retry_after(delay)` when the provider returns a relative
-`Retry-After` value, or `JobFailure::retry_at(reset_at)` when it returns an
+Use `JobFailure::retry_not_before_delay(delay)` when the provider returns a relative
+`Retry-After` value, or `JobFailure::retry_not_before(reset_at)` when it returns an
 absolute UTC reset timestamp:
 
 ```rust
@@ -81,51 +81,50 @@ let relative = JobFailure::retryable(
     "provider.temporarily_unavailable",
     "Provider asked the client to retry later.",
 )
-.retry_after(Duration::from_secs(retry_after_seconds));
+.retry_not_before_delay(Duration::from_secs(retry_after_seconds));
 
 let absolute = JobFailure::retryable(
     "provider.rate_limited",
     "Provider rate limit reached.",
 )
-.retry_at(provider_reset_at);
+.retry_not_before(provider_reset_at);
 ```
 
-The worker resolves retry timing in this order:
-
-1. timing attached by the handler;
-2. the registry override for the exact job type and failure code;
-3. Runledger's exponential backoff.
+The worker first resolves ordinary policy from the registry override for the
+exact job type and failure code or Runledger's exponential fallback. PostgreSQL
+then schedules the later of that policy time and the handler's not-before hint.
 
 Timing is consulted only when another attempt will actually be scheduled.
 Terminal and panicked failures, and retryable failures that exhaust
 `max_attempts`, are dead-lettered without applying or validating it. A relative
 delay is measured from PostgreSQL's completion clock; positive sub-millisecond
-values round up to one millisecond, while zero or an unrepresentable delay
-becomes a terminal `job.invalid_retry_timing` handler failure. An absolute time
-is rounded up only to PostgreSQL microsecond precision. If it is at or before
-the database completion time, `next_run_at` is that completion time and the job
-is immediately eligible. Absolute timestamps outside PostgreSQL's supported
-range also become `job.invalid_retry_timing`.
+values round up to one millisecond, while zero supplies no additional lower
+bound. An absolute time is rounded up only to PostgreSQL microsecond precision.
+If it is at or before the database completion time, it cannot shorten ordinary
+policy delay; a past value outside PostgreSQL's range is likewise ignored. A
+winning relative delay or future timestamp that cannot be represented becomes
+`job.invalid_retry_timing`.
 
 This API controls another failed attempt; it is not successful continuation:
 
 | Handler result | Durable effect |
 | --- | --- |
-| `Err(JobFailure::retryable(...).retry_after(...))` or `.retry_at(...)` | Closes the attempt as failed, keeps `run_number`, consumes attempt budget, and leaves workflow dependents blocked. |
-| `Ok(JobCompletion::continue_after(...))` | Closes a direct-job slice successfully, advances `run_number`, and starts the new run with a fresh attempt budget. |
+| `Err(JobFailure::retryable(...).retry_not_before_delay(...))` or `.retry_not_before(...)` | Closes the attempt as failed, keeps `run_number`, consumes attempt budget, and leaves workflow dependents blocked. |
+| `Ok(JobCompletion::continue_after(...))` | Closes a slice successfully, advances `run_number`, and starts the new run with a fresh attempt budget. Workflow job steps require persisted opt-in. |
 
-For relative timing, `job_attempts.retry_delay_ms` and the `RETRY_SCHEDULED`
-event retain the selected delay. For absolute timing, the attempt delay stays
-null and the event records `requested_retry_at` together with the effective
-`next_run_at`. In lifecycle observers, match
-`JobFailureDisposition::RetryScheduled` for a committed relative delay and
-`RetryScheduledAt` for a committed absolute request. The observer disposition
-is authoritative for what was persisted; `JobFailure::retry_timing()` reports
-what the handler requested.
+`job_attempts.retry_delay_ms` retains the ordinary policy delay. Attempts and
+`RETRY_SCHEDULED` events also record `requested_retry_not_before`,
+`effective_next_run_at`, and `retry_timing_source`. Observer dispositions are
+authoritative for the effective schedule; `JobFailure::retry_timing()` reports
+what the handler requested. `RetryScheduledAt.requested_retry_at` contains the
+database-clock boundary for either an absolute hint or a relative hint converted
+to an absolute timestamp. Event payloads also retain `requested_retry_at` and
+`next_run_at` as legacy aliases for consumers that have not migrated to the
+clarified field names.
 
-## Bounded Direct-Job Continuation
+## Bounded Job Continuation
 
-When one direct logical job must process bounded slices, return
+When one logical job must process bounded slices, return
 `JobCompletion::continue_now()` or `JobCompletion::continue_after(delay)` from
 the handler instead of enqueueing ordinal successor jobs. Add `.progress(...)`
 and `.checkpoint(...)` when the next run needs durable position metadata.
@@ -136,7 +135,26 @@ Runledger keeps the job ID, closes the current attempt successfully, advances
 must remain idempotent because a crash before continuation persistence leaves
 the lease for normal recovery; an exhausted lease is dead-lettered, and a new
 checkpoint from an uncommitted slice is unavailable. Continuations cannot carry
-final output and are not supported for workflow-managed jobs.
+final output.
+
+Direct jobs need no enqueue setting. A workflow job step must explicitly opt in:
+
+```rust
+let step = WorkflowStepEnqueueBuilder::new(step_key, job_type, &payload)
+    .allow_handler_continuation()
+    .try_build()?;
+```
+
+The persisted default is disabled, and external steps cannot opt in. A
+committed workflow continuation returns only that step from `RUNNING` to
+`ENQUEUED`; it does not release dependency edges, decrement counters, invoke
+terminal callbacks, or recompute terminal workflow state. The workflow stays
+active, and a delayed continuation remains unclaimable until `next_run_at`.
+Only final success, failure, or cancellation terminalizes the step.
+
+Do not emit continuation-enabled workflow steps until every 0.7 process and
+live lease has quiesced. A 0.7 worker does not understand the persisted opt-in
+and can terminalize the step when its handler returns continuation.
 Successful continuations are not bounded by `max_attempts`; handlers must own a
 terminal condition and should use a nonzero delay for polling-style work.
 
@@ -351,22 +369,74 @@ for event in events {
 }
 ```
 
-## Pre-0.6 To 0.6 Activation And Rollback Runbook
+## Active Keys, Execution Resources, And Workflow Recovery
 
-Continuation and typed recovery require a two-phase runtime rollout even though
-0.6.0 added no schema migration. "Disabled" means deployed handlers do not return
-continuation dispositions and application callers do not invoke the new
-recovery APIs; Runledger has no global switch. Continuation is optional. Typed
-recovery is the required destination only for applications that have callers of
-deprecated `requeue_job`.
+- Use `.active_key(...)` only with `enqueue_or_get_active_workflow`, and handle
+  `Inserted`, `ExistingActive`, and `ExistingIdempotent` explicitly. Scope is
+  global when `organization_id` is absent and organization-local otherwise.
+  Workflow type is not part of the scope; namespace keys by type unless
+  cross-type coordination is intentional. Active keys must be non-blank and at
+  most 512 bytes. A canceled live lease is released by the lease reaper after
+  quiescence; if reaping stops, the key remains reserved until it resumes.
+  `ExistingActive` may therefore contain a terminal canceled run or a different
+  workflow type using the same unnamespaced key; do not retry solely because
+  `run.status` is terminal. `enqueue_workflow_run_handle` rejects active-key
+  payloads so it cannot erase collision classification. Match the active
+  enqueue outcome, then create a handle with `workflow_run_handle` from the
+  returned run ID and scope.
+- Use `enqueue_job_with_execution_resource` for direct jobs or
+  `WorkflowStepEnqueueBuilder::execution_resource` for job steps. A blocked
+  resource leaves work pending at attempt zero and does not occupy a worker
+  claim slot. Resource keys are global across organizations, so namespace them
+  in the application when tenants must not contend. They guarantee mutual
+  exclusion rather than global FIFO; type-restricted workers order only the
+  eligible types. Mixing claim APIs or workers with different type filters can
+  therefore reorder contenders for one key without weakening mutual exclusion.
+  A requested batch is only an upper bound: concurrent resource races and the
+  bounded 1,024–16,384-job resource-head window can return short batches,
+  especially behind a dense same-key prefix. Exclusivity is lease-scoped: after
+  heartbeat loss, the reaper releases an expired owner even if the old handler
+  has not physically exited.
+  Fence or make provider-side operations idempotent so a late handler cannot
+  conflict with its successor. Successful direct-job replay preserves the source
+  resource key. If reaping stops, expired claims stay reserved until it resumes;
+  each pass bounds cleanup by the reaper batch limit. Reaped job transitions
+  commit before coordination-claim cleanup, and the detailed reaper result
+  reports released active/resource claim counts plus cleanup errors. The runtime
+  logs cleanup failures and warns when cleanup reaches its batch limit. A
+  resource owner's heartbeat renews the claim row, and continuation releases
+  the claim between slices so the next slice must re-contend.
+- Use `recover_workflow_run` for a terminal workflow. It creates a new run and
+  durable lineage; it never reopens source steps. Recovery requires a canonical
+  enqueue snapshot and replays committed append history while preserving active
+  and resource constraints together with each source step's resolved priority,
+  attempt limit, and timeout. It uses the latest payload persisted on each
+  source step, including a committed pending-step payload correction. Every new
+  workflow retains a canonical snapshot containing step payloads; account for
+  the duplicated JSON in retention planning and store large artifacts
+  externally.
+- Treat recovery `request_key` as an idempotency boundary. Identical retries
+  return the existing recovery; changed source-step, mode, or reason fields
+  conflict. Keys must be non-blank and at most 512 bytes. Deleting only the
+  recovery run is blocked while the source remains so retention cannot erase
+  that idempotency guard; delete the complete lineage in a source-led
+  statement.
+
+## 0.7 To 0.8 Activation And Rollback Runbook
+
+The 0.8 persisted continuation, active-key, execution-resource, retry-audit,
+and workflow-recovery paths require a two-phase runtime rollout. "Disabled"
+means deployed handlers do not return workflow continuation dispositions and
+application callers do not invoke the new coordinated enqueue or recovery
+APIs; Runledger has no global switch.
 
 For activation:
 
-1. When upgrading to a release that contains successful replay and continuation
-   metrics, first apply
-   `202607190001_job_replays_and_continuation_metrics`, then apply
-   `202607250001_harden_continuation_metrics_payload_validation` for corrected
-   metrics. Existing older binaries remain data-plane compatible with the
+1. Apply the additive migrations through
+   `202607280005_workflow_recoveries`, including the workflow continuation,
+   active-claim, retry-audit, and execution-resource migrations. Existing 0.7
+   binaries remain data-plane compatible only while the new paths are unused.
+   Existing older binaries remain data-plane compatible with the
    additive table and views when startup uses Runledger's filtered migration or
    schema-compatibility helper. SQLx records the migrations, while their
    compatibility-fence history deliberately remains at the 0.6.0 set so those
@@ -377,9 +447,9 @@ For activation:
    close that disposable connection or pool instead of retrying it. Do not
    deploy replay or metrics callers before these expand-first migrations are
    present.
-2. Deploy 0.6 to every worker, reaper, admin, API, CLI, and repair process that
-   writes job lifecycle state. Keep both new code paths unused.
-3. Prove from deployment inventory or process telemetry that every pre-0.6
+2. Deploy 0.8 to every worker, reaper, admin, API, CLI, and repair process that
+   writes job lifecycle state. Keep the new paths unused.
+3. Prove from deployment inventory or process telemetry that every 0.7
    process has stopped. Runledger rows do not record a process's crate version,
    so a database query alone cannot prove this condition.
 4. Record the authoritative server version:
@@ -408,18 +478,25 @@ For activation:
    ORDER BY lease_expires_at, id;
    ```
 
-6. Resume 0.6 claims. Activate typed recovery and continuation independently,
-   beginning with a canary job type or tenant. Watch the continuation queries
-   above plus ordinary dead-letter and persistence-failure alerts before
-   widening the canary.
+6. Resume 0.8 claims. Activate workflow continuation, active keys, execution
+   resources, retry hints, and workflow recovery independently, beginning with
+   a canary job type or tenant.
 
-After either new path has committed state, do not start a pre-0.6 writer as a
+A 0.7 worker does not create a `job_execution_resource_claims` row before it
+tries to lease a resource-constrained job. The database trigger added by the
+resource migration rejects that lease, preserving mutual exclusion but causing
+the old worker's claim transaction to fail loudly. It may repeatedly roll back
+batches that encounter constrained work. Steps 2–6 are therefore a mandatory
+availability and protocol fence, not only a schema rollout precaution.
+
+After a new path has committed state, do not start a 0.7 writer as a
 partial rollback. For a coordinated rollback:
 
 1. First deploy or configure application code so no handler emits another
-   continuation and no caller starts another typed recovery.
+   continuation, no caller starts another typed recovery, and no caller enqueues
+   another resource-constrained job.
 2. Drain all nonterminal jobs whose current run was created by a handler
-   continuation. This query must return no rows before a pre-0.6 writer starts:
+   continuation. This query must return no rows before a 0.7 writer starts:
 
    ```sql
    SELECT jq.id,
@@ -459,7 +536,26 @@ partial rollback. For a coordinated rollback:
    continuation history therefore does not keep a job in this rollback gate
    after a later admin recovery.
 
-3. Wait for every canceled live-handler fence to expire; this query must also
+3. Drain resource-constrained work. A 0.7 worker cannot acquire the durable
+   resource claim, so the database rejects its lease and rolls back the claim
+   transaction. This query must return no rows:
+
+   ```sql
+   SELECT id,
+          job_type,
+          organization_id,
+          status,
+          run_number,
+          execution_resource_key,
+          next_run_at,
+          lease_expires_at
+   FROM job_queue
+   WHERE execution_resource_key IS NOT NULL
+     AND status IN ('PENDING', 'LEASED')
+   ORDER BY next_run_at, id;
+   ```
+
+4. Wait for every canceled live-handler fence to expire; this query must also
    return no rows:
 
    ```sql
@@ -474,10 +570,10 @@ partial rollback. For a coordinated rollback:
    ORDER BY lease_expires_at, id;
    ```
 
-4. Stop every 0.6 worker, reaper, admin, API, CLI, and repair writer. Confirm
+5. Stop every 0.8 worker, reaper, admin, API, CLI, and repair writer. Confirm
    process shutdown from deployment inventory, pause claims, and rerun the
    active-lease query from activation until it returns no rows. Only then start
-   any pre-0.6 process.
+   any 0.7 process.
 
 Choose one migration-history strategy before starting the rollback binary:
 
@@ -640,7 +736,8 @@ The replay contract preserves fresh-job semantics:
 
 - the successful source row, events, checkpoint, and output remain unchanged;
 - the replay gets a new job ID, starts at run one, and copies the source job
-  type, tenant, payload, priority, attempt budget, and timeout;
+  type, tenant, payload, priority, attempt budget, timeout, and execution
+  resource;
 - progress, checkpoint, output, terminal timestamps, workflow ownership, the
   original idempotency key, and the source's old schedule time are not copied;
 - Runledger records the source ID/run, replay ID, request key, and reason in

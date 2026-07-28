@@ -87,15 +87,18 @@ Do not call `requeue_job` on workflow-managed jobs; it returns
 Use `update_job_payload_uuid_array_field` only for direct pending jobs; inspect
 `JobPayloadUuidArrayFieldUpdate` for `Updated`, `NotFound`, or rejected updates.
 
-## Bounded Direct-Job Continuation
+## Bounded Job Continuation
 
-Continuation is opt-in at each handler, not a global Runledger feature flag.
-Use `JobCompletion::continue_now()` or `continue_after(delay)` only after a
-bounded, successful, idempotent slice. Version checkpoints, read the committed
-value from `JobContext::checkpoint`, enforce an application-owned logical
+Direct jobs can use continuation immediately; workflow job steps require the
+persisted `WorkflowStepEnqueueBuilder::allow_handler_continuation()` opt-in,
+which defaults to false and is invalid for external steps. Use
+`JobCompletion::continue_now()` or `continue_after(delay)` only after a bounded,
+successful, idempotent slice. Version checkpoints, read the committed value
+from `JobContext::checkpoint`, enforce an application-owned logical
 deadline/run limit, and use nonzero delays for polling. Continuation does not
-consume `max_attempts`, cannot carry final output, and is unsupported for
-workflow-managed jobs. Canary by job type or tenant and alert on continuation
+consume `max_attempts`, cannot carry final output, and keeps workflow
+dependencies blocked until final terminal completion. Canary by job type or
+tenant and alert on continuation
 rate, run depth, dead letters, and continuation persistence failures. The
 external-consumer smoke test is the compile-checked continuation example.
 It also exercises pool-owned and caller-transaction recovery, caller-transaction
@@ -107,6 +110,57 @@ optional organization filter uses admin aggregation semantics; `None` means all
 scopes, not exact global scope. Active metrics mean the current run was created
 by continuation; later admin recovery does not remain `active` merely because a
 job has older continuation history.
+
+## Active Workflow Keys
+
+Use `WorkflowRunEnqueueBuilder::active_key` only with
+`enqueue_or_get_active_workflow`. Handle `Inserted`, `ExistingActive`, and
+`ExistingIdempotent` explicitly. Active claims are global or organization
+scoped and release only after terminal work is quiescent. Workflow type is not
+part of that scope; namespace keys by type unless cross-type coordination is
+intentional. Active keys are non-blank and limited to 512 bytes. Deferred
+release after cancellation depends on the lease reaper; stopped reaping leaves
+the key reserved until it resumes. `ExistingActive` can carry a terminal
+canceled run during that interval.
+`enqueue_workflow_run_handle` rejects active-key payloads; match the classified
+active enqueue outcome first, then call `workflow_run_handle` with its run ID
+and scope when a result handle is needed.
+
+## Durable Execution Resources
+
+Use `enqueue_job_with_execution_resource` for direct work or
+`WorkflowStepEnqueueBuilder::execution_resource` for job-backed steps.
+Reservation is atomic before leasing; resource-blocked work remains pending at
+attempt zero and consumes no worker claim slot. Resource keys are global across
+organizations; namespace them in the application when tenants must not
+coordinate. They guarantee mutual exclusion, not global FIFO; type-restricted
+workers order only their eligible types. Mixing claim APIs or distinct worker
+type filters may reorder contenders without weakening mutual exclusion.
+A requested batch size is only an upper bound; cross-worker resource races can
+return a short batch. Resource-head discovery scans a bounded 1,024–16,384-job
+window scaled by batch size; a dense same-key prefix can therefore also return
+short. Resource inserts use consistent key order to reduce cross-filter
+deadlock risk. Exclusivity is lease-scoped: the reaper releases an expired owner
+as it transitions the owning job after heartbeat loss, so provider-side effects
+must remain fenced or idempotent if a late handler outlives its lease.
+Stopped reaping leaves expired claims reserved; cleanup is bounded by the
+configured reaper batch limit. Reaped lease transitions commit before
+coordination-claim cleanup. Detailed reaper results expose released-claim counts
+and cleanup errors; the runtime logs cleanup failures and batch saturation.
+Resource-owner heartbeats renew the claim row, and continuation releases it
+between slices so the next slice re-contends.
+Successful direct-job replay preserves the source execution resource.
+
+## Workflow Recovery
+
+Use `recover_workflow_run` to replay a terminal workflow as a new run with
+durable lineage. It reconstructs canonical enqueue plus append history,
+preserves active/resource constraints and resolved per-step queue settings, and
+uses each source step's latest persisted payload. It is idempotent by source run
+and request key and rejects sources without a safe canonical snapshot. Never
+reopen terminal source steps in place. Recovery request keys are non-blank and
+limited to 512 bytes. Retention cannot delete only the recovery run while its
+source remains because that would erase the request idempotency guard.
 
 ## Direct-Job Recovery And Replay
 
@@ -154,15 +208,17 @@ provenance. The decoded enums and struct variants are non-exhaustive, so use
 `JobEventRecord::payload` as the raw fallback for `Unknown`, `Other`, malformed,
 custom, or future payloads.
 
-## Pre-0.6 Rollout Fence
+## 0.7 To 0.8 Rollout Fence
 
-Deploy 0.6 to every worker, reaper, admin, API, CLI, and repair writer with both
-new code paths unused. Activate them independently only after every pre-0.6
-process and old lease has quiesced. Continuation may remain unused forever;
-legacy requeue callers must eventually migrate. After activation, never start a
-pre-0.6 writer until continuations are disabled, no pending or leased job has a
-current run created by continuation, canceled lease fences have quiesced, and
-all 0.6 writers have stopped. Follow the PostgreSQL 18 activation/rollback
+Apply additive migrations through `202607280005_workflow_recoveries`, then
+deploy 0.8 to every worker, reaper, admin, API, CLI, and repair writer with the
+new paths unused. Activate only after every 0.7 process and old lease has
+quiesced. A PostgreSQL trigger rejects a resource-constrained lease without its
+exact durable claim, so 0.7 workers fail loudly instead of violating mutual
+exclusion but can repeatedly roll back affected claim batches. After
+activation, never start a 0.7 writer until new writes are disabled,
+continuation/resource work is drained, canceled lease fences have quiesced,
+and all 0.8 writers have stopped. Follow the PostgreSQL 18 activation/rollback
 queries in `docs/downstream-agent-guide.md`.
 
 Apply `202607190001_job_replays_and_continuation_metrics` before deploying

@@ -6,8 +6,8 @@ use runledger_postgres::jobs::{
     CompareAndReplaySucceededJob, CompareAndReplaySucceededJobOutcome, DecodedJobEventPayload,
     JobCompletionUpdate, JobEnqueue, JobEnqueueDisposition, JobPayloadUuidArrayFieldUpdate,
     JobScope, claim_jobs, compare_and_replay_succeeded_job, compare_and_replay_succeeded_job_tx,
-    complete_job_success, enqueue_job, enqueue_workflow_run, get_job_by_id, list_job_events,
-    list_workflow_steps, update_job_payload_uuid_array_field,
+    complete_job_success, enqueue_job, enqueue_job_with_execution_resource, enqueue_workflow_run,
+    get_job_by_id, list_job_events, list_workflow_steps, update_job_payload_uuid_array_field,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -20,6 +20,7 @@ mod support;
 use support::{claim_one_job, register_test_job_definition};
 
 const JOB_TYPE: &str = "jobs.test.succeeded_replay";
+const EXECUTION_RESOURCE: &str = "provider-account:successful-replay";
 
 async fn enqueue_keyed_source(
     pool: &DbPool,
@@ -270,6 +271,102 @@ async fn successful_replay_preserves_source_and_idempotently_creates_fresh_job()
     let original_retry =
         enqueue_keyed_source(&pool, organization_id, &payload, "original-operation-501").await;
     assert_eq!(original_retry, source_job_id);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn successful_replay_preserves_the_source_execution_resource() {
+    let (pool, database) = setup_ephemeral_pool("postgres_resource_successful_replay", 6).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let organization_id = Uuid::from_u128(502);
+    let source_payload = json!({"operation": "resource-source"});
+    let source_job_id = enqueue_job_with_execution_resource(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new(JOB_TYPE),
+            organization_id: Some(organization_id),
+            payload: &source_payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: None,
+            stage: None,
+        },
+        EXECUTION_RESOURCE,
+    )
+    .await
+    .expect("enqueue resource-constrained replay source")
+    .job_id;
+    complete_source_with_result(&pool, source_job_id, &json!({}), &json!({})).await;
+
+    let owner_payload = json!({"operation": "resource-owner"});
+    let owner_job_id = enqueue_job_with_execution_resource(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new(JOB_TYPE),
+            organization_id: Some(organization_id),
+            payload: &owner_payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: None,
+            stage: None,
+        },
+        EXECUTION_RESOURCE,
+    )
+    .await
+    .expect("enqueue current resource owner")
+    .job_id;
+    let owner = claim_one_job(&pool, "worker-successful-replay-resource-owner").await;
+    assert_eq!(owner.id, owner_job_id);
+
+    let replay = compare_and_replay_succeeded_job(
+        &pool,
+        replay_request(
+            organization_id,
+            source_job_id,
+            "resource-replay",
+            "replay with the original resource fence",
+        ),
+    )
+    .await
+    .expect("replay resource-constrained source");
+    let CompareAndReplaySucceededJobOutcome::Replayed { replay, .. } = replay else {
+        panic!("expected replay outcome");
+    };
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT execution_resource_key FROM job_queue WHERE id = $1",
+        )
+        .bind(replay.job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load replay resource key")
+        .as_deref(),
+        Some(EXECUTION_RESOURCE)
+    );
+    assert!(
+        claim_jobs(&pool, "worker-blocked-resource-replay", 30, 1)
+            .await
+            .expect("attempt claim while resource is owned")
+            .is_empty()
+    );
+
+    complete_job_success(
+        &pool,
+        owner.id,
+        owner.run_number,
+        owner.attempt,
+        owner.worker_id.as_deref().expect("owner worker id"),
+        None,
+    )
+    .await
+    .expect("complete current resource owner");
+    let claimed_replay = claim_one_job(&pool, "worker-resource-replay").await;
+    assert_eq!(claimed_replay.id, replay.job_id);
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -723,6 +820,10 @@ async fn workflow_managed_success_cannot_be_replayed_as_a_direct_job() {
         panic!("expected workflow replay validation error");
     };
     assert_eq!(error.code(), "job.workflow_requeue_not_supported");
+    assert_eq!(
+        error.client_message(),
+        "Workflow-managed jobs cannot be requeued directly."
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }

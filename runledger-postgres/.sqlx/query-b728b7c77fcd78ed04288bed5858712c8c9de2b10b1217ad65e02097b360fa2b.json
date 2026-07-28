@@ -1,0 +1,101 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workflow_steps\n                 SET dependency_count_pending = dependency_count_pending - 1,\n                     dependency_count_unsatisfied = dependency_count_unsatisfied +\n                        CASE WHEN $2 THEN 1 ELSE 0 END,\n                     updated_at = now()\n                 WHERE id = $1\n                 RETURNING\n                    id,\n                    workflow_run_id,\n                    execution_kind::text AS \"execution_kind!\",\n                    job_type,\n                    organization_id,\n                    payload,\n                    priority,\n                    max_attempts,\n                    timeout_seconds,\n                    stage,\n                    execution_resource_key,\n                    status::text AS \"status!\",\n                    dependency_count_pending,\n                    dependency_count_unsatisfied",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "workflow_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "execution_kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "execution_resource_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "dependency_count_pending",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "dependency_count_unsatisfied",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "b728b7c77fcd78ed04288bed5858712c8c9de2b10b1217ad65e02097b360fa2b"
+}

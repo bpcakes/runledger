@@ -79,6 +79,7 @@ pub struct WorkflowRunEnqueue<'a> {
     pub(super) organization_id: Option<Uuid>,
     pub(super) metadata: &'a serde_json::Value,
     pub(super) idempotency_key: Option<&'a str>,
+    pub(super) active_key: Option<&'a str>,
     pub(super) result_step_key: Option<StepKey<'a>>,
     pub(super) steps: Vec<WorkflowStepEnqueue<'a>>,
 }
@@ -105,6 +106,11 @@ impl<'a> WorkflowRunEnqueue<'a> {
     }
 
     #[must_use]
+    pub const fn active_key(&self) -> Option<&'a str> {
+        self.active_key
+    }
+
+    #[must_use]
     pub const fn result_step_key(&self) -> Option<StepKey<'a>> {
         self.result_step_key
     }
@@ -126,6 +132,8 @@ pub struct WorkflowStepEnqueue<'a> {
     pub(super) max_attempts: Option<i32>,
     pub(super) timeout_seconds: Option<i32>,
     pub(super) stage: Option<JobStage>,
+    pub(super) allow_handler_continuation: bool,
+    pub(super) execution_resource_key: Option<&'a str>,
     pub(super) dependencies: Vec<WorkflowStepDependencySpec<'a>>,
 }
 
@@ -173,6 +181,18 @@ impl<'a> WorkflowStepEnqueue<'a> {
     #[must_use]
     pub const fn stage(&self) -> Option<JobStage> {
         self.stage
+    }
+
+    /// Whether this job-backed step may return a successful handler continuation.
+    #[must_use]
+    pub const fn allows_handler_continuation(&self) -> bool {
+        self.allow_handler_continuation
+    }
+
+    /// The single-permit resource this job step must own while leased.
+    #[must_use]
+    pub const fn execution_resource_key(&self) -> Option<&'a str> {
+        self.execution_resource_key
     }
 
     #[must_use]
