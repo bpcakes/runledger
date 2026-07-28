@@ -726,6 +726,12 @@ forward migrations:
   during expand-first rollout and code rollback. This does not make a raw
   `MIGRATOR.run(...)` from that exact release tolerate the newer SQLx history
   row.
+- `202607250001_harden_continuation_metrics_payload_validation` — replaces the
+  continuation rollup view so only well-typed, internally consistent handler
+  continuation events contribute to its 24-hour and active-run metrics. This
+  view-only correction also relies on SQLx history without advancing the
+  compatibility-fence history, allowing filtered 0.7.0 startup paths to coexist
+  during patch rollout.
 
 Treat the flattened baseline as a from-scratch schema definition, not an
 in-place upgrade from the older multi-file standalone history; apply later
@@ -747,19 +753,29 @@ Two supported startup modes:
 
 For consumers of the published crates:
 
-- `runledger_postgres::MIGRATOR` embeds the vendored `runledger-postgres/migrations/` copy.
+- `runledger_postgres::MIGRATOR` embeds the vendored
+  `runledger-postgres/migrations/` copy for expert inspection, checksum
+  comparison, and migration-manifest synchronization. Iterating it is
+  supported; directly invoking its raw `run` or `undo` methods against a shared
+  pool is not the supported startup path.
 - `runledger-test-support` embeds its own `runledger-test-support/migrations/` copy for packaged test harnesses.
 - `runledger-postgres/build.rs` fails local builds if the vendored copy drifts
   from the canonical workspace-root `migrations/` directory.
 
-Apply migrations (or call `migrate_after_idempotency_cutover`) before using
-`runledger-postgres` or running DB-backed tests.
+Call `migrate_after_idempotency_cutover` to apply migrations, or
+`ensure_schema_compatible_after_idempotency_cutover` when DDL is managed
+externally, before using `runledger-postgres` or running DB-backed tests. SQLx
+0.8 can return early from a raw migration-history rejection without releasing
+its session advisory lock. A process that unavoidably executes a raw migrator
+must use a disposable connection or pool and close it after any error rather
+than retrying with the possibly locked pool.
 
 Apply `202607190001_job_replays_and_continuation_metrics` before deploying code
-that calls successful-replay or continuation-metrics APIs. Older job-state code
-remains data-plane compatible with the additive table and view, so this is an
-expand-first change, but its startup path matters. Choose one of these code
-rollback strategies:
+that calls successful-replay or continuation-metrics APIs, and apply
+`202607250001_harden_continuation_metrics_payload_validation` for corrected
+continuation metrics. Older job-state code remains data-plane compatible with
+the additive table and views, so these are expand-first changes, but their
+startup path matters. Choose one of these code rollback strategies:
 
 1. Recommended: leave the migration applied and start the rollback binary with
    `migrate_after_idempotency_cutover` or
@@ -917,10 +933,11 @@ Tests fall into two categories:
   test, and apply the local Runledger migrations.
 
 The packaged external-consumer smoke test packages `runledger-core`,
-`runledger-postgres`, and `runledger-runtime`, extracts the `.crate` archives,
-builds a standalone host crate against the packaged manifests via
-`[patch.crates-io]`, then runs migrations, starts the supervisor, enqueues jobs,
-and asserts terminal states:
+`runledger-test-support`, `runledger-postgres`, and `runledger-runtime`,
+extracts the `.crate` archives, builds a standalone host crate against the
+packaged manifests via `[patch.crates-io]` and its checked-in lockfile, then
+runs migrations, starts the supervisor, enqueues jobs, and asserts terminal
+states:
 
 ```bash
 ./scripts/run-external-consumer-smoke.sh
@@ -978,10 +995,13 @@ Prepare a release:
 ./scripts/prepare-release.sh 0.7.0
 ```
 
-The preparation script requires a clean working tree, bumps publishable crate
-and root workspace dependency versions, refreshes SQLx offline metadata, runs
-workspace tests and the packaged smoke test, and dry-runs `runledger-core` while
-packaging the dependent crates locally. If publishing manually, run
+The preparation script starts from a clean working tree or resumes an existing
+generated release diff whose manifests are already at the requested version.
+It rejects changes outside the files it generates. The script bumps publishable
+crate and root workspace dependency versions, refreshes the root and standalone
+smoke lockfiles plus SQLx offline metadata, runs workspace tests and the locked
+packaged smoke test, dry-runs `runledger-core`, packages the library crates, and
+build-verifies the packaged `runledger-tui` binary. If publishing manually, run
 `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres` or
 `runledger-runtime` and commit any resulting `.sqlx/` changes.
 
@@ -991,8 +1011,11 @@ After reviewing and committing the prepared diff:
 ./scripts/publish-release.sh 0.7.0
 ```
 
-The publish script publishes crates in dependency order, dry-runs each once its
-workspace dependencies are indexed, creates a `v0.7.0` tag, and pushes the
+Before publishing any crate, the publish script confirms that the release tag
+is absent locally and remotely, fetches the same-named remote branch and
+requires it to be an ancestor of `HEAD`, and dry-runs the branch and tag push.
+It then publishes crates in dependency order, dry-runs each once its workspace
+dependencies are indexed, creates a `v0.7.0` tag, and atomically pushes the
 current branch and tag. Set `PUBLISH_REMOTE` to override the git remote for the
 final push.
 

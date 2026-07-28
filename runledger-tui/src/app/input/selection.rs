@@ -140,7 +140,7 @@ impl App {
             .map(|r| r.id)
     }
 
-    fn selected_workflow_step_job_id(&self) -> Option<Uuid> {
+    pub(crate) fn selected_workflow_step_job_id(&self) -> Option<Uuid> {
         self.workflow_detail
             .as_ref()?
             .steps

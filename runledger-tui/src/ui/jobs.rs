@@ -6,7 +6,8 @@ use crate::app::App;
 use crate::data::JobsData;
 use crate::format::{format_relative_timestamp, job_status_label, short_uuid, truncate_str};
 use crate::ui::render::{
-    CellAlign, TableColumn, TableRow, draw_table, job_status_style, scope_banner, table_cell,
+    CellAlign, TableColumn, TableEnterAction, TableRow, TableSelection, draw_table,
+    job_status_style, scope_banner, table_cell,
 };
 
 pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobsData) {
@@ -80,7 +81,7 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobsDa
         " Job queue ",
         &columns,
         rows,
-        app.list_selection,
+        TableSelection::new(app.list_selection, TableEnterAction::OpenDetails),
         "No jobs match the current scope and filters.",
     );
 }

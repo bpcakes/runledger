@@ -5,18 +5,27 @@ use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migrator};
 
 use crate::DbPool;
 
-/// Raw SQLx migrator for the migrations bundled with this crate version.
+/// Raw SQLx migrator for inspecting the migrations bundled with this crate
+/// version.
 ///
-/// SQLx's [`Migrator::run`] rejects applied versions absent from this exact
-/// bundle. During an additive compatibility window, an older binary should use
-/// Runledger's filtered [`migrate_after_idempotency_cutover`] or
-/// [`ensure_schema_compatible_after_idempotency_cutover`] startup API instead
-/// of invoking its raw `MIGRATOR`: the filtered APIs also enforce Runledger's
-/// compatibility-fence history. If an exact old binary unavoidably invokes its
-/// raw migrator, use a compatible patched startup path or explicitly accept the
-/// data-loss boundary of reverting newer migrations before starting it. For
-/// the post-v0.6 successful-replay migration, that includes relational replay
-/// lineage and replay-request idempotency state.
+/// Iterating this value to inspect bundled versions and checksums is supported.
+/// Calling [`Migrator::run`] or [`Migrator::undo`] on it with a shared
+/// application pool is not. SQLx rejects applied versions absent from the exact
+/// bundle, and PostgreSQL migration locks are session-scoped; SQLx can return
+/// from a validation error before unlocking and put the still-locked session
+/// back into the pool.
+///
+/// Use [`migrate_after_idempotency_cutover`] to apply Runledger migrations, or
+/// [`ensure_schema_compatible_after_idempotency_cutover`] when DDL is managed
+/// externally. If a compatibility diagnostic intentionally executes a raw
+/// migrator that may mismatch history, give it a disposable connection or
+/// single-use pool and close that connection or pool on every error path.
+///
+/// During an additive compatibility window, an exact older binary that cannot
+/// use the filtered API must be patched before startup or explicitly accept the
+/// data-loss boundary of reverting newer migrations. For the post-v0.6
+/// successful-replay migration, that includes relational replay lineage and
+/// replay-request idempotency state.
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;

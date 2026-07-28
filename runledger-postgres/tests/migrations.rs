@@ -27,7 +27,11 @@ const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
 const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
 const V0_6_LATEST_MIGRATION_VERSION: i64 = 202606030001;
 const REPLAY_METRICS_MIGRATION_VERSION: i64 = 202607190001;
-const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[REPLAY_METRICS_MIGRATION_VERSION];
+const CONTINUATION_METRICS_VALIDATION_MIGRATION_VERSION: i64 = 202607250001;
+const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
+    REPLAY_METRICS_MIGRATION_VERSION,
+    CONTINUATION_METRICS_VALIDATION_MIGRATION_VERSION,
+];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 const TEST_HARNESS_ADMIN_CONNECTIONS: u32 = 1;
 
@@ -429,6 +433,331 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
         .await
         .expect("load continuation metrics after down/up cycle"),
         (1, 1, 2)
+    );
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn raw_version_missing_strands_session_lock_until_pool_close_but_safe_path_unlocks() {
+    let harness = TestHarness::fresh("runledger_pg_raw_migration_lock").await;
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read exact PostgreSQL version for migration lock regression");
+    eprintln!("migration lock regression PostgreSQL server_version={server_version}");
+
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("apply current migrations before raw compatibility check");
+
+    let _migration_connection_budget = acquire_test_db_connection_budget(2).await;
+    let database_url = with_database_name(&harness.admin_url, &harness.database_name);
+    let raw_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect disposable raw migration pool");
+    let raw_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&raw_pool)
+        .await
+        .expect("read raw migration backend pid");
+
+    let raw_error = raw_v0_7_migrator()
+        .run(&raw_pool)
+        .await
+        .expect_err("raw v0.7 migrator must reject newer applied SQLx history");
+    assert!(
+        matches!(
+            &raw_error,
+            MigrateError::VersionMissing(version)
+                if *version == CONTINUATION_METRICS_VALIDATION_MIGRATION_VERSION
+        ),
+        "unexpected raw v0.7 migration error: {raw_error}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&raw_pool)
+            .await
+            .expect("reacquire raw migration session after VersionMissing"),
+        raw_backend_pid,
+        "single-connection raw pool must retain the session that failed validation"
+    );
+    assert_eq!(
+        advisory_lock_count_for_backend(&harness.pool, raw_backend_pid).await,
+        1,
+        "raw SQLx VersionMissing must leave its session migration lock held"
+    );
+
+    let contender_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect disposable contender migration pool");
+    let contender_result =
+        tokio::time::timeout(Duration::from_millis(500), MIGRATOR.run(&contender_pool)).await;
+    assert!(
+        contender_result.is_err(),
+        "a second migration session must block on the raw session's stranded advisory lock"
+    );
+    contender_pool.close().await;
+
+    raw_pool.close().await;
+    assert_eq!(
+        advisory_lock_count_for_backend(&harness.pool, raw_backend_pid).await,
+        0,
+        "closing the disposable raw pool must release the stranded session lock"
+    );
+
+    let safe_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect fresh safe migration pool");
+    migrate_after_idempotency_cutover(&safe_pool)
+        .await
+        .expect("safe Runledger migrator acquires and releases after raw pool closure");
+    assert_eq!(
+        advisory_lock_count_for_database(&harness.pool).await,
+        0,
+        "successful safe Runledger migration must release its session lock"
+    );
+
+    let newer_fence_version = CONTINUATION_METRICS_VALIDATION_MIGRATION_VERSION + 1;
+    seed_runledger_migration_history(&harness.pool, newer_fence_version).await;
+    let safe_error = migrate_after_idempotency_cutover(&safe_pool)
+        .await
+        .expect_err("safe Runledger migration path must reject newer compatibility history");
+    assert!(
+        matches!(
+            &safe_error,
+            SchemaCompatibilityError::Incompatible(MigrateError::VersionMissing(version))
+                if *version == newer_fence_version
+        ),
+        "unexpected safe migration error: {safe_error}"
+    );
+    assert_eq!(
+        advisory_lock_count_for_database(&harness.pool).await,
+        0,
+        "safe Runledger migration errors must explicitly release the session lock"
+    );
+    safe_pool.close().await;
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn continuation_metrics_require_well_typed_v0_6_or_v0_7_payloads() {
+    const JOB_TYPE: &str = "jobs.test.continuation_payload_validation";
+
+    let harness = TestHarness::fresh("runledger_pg_continuation_payloads").await;
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read exact PostgreSQL version for continuation metrics regression");
+    eprintln!("continuation metrics regression PostgreSQL server_version={server_version}");
+
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("apply continuation metrics validation migration");
+    sqlx::query(
+        "INSERT INTO job_definitions (
+            job_type,
+            version,
+            max_attempts,
+            default_timeout_seconds,
+            default_priority,
+            is_enabled
+         )
+         VALUES ($1, 1, 3, 30, 100, true)",
+    )
+    .bind(JOB_TYPE)
+    .execute(&harness.pool)
+    .await
+    .expect("insert continuation payload validation job definition");
+
+    sqlx::query(
+        r#"
+WITH canonical(event_payload) AS (
+    SELECT jsonb_build_object(
+        'reason', 'HANDLER_CONTINUATION',
+        'requeue_kind', 'HANDLER_CONTINUATION',
+        'next_run_number', 2,
+        'next_run_at', clock_timestamp() + interval '1 hour',
+        'delay_microseconds', 1000
+    )
+),
+payload_cases(case_name, current_run_number, event_payload) AS (
+    SELECT cases.*
+    FROM canonical
+    CROSS JOIN LATERAL (
+        VALUES
+            ('v0_6_kindless', 2, canonical.event_payload - 'requeue_kind'),
+            ('v0_7_discriminated', 2, canonical.event_payload),
+            ('missing_reason', 2, canonical.event_payload - 'reason'),
+            (
+                'null_reason',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('reason', NULL::text)
+            ),
+            (
+                'wrong_reason_type',
+                2,
+                canonical.event_payload || jsonb_build_object('reason', 7)
+            ),
+            (
+                'null_next_run_at',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('next_run_at', NULL::text)
+            ),
+            (
+                'wrong_next_run_number_type',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('next_run_number', '2'::text)
+            ),
+            (
+                'null_next_run_number',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('next_run_number', NULL::int4)
+            ),
+            (
+                'wrong_next_run_at_type',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('next_run_at', 12345)
+            ),
+            (
+                'invalid_next_run_at',
+                3,
+                canonical.event_payload
+                    || jsonb_build_object(
+                        'next_run_number', 3,
+                        'next_run_at', 'not-a-timestamp'
+                    )
+            ),
+            (
+                'non_rfc3339_next_run_at',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('next_run_at', 'tomorrow')
+            ),
+            (
+                'wrong_delay_type',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('delay_microseconds', '0'::text)
+            ),
+            (
+                'null_delay',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('delay_microseconds', NULL::bigint)
+            ),
+            (
+                'fractional_delay',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('delay_microseconds', 0.5::numeric)
+            ),
+            (
+                'negative_delay',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object('delay_microseconds', -1)
+            ),
+            (
+                'overflow_delay',
+                2,
+                canonical.event_payload
+                    || jsonb_build_object(
+                        'delay_microseconds',
+                        9223372036854775808::numeric
+                    )
+            )
+    ) AS cases(case_name, current_run_number, event_payload)
+),
+inserted_jobs AS (
+    INSERT INTO job_queue (
+        job_type,
+        payload,
+        status,
+        run_number,
+        max_attempts,
+        timeout_seconds,
+        next_run_at
+    )
+    SELECT
+        $1,
+        jsonb_build_object('case_name', payload_cases.case_name),
+        'PENDING',
+        payload_cases.current_run_number,
+        3,
+        30,
+        clock_timestamp() + interval '1 hour'
+    FROM payload_cases
+    RETURNING id, payload ->> 'case_name' AS case_name, run_number
+)
+INSERT INTO job_events (
+    job_id,
+    run_number,
+    event_type,
+    payload
+)
+SELECT
+    inserted_jobs.id,
+    inserted_jobs.run_number - 1,
+    'REQUEUED',
+    payload_cases.event_payload
+FROM inserted_jobs
+JOIN payload_cases USING (case_name)
+        "#,
+    )
+    .bind(JOB_TYPE)
+    .execute(&harness.pool)
+    .await
+    .expect("seed valid and malformed continuation event payloads");
+
+    assert_eq!(
+        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        (2, 2, 2),
+        "only genuine kindless v0.6 and discriminated v0.7 continuation events count"
+    );
+
+    let down_migration = MIGRATOR
+        .iter()
+        .find(|migration| {
+            migration.migration_type.is_down_migration()
+                && migration.version == CONTINUATION_METRICS_VALIDATION_MIGRATION_VERSION
+        })
+        .expect("continuation metrics validation down migration exists");
+    let mut conn = harness
+        .pool
+        .acquire()
+        .await
+        .expect("acquire continuation metrics revert connection");
+    (*conn)
+        .revert(down_migration)
+        .await
+        .expect("restore the prior continuation metrics view");
+    drop(conn);
+
+    assert_eq!(
+        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        (16, 14, 3),
+        "down migration must restore the published v0.7 payload-presence semantics"
+    );
+
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("reapply continuation metrics validation migration");
+    assert_eq!(
+        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        (2, 2, 2),
+        "reapplying the forward migration restores strict payload validation"
     );
 
     harness.teardown().await;
@@ -881,6 +1210,52 @@ async fn ensure_schema_compatible_rejects_newer_runledger_migration_history() {
     harness.teardown().await;
 }
 
+async fn load_continuation_metrics(pool: &PgPool, job_type: &str) -> (i64, i64, i32) {
+    sqlx::query_as::<_, (i64, i64, i32)>(
+        "SELECT continued_24h, active_continued_count, max_active_run_number
+         FROM job_continuation_metrics_rollup
+         WHERE organization_id IS NULL
+           AND job_type = $1",
+    )
+    .bind(job_type)
+    .fetch_one(pool)
+    .await
+    .expect("load continuation metrics")
+}
+
+async fn advisory_lock_count_for_backend(pool: &PgPool, backend_pid: i32) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint
+         FROM pg_locks
+         WHERE locktype = 'advisory'
+           AND mode = 'ExclusiveLock'
+           AND granted
+           AND pid = $1",
+    )
+    .bind(backend_pid)
+    .fetch_one(pool)
+    .await
+    .expect("count backend advisory locks")
+}
+
+async fn advisory_lock_count_for_database(pool: &PgPool) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint
+         FROM pg_locks
+         WHERE locktype = 'advisory'
+           AND mode = 'ExclusiveLock'
+           AND granted
+           AND database = (
+               SELECT oid
+               FROM pg_database
+               WHERE datname = current_database()
+           )",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count database advisory locks")
+}
+
 async fn connect_admin_pool(admin_url: &str) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()
         .max_connections(1)
@@ -1050,6 +1425,26 @@ fn raw_v0_6_migrator() -> Migrator {
                 && migration.migration_type.is_up_migration()
         }),
         "raw v0.6 migration fixture must include its final up migration"
+    );
+
+    Migrator {
+        migrations: Cow::Owned(migrations),
+        ..Migrator::DEFAULT
+    }
+}
+
+fn raw_v0_7_migrator() -> Migrator {
+    let migrations = MIGRATOR
+        .iter()
+        .filter(|migration| migration.version <= REPLAY_METRICS_MIGRATION_VERSION)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        migrations.iter().any(|migration| {
+            migration.version == REPLAY_METRICS_MIGRATION_VERSION
+                && migration.migration_type.is_up_migration()
+        }),
+        "raw v0.7 migration fixture must include its final up migration"
     );
 
     Migrator {

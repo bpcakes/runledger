@@ -12,7 +12,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # Direct `cargo test --manifest-path smoke/external-consumer/Cargo.toml` uses
 # local paths so contributors are not blocked before the next crates.io release.
 # scripts/run-external-consumer-smoke.sh rewrites these to packaged version
-# requirements and patches crates.io to extracted `.crate` archives.
+# requirements, patches crates.io to extracted `.crate` archives, and requires
+# this crate's checked-in lockfile to remain valid.
 runledger-core = { path = "../../runledger-core" }
 runledger-postgres = { path = "../../runledger-postgres" }
 runledger-runtime = { path = "../../runledger-runtime" }

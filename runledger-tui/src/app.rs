@@ -261,7 +261,11 @@ impl App {
                 "Enter/l open | / search | t type | c clear | y copy id | g/G top/end | p pause"
             }
             Screen::WorkflowDetail { .. } => {
-                "Enter/l open job | h/Esc back | / search | y copy id | g/G top/end | p pause"
+                if self.selected_workflow_step_job_id().is_some() {
+                    "Enter/l open job | h/Esc back | / search | y copy id | g/G top/end | p pause"
+                } else {
+                    "h/Esc back | / search | y copy id | g/G top/end | p pause"
+                }
             }
             Screen::Definitions => {
                 "/ search | t type | c clear | g/G top/end | p pause | r refresh"
@@ -623,8 +627,13 @@ mod tests {
 
     use super::*;
     use chrono::Utc;
-    use runledger_core::jobs::{JobEventType, JobStage, JobStatus, JobTypeName};
-    use runledger_postgres::jobs::{JobEventRecord, JobQueueRecord};
+    use runledger_core::jobs::{
+        JobEventType, JobStage, JobStatus, JobTypeName, StepKeyName, WorkflowRunStatus,
+        WorkflowStepExecutionKind, WorkflowStepStatus, WorkflowTypeName,
+    };
+    use runledger_postgres::jobs::{
+        JobEventRecord, JobQueueRecord, WorkflowRunDbRecord, WorkflowStepDbRecord,
+    };
 
     use crate::data::DashboardContinuationMetrics;
 
@@ -704,6 +713,66 @@ mod tests {
         }
     }
 
+    fn workflow_detail_with_step(job_id: Option<Uuid>) -> WorkflowDetailData {
+        let now = Utc::now();
+        let run_id = Uuid::new_v4();
+        let is_job = job_id.is_some();
+        WorkflowDetailData {
+            run: WorkflowRunDbRecord {
+                id: run_id,
+                workflow_type: WorkflowTypeName::new("workflows.test")
+                    .expect("valid workflow type"),
+                organization_id: None,
+                status: WorkflowRunStatus::Running,
+                idempotency_key: None,
+                result_step_key: None,
+                metadata: serde_json::json!({}),
+                started_at: now,
+                finished_at: None,
+                created_at: now,
+                updated_at: now,
+            },
+            steps: vec![WorkflowStepDbRecord {
+                id: Uuid::new_v4(),
+                workflow_run_id: run_id,
+                step_key: StepKeyName::new("step.test").expect("valid step key"),
+                execution_kind: if is_job {
+                    WorkflowStepExecutionKind::Job
+                } else {
+                    WorkflowStepExecutionKind::External
+                },
+                job_type: is_job.then(|| JobTypeName::new("jobs.test").expect("valid job type")),
+                organization_id: None,
+                payload: serde_json::json!({}),
+                priority: None,
+                max_attempts: None,
+                timeout_seconds: None,
+                stage: is_job.then_some(JobStage::Queued),
+                status: if is_job {
+                    WorkflowStepStatus::Enqueued
+                } else {
+                    WorkflowStepStatus::WaitingForExternal
+                },
+                job_id,
+                released_at: None,
+                started_at: None,
+                finished_at: None,
+                dependency_count_total: 0,
+                dependency_count_pending: 0,
+                dependency_count_unsatisfied: 0,
+                status_reason: None,
+                last_error_code: None,
+                last_error_message: None,
+                output: None,
+                created_at: now,
+                updated_at: now,
+            }],
+            dependencies: Vec::new(),
+            steps_total: 1,
+            dependencies_total: 0,
+        }
+    }
+
     #[test]
     fn table_search_does_not_build_fields_without_a_query() {
         let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
@@ -721,6 +790,26 @@ mod tests {
             ["needle"]
         }));
         assert_eq!(build_count.get(), 1);
+    }
+
+    #[test]
+    fn workflow_detail_open_hint_tracks_selected_step_job() {
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let external_detail = workflow_detail_with_step(None);
+        app.screen = Screen::WorkflowDetail {
+            run_id: external_detail.run.id,
+        };
+        app.workflow_detail = Some(external_detail);
+
+        assert!(!app.key_hint_line().contains("open job"));
+
+        let job_detail = workflow_detail_with_step(Some(Uuid::new_v4()));
+        app.screen = Screen::WorkflowDetail {
+            run_id: job_detail.run.id,
+        };
+        app.workflow_detail = Some(job_detail);
+
+        assert!(app.key_hint_line().contains("Enter/l open job"));
     }
 
     #[test]

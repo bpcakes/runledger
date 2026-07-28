@@ -15,7 +15,8 @@ use crate::format::{
     job_status_label, short_uuid, truncate_str,
 };
 use crate::ui::render::{
-    CellAlign, TableColumn, TableRow, draw_table, job_status_style, scope_banner, table_cell,
+    CellAlign, TableColumn, TableEnterAction, TableRow, TableSelection, draw_table,
+    job_status_style, scope_banner, table_cell,
 };
 
 pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &mut App, data: &JobDetailData) {
@@ -198,7 +199,7 @@ fn draw_events(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &Job
         " Events ",
         &columns,
         rows,
-        app.list_selection,
+        TableSelection::new(app.list_selection, TableEnterAction::None),
         "No job events match the current search.",
     );
 
@@ -345,7 +346,7 @@ fn draw_logs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobDe
         " Logs ",
         &columns,
         rows,
-        app.list_selection,
+        TableSelection::new(app.list_selection, TableEnterAction::None),
         "No log lines match the current search.",
     );
 }

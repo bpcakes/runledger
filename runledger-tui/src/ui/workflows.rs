@@ -9,8 +9,9 @@ use crate::format::{
     workflow_run_status_label, workflow_step_status_label,
 };
 use crate::ui::render::{
-    CellAlign, TableColumn, TableRow, draw_table, draw_table_unselected, scope_banner, table_cell,
-    workflow_run_status_style, workflow_step_status_style,
+    CellAlign, TableColumn, TableEnterAction, TableRow, TableSelection, draw_table,
+    draw_table_unselected, scope_banner, table_cell, workflow_run_status_style,
+    workflow_step_status_style,
 };
 
 pub fn draw_runs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &WorkflowsData) {
@@ -67,7 +68,7 @@ pub fn draw_runs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &W
         " Workflow runs ",
         &columns,
         rows,
-        app.list_selection,
+        TableSelection::new(app.list_selection, TableEnterAction::OpenDetails),
         "No workflow runs match the current scope and filters.",
     );
 }
@@ -137,7 +138,12 @@ pub fn draw_detail(
             app.list_selection
                 .min(filtered_steps.len().saturating_sub(1)),
         )
-        .map(|s| s.id);
+        .map(|step| step.id);
+    let step_enter_action = if app.selected_workflow_step_job_id().is_some() {
+        TableEnterAction::OpenDetails
+    } else {
+        TableEnterAction::None
+    };
     let step_rows: Vec<TableRow> = data
         .steps
         .iter()
@@ -174,7 +180,7 @@ pub fn draw_detail(
         " Steps ",
         &step_columns,
         step_rows,
-        app.list_selection,
+        TableSelection::new(app.list_selection, step_enter_action),
         "No workflow steps match the current search.",
     );
 

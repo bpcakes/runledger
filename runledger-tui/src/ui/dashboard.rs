@@ -6,7 +6,8 @@ use ratatui::widgets::{Block, Paragraph};
 use crate::app::App;
 use crate::data::DashboardData;
 use crate::ui::render::{
-    CellAlign, TableColumn, TableRow, draw_table, scope_banner, status_style_warn, table_cell,
+    CellAlign, TableColumn, TableEnterAction, TableRow, TableSelection, draw_table, scope_banner,
+    status_style_warn, table_cell,
 };
 
 const DASHBOARD_COLUMNS: [TableColumn; 11] = [
@@ -78,7 +79,7 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &Dashbo
         " Metrics ",
         &DASHBOARD_COLUMNS,
         rows,
-        app.list_selection,
+        TableSelection::new(app.list_selection, TableEnterAction::None),
         "No job metrics in this scope.",
     );
 }

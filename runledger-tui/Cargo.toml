@@ -6,8 +6,8 @@ rust-version = "1.88"
 license = "MIT"
 description = "Read-only terminal UI for monitoring Runledger jobs and workflows"
 readme = "../README.md"
-repository = "https://github.com/featherenvy/runledger"
-homepage = "https://github.com/featherenvy/runledger"
+repository = "https://github.com/bpcakes/runledger"
+homepage = "https://github.com/bpcakes/runledger"
 keywords = ["jobs", "workflows", "postgres", "tui"]
 categories = ["command-line-utilities", "asynchronous"]
 

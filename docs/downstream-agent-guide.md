@@ -308,15 +308,19 @@ For activation:
 
 1. When upgrading to a release that contains successful replay and continuation
    metrics, first apply
-   `202607190001_job_replays_and_continuation_metrics`. Existing 0.6.0 binaries
-   remain data-plane compatible with the additive table and view when startup
-   uses Runledger's filtered migration or schema-compatibility helper. SQLx
-   records the migration, while its compatibility-fence history deliberately
-   remains at the 0.6.0 set so those released guards continue to pass. A raw
-   `MIGRATOR.run(...)` from the exact older release is different: SQLx rejects
-   the newer migration-history row because that version is absent from the
-   embedded migration set. Do not deploy replay or metrics callers before this
-   expand-first migration is present.
+   `202607190001_job_replays_and_continuation_metrics`, then apply
+   `202607250001_harden_continuation_metrics_payload_validation` for corrected
+   metrics. Existing older binaries remain data-plane compatible with the
+   additive table and views when startup uses Runledger's filtered migration or
+   schema-compatibility helper. SQLx records the migrations, while their
+   compatibility-fence history deliberately remains at the 0.6.0 set so those
+   released guards continue to pass. A raw `MIGRATOR.run(...)` from an exact
+   older release is different: SQLx rejects a newer migration-history row
+   because that version is absent from the embedded migration set. SQLx 0.8 can
+   also leave the raw migrator's session advisory lock held on this error, so
+   close that disposable connection or pool instead of retrying it. Do not
+   deploy replay or metrics callers before these expand-first migrations are
+   present.
 2. Deploy 0.6 to every worker, reaper, admin, API, CLI, and repair process that
    writes job lifecycle state. Keep both new code paths unused.
 3. Prove from deployment inventory or process telemetry that every pre-0.6
@@ -422,18 +426,21 @@ partial rollback. For a coordinated rollback:
 Choose one migration-history strategy before starting the rollback binary:
 
 1. Recommended: leave
-   `202607190001_job_replays_and_continuation_metrics` applied and use
+   `202607190001_job_replays_and_continuation_metrics` and
+   `202607250001_harden_continuation_metrics_payload_validation` applied and use
    `migrate_after_idempotency_cutover` or
    `ensure_schema_compatible_after_idempotency_cutover` at startup. These
    Runledger paths filter SQLx history to the migrations embedded in that
    release and preserve replay lineage and idempotency state. Patch the rollback
    binary's startup first if it directly calls raw `MIGRATOR.run(...)`.
-2. If that exact older raw-MIGRATOR startup cannot be patched, use the newer
-   release artifact to run the newer down migration before starting it. This is
-   destructive: the down migration deletes relational `job_replays` lineage
-   and replay-idempotency state while leaving replay-created jobs in `job_queue`
-   and their lineage-bearing `ENQUEUED` events intact. Choose this path after
-   replay activation only with explicit acceptance of that data loss.
+2. If that exact older raw-MIGRATOR startup cannot be patched, close its failed
+   connection or pool, then use the newer release artifact to run the newer down
+   migrations before starting it. Reverting `202607250001` only restores the
+   prior metrics view. Reverting `202607190001` is destructive: it deletes
+   relational `job_replays` lineage and replay-idempotency state while leaving
+   replay-created jobs in `job_queue` and their lineage-bearing `ENQUEUED` events
+   intact. Choose that path after replay activation only with explicit
+   acceptance of the data loss.
 
 Use these SQL statements only for diagnosis and rollout gates. Drain or mutate
 jobs through Runledger APIs; do not repair `job_queue` or `job_events` with

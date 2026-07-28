@@ -4,8 +4,32 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add a forward continuation-metrics view migration that rejects malformed
+  continuation event payloads while preserving both kindless 0.6 and
+  discriminated 0.7 event compatibility.
+- Add regression coverage for SQLx's raw-migrator advisory-lock failure mode
+  and document `MIGRATOR` as an inspection surface rather than the supported
+  startup migration path.
+
+### Changed
+
+- Harden release preparation and publication with resumable version
+  preparation, locked external-consumer resolution, packaged TUI verification,
+  remote branch/tag preflights, and a dry-run push before crate publication.
+- Point crate metadata, generated changelog links, and source documentation at
+  the current `bpcakes/runledger` repository.
+
+### Fixed
+
+- Exclude null, wrong-typed, and otherwise malformed handler-continuation event
+  payloads from 24-hour and active-continuation metrics.
+- Show compact-table and workflow-detail keyboard hints only when the selected
+  row actually opens a detail view.
+
 ## [0.7.0] - 2026-07-25
-[Compare changes](https://github.com/featherenvy/runledger/compare/v0.6.0...v0.7.0)
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.6.0...v0.7.0)
 
 ### Added
 
@@ -96,7 +120,7 @@ Release 0.7.0 requires migration
 continuation-metrics APIs are used.
 
 ## [0.6.0] - 2026-07-18
-[Compare changes](https://github.com/featherenvy/runledger/compare/v0.5.0...v0.6.0)
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.5.0...v0.6.0)
 
 ### Added
 
@@ -206,7 +230,7 @@ continuation-metrics APIs are used.
 Release 0.6.0 requires no database migration.
 
 ## [0.5.0] - 2026-07-09
-[Compare changes](https://github.com/featherenvy/runledger/compare/v0.4.0...v0.5.0)
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.4.0...v0.5.0)
 
 ### Added
 
@@ -248,7 +272,7 @@ Release 0.6.0 requires no database migration.
   CI hosts.
 
 ## [0.4.0] - 2026-06-15
-[Compare changes](https://github.com/featherenvy/runledger/compare/v0.3.0...v0.4.0)
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.3.0...v0.4.0)
 
 ### Added
 
@@ -317,7 +341,7 @@ Release 0.6.0 requires no database migration.
   missed cron tick.
 
 ## [0.3.0] - 2026-05-27
-[Compare changes](https://github.com/featherenvy/runledger/compare/v0.2.1...v0.3.0)
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.2.1...v0.3.0)
 
 ### Added
 
@@ -339,7 +363,7 @@ Release 0.6.0 requires no database migration.
 - Fix cargo deny CI runner
 
 ## [0.2.1] - 2026-05-25
-[Compare changes](https://github.com/featherenvy/runledger/compare/v0.1.2...v0.2.1)
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.1.2...v0.2.1)
 
 ### Added
 
@@ -362,7 +386,7 @@ Release 0.6.0 requires no database migration.
 - Improve runtime supervisor and agent-facing docs
 
 ## [0.1.2] - 2026-05-19
-[Compare changes](https://github.com/featherenvy/runledger/compare/v0.1.1...v0.1.2)
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.1.1...v0.1.2)
 
 ### Added
 

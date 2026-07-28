@@ -31,9 +31,105 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required"
 }
 
-require_clean_worktree() {
-  if [[ -n "$(git status --porcelain)" ]]; then
-    die "working tree must be clean before preparing a release"
+release_generated_path() {
+  local path="$1"
+
+  case "$path" in
+    Cargo.toml | \
+      Cargo.lock | \
+      smoke/external-consumer/Cargo.lock | \
+      runledger-core/Cargo.toml | \
+      runledger-test-support/Cargo.toml | \
+      runledger-postgres/Cargo.toml | \
+      runledger-runtime/Cargo.toml | \
+      runledger-tui/Cargo.toml | \
+      .sqlx/* | \
+      runledger-postgres/.sqlx/* | \
+      runledger-runtime/.sqlx/* | \
+      runledger-postgres/migrations/* | \
+      runledger-test-support/migrations/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+crate_manifest_version() {
+  local manifest="$1"
+
+  awk '
+    /^\[package\][[:space:]]*$/ {
+      in_package = 1
+      next
+    }
+    in_package && /^\[/ {
+      exit
+    }
+    in_package && /^[[:space:]]*version[[:space:]]*=/ {
+      value = $0
+      sub(/^[^"]*"/, "", value)
+      sub(/".*$/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' "$manifest"
+}
+
+require_manifest_versions() {
+  local version="$1"
+  local crate
+
+  for crate in "${PUBLISHABLE_CRATES[@]}"; do
+    local manifest_version
+    manifest_version="$(crate_manifest_version "$ROOT_DIR/${crate}/Cargo.toml")" \
+      || die "could not read ${crate} package version"
+    if [[ "$manifest_version" != "$version" ]]; then
+      die "cannot resume: ${crate} manifest is ${manifest_version}, expected ${version}"
+    fi
+  done
+
+  for crate in "${WORKSPACE_DEPENDENCY_CRATES[@]}"; do
+    grep -Fq \
+      "${crate} = { version = \"${version}\", path = \"${crate}\" }" \
+      "$ROOT_DIR/Cargo.toml" \
+      || die "cannot resume: workspace dependency for ${crate} is not pinned to ${version}"
+  done
+}
+
+require_clean_or_resumable_worktree() {
+  local version="$1"
+  local dirty=false
+  local unexpected_paths=()
+  local path
+
+  while IFS= read -r -d '' path; do
+    dirty=true
+    if ! release_generated_path "$path"; then
+      unexpected_paths+=("$path")
+    fi
+  done < <(
+    git diff --name-only -z
+    git diff --cached --name-only -z
+    git ls-files --others --exclude-standard -z
+  )
+
+  if [[ "${#unexpected_paths[@]}" -gt 0 ]]; then
+    echo "error: working tree contains changes outside the resumable release output:" >&2
+    printf '  %s\n' "${unexpected_paths[@]}" >&2
+    exit 1
+  fi
+
+  if [[ "$dirty" == true ]]; then
+    require_manifest_versions "$version"
+    echo "Resuming release preparation for ${version} from the existing generated diff."
   fi
 }
 
@@ -83,6 +179,21 @@ bump_workspace_dependency() {
   ' "$ROOT_DIR/Cargo.toml"
 }
 
+package_with_workspace_patches() {
+  local crate="$1"
+  shift
+
+  cargo package \
+    --allow-dirty \
+    -p "$crate" \
+    "$@" \
+    --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
+    --config "patch.crates-io.runledger-test-support.path=\"${ROOT_DIR}/runledger-test-support\"" \
+    --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
+    --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
+    --quiet
+}
+
 if [[ $# -ne 1 ]]; then
   usage
   exit 2
@@ -95,8 +206,8 @@ cd "$ROOT_DIR"
 require_command cargo
 require_command curl
 require_command git
-require_clean_worktree
 validate_version "$VERSION"
+require_clean_or_resumable_worktree "$VERSION"
 
 for crate in "${PUBLISHABLE_CRATES[@]}"; do
   if version_exists_on_crates_io "$crate" "$VERSION"; then
@@ -113,6 +224,12 @@ for crate in "${WORKSPACE_DEPENDENCY_CRATES[@]}"; do
 done
 
 cargo update -w
+cargo update \
+  --manifest-path "$ROOT_DIR/smoke/external-consumer/Cargo.toml" \
+  -p runledger-core \
+  -p runledger-test-support \
+  -p runledger-postgres \
+  -p runledger-runtime
 
 ./scripts/refresh-sqlx-cache.sh
 cargo test --workspace
@@ -120,18 +237,13 @@ cargo test --workspace
 
 cargo publish --allow-dirty --dry-run -p runledger-core
 
-for crate in runledger-test-support runledger-postgres runledger-runtime runledger-tui; do
-  cargo package \
-    --allow-dirty \
-    --no-verify \
-    -p "$crate" \
-    --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
-    --config "patch.crates-io.runledger-test-support.path=\"${ROOT_DIR}/runledger-test-support\"" \
-    --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
-    --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
-    --quiet \
-    >/dev/null
+for crate in runledger-test-support runledger-postgres runledger-runtime; do
+  package_with_workspace_patches "$crate" --no-verify >/dev/null
 done
+
+# Keep verification enabled for the distributable binary so Cargo builds the
+# extracted runledger-tui package before any irreversible publication begins.
+package_with_workspace_patches runledger-tui >/dev/null
 
 echo "Release ${VERSION} is prepared."
 echo "Review the diff, commit it, then run: ./scripts/publish-release.sh ${VERSION}"

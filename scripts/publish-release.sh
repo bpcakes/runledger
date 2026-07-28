@@ -63,7 +63,9 @@ require_manifest_versions() {
   done
 
   for crate in "${WORKSPACE_DEPENDENCY_CRATES[@]}"; do
-    grep -Eq "^${crate}[[:space:]]*=[[:space:]]*\\{[[:space:]]*version[[:space:]]*=[[:space:]]*\"${version}\"" "$ROOT_DIR/Cargo.toml" \
+    grep -Fq \
+      "${crate} = { version = \"${version}\", path = \"${crate}\" }" \
+      "$ROOT_DIR/Cargo.toml" \
       || die "workspace dependency for ${crate} is not pinned to ${version}"
   done
 }
@@ -101,6 +103,55 @@ require_tag_absent() {
   if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
     die "tag ${tag} already exists"
   fi
+}
+
+require_remote_tag_absent() {
+  local remote="$1"
+  local tag="$2"
+  local remote_tags
+
+  remote_tags="$(
+    git ls-remote \
+      --tags \
+      "$remote" \
+      "refs/tags/${tag}" \
+      "refs/tags/${tag}^{}"
+  )" || die "failed to inspect tag ${tag} on remote '${remote}'"
+
+  if [[ -n "$remote_tags" ]]; then
+    die "tag ${tag} already exists on remote '${remote}'"
+  fi
+}
+
+require_remote_branch_ancestor() {
+  local remote="$1"
+  local branch="$2"
+  local remote_ref="refs/heads/${branch}"
+  local remote_head
+
+  git fetch --quiet --no-tags "$remote" "$remote_ref" \
+    || die "failed to fetch ${remote_ref} from remote '${remote}'"
+  remote_head="$(git rev-parse FETCH_HEAD)"
+
+  if ! git merge-base --is-ancestor "$remote_head" HEAD; then
+    die "remote branch ${remote}/${branch} is not an ancestor of HEAD; publishing would risk a non-fast-forward push"
+  fi
+}
+
+require_dry_run_push() {
+  local remote="$1"
+  local branch="$2"
+  local tag="$3"
+
+  echo "Checking branch and tag push permissions on remote '${remote}'..."
+  git push \
+    --atomic \
+    --dry-run \
+    --porcelain \
+    "$remote" \
+    "HEAD:refs/heads/${branch}" \
+    "HEAD:refs/tags/${tag}" \
+    || die "dry-run push of ${branch} and ${tag} to remote '${remote}' failed"
 }
 
 version_exists_on_crates_io() {
@@ -148,6 +199,10 @@ fi
 git remote get-url "$PUBLISH_REMOTE" >/dev/null \
   || die "git remote '${PUBLISH_REMOTE}' does not exist"
 
+require_remote_tag_absent "$PUBLISH_REMOTE" "$TAG"
+require_remote_branch_ancestor "$PUBLISH_REMOTE" "$current_branch"
+require_dry_run_push "$PUBLISH_REMOTE" "$current_branch" "$TAG"
+
 for crate in "${PUBLISHABLE_CRATES[@]}"; do
   if version_exists_on_crates_io "$crate" "$VERSION"; then
     echo "${crate} ${VERSION} already exists on crates.io; assuming a previous publish completed."
@@ -161,7 +216,10 @@ done
 
 git tag "$TAG"
 
-git push "$PUBLISH_REMOTE" "$current_branch"
-git push "$PUBLISH_REMOTE" "$TAG"
+git push \
+  --atomic \
+  "$PUBLISH_REMOTE" \
+  "HEAD:refs/heads/${current_branch}" \
+  "refs/tags/${TAG}:refs/tags/${TAG}"
 
 echo "Published ${VERSION} and pushed ${TAG}."

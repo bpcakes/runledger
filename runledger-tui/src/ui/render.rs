@@ -62,6 +62,28 @@ pub struct TableRow {
     pub style: Style,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableEnterAction {
+    None,
+    OpenDetails,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableSelection {
+    pub index: usize,
+    pub enter_action: TableEnterAction,
+}
+
+impl TableSelection {
+    #[must_use]
+    pub const fn new(index: usize, enter_action: TableEnterAction) -> Self {
+        Self {
+            index,
+            enter_action,
+        }
+    }
+}
+
 impl TableRow {
     #[must_use]
     pub fn new(cells: Vec<Cell<'static>>) -> Self {
@@ -256,10 +278,18 @@ pub fn draw_table(
     title: &'static str,
     columns: &[TableColumn],
     rows: Vec<TableRow>,
-    selected: usize,
+    selection: TableSelection,
     empty_message: &str,
 ) {
-    draw_table_with_selection(f, area, title, columns, rows, Some(selected), empty_message);
+    draw_table_with_selection(
+        f,
+        area,
+        title,
+        columns,
+        rows,
+        Some(selection),
+        empty_message,
+    );
 }
 
 pub fn draw_table_unselected(
@@ -279,10 +309,10 @@ fn draw_table_with_selection(
     title: &'static str,
     columns: &[TableColumn],
     rows: Vec<TableRow>,
-    selected: Option<usize>,
+    selection: Option<TableSelection>,
     empty_message: &str,
 ) {
-    let visible_columns = visible_column_indexes(area.width, columns, selected.is_some());
+    let visible_columns = visible_column_indexes(area.width, columns, selection.is_some());
     let headers = visible_columns
         .iter()
         .map(|index| table_cell(columns[*index].header, columns[*index].align));
@@ -300,10 +330,13 @@ fn draw_table_with_selection(
         f.render_widget(block, area);
         return;
     }
-    let selected_label = selected
-        .map(|index| format!(" {}/{} ", index.min(row_count - 1) + 1, row_count))
+    let selected_label = selection
+        .map(|selection| format!(" {}/{} ", selection.index.min(row_count - 1) + 1, row_count))
         .unwrap_or_else(|| format!(" {row_count} "));
-    let compact_note = if visible_columns.len() < columns.len() {
+    let compact_note = if visible_columns.len() < columns.len()
+        && selection
+            .is_some_and(|selection| selection.enter_action == TableEnterAction::OpenDetails)
+    {
         " compact: Enter for details"
     } else {
         ""
@@ -323,7 +356,7 @@ fn draw_table_with_selection(
         .header(header)
         .block(
             Block::default()
-                .borders(if selected.is_some() {
+                .borders(if selection.is_some() {
                     Borders::ALL
                 } else {
                     Borders::TOP
@@ -339,10 +372,10 @@ fn draw_table_with_selection(
         .highlight_symbol(TABLE_HIGHLIGHT_SYMBOL)
         .highlight_spacing(HighlightSpacing::WhenSelected);
     let mut state = ratatui::widgets::TableState::default();
-    if let Some(selected) = selected
+    if let Some(selection) = selection
         && row_count > 0
     {
-        state.select(Some(selected.min(row_count - 1)));
+        state.select(Some(selection.index.min(row_count - 1)));
     }
     f.render_stateful_widget(table, area, &mut state);
 }
@@ -454,6 +487,9 @@ pub fn scope_banner(scope: Scope) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
 
     #[test]
@@ -500,5 +536,87 @@ mod tests {
         let columns = [TableColumn::left("Long header", Constraint::Max(4))];
 
         assert_eq!(minimum_table_width(&columns, 0, false), 4);
+    }
+
+    #[test]
+    fn compact_navigable_tables_show_enter_details_hint() {
+        let rendered = render_compact_selected_table(TableEnterAction::OpenDetails);
+
+        assert!(rendered.contains("compact: Enter for details"));
+    }
+
+    #[test]
+    fn compact_non_navigable_tables_do_not_show_enter_details_hint() {
+        let rendered = render_compact_selected_table(TableEnterAction::None);
+
+        assert!(!rendered.contains("compact: Enter for details"));
+    }
+
+    #[test]
+    fn compact_unselected_tables_do_not_show_enter_details_hint() {
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let columns = compact_test_columns();
+        terminal
+            .draw(|frame| {
+                draw_table_unselected(
+                    frame,
+                    frame.area(),
+                    " Test ",
+                    &columns,
+                    compact_test_rows(),
+                    "No rows.",
+                );
+            })
+            .expect("render table");
+
+        let rendered = buffer_text(terminal.backend());
+        assert!(!rendered.contains("compact: Enter for details"));
+    }
+
+    fn render_compact_selected_table(enter_action: TableEnterAction) -> String {
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let columns = compact_test_columns();
+        terminal
+            .draw(|frame| {
+                draw_table(
+                    frame,
+                    frame.area(),
+                    " Test ",
+                    &columns,
+                    compact_test_rows(),
+                    TableSelection::new(0, enter_action),
+                    "No rows.",
+                );
+            })
+            .expect("render table");
+
+        buffer_text(terminal.backend())
+    }
+
+    fn compact_test_columns() -> [TableColumn; 2] {
+        [
+            TableColumn::left("Required", Constraint::Min(12)),
+            TableColumn::left("Optional", Constraint::Length(12)).optional(1),
+        ]
+    }
+
+    fn compact_test_rows() -> Vec<TableRow> {
+        vec![TableRow::new(vec![
+            table_cell("visible", CellAlign::Left),
+            table_cell("hidden", CellAlign::Left),
+        ])]
+    }
+
+    fn buffer_text(backend: &TestBackend) -> String {
+        backend
+            .buffer()
+            .content()
+            .iter()
+            .fold(String::new(), |mut text, cell| {
+                text.push_str(cell.symbol());
+                text
+            })
     }
 }

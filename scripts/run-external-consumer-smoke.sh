@@ -81,5 +81,6 @@ perl -0pi -e '
 
 CARGO_TARGET_DIR="$TARGET_DIR" cargo test \
   --manifest-path "$SMOKE_MANIFEST" \
+  --locked \
   --test smoke \
   --config "$TMP_CONFIG"

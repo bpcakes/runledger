@@ -167,10 +167,12 @@ queries in `docs/downstream-agent-guide.md`.
 
 Apply `202607190001_job_replays_and_continuation_metrics` before deploying
 successful-replay or continuation-metrics callers; it creates `job_replays` and
-`job_continuation_metrics_rollup`. SQLx records it, but it intentionally does
-not advance the custom compatibility-fence
-history, so Runledger's filtered released 0.6.0 startup and schema guards can
-coexist during expand-first rollout. For code rollback, choose one strategy:
+`job_continuation_metrics_rollup`. Apply
+`202607250001_harden_continuation_metrics_payload_validation` for corrected
+continuation metrics. SQLx records both, but they intentionally do not advance
+the custom compatibility-fence history, so Runledger's filtered older startup
+and schema guards can coexist during expand-first rollout. For code rollback,
+choose one strategy:
 
 1. Recommended: leave the additive migration applied and use
    `migrate_after_idempotency_cutover` or
@@ -178,11 +180,13 @@ coexist during expand-first rollout. For code rollback, choose one strategy:
    filter SQLx history to the migrations embedded in the release. Patch startup
    first if the rollback binary calls raw `MIGRATOR.run(...)`.
 2. An exact older raw `MIGRATOR.run(...)` cannot tolerate the newer SQLx history
-   row. If it cannot be patched, use the newer release artifact to run the newer
-   down migration before startup, only with explicit acceptance that this
-   deletes relational `job_replays` lineage and replay-idempotency state while
-   leaving replay-created queue rows and their lineage-bearing `ENQUEUED` events
-   in place.
+   row and SQLx 0.8 can leave its session advisory lock held on that error. Close
+   the disposable raw-migration connection or pool rather than retrying it. If
+   startup cannot be patched, use the newer release artifact to run the newer
+   down migrations before startup, only with explicit acceptance that reverting
+   `202607190001` deletes relational `job_replays` lineage and replay-idempotency
+   state while leaving replay-created queue rows and their lineage-bearing
+   `ENQUEUED` events in place.
 
 ## Catalog Rule
 

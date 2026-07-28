@@ -5,7 +5,9 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::data::DefinitionsData;
 use crate::format::truncate_str;
-use crate::ui::render::{CellAlign, TableColumn, TableRow, draw_table, table_cell};
+use crate::ui::render::{
+    CellAlign, TableColumn, TableEnterAction, TableRow, TableSelection, draw_table, table_cell,
+};
 
 pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &DefinitionsData) {
     let chunks = Layout::default()
@@ -57,7 +59,7 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &Defini
         " Job definitions ",
         &columns,
         rows,
-        app.list_selection,
+        TableSelection::new(app.list_selection, TableEnterAction::None),
         "No job definitions match the current filter.",
     );
 }
