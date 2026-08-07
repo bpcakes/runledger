@@ -437,7 +437,7 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
             execution_resource_key: self.execution_resource_key,
             dependencies: self.dependencies,
         };
-        validate_step_enqueue(&step, None)?;
+        validate_step_enqueue(&step)?;
         Ok(step)
     }
 }

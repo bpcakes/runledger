@@ -2,7 +2,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::super::identifiers::{JobType, StepKey, WorkflowType};
 use super::super::status::JobStage;
-use super::build_validation::{WorkflowStepBuildValidationError, validate_step_enqueue};
+use super::build_validation::validate_step_enqueue;
+use super::step_validation::{
+    WorkflowStepShapeValidationInput, WorkflowStepValidationError, validate_step_dependency_shape,
+    validate_step_shape,
+};
 use super::types::{WorkflowRunEnqueue, WorkflowStepExecutionKind};
 
 /// Dependency input used by [`validate_workflow_dag`].
@@ -206,6 +210,75 @@ pub enum WorkflowDagValidationError {
     CycleDetected,
 }
 
+impl WorkflowDagValidationError {
+    fn from_step_validation_error(error: WorkflowStepValidationError, step_index: usize) -> Self {
+        match error {
+            WorkflowStepValidationError::BlankStepKey => Self::BlankStepKey { step_index },
+            WorkflowStepValidationError::BlankStepJobType { step_key } => {
+                Self::BlankStepJobType { step_key }
+            }
+            WorkflowStepValidationError::NonPositiveStepMaxAttempts {
+                step_key,
+                max_attempts,
+            } => Self::NonPositiveStepMaxAttempts {
+                step_key,
+                max_attempts,
+            },
+            WorkflowStepValidationError::NonPositiveStepTimeoutSeconds {
+                step_key,
+                timeout_seconds,
+            } => Self::NonPositiveStepTimeoutSeconds {
+                step_key,
+                timeout_seconds,
+            },
+            WorkflowStepValidationError::InvalidStepExecutionResourceKey { step_key } => {
+                Self::InvalidStepExecutionResourceKey { step_key }
+            }
+            WorkflowStepValidationError::ExternalStepJobTypeNotAllowed { step_key } => {
+                Self::ExternalStepJobTypeNotAllowed { step_key }
+            }
+            WorkflowStepValidationError::ExternalStepQueueSettingsNotAllowed { step_key } => {
+                Self::ExternalStepQueueSettingsNotAllowed { step_key }
+            }
+            WorkflowStepValidationError::BlankDependencyStepKey { step_key } => {
+                Self::BlankDependencyStepKey { step_key }
+            }
+            WorkflowStepValidationError::DuplicateDependency {
+                step_key,
+                prerequisite_step_key,
+            } => Self::DuplicateDependency {
+                step_key,
+                prerequisite_step_key,
+            },
+            WorkflowStepValidationError::SelfDependency { step_key } => {
+                Self::SelfDependency { step_key }
+            }
+        }
+    }
+}
+
+fn is_acyclic(mut indegree: Vec<usize>, adjacency: &[Vec<usize>]) -> bool {
+    let mut ready: VecDeque<usize> = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &count)| (count == 0).then_some(index))
+        .collect();
+    let mut visited = 0usize;
+
+    while let Some(index) = ready.pop_front() {
+        visited += 1;
+
+        for &next in &adjacency[index] {
+            indegree[next] -= 1;
+            if indegree[next] == 0 {
+                ready.push_back(next);
+            }
+        }
+    }
+
+    visited == indegree.len()
+}
+
 /// Validates a workflow DAG from lightweight validation inputs.
 ///
 /// This helper checks workflow shape only. It does not check whether job types
@@ -228,68 +301,20 @@ pub fn validate_workflow_dag(
 
     let mut step_key_to_index: BTreeMap<&str, usize> = BTreeMap::new();
     for (step_index, step) in steps.iter().enumerate() {
-        if step.step_key.as_str().trim().is_empty() {
-            return Err(WorkflowDagValidationError::BlankStepKey { step_index });
-        }
-        match step.execution_kind {
-            WorkflowStepExecutionKind::Job => {
-                let Some(job_type) = step.job_type else {
-                    return Err(WorkflowDagValidationError::BlankStepJobType {
-                        step_key: step.step_key.as_str().to_owned(),
-                    });
-                };
-                if job_type.as_str().trim().is_empty() {
-                    return Err(WorkflowDagValidationError::BlankStepJobType {
-                        step_key: step.step_key.as_str().to_owned(),
-                    });
-                }
-                if let Some(max_attempts) = step.max_attempts
-                    && max_attempts <= 0
-                {
-                    return Err(WorkflowDagValidationError::NonPositiveStepMaxAttempts {
-                        step_key: step.step_key.as_str().to_owned(),
-                        max_attempts,
-                    });
-                }
-                if let Some(timeout_seconds) = step.timeout_seconds
-                    && timeout_seconds <= 0
-                {
-                    return Err(WorkflowDagValidationError::NonPositiveStepTimeoutSeconds {
-                        step_key: step.step_key.as_str().to_owned(),
-                        timeout_seconds,
-                    });
-                }
-                if let Some(resource_key) = step.execution_resource_key
-                    && (resource_key.trim().is_empty() || resource_key.len() > 512)
-                {
-                    return Err(
-                        WorkflowDagValidationError::InvalidStepExecutionResourceKey {
-                            step_key: step.step_key.as_str().to_owned(),
-                        },
-                    );
-                }
-            }
-            WorkflowStepExecutionKind::External => {
-                if step.job_type.is_some() {
-                    return Err(WorkflowDagValidationError::ExternalStepJobTypeNotAllowed {
-                        step_key: step.step_key.as_str().to_owned(),
-                    });
-                }
-                if step.priority.is_some()
-                    || step.max_attempts.is_some()
-                    || step.timeout_seconds.is_some()
-                    || step.stage.is_some()
-                    || step.allow_handler_continuation
-                    || step.execution_resource_key.is_some()
-                {
-                    return Err(
-                        WorkflowDagValidationError::ExternalStepQueueSettingsNotAllowed {
-                            step_key: step.step_key.as_str().to_owned(),
-                        },
-                    );
-                }
-            }
-        }
+        validate_step_shape(WorkflowStepShapeValidationInput {
+            step_key: step.step_key.as_str(),
+            execution_kind: step.execution_kind,
+            job_type: step.job_type.map(|job_type| job_type.as_str()),
+            priority: step.priority,
+            max_attempts: step.max_attempts,
+            timeout_seconds: step.timeout_seconds,
+            stage: step.stage,
+            allow_handler_continuation: step.allow_handler_continuation,
+            execution_resource_key: step.execution_resource_key,
+        })
+        .map_err(|error| {
+            WorkflowDagValidationError::from_step_validation_error(error, step_index)
+        })?;
         if step_key_to_index
             .insert(step.step_key.as_str(), step_index)
             .is_some()
@@ -307,23 +332,14 @@ pub fn validate_workflow_dag(
         let mut seen_dependencies: BTreeSet<&str> = BTreeSet::new();
 
         for dependency in &step.dependencies {
-            if dependency.prerequisite_step_key.as_str().trim().is_empty() {
-                return Err(WorkflowDagValidationError::BlankDependencyStepKey {
-                    step_key: step.step_key.as_str().to_owned(),
-                });
-            }
-            if dependency.prerequisite_step_key == step.step_key {
-                return Err(WorkflowDagValidationError::SelfDependency {
-                    step_key: step.step_key.as_str().to_owned(),
-                });
-            }
-
-            if !seen_dependencies.insert(dependency.prerequisite_step_key.as_str()) {
-                return Err(WorkflowDagValidationError::DuplicateDependency {
-                    step_key: step.step_key.as_str().to_owned(),
-                    prerequisite_step_key: dependency.prerequisite_step_key.as_str().to_owned(),
-                });
-            }
+            validate_step_dependency_shape(
+                step.step_key.as_str(),
+                dependency.prerequisite_step_key.as_str(),
+                &mut seen_dependencies,
+            )
+            .map_err(|error| {
+                WorkflowDagValidationError::from_step_validation_error(error, dependent_index)
+            })?;
 
             let Some(&prerequisite_index) =
                 step_key_to_index.get(dependency.prerequisite_step_key.as_str())
@@ -339,25 +355,7 @@ pub fn validate_workflow_dag(
         }
     }
 
-    let mut ready: VecDeque<usize> = indegree
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &count)| (count == 0).then_some(index))
-        .collect();
-    let mut visited = 0usize;
-
-    while let Some(index) = ready.pop_front() {
-        visited += 1;
-
-        for &next in &adjacency[index] {
-            indegree[next] -= 1;
-            if indegree[next] == 0 {
-                ready.push_back(next);
-            }
-        }
-    }
-
-    if visited != steps.len() {
+    if !is_acyclic(indegree, &adjacency) {
         return Err(WorkflowDagValidationError::CycleDetected);
     }
 
@@ -463,51 +461,8 @@ pub fn validate_workflow_step_append(
 
     let mut new_step_key_to_index: BTreeMap<&str, usize> = BTreeMap::new();
     for (build_step_index, step) in new_steps.iter().enumerate() {
-        validate_step_enqueue(step, Some(build_step_index)).map_err(|error| match error {
-            WorkflowStepBuildValidationError::BlankStepKey { step_index } => {
-                WorkflowDagValidationError::BlankStepKey {
-                    step_index: step_index.unwrap_or(build_step_index),
-                }
-            }
-            WorkflowStepBuildValidationError::BlankStepJobType { step_key } => {
-                WorkflowDagValidationError::BlankStepJobType { step_key }
-            }
-            WorkflowStepBuildValidationError::NonPositiveStepMaxAttempts {
-                step_key,
-                max_attempts,
-            } => WorkflowDagValidationError::NonPositiveStepMaxAttempts {
-                step_key,
-                max_attempts,
-            },
-            WorkflowStepBuildValidationError::NonPositiveStepTimeoutSeconds {
-                step_key,
-                timeout_seconds,
-            } => WorkflowDagValidationError::NonPositiveStepTimeoutSeconds {
-                step_key,
-                timeout_seconds,
-            },
-            WorkflowStepBuildValidationError::InvalidStepExecutionResourceKey { step_key } => {
-                WorkflowDagValidationError::InvalidStepExecutionResourceKey { step_key }
-            }
-            WorkflowStepBuildValidationError::ExternalStepJobTypeNotAllowed { step_key } => {
-                WorkflowDagValidationError::ExternalStepJobTypeNotAllowed { step_key }
-            }
-            WorkflowStepBuildValidationError::ExternalStepQueueSettingsNotAllowed { step_key } => {
-                WorkflowDagValidationError::ExternalStepQueueSettingsNotAllowed { step_key }
-            }
-            WorkflowStepBuildValidationError::BlankDependencyStepKey { step_key } => {
-                WorkflowDagValidationError::BlankDependencyStepKey { step_key }
-            }
-            WorkflowStepBuildValidationError::DuplicateDependency {
-                step_key,
-                prerequisite_step_key,
-            } => WorkflowDagValidationError::DuplicateDependency {
-                step_key,
-                prerequisite_step_key,
-            },
-            WorkflowStepBuildValidationError::SelfDependency { step_key } => {
-                WorkflowDagValidationError::SelfDependency { step_key }
-            }
+        validate_step_enqueue(step).map_err(|error| {
+            WorkflowDagValidationError::from_step_validation_error(error, build_step_index)
         })?;
 
         let step_key = step.step_key().as_str();
@@ -550,24 +505,7 @@ pub fn validate_workflow_step_append(
         }
     }
 
-    let mut ready: VecDeque<usize> = indegree
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &count)| (count == 0).then_some(index))
-        .collect();
-    let mut visited = 0usize;
-
-    while let Some(index) = ready.pop_front() {
-        visited += 1;
-        for &next in &adjacency[index] {
-            indegree[next] -= 1;
-            if indegree[next] == 0 {
-                ready.push_back(next);
-            }
-        }
-    }
-
-    if visited != new_steps.len() {
+    if !is_acyclic(indegree, &adjacency) {
         return Err(WorkflowDagValidationError::CycleDetected);
     }
 

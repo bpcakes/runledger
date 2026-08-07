@@ -218,6 +218,36 @@ fn workflow_dag_validation_rejects_duplicate_step_keys() {
 }
 
 #[test]
+fn workflow_dag_validation_checks_duplicate_step_keys_before_dependencies() {
+    let result = validate_workflow_dag(
+        WorkflowType::new("workflow.test"),
+        &[
+            dag_step(
+                "duplicate",
+                WorkflowStepExecutionKind::Job,
+                Some("jobs.test.a"),
+                Some(JobStage::Queued),
+                vec!["missing"],
+            ),
+            dag_step(
+                "duplicate",
+                WorkflowStepExecutionKind::Job,
+                Some("jobs.test.b"),
+                Some(JobStage::Queued),
+                vec![],
+            ),
+        ],
+    );
+
+    assert_eq!(
+        result,
+        Err(WorkflowDagValidationError::DuplicateStepKey {
+            step_key: "duplicate".to_owned(),
+        })
+    );
+}
+
+#[test]
 fn workflow_dag_validation_rejects_duplicate_dependencies() {
     let result = validate_workflow_dag(
         WorkflowType::new("workflow.test"),
@@ -406,6 +436,100 @@ fn validate_workflow_step_append_rejects_duplicate_existing_step_key() {
             step_key: "step.a".to_owned(),
         })
     );
+}
+
+#[test]
+fn validate_workflow_step_append_checks_each_step_before_duplicate_step_keys() {
+    let existing_step_keys = BTreeSet::new();
+    let payload = serde_json::json!({"ok": true});
+    let new_steps = vec![
+        WorkflowStepEnqueue {
+            step_key: StepKey::new("duplicate"),
+            execution_kind: WorkflowStepExecutionKind::Job,
+            job_type: Some(JobType::new("jobs.test.a")),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            stage: Some(JobStage::Queued),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
+            dependencies: vec![WorkflowStepDependencySpec {
+                prerequisite_step_key: StepKey::new(" "),
+                release_mode: None,
+            }],
+        },
+        WorkflowStepEnqueue {
+            step_key: StepKey::new("duplicate"),
+            execution_kind: WorkflowStepExecutionKind::Job,
+            job_type: Some(JobType::new("jobs.test.b")),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            stage: Some(JobStage::Queued),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
+            dependencies: Vec::new(),
+        },
+    ];
+
+    let result = validate_workflow_step_append(&existing_step_keys, &new_steps);
+
+    assert_eq!(
+        result,
+        Err(WorkflowDagValidationError::BlankDependencyStepKey {
+            step_key: "duplicate".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn validate_workflow_step_append_rejects_cycles_within_new_steps() {
+    let existing_step_keys = BTreeSet::new();
+    let payload = serde_json::json!({"ok": true});
+    let new_steps = vec![
+        WorkflowStepEnqueue {
+            step_key: StepKey::new("a"),
+            execution_kind: WorkflowStepExecutionKind::Job,
+            job_type: Some(JobType::new("jobs.test.a")),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            stage: Some(JobStage::Queued),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
+            dependencies: vec![WorkflowStepDependencySpec {
+                prerequisite_step_key: StepKey::new("b"),
+                release_mode: None,
+            }],
+        },
+        WorkflowStepEnqueue {
+            step_key: StepKey::new("b"),
+            execution_kind: WorkflowStepExecutionKind::Job,
+            job_type: Some(JobType::new("jobs.test.b")),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            stage: Some(JobStage::Queued),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
+            dependencies: vec![WorkflowStepDependencySpec {
+                prerequisite_step_key: StepKey::new("a"),
+                release_mode: None,
+            }],
+        },
+    ];
+
+    let result = validate_workflow_step_append(&existing_step_keys, &new_steps);
+
+    assert_eq!(result, Err(WorkflowDagValidationError::CycleDetected));
 }
 
 #[test]

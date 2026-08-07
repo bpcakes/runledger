@@ -15,6 +15,7 @@ mod dag_validation;
 mod errors;
 mod run_builder;
 mod step_builder;
+mod step_validation;
 mod types;
 
 pub use dag_builder::WorkflowDagBuilder;
