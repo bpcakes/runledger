@@ -48,6 +48,17 @@ pub async fn reap_expired_leases_with_diagnostics(
 ) -> Result<ReapExpiredLeasesDetailedResult> {
     validate_positive_retry_delay(default_retry_delay_ms)?;
 
+    let batch = reap_expired_lease_batch(pool, limit, default_retry_delay_ms).await?;
+    let cleanup = cleanup_reaped_lease_coordination(pool, limit).await;
+
+    Ok(batch.into_detailed_result(cleanup))
+}
+
+async fn reap_expired_lease_batch(
+    pool: &DbPool,
+    limit: i64,
+    default_retry_delay_ms: i32,
+) -> Result<ReapExpiredLeaseBatchOutcome> {
     let mut tx = pool
         .begin()
         .await
@@ -96,10 +107,7 @@ pub async fn reap_expired_leases_with_diagnostics(
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("reap expired lease lookup", error))?;
 
-    let mut processed: i64 = 0;
-    let mut reaped_leases = Vec::new();
-    let mut deferred_row_error_count = 0;
-    let mut deferred_row_errors = Vec::new();
+    let mut outcome = ReapExpiredLeaseBatchOutcome::default();
     for db_row in rows {
         let row = ReapExpiredLeaseRow {
             job_id: db_row.id,
@@ -166,12 +174,7 @@ pub async fn reap_expired_leases_with_diagnostics(
                     Error::from_query_sqlx_with_context("reap defer failed row", error)
                 })?;
 
-                record_deferred_row_error(
-                    &mut deferred_row_error_count,
-                    &mut deferred_row_errors,
-                    &row,
-                    &error,
-                );
+                outcome.record_deferred_row_error(&row, &error);
 
                 continue;
             }
@@ -184,51 +187,28 @@ pub async fn reap_expired_leases_with_diagnostics(
                 Error::from_query_sqlx_with_context("reap release row savepoint", error)
             })?;
 
-        processed += 1;
-        reaped_leases.push(reaped_lease_record(&row, &disposition));
+        outcome.record_reaped_lease(&row, &disposition);
     }
 
     tx.commit()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    let mut cleanup_errors = Vec::new();
-    let workflow_active_claims_released =
-        match cleanup_quiesced_workflow_active_claims(pool, limit).await {
-            Ok(released) => released,
-            Err(error) => {
-                cleanup_errors.push(ReapExpiredLeaseCleanupError {
-                    operation: ReapExpiredLeaseCleanupOperation::WorkflowActiveClaims,
-                    error: error.to_string(),
-                });
-                0
-            }
-        };
-    let execution_resource_claims_released =
-        match cleanup_expired_execution_resource_claims(pool, limit).await {
-            Ok(released) => released,
-            Err(error) => {
-                cleanup_errors.push(ReapExpiredLeaseCleanupError {
-                    operation: ReapExpiredLeaseCleanupOperation::ExecutionResourceClaims,
-                    error: error.to_string(),
-                });
-                0
-            }
-        };
-    let terminal_dead_lettered = terminal_dead_lettered_from(&reaped_leases);
+    Ok(outcome)
+}
 
-    Ok(ReapExpiredLeasesDetailedResult {
-        summary: ReapExpiredLeasesResult {
-            processed,
-            terminal_dead_lettered,
-        },
-        reaped_leases,
-        deferred_row_error_count,
-        deferred_row_errors,
-        workflow_active_claims_released,
-        execution_resource_claims_released,
-        cleanup_errors,
-    })
+async fn cleanup_reaped_lease_coordination(
+    pool: &DbPool,
+    limit: i64,
+) -> ReapExpiredLeaseCleanupOutcome {
+    let mut outcome = ReapExpiredLeaseCleanupOutcome::default();
+    outcome.record_workflow_active_claim_cleanup(
+        cleanup_quiesced_workflow_active_claims(pool, limit).await,
+    );
+    outcome.record_execution_resource_claim_cleanup(
+        cleanup_expired_execution_resource_claims(pool, limit).await,
+    );
+    outcome
 }
 
 async fn cleanup_quiesced_workflow_active_claims(pool: &DbPool, limit: i64) -> Result<u64> {
@@ -253,6 +233,117 @@ async fn cleanup_expired_execution_resource_claims(pool: &DbPool, limit: i64) ->
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     Ok(released)
+}
+
+#[derive(Default)]
+struct ReapExpiredLeaseBatchOutcome {
+    processed: i64,
+    reaped_leases: Vec<ReapedLeaseRecord>,
+    deferred_row_error_count: usize,
+    deferred_row_errors: Vec<ReapExpiredLeaseDeferredError>,
+}
+
+impl ReapExpiredLeaseBatchOutcome {
+    fn record_reaped_lease(
+        &mut self,
+        row: &ReapExpiredLeaseRow,
+        disposition: &ReapExpiredLeaseDisposition,
+    ) {
+        self.processed += 1;
+        self.reaped_leases
+            .push(reaped_lease_record(row, disposition));
+    }
+
+    fn record_deferred_row_error(&mut self, row: &ReapExpiredLeaseRow, error: &Error) {
+        self.deferred_row_error_count += 1;
+
+        if self.deferred_row_errors.len() >= MAX_DEFERRED_ROW_ERRORS {
+            return;
+        }
+
+        let (error_code, error_message, sqlstate) = sanitized_deferred_row_error(error);
+        self.deferred_row_errors
+            .push(ReapExpiredLeaseDeferredError {
+                job_id: row.job_id,
+                run_number: row.run_number,
+                attempt: row.attempt,
+                error_code,
+                error_message,
+                sqlstate,
+            });
+    }
+
+    fn into_detailed_result(
+        self,
+        cleanup: ReapExpiredLeaseCleanupOutcome,
+    ) -> ReapExpiredLeasesDetailedResult {
+        let Self {
+            processed,
+            reaped_leases,
+            deferred_row_error_count,
+            deferred_row_errors,
+        } = self;
+        let ReapExpiredLeaseCleanupOutcome {
+            workflow_active_claims_released,
+            execution_resource_claims_released,
+            cleanup_errors,
+        } = cleanup;
+
+        ReapExpiredLeasesDetailedResult {
+            summary: ReapExpiredLeasesResult {
+                processed,
+                terminal_dead_lettered: terminal_dead_lettered_from(&reaped_leases),
+            },
+            reaped_leases,
+            deferred_row_error_count,
+            deferred_row_errors,
+            workflow_active_claims_released,
+            execution_resource_claims_released,
+            cleanup_errors,
+        }
+    }
+}
+
+#[derive(Default)]
+struct ReapExpiredLeaseCleanupOutcome {
+    workflow_active_claims_released: u64,
+    execution_resource_claims_released: u64,
+    cleanup_errors: Vec<ReapExpiredLeaseCleanupError>,
+}
+
+impl ReapExpiredLeaseCleanupOutcome {
+    fn record_workflow_active_claim_cleanup(&mut self, result: Result<u64>) {
+        let released = self.capture_cleanup_result(
+            ReapExpiredLeaseCleanupOperation::WorkflowActiveClaims,
+            result,
+        );
+        self.workflow_active_claims_released = released;
+    }
+
+    fn record_execution_resource_claim_cleanup(&mut self, result: Result<u64>) {
+        let released = self.capture_cleanup_result(
+            ReapExpiredLeaseCleanupOperation::ExecutionResourceClaims,
+            result,
+        );
+        self.execution_resource_claims_released = released;
+    }
+
+    fn capture_cleanup_result(
+        &mut self,
+        operation: ReapExpiredLeaseCleanupOperation,
+        result: Result<u64>,
+    ) -> u64 {
+        match result {
+            Ok(released) => released,
+            Err(error) => {
+                self.cleanup_errors.push(ReapExpiredLeaseCleanupError {
+                    operation,
+                    error: error.to_string(),
+                });
+                0
+            }
+        }
+    }
 }
 
 struct ReapExpiredLeaseRow {
@@ -359,29 +450,6 @@ fn identity_for(row: &ReapExpiredLeaseRow) -> ReapLeaseIdentity {
         run_number: row.run_number,
         attempt: row.attempt,
     }
-}
-
-fn record_deferred_row_error(
-    deferred_row_error_count: &mut usize,
-    deferred_row_errors: &mut Vec<ReapExpiredLeaseDeferredError>,
-    row: &ReapExpiredLeaseRow,
-    error: &Error,
-) {
-    *deferred_row_error_count += 1;
-
-    if deferred_row_errors.len() >= MAX_DEFERRED_ROW_ERRORS {
-        return;
-    }
-
-    let (error_code, error_message, sqlstate) = sanitized_deferred_row_error(error);
-    deferred_row_errors.push(ReapExpiredLeaseDeferredError {
-        job_id: row.job_id,
-        run_number: row.run_number,
-        attempt: row.attempt,
-        error_code,
-        error_message,
-        sqlstate,
-    });
 }
 
 fn log_trusted_deferred_row_error(row: &ReapExpiredLeaseRow, error: &Error) {
