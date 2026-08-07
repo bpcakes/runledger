@@ -4,7 +4,6 @@ use runledger_core::jobs::{
     JobStage, JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowRunStatus, WorkflowStepEnqueue,
     WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind, WorkflowType,
 };
-use serde::Deserialize;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -19,6 +18,10 @@ use super::super::workflow_types::{
 };
 use super::enqueue::{enqueue_or_get_active_workflow_tx, enqueue_workflow_run_tx};
 use super::read::load_workflow_run_by_id_tx;
+use super::snapshot::{
+    RecoveryEnqueueSnapshot, StoredCanonicalWorkflowStep, deserialize_recovery_append_snapshot,
+    deserialize_recovery_enqueue_snapshot,
+};
 
 #[derive(sqlx::FromRow)]
 struct RecoverySourceRow {
@@ -52,55 +55,6 @@ struct RecoverySourceStepState {
     timeout_seconds: Option<i32>,
     allow_handler_continuation: bool,
     execution_resource_key: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryEnqueueSnapshot {
-    metadata: Value,
-    #[serde(default)]
-    active_key: Option<String>,
-    #[serde(default)]
-    result_step_key: Option<String>,
-    steps: Vec<RecoveryStepSnapshot>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryAppendSnapshot {
-    #[serde(default, rename = "append_window_step_key")]
-    _append_window_step_key: Option<String>,
-    steps: Vec<RecoveryStepSnapshot>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryStepSnapshot {
-    step_key: String,
-    execution_kind: String,
-    job_type: Option<String>,
-    #[serde(default)]
-    organization_id: Option<Uuid>,
-    // Require the canonical field for snapshot integrity, but replay the source
-    // step's latest persisted payload so committed corrections survive recovery.
-    #[serde(rename = "payload")]
-    _canonical_payload: Value,
-    priority: Option<i32>,
-    max_attempts: Option<i32>,
-    timeout_seconds: Option<i32>,
-    stage: Option<String>,
-    #[serde(default)]
-    allow_handler_continuation: bool,
-    #[serde(default)]
-    execution_resource_key: Option<String>,
-    dependencies: Vec<RecoveryDependencySnapshot>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryDependencySnapshot {
-    prerequisite_step_key: String,
-    release_mode: String,
 }
 
 /// Replays a terminal workflow as a new lineage-linked run in an internally
@@ -209,10 +163,9 @@ async fn recover_workflow_run_read_committed_tx(
     let enqueue_request = source.enqueue_request.clone().ok_or_else(|| {
         recovery_snapshot_missing_error(request.source_run_id, "canonical enqueue request")
     })?;
-    let mut initial =
-        serde_json::from_value::<RecoveryEnqueueSnapshot>(enqueue_request).map_err(|error| {
-            unsafe_recovery_snapshot_error(format!("invalid enqueue snapshot: {error}"))
-        })?;
+    let mut initial = deserialize_recovery_enqueue_snapshot(enqueue_request).map_err(|error| {
+        unsafe_recovery_snapshot_error(format!("invalid enqueue snapshot: {error}"))
+    })?;
     let mutations = sqlx::query_as::<_, RecoveryMutationRow>(
         "SELECT mutation_kind, request
          FROM workflow_run_mutations
@@ -237,9 +190,9 @@ async fn recover_workflow_run_read_committed_tx(
                 mutation.mutation_kind
             )));
         }
-        let append = serde_json::from_value::<RecoveryAppendSnapshot>(mutation.request).map_err(
-            |error| unsafe_recovery_snapshot_error(format!("invalid append snapshot: {error}")),
-        )?;
+        let append = deserialize_recovery_append_snapshot(mutation.request).map_err(|error| {
+            unsafe_recovery_snapshot_error(format!("invalid append snapshot: {error}"))
+        })?;
         for step in append.steps {
             insert_recovery_step(&mut steps_by_key, step)?;
         }
@@ -296,7 +249,7 @@ async fn recover_workflow_run_read_committed_tx(
 fn build_recovery_enqueue<'a>(
     source: &'a RecoverySourceRow,
     initial: &'a RecoveryEnqueueSnapshot,
-    steps: &'a [RecoveryStepSnapshot],
+    steps: &'a [StoredCanonicalWorkflowStep],
     source_step_state: &'a BTreeMap<String, RecoverySourceStepState>,
 ) -> Result<runledger_core::jobs::WorkflowRunEnqueue<'a>> {
     // This is a load-bearing reconstruction invariant: every path that adds
@@ -459,7 +412,7 @@ fn build_recovery_enqueue<'a>(
 }
 
 fn resolved_source_step_setting(
-    step: &RecoveryStepSnapshot,
+    step: &StoredCanonicalWorkflowStep,
     field: &str,
     requested_value: Option<i32>,
     source_value: Option<i32>,
@@ -516,8 +469,8 @@ async fn load_recovery_source_step_state_tx(
 }
 
 fn insert_recovery_step(
-    steps_by_key: &mut BTreeMap<String, RecoveryStepSnapshot>,
-    step: RecoveryStepSnapshot,
+    steps_by_key: &mut BTreeMap<String, StoredCanonicalWorkflowStep>,
+    step: StoredCanonicalWorkflowStep,
 ) -> Result<()> {
     let step_key = step.step_key.clone();
     if steps_by_key.insert(step_key.clone(), step).is_some() {

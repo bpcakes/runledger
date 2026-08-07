@@ -1,7 +1,4 @@
-use runledger_core::jobs::{
-    WorkflowDependencyReleaseMode, WorkflowRunEnqueue, validate_workflow_run_enqueue,
-};
-use serde::Serialize;
+use runledger_core::jobs::{WorkflowRunEnqueue, validate_workflow_run_enqueue};
 use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
 
@@ -18,54 +15,19 @@ use super::errors::{
     workflow_enqueue_conflicting_retry_error, workflow_internal_state_error,
     workflow_legacy_idempotency_snapshot_missing_error,
 };
-use super::is_false;
 use super::read::load_workflow_run_by_id_tx;
 use super::release::{StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx};
 use super::runtime::recompute_workflow_run_statuses_tx;
+use super::snapshot::canonical_workflow_enqueue_request;
 use super::steps::{
     fetch_job_definition_defaults_tx, insert_workflow_step_dependencies_tx,
-    insert_workflow_steps_tx, workflow_step_effective_organization_id,
-    workflow_step_effective_stage,
+    insert_workflow_steps_tx,
 };
 use super::validation::workflow_dag_validation_error;
 
 struct WorkflowRunInsertOutcome {
     record: WorkflowRunDbRecord,
     inserted: bool,
-}
-
-#[derive(Serialize)]
-struct CanonicalWorkflowRunEnqueueRequest<'a> {
-    metadata: &'a JsonValue,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    active_key: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result_step_key: Option<&'a str>,
-    steps: Vec<CanonicalWorkflowStep<'a>>,
-}
-
-#[derive(Serialize)]
-struct CanonicalWorkflowStep<'a> {
-    step_key: &'a str,
-    execution_kind: &'static str,
-    job_type: Option<&'a str>,
-    organization_id: Option<Uuid>,
-    payload: &'a JsonValue,
-    priority: Option<i32>,
-    max_attempts: Option<i32>,
-    timeout_seconds: Option<i32>,
-    stage: Option<&'static str>,
-    #[serde(skip_serializing_if = "is_false")]
-    allow_handler_continuation: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    execution_resource_key: Option<&'a str>,
-    dependencies: Vec<CanonicalWorkflowDependency<'a>>,
-}
-
-#[derive(Serialize)]
-struct CanonicalWorkflowDependency<'a> {
-    prerequisite_step_key: &'a str,
-    release_mode: &'static str,
 }
 
 /// Enqueues a workflow run in its own transaction.
@@ -530,62 +492,6 @@ fn validate_existing_idempotent_workflow_run(existing: &WorkflowRunEnqueueRow) -
     }
 }
 
-fn canonical_workflow_enqueue_request(payload: &WorkflowRunEnqueue<'_>) -> Result<JsonValue> {
-    let mut steps = payload
-        .steps()
-        .iter()
-        .map(|step| {
-            let mut dependencies = step
-                .dependencies()
-                .iter()
-                .map(|dependency| CanonicalWorkflowDependency {
-                    prerequisite_step_key: dependency.prerequisite_step_key.as_str(),
-                    release_mode: dependency
-                        .release_mode
-                        .unwrap_or(WorkflowDependencyReleaseMode::OnTerminal)
-                        .as_db_value(),
-                })
-                .collect::<Vec<_>>();
-            dependencies.sort_by(|left, right| {
-                left.prerequisite_step_key
-                    .cmp(right.prerequisite_step_key)
-                    .then(left.release_mode.cmp(right.release_mode))
-            });
-
-            CanonicalWorkflowStep {
-                step_key: step.step_key().as_str(),
-                execution_kind: step.execution_kind().as_db_value(),
-                job_type: step.job_type().map(|job_type| job_type.as_str()),
-                organization_id: workflow_step_effective_organization_id(
-                    payload.organization_id(),
-                    step,
-                ),
-                payload: step.payload(),
-                priority: step.priority(),
-                max_attempts: step.max_attempts(),
-                timeout_seconds: step.timeout_seconds(),
-                stage: workflow_step_effective_stage(step),
-                allow_handler_continuation: step.allows_handler_continuation(),
-                execution_resource_key: step.execution_resource_key(),
-                dependencies,
-            }
-        })
-        .collect::<Vec<_>>();
-    steps.sort_by(|left, right| left.step_key.cmp(right.step_key));
-
-    serde_json::to_value(CanonicalWorkflowRunEnqueueRequest {
-        metadata: payload.metadata(),
-        active_key: payload.active_key(),
-        result_step_key: payload.result_step_key().map(|step_key| step_key.as_str()),
-        steps,
-    })
-    .map_err(|error| {
-        workflow_internal_state_error(format!(
-            "failed to serialize canonical workflow enqueue request: {error}"
-        ))
-    })
-}
-
 pub(crate) async fn enqueue_root_steps_tx(tx: &mut DbTx<'_>, workflow_run_id: Uuid) -> Result<()> {
     let rows = sqlx::query!(
         "SELECT
@@ -643,7 +549,7 @@ mod tests {
     use serde_json::json;
     use sqlx::types::Uuid;
 
-    use super::canonical_workflow_enqueue_request;
+    use super::super::snapshot::canonical_workflow_enqueue_request;
 
     #[test]
     fn canonical_workflow_enqueue_request_matches_golden_snapshot() {

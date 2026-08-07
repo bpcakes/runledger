@@ -34,12 +34,9 @@ mod read;
 mod recovery;
 mod release;
 mod runtime;
+mod snapshot;
 mod steps;
 mod validation;
-
-const fn is_false(value: &bool) -> bool {
-    !*value
-}
 
 #[cfg(feature = "test-support")]
 pub mod test_support {

@@ -1,171 +1,11 @@
-use runledger_core::jobs::{JobStage, StepKey, WorkflowDependencyReleaseMode, WorkflowStepEnqueue};
-use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
 
 use crate::{DbTx, Error, Result};
 
-use super::super::errors::workflow_internal_state_error;
-use super::super::is_false;
-use super::super::steps::{workflow_step_effective_organization_id, workflow_step_effective_stage};
-
-#[derive(Serialize)]
-struct CanonicalAppendRequest<'a> {
-    append_window_step_key: &'a str,
-    steps: Vec<CanonicalStep<'a>>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub(super) struct StoredCanonicalAppendRequest {
-    #[serde(default)]
-    append_window_step_key: Option<String>,
-    steps: Vec<StoredCanonicalStep>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-struct StoredCanonicalStep {
-    step_key: String,
-    execution_kind: String,
-    job_type: Option<String>,
-    #[serde(default)]
-    organization_id: Option<Uuid>,
-    payload: JsonValue,
-    priority: Option<i32>,
-    max_attempts: Option<i32>,
-    timeout_seconds: Option<i32>,
-    stage: Option<String>,
-    #[serde(default)]
-    allow_handler_continuation: bool,
-    #[serde(default)]
-    execution_resource_key: Option<String>,
-    dependencies: Vec<StoredCanonicalDependency>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-struct StoredCanonicalDependency {
-    prerequisite_step_key: String,
-    release_mode: String,
-}
-
-#[derive(Serialize)]
-struct CanonicalStep<'a> {
-    step_key: &'a str,
-    execution_kind: &'static str,
-    job_type: Option<&'a str>,
-    organization_id: Option<Uuid>,
-    payload: &'a JsonValue,
-    priority: Option<i32>,
-    max_attempts: Option<i32>,
-    timeout_seconds: Option<i32>,
-    stage: Option<&'static str>,
-    #[serde(skip_serializing_if = "is_false")]
-    allow_handler_continuation: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    execution_resource_key: Option<&'a str>,
-    dependencies: Vec<CanonicalDependency<'a>>,
-}
-
-#[derive(Serialize)]
-struct CanonicalDependency<'a> {
-    prerequisite_step_key: &'a str,
-    release_mode: &'static str,
-}
-
-pub(super) fn canonical_append_request(
-    append_window_step_key: StepKey<'_>,
-    workflow_organization_id: Option<Uuid>,
-    steps: &[WorkflowStepEnqueue<'_>],
-) -> Result<JsonValue> {
-    let mut canonical_steps = steps
-        .iter()
-        .map(|step| {
-            let mut dependencies = step
-                .dependencies()
-                .iter()
-                .map(|dependency| CanonicalDependency {
-                    prerequisite_step_key: dependency.prerequisite_step_key.as_str(),
-                    release_mode: dependency
-                        .release_mode
-                        .unwrap_or(WorkflowDependencyReleaseMode::OnTerminal)
-                        .as_db_value(),
-                })
-                .collect::<Vec<_>>();
-            dependencies.sort_by(|left, right| {
-                left.prerequisite_step_key
-                    .cmp(right.prerequisite_step_key)
-                    .then(left.release_mode.cmp(right.release_mode))
-            });
-
-            CanonicalStep {
-                step_key: step.step_key().as_str(),
-                execution_kind: step.execution_kind().as_db_value(),
-                job_type: step.job_type().map(|job_type| job_type.as_str()),
-                organization_id: workflow_step_effective_organization_id(
-                    workflow_organization_id,
-                    step,
-                ),
-                payload: step.payload(),
-                priority: step.priority(),
-                max_attempts: step.max_attempts(),
-                timeout_seconds: step.timeout_seconds(),
-                stage: workflow_step_effective_stage(step),
-                allow_handler_continuation: step.allows_handler_continuation(),
-                execution_resource_key: step.execution_resource_key(),
-                dependencies,
-            }
-        })
-        .collect::<Vec<_>>();
-    canonical_steps.sort_by(|left, right| left.step_key.cmp(right.step_key));
-
-    let request = CanonicalAppendRequest {
-        append_window_step_key: append_window_step_key.as_str(),
-        steps: canonical_steps,
-    };
-
-    serde_json::to_value(request).map_err(|error| {
-        workflow_internal_state_error(format!(
-            "failed to serialize canonical workflow append request: {error}"
-        ))
-    })
-}
-
-pub(super) fn deserialize_stored_append_request(
-    value: &JsonValue,
-    workflow_organization_id: Option<Uuid>,
-) -> Result<StoredCanonicalAppendRequest> {
-    let request = serde_json::from_value(value.clone()).map_err(|error| {
-        workflow_internal_state_error(format!(
-            "failed to deserialize canonical workflow append request: {error}"
-        ))
-    })?;
-    Ok(normalize_stored_append_request(
-        request,
-        workflow_organization_id,
-    ))
-}
-
-fn normalize_stored_append_request(
-    mut request: StoredCanonicalAppendRequest,
-    workflow_organization_id: Option<Uuid>,
-) -> StoredCanonicalAppendRequest {
-    for step in &mut request.steps {
-        step.organization_id = step.organization_id.or(workflow_organization_id);
-        if step.execution_kind == "JOB" && step.stage.is_none() {
-            // Older append snapshots stored an explicitly cleared job stage as
-            // null, while insertion still materialized the step as queued.
-            step.stage = Some(JobStage::Queued.as_db_value().to_owned());
-        }
-        step.dependencies.sort_by(|left, right| {
-            left.prerequisite_step_key
-                .cmp(&right.prerequisite_step_key)
-                .then(left.release_mode.cmp(&right.release_mode))
-        });
-    }
-    request
-        .steps
-        .sort_by(|left, right| left.step_key.cmp(&right.step_key));
-    request
-}
+use super::super::snapshot::{
+    StoredCanonicalAppendRequest, StoredCanonicalWorkflowStep, deserialize_stored_append_request,
+};
 
 pub(super) async fn stored_append_request_matches_tx(
     tx: &mut DbTx<'_>,
@@ -207,8 +47,8 @@ fn stored_append_request_matches_for_test(
 
 #[cfg(test)]
 fn stored_append_steps_match_for_test(
-    left: &[StoredCanonicalStep],
-    right: &[StoredCanonicalStep],
+    left: &[StoredCanonicalWorkflowStep],
+    right: &[StoredCanonicalWorkflowStep],
 ) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
@@ -218,8 +58,8 @@ fn stored_append_steps_match_for_test(
 
 async fn stored_append_steps_match_tx(
     tx: &mut DbTx<'_>,
-    left: &[StoredCanonicalStep],
-    right: &[StoredCanonicalStep],
+    left: &[StoredCanonicalWorkflowStep],
+    right: &[StoredCanonicalWorkflowStep],
 ) -> Result<bool> {
     if left.len() != right.len() {
         return Ok(false);
@@ -240,8 +80,8 @@ async fn stored_append_steps_match_tx(
 }
 
 fn stored_append_step_fields_match(
-    left: &StoredCanonicalStep,
-    right: &StoredCanonicalStep,
+    left: &StoredCanonicalWorkflowStep,
+    right: &StoredCanonicalWorkflowStep,
 ) -> bool {
     left.step_key == right.step_key
         && left.execution_kind == right.execution_kind
@@ -329,10 +169,10 @@ mod tests {
     use serde_json::json;
     use sqlx::types::Uuid;
 
-    use super::{
+    use super::super::super::snapshot::{
         canonical_append_request, deserialize_stored_append_request,
-        stored_append_request_matches_for_test,
     };
+    use super::stored_append_request_matches_for_test;
 
     #[test]
     fn canonical_append_request_matches_golden_snapshot() {

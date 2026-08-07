@@ -33,6 +33,7 @@ use super::super::release::{
     StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx,
 };
 use super::super::runtime::{recompute_workflow_run_statuses_tx, resolve_terminal_step_queue_tx};
+use super::super::snapshot::{canonical_append_request, deserialize_stored_append_request};
 use super::super::steps::{
     WorkflowStepIdsByKey, dependency_count_total, fetch_job_definition_defaults_tx,
     insert_workflow_step_dependency_record_tx, insert_workflow_step_record_tx, step_id_for_key,
@@ -40,8 +41,8 @@ use super::super::steps::{
 };
 use super::super::validation::workflow_dag_validation_error;
 use super::idempotency::{
-    canonical_append_request, deserialize_stored_append_request, insert_workflow_mutation_row_tx,
-    load_existing_mutation_request_tx, stored_append_request_matches_tx,
+    insert_workflow_mutation_row_tx, load_existing_mutation_request_tx,
+    stored_append_request_matches_tx,
 };
 
 #[derive(Debug)]
