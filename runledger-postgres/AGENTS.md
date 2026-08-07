@@ -13,7 +13,7 @@ PostgreSQL persistence for durable execution: queue lifecycle, workflow DAG stat
 
 ## Edit here for X
 - Job enqueue/claim/retry/dead-letter behavior: `src/jobs/queue/*`.
-- Workflow runtime/dependency transitions: `src/jobs/workflows/runtime.rs`.
+- Workflow runtime/dependency transitions: `src/jobs/workflows/runtime/*`.
 - Workflow run creation/read APIs: `src/jobs/workflows/enqueue.rs`, `src/jobs/workflows/read.rs`.
 - DB error categorization: `src/error.rs`, `src/error/classify/*`.
 
