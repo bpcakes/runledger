@@ -1,21 +1,24 @@
 pub(crate) mod advance;
 mod attempts;
+mod claim;
 mod definitions;
-mod dispatch;
+mod enqueue;
 pub(crate) mod events;
 mod lifecycle;
 mod reaper;
 mod release;
 
+pub use self::claim::{
+    claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
+};
 pub use self::definitions::{
     JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionCatalogSyncReport,
     get_job_definition_by_type, insert_job_definition_if_missing_tx, list_job_definitions,
     sync_catalog_job_definitions_exact_tx, sync_catalog_job_definitions_tx, update_job_definition,
     upsert_job_definition_tx,
 };
-pub(in crate::jobs) use self::dispatch::enqueue_replayed_job_with_outcome_tx;
-pub use self::dispatch::{
-    claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
+pub(in crate::jobs) use self::enqueue::enqueue_replayed_job_with_outcome_tx;
+pub use self::enqueue::{
     enqueue_job, enqueue_job_tx, enqueue_job_with_execution_resource,
     enqueue_job_with_execution_resource_tx, enqueue_job_with_outcome_tx,
 };

@@ -16,7 +16,7 @@ use super::super::workflows::{
     on_retry_scheduled, on_terminal, release_quiesced_workflow_active_claims_tx,
 };
 use super::attempts::ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART;
-use super::dispatch::release_expired_execution_resource_claims_tx;
+use super::claim::release_expired_execution_resource_claims_tx;
 use super::release::{
     TryReleaseUnstartedClaimResult, UnstartedClaimIdentity, try_release_unstarted_job_claim_tx,
 };
