@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 
 use futures_util::FutureExt;
@@ -65,19 +66,7 @@ async fn notify_handlers_of_terminal_lease_expirations_inner<F>(
 where
     F: FnOnce(),
 {
-    let mut in_flight = JoinSet::new();
-    let mut metadata: HashMap<Id, HookMetadata> = HashMap::new();
-    let mut started_hook_count = 0;
-    let mut skipped_hook_count = 0;
-    let mut shutdown_observed = shutdown::is_requested_or_closed(shutdown);
-    let mut post_shutdown_admission_budget = if shutdown_observed {
-        // If shutdown was already requested after the reaper committed a
-        // terminal batch, attempt one bounded concurrency window instead of
-        // silently skipping every committed hook.
-        REAPER_TERMINAL_HOOK_MAX_CONCURRENCY
-    } else {
-        0
-    };
+    let mut fanout = TerminalHookFanout::new(shutdown);
     let mut before_first_hook_admission = Some(before_first_hook_admission);
 
     for job in jobs {
@@ -93,35 +82,9 @@ where
             before_first_hook_admission();
         }
 
-        if !shutdown_observed {
-            while in_flight.len() >= REAPER_TERMINAL_HOOK_MAX_CONCURRENCY {
-                if wait_for_hook_capacity_or_shutdown(&mut in_flight, &mut metadata, shutdown).await
-                    == HookWaitOutcome::ShutdownRequested
-                {
-                    observe_shutdown_and_grant_admission_budget(
-                        &mut shutdown_observed,
-                        &mut post_shutdown_admission_budget,
-                    );
-                    break;
-                }
-            }
-
-            if !shutdown_observed && shutdown::is_requested_or_closed(shutdown) {
-                observe_shutdown_and_grant_admission_budget(
-                    &mut shutdown_observed,
-                    &mut post_shutdown_admission_budget,
-                );
-            }
-        }
-
-        if shutdown_observed {
-            if post_shutdown_admission_budget == 0
-                || in_flight.len() >= REAPER_TERMINAL_HOOK_MAX_CONCURRENCY
-            {
-                skipped_hook_count += 1;
-                continue;
-            }
-            post_shutdown_admission_budget -= 1;
+        fanout.wait_for_capacity_or_observe_shutdown(shutdown).await;
+        if !fanout.reserve_hook_admission() {
+            continue;
         }
 
         let context = JobContext {
@@ -154,68 +117,32 @@ where
             attempt = job.attempt,
         );
 
-        let abort_handle = in_flight.spawn(
-            async move {
-                match tokio::time::timeout(
-                    TERMINAL_HOOK_TIMEOUT,
-                    AssertUnwindSafe(handler.on_dead_letter(context, payload, dead_letter))
-                        .catch_unwind(),
-                )
-                .await
-                {
-                    Ok(Ok(())) => HookOutcome::Completed,
-                    Ok(Err(panic_payload)) => {
-                        HookOutcome::Panicked(panic_payload_message(&*panic_payload))
-                    }
-                    Err(_) => HookOutcome::TimedOut,
+        let hook = async move {
+            match tokio::time::timeout(
+                TERMINAL_HOOK_TIMEOUT,
+                AssertUnwindSafe(handler.on_dead_letter(context, payload, dead_letter))
+                    .catch_unwind(),
+            )
+            .await
+            {
+                Ok(Ok(())) => HookOutcome::Completed,
+                Ok(Err(panic_payload)) => {
+                    HookOutcome::Panicked(panic_payload_message(&*panic_payload))
                 }
+                Err(_) => HookOutcome::TimedOut,
             }
-            .instrument(hook_span),
-        );
-        metadata.insert(abort_handle.id(), hook_meta);
-        started_hook_count += 1;
-    }
-
-    if !shutdown_observed {
-        shutdown_observed =
-            drain_hook_results_until_complete_or_shutdown(&mut in_flight, &mut metadata, shutdown)
-                .await;
-    }
-
-    if shutdown_observed {
-        if started_hook_count > 0 || skipped_hook_count > 0 {
-            warn!(
-                started_terminal_hooks = started_hook_count,
-                skipped_terminal_hooks_due_to_shutdown = skipped_hook_count,
-                in_flight_terminal_hooks = in_flight.len(),
-                shutdown_drain_timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
-                "reaper terminal hook fanout interrupted by shutdown; draining in-flight hooks with bounded budget"
-            );
         }
-        drain_terminal_hooks_for_shutdown(&mut in_flight, &mut metadata).await;
-        clear_stale_hook_metadata(&mut metadata);
-        return TerminalHookFanoutResult::InterruptedByShutdown {
-            started: started_hook_count,
-            skipped: skipped_hook_count,
-        };
+        .instrument(hook_span);
+        fanout.spawn_hook(hook, hook_meta);
     }
 
-    clear_stale_hook_metadata(&mut metadata);
-    TerminalHookFanoutResult::Completed {
-        started: started_hook_count,
-    }
-}
-
-fn observe_shutdown_and_grant_admission_budget(
-    shutdown_observed: &mut bool,
-    post_shutdown_admission_budget: &mut usize,
-) {
-    if *shutdown_observed {
-        return;
+    if !fanout.shutdown_observed {
+        fanout
+            .drain_results_until_complete_or_shutdown(shutdown)
+            .await;
     }
 
-    *shutdown_observed = true;
-    *post_shutdown_admission_budget = REAPER_TERMINAL_HOOK_MAX_CONCURRENCY;
+    fanout.finish().await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,220 +172,324 @@ struct HookMetadata {
     attempt: i32,
 }
 
+struct TerminalHookFanout {
+    in_flight: JoinSet<HookOutcome>,
+    metadata: HashMap<Id, HookMetadata>,
+    started_hook_count: usize,
+    skipped_hook_count: usize,
+    shutdown_observed: bool,
+    post_shutdown_admission_budget: usize,
+}
+
+impl TerminalHookFanout {
+    fn new(shutdown: &watch::Receiver<bool>) -> Self {
+        let shutdown_observed = shutdown::is_requested_or_closed(shutdown);
+        let post_shutdown_admission_budget = if shutdown_observed {
+            // If shutdown was already requested after the reaper committed a
+            // terminal batch, attempt one bounded concurrency window instead of
+            // silently skipping every committed hook.
+            REAPER_TERMINAL_HOOK_MAX_CONCURRENCY
+        } else {
+            0
+        };
+
+        Self {
+            in_flight: JoinSet::new(),
+            metadata: HashMap::new(),
+            started_hook_count: 0,
+            skipped_hook_count: 0,
+            shutdown_observed,
+            post_shutdown_admission_budget,
+        }
+    }
+
+    async fn wait_for_capacity_or_observe_shutdown(
+        &mut self,
+        shutdown: &mut watch::Receiver<bool>,
+    ) {
+        if self.shutdown_observed {
+            return;
+        }
+
+        while self.in_flight.len() >= REAPER_TERMINAL_HOOK_MAX_CONCURRENCY {
+            if self.wait_for_hook_capacity_or_shutdown(shutdown).await
+                == HookWaitOutcome::ShutdownRequested
+            {
+                self.observe_shutdown_and_grant_admission_budget();
+                break;
+            }
+        }
+
+        if !self.shutdown_observed && shutdown::is_requested_or_closed(shutdown) {
+            self.observe_shutdown_and_grant_admission_budget();
+        }
+    }
+
+    fn observe_shutdown_and_grant_admission_budget(&mut self) {
+        if self.shutdown_observed {
+            return;
+        }
+
+        self.shutdown_observed = true;
+        self.post_shutdown_admission_budget = REAPER_TERMINAL_HOOK_MAX_CONCURRENCY;
+    }
+
+    fn reserve_hook_admission(&mut self) -> bool {
+        if !self.shutdown_observed {
+            return true;
+        }
+
+        if self.post_shutdown_admission_budget == 0
+            || self.in_flight.len() >= REAPER_TERMINAL_HOOK_MAX_CONCURRENCY
+        {
+            self.skipped_hook_count += 1;
+            return false;
+        }
+
+        self.post_shutdown_admission_budget -= 1;
+        true
+    }
+
+    fn spawn_hook<F>(&mut self, hook: F, hook_meta: HookMetadata)
+    where
+        F: Future<Output = HookOutcome> + Send + 'static,
+    {
+        let abort_handle = self.in_flight.spawn(hook);
+        self.metadata.insert(abort_handle.id(), hook_meta);
+        self.started_hook_count += 1;
+    }
+
+    async fn wait_for_hook_capacity_or_shutdown(
+        &mut self,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> HookWaitOutcome {
+        while self.in_flight.len() >= REAPER_TERMINAL_HOOK_MAX_CONCURRENCY {
+            tokio::select! {
+                result = self.in_flight.join_next_with_id() => {
+                    if let Some(result) = result {
+                        self.handle_next_hook_result(result);
+                        return HookWaitOutcome::HookCompleted;
+                    }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return HookWaitOutcome::ShutdownRequested;
+                    }
+                }
+            }
+        }
+
+        HookWaitOutcome::HookCompleted
+    }
+
+    async fn drain_results_until_complete_or_shutdown(
+        &mut self,
+        shutdown: &mut watch::Receiver<bool>,
+    ) {
+        while !self.in_flight.is_empty() {
+            tokio::select! {
+                result = self.in_flight.join_next_with_id() => {
+                    if let Some(result) = result {
+                        self.handle_next_hook_result(result);
+                    }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        self.shutdown_observed = true;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn finish(mut self) -> TerminalHookFanoutResult {
+        if self.shutdown_observed {
+            if self.started_hook_count > 0 || self.skipped_hook_count > 0 {
+                warn!(
+                    started_terminal_hooks = self.started_hook_count,
+                    skipped_terminal_hooks_due_to_shutdown = self.skipped_hook_count,
+                    in_flight_terminal_hooks = self.in_flight.len(),
+                    shutdown_drain_timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
+                    "reaper terminal hook fanout interrupted by shutdown; draining in-flight hooks with bounded budget"
+                );
+            }
+            self.drain_terminal_hooks_for_shutdown().await;
+            self.clear_stale_hook_metadata();
+            return TerminalHookFanoutResult::InterruptedByShutdown {
+                started: self.started_hook_count,
+                skipped: self.skipped_hook_count,
+            };
+        }
+
+        self.clear_stale_hook_metadata();
+        TerminalHookFanoutResult::Completed {
+            started: self.started_hook_count,
+        }
+    }
+
+    async fn drain_terminal_hooks_for_shutdown(&mut self) {
+        if self.in_flight.is_empty() {
+            return;
+        }
+
+        info!(
+            in_flight_terminal_hooks = self.in_flight.len(),
+            timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
+            "shutdown requested; draining in-flight reaper terminal hooks"
+        );
+
+        match timeout(
+            TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT,
+            self.drain_hook_results_to_completion(),
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(_) => {
+                warn!(
+                    remaining_terminal_hooks = self.in_flight.len(),
+                    timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
+                    "reaper terminal hooks did not finish before shutdown drain deadline; aborting"
+                );
+                self.in_flight.abort_all();
+
+                match timeout(
+                    TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT,
+                    self.drain_hook_results_to_completion(),
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(_) => {
+                        warn!(
+                            remaining_terminal_hooks = self.in_flight.len(),
+                            timeout_ms = TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT.as_millis(),
+                            "reaper terminal hook abort drain timed out during shutdown; dropping unresolved tasks"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    async fn drain_hook_results_to_completion(&mut self) {
+        while let Some(result) = self.in_flight.join_next_with_id().await {
+            self.handle_next_hook_result(result);
+        }
+    }
+
+    fn clear_stale_hook_metadata(&mut self) {
+        if self.metadata.is_empty() {
+            return;
+        }
+
+        warn!(
+            stale_hook_metadata_entries = self.metadata.len(),
+            "reaper hook metadata diverged from in-flight task set; clearing stale metadata"
+        );
+        self.metadata.clear();
+    }
+
+    fn handle_next_hook_result(&mut self, result: HookJoinResult) {
+        match result {
+            Ok((id, HookOutcome::Completed)) => {
+                if self.metadata.remove(&id).is_none() {
+                    warn!("terminal failure hook completed; metadata missing in reaper loop");
+                }
+            }
+            Ok((id, HookOutcome::TimedOut)) => {
+                if let Some(meta) = self.metadata.remove(&id) {
+                    warn!(
+                        job_id = meta.job_id,
+                        job_type = meta.job_type,
+                        run_number = meta.run_number,
+                        attempt = meta.attempt,
+                        timeout_ms = TERMINAL_HOOK_TIMEOUT.as_millis(),
+                        "terminal failure hook timed out; continuing reaper loop"
+                    );
+                } else {
+                    warn!(
+                        timeout_ms = TERMINAL_HOOK_TIMEOUT.as_millis(),
+                        "terminal failure hook timed out; metadata missing in reaper loop"
+                    );
+                }
+            }
+            Ok((id, HookOutcome::Panicked(panic_message))) => {
+                if let Some(meta) = self.metadata.remove(&id) {
+                    warn!(
+                        job_id = meta.job_id,
+                        job_type = meta.job_type,
+                        run_number = meta.run_number,
+                        attempt = meta.attempt,
+                        panic = %panic_message,
+                        "terminal failure hook panicked; continuing reaper loop"
+                    );
+                } else {
+                    warn!(
+                        panic = %panic_message,
+                        "terminal failure hook panicked; metadata missing in reaper loop"
+                    );
+                }
+            }
+            Err(error) => {
+                let id = error.id();
+                if let Some(meta) = self.metadata.remove(&id) {
+                    if error.is_panic() {
+                        warn!(
+                            job_id = meta.job_id,
+                            job_type = meta.job_type,
+                            run_number = meta.run_number,
+                            attempt = meta.attempt,
+                            error = %error,
+                            "terminal failure hook panicked; continuing reaper loop"
+                        );
+                    } else if error.is_cancelled() {
+                        warn!(
+                            job_id = meta.job_id,
+                            job_type = meta.job_type,
+                            run_number = meta.run_number,
+                            attempt = meta.attempt,
+                            error = %error,
+                            "terminal failure hook was cancelled; continuing reaper loop"
+                        );
+                    } else {
+                        warn!(
+                            job_id = meta.job_id,
+                            job_type = meta.job_type,
+                            run_number = meta.run_number,
+                            attempt = meta.attempt,
+                            error = %error,
+                            "terminal failure hook join failed; continuing reaper loop"
+                        );
+                    }
+                } else if error.is_panic() {
+                    warn!(
+                        error = %error,
+                        "terminal failure hook panicked; metadata missing in reaper loop"
+                    );
+                } else if error.is_cancelled() {
+                    warn!(
+                        error = %error,
+                        "terminal failure hook was cancelled; metadata missing in reaper loop"
+                    );
+                } else {
+                    warn!(
+                        error = %error,
+                        "terminal failure hook join failed; metadata missing in reaper loop"
+                    );
+                }
+            }
+        }
+    }
+}
+
 type HookJoinResult = std::result::Result<(Id, HookOutcome), tokio::task::JoinError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HookWaitOutcome {
     HookCompleted,
     ShutdownRequested,
-}
-
-async fn wait_for_hook_capacity_or_shutdown(
-    in_flight: &mut JoinSet<HookOutcome>,
-    metadata: &mut HashMap<Id, HookMetadata>,
-    shutdown: &mut watch::Receiver<bool>,
-) -> HookWaitOutcome {
-    while in_flight.len() >= REAPER_TERMINAL_HOOK_MAX_CONCURRENCY {
-        tokio::select! {
-            result = in_flight.join_next_with_id() => {
-                if let Some(result) = result {
-                    handle_next_hook_result(result, metadata);
-                    return HookWaitOutcome::HookCompleted;
-                }
-            }
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    return HookWaitOutcome::ShutdownRequested;
-                }
-            }
-        }
-    }
-
-    HookWaitOutcome::HookCompleted
-}
-
-async fn drain_hook_results_until_complete_or_shutdown(
-    in_flight: &mut JoinSet<HookOutcome>,
-    metadata: &mut HashMap<Id, HookMetadata>,
-    shutdown: &mut watch::Receiver<bool>,
-) -> bool {
-    while !in_flight.is_empty() {
-        tokio::select! {
-            result = in_flight.join_next_with_id() => {
-                if let Some(result) = result {
-                    handle_next_hook_result(result, metadata);
-                }
-            }
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
-async fn drain_terminal_hooks_for_shutdown(
-    in_flight: &mut JoinSet<HookOutcome>,
-    metadata: &mut HashMap<Id, HookMetadata>,
-) {
-    if in_flight.is_empty() {
-        return;
-    }
-
-    info!(
-        in_flight_terminal_hooks = in_flight.len(),
-        timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
-        "shutdown requested; draining in-flight reaper terminal hooks"
-    );
-
-    match timeout(
-        TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT,
-        drain_hook_results_to_completion(in_flight, metadata),
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(_) => {
-            warn!(
-                remaining_terminal_hooks = in_flight.len(),
-                timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
-                "reaper terminal hooks did not finish before shutdown drain deadline; aborting"
-            );
-            in_flight.abort_all();
-
-            match timeout(
-                TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT,
-                drain_hook_results_to_completion(in_flight, metadata),
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(_) => {
-                    warn!(
-                        remaining_terminal_hooks = in_flight.len(),
-                        timeout_ms = TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT.as_millis(),
-                        "reaper terminal hook abort drain timed out during shutdown; dropping unresolved tasks"
-                    );
-                }
-            }
-        }
-    }
-}
-
-async fn drain_hook_results_to_completion(
-    in_flight: &mut JoinSet<HookOutcome>,
-    metadata: &mut HashMap<Id, HookMetadata>,
-) {
-    while let Some(result) = in_flight.join_next_with_id().await {
-        handle_next_hook_result(result, metadata);
-    }
-}
-
-fn clear_stale_hook_metadata(metadata: &mut HashMap<Id, HookMetadata>) {
-    if metadata.is_empty() {
-        return;
-    }
-
-    warn!(
-        stale_hook_metadata_entries = metadata.len(),
-        "reaper hook metadata diverged from in-flight task set; clearing stale metadata"
-    );
-    metadata.clear();
-}
-
-fn handle_next_hook_result(result: HookJoinResult, metadata: &mut HashMap<Id, HookMetadata>) {
-    match result {
-        Ok((id, HookOutcome::Completed)) => {
-            if metadata.remove(&id).is_none() {
-                warn!("terminal failure hook completed; metadata missing in reaper loop");
-            }
-        }
-        Ok((id, HookOutcome::TimedOut)) => {
-            if let Some(meta) = metadata.remove(&id) {
-                warn!(
-                    job_id = meta.job_id,
-                    job_type = meta.job_type,
-                    run_number = meta.run_number,
-                    attempt = meta.attempt,
-                    timeout_ms = TERMINAL_HOOK_TIMEOUT.as_millis(),
-                    "terminal failure hook timed out; continuing reaper loop"
-                );
-            } else {
-                warn!(
-                    timeout_ms = TERMINAL_HOOK_TIMEOUT.as_millis(),
-                    "terminal failure hook timed out; metadata missing in reaper loop"
-                );
-            }
-        }
-        Ok((id, HookOutcome::Panicked(panic_message))) => {
-            if let Some(meta) = metadata.remove(&id) {
-                warn!(
-                    job_id = meta.job_id,
-                    job_type = meta.job_type,
-                    run_number = meta.run_number,
-                    attempt = meta.attempt,
-                    panic = %panic_message,
-                    "terminal failure hook panicked; continuing reaper loop"
-                );
-            } else {
-                warn!(
-                    panic = %panic_message,
-                    "terminal failure hook panicked; metadata missing in reaper loop"
-                );
-            }
-        }
-        Err(error) => {
-            let id = error.id();
-            if let Some(meta) = metadata.remove(&id) {
-                if error.is_panic() {
-                    warn!(
-                        job_id = meta.job_id,
-                        job_type = meta.job_type,
-                        run_number = meta.run_number,
-                        attempt = meta.attempt,
-                        error = %error,
-                        "terminal failure hook panicked; continuing reaper loop"
-                    );
-                } else if error.is_cancelled() {
-                    warn!(
-                        job_id = meta.job_id,
-                        job_type = meta.job_type,
-                        run_number = meta.run_number,
-                        attempt = meta.attempt,
-                        error = %error,
-                        "terminal failure hook was cancelled; continuing reaper loop"
-                    );
-                } else {
-                    warn!(
-                        job_id = meta.job_id,
-                        job_type = meta.job_type,
-                        run_number = meta.run_number,
-                        attempt = meta.attempt,
-                        error = %error,
-                        "terminal failure hook join failed; continuing reaper loop"
-                    );
-                }
-            } else if error.is_panic() {
-                warn!(
-                    error = %error,
-                    "terminal failure hook panicked; metadata missing in reaper loop"
-                );
-            } else if error.is_cancelled() {
-                warn!(
-                    error = %error,
-                    "terminal failure hook was cancelled; metadata missing in reaper loop"
-                );
-            } else {
-                warn!(
-                    error = %error,
-                    "terminal failure hook join failed; metadata missing in reaper loop"
-                );
-            }
-        }
-    }
 }
 
 fn panic_payload_message(panic_payload: &(dyn std::any::Any + Send)) -> String {
