@@ -52,6 +52,14 @@ enum AttemptClaimOrigin {
     WorkerPrestart,
 }
 
+struct ClaimRequest<'a> {
+    worker_id: &'a str,
+    lease_duration_seconds: i32,
+    limit: i64,
+    allowed_job_types: Option<&'a [JobType<'a>]>,
+    claim_origin: AttemptClaimOrigin,
+}
+
 #[derive(Clone, Copy)]
 enum ExistingJobLock {
     KeyShare,
@@ -607,11 +615,13 @@ pub async fn claim_jobs(
 
     claim_jobs_inner(
         pool,
-        worker_id,
-        lease_duration_seconds,
-        limit,
-        None,
-        AttemptClaimOrigin::Direct,
+        ClaimRequest {
+            worker_id,
+            lease_duration_seconds,
+            limit,
+            allowed_job_types: None,
+            claim_origin: AttemptClaimOrigin::Direct,
+        },
     )
     .await
 }
@@ -631,11 +641,13 @@ pub async fn claim_jobs_for_types(
 
     claim_jobs_inner(
         pool,
-        worker_id,
-        lease_duration_seconds,
-        limit,
-        Some(allowed_job_types),
-        AttemptClaimOrigin::Direct,
+        ClaimRequest {
+            worker_id,
+            lease_duration_seconds,
+            limit,
+            allowed_job_types: Some(allowed_job_types),
+            claim_origin: AttemptClaimOrigin::Direct,
+        },
     )
     .await
 }
@@ -650,11 +662,13 @@ pub async fn claim_prestart_jobs(
 
     claim_jobs_inner(
         pool,
-        worker_id,
-        lease_duration_seconds,
-        limit,
-        None,
-        AttemptClaimOrigin::WorkerPrestart,
+        ClaimRequest {
+            worker_id,
+            lease_duration_seconds,
+            limit,
+            allowed_job_types: None,
+            claim_origin: AttemptClaimOrigin::WorkerPrestart,
+        },
     )
     .await
 }
@@ -674,41 +688,46 @@ pub async fn claim_prestart_jobs_for_types(
 
     claim_jobs_inner(
         pool,
-        worker_id,
-        lease_duration_seconds,
-        limit,
-        Some(allowed_job_types),
-        AttemptClaimOrigin::WorkerPrestart,
+        ClaimRequest {
+            worker_id,
+            lease_duration_seconds,
+            limit,
+            allowed_job_types: Some(allowed_job_types),
+            claim_origin: AttemptClaimOrigin::WorkerPrestart,
+        },
     )
     .await
 }
 
-async fn claim_jobs_inner(
-    pool: &DbPool,
-    worker_id: &str,
-    lease_duration_seconds: i32,
-    limit: i64,
-    allowed_job_types: Option<&[JobType<'_>]>,
-    claim_origin: AttemptClaimOrigin,
-) -> Result<Vec<JobQueueRecord>> {
+async fn claim_jobs_inner(pool: &DbPool, request: ClaimRequest<'_>) -> Result<Vec<JobQueueRecord>> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    let claim_ids = fetch_claim_ids(
-        &mut tx,
-        worker_id,
-        lease_duration_seconds,
-        limit,
-        allowed_job_types,
-    )
-    .await?;
-
-    if claim_ids.is_empty() {
+    let claimed = lease_claimed_rows_tx(&mut tx, &request).await?;
+    if claimed.is_empty() {
         tx.commit()
             .await
             .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        return Ok(claimed);
+    }
+
+    record_claim_side_effects_tx(&mut tx, &claimed, &request).await?;
+
+    tx.commit()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+
+    Ok(claimed)
+}
+
+async fn lease_claimed_rows_tx(
+    tx: &mut DbTx<'_>,
+    request: &ClaimRequest<'_>,
+) -> Result<Vec<JobQueueRecord>> {
+    let claim_ids = fetch_claim_ids(tx, request).await?;
+    if claim_ids.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -752,11 +771,11 @@ async fn claim_jobs_inner(
             last_error_message,
             created_at,
             updated_at",
-        worker_id,
-        lease_duration_seconds,
+        request.worker_id,
+        request.lease_duration_seconds,
         &claim_ids,
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("claim jobs update", error))?;
 
@@ -765,8 +784,16 @@ async fn claim_jobs_inner(
         .map(JobQueueRow::into_record)
         .collect::<Result<_>>()?;
 
-    for job in &claimed {
-        on_claimed(&mut tx, job.id).await?;
+    Ok(claimed)
+}
+
+async fn record_claim_side_effects_tx(
+    tx: &mut DbTx<'_>,
+    claimed: &[JobQueueRecord],
+    request: &ClaimRequest<'_>,
+) -> Result<()> {
+    for job in claimed {
+        on_claimed(tx, job.id).await?;
 
         sqlx::query!(
             "INSERT INTO job_attempts (
@@ -783,10 +810,10 @@ async fn claim_jobs_inner(
             job.id,
             job.run_number,
             job.attempt,
-            worker_id,
-            claim_origin.as_db_value(),
+            request.worker_id,
+            request.claim_origin.as_db_value(),
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| Error::from_query_sqlx_with_context("claim jobs attempt insert", error))?;
 
@@ -811,30 +838,20 @@ async fn claim_jobs_inner(
             job.run_number,
             job.attempt,
             job.stage.as_db_value(),
-            worker_id,
-            lease_duration_seconds,
+            request.worker_id,
+            request.lease_duration_seconds,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| Error::from_query_sqlx_with_context("claim jobs event insert", error))?;
     }
 
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
-
-    Ok(claimed)
+    Ok(())
 }
 
-async fn fetch_claim_ids(
-    tx: &mut DbTx<'_>,
-    worker_id: &str,
-    lease_duration_seconds: i32,
-    limit: i64,
-    allowed_job_types: Option<&[JobType<'_>]>,
-) -> Result<Vec<Uuid>> {
-    let resource_head_window = resource_head_window_limit(limit);
-    let query_result = match allowed_job_types {
+async fn fetch_claim_ids(tx: &mut DbTx<'_>, request: &ClaimRequest<'_>) -> Result<Vec<Uuid>> {
+    let resource_head_window = resource_head_window_limit(request.limit);
+    let query_result = match request.allowed_job_types {
         Some(allowed_job_types) => {
             let allowed_job_types = allowed_job_types
                 .iter()
@@ -939,9 +956,9 @@ async fn fetch_claim_ids(
                     c.next_run_at ASC,
                     c.created_at ASC,
                     c.id ASC"#,
-                limit,
-                worker_id,
-                lease_duration_seconds,
+                request.limit,
+                request.worker_id,
+                request.lease_duration_seconds,
                 allowed_job_types.as_slice(),
                 resource_head_window,
             )
@@ -1046,9 +1063,9 @@ async fn fetch_claim_ids(
                     c.next_run_at ASC,
                     c.created_at ASC,
                     c.id ASC"#,
-                limit,
-                worker_id,
-                lease_duration_seconds,
+                request.limit,
+                request.worker_id,
+                request.lease_duration_seconds,
                 resource_head_window,
             )
             .fetch_all(&mut **tx)

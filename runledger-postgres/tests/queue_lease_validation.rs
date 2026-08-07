@@ -1,7 +1,11 @@
-use runledger_core::jobs::{JobEventType, JobStatus, JobType};
+use runledger_core::jobs::{
+    JobEventType, JobStatus, JobType, StepKey, WorkflowRunEnqueueBuilder,
+    WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
+};
 use runledger_postgres::jobs::{
     JobQueueRecord, claim_jobs, claim_jobs_for_types, claim_prestart_jobs,
-    claim_prestart_jobs_for_types, get_job_by_id, heartbeat_job, list_job_events,
+    claim_prestart_jobs_for_types, enqueue_workflow_run, get_job_by_id, heartbeat_job,
+    list_job_events, list_workflow_steps,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -13,6 +17,7 @@ mod support;
 use support::{enqueue_test_job as enqueue_shared_test_job, register_test_job_definition};
 
 const JOB_TYPE: &str = "jobs.test.lease_validation";
+const CLAIM_TRANSACTION_RESOURCE: &str = "claim-transaction-resource";
 
 async fn enqueue_test_job(pool: &DbPool, case_name: &str) -> Uuid {
     let payload = json!({ "case": case_name });
@@ -137,6 +142,160 @@ async fn claim_entrypoints_reject_non_positive_lease_duration_without_mutating_p
         .expect_err("negative typed prestart claim lease duration should be rejected"),
     );
     assert_jobs_unchanged(&pool, &pending_jobs).await;
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn claim_rolls_back_all_phase_writes_when_event_recording_fails() {
+    let (pool, database) = setup_ephemeral_pool("postgres_claim_transaction_rollback", 4).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"case": "claim-transaction-rollback"});
+    let metadata = json!({"case": "claim-transaction-rollback"});
+    let step =
+        WorkflowStepEnqueueBuilder::new(StepKey::new("root"), JobType::new(JOB_TYPE), &payload)
+            .execution_resource(CLAIM_TRANSACTION_RESOURCE)
+            .try_build()
+            .expect("build resource-bound workflow step");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.claim_transaction_rollback"),
+        &metadata,
+    )
+    .step(step)
+    .try_build()
+    .expect("build claim rollback workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue claim rollback workflow");
+    let initial_step = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list initial workflow step")
+        .pop()
+        .expect("one workflow step");
+    let job_id = initial_step.job_id.expect("root job should be released");
+    assert_eq!(initial_step.status, WorkflowStepStatus::Enqueued);
+
+    sqlx::query(
+        "CREATE FUNCTION assert_claim_attempt_order()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             IF NOT EXISTS (
+                 SELECT 1
+                 FROM job_queue
+                 WHERE id = NEW.job_id
+                   AND status = 'LEASED'
+             ) OR NOT EXISTS (
+                 SELECT 1
+                 FROM workflow_steps
+                 WHERE job_id = NEW.job_id
+                   AND status = 'RUNNING'
+             ) THEN
+                 RAISE EXCEPTION 'claim attempt side effects were recorded out of order';
+             END IF;
+             RETURN NEW;
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("create claim attempt order assertion");
+    sqlx::query(
+        "CREATE TRIGGER assert_claim_attempt_order
+         BEFORE INSERT ON job_attempts
+         FOR EACH ROW
+         EXECUTE FUNCTION assert_claim_attempt_order()",
+    )
+    .execute(&pool)
+    .await
+    .expect("create claim attempt order trigger");
+    sqlx::query(
+        "CREATE FUNCTION fail_claim_event_after_order_checks()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             IF NEW.event_type = 'LEASED' THEN
+                 IF NOT EXISTS (
+                     SELECT 1
+                     FROM job_attempts
+                     WHERE job_id = NEW.job_id
+                       AND run_number = NEW.run_number
+                       AND attempt = NEW.attempt
+                 ) THEN
+                     RAISE EXCEPTION 'claim event was recorded before its attempt';
+                 END IF;
+                 RAISE EXCEPTION 'injected claim event failure';
+             END IF;
+             RETURN NEW;
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("create claim event failure function");
+    sqlx::query(
+        "CREATE TRIGGER fail_claim_event_after_order_checks
+         BEFORE INSERT ON job_events
+         FOR EACH ROW
+         EXECUTE FUNCTION fail_claim_event_after_order_checks()",
+    )
+    .execute(&pool)
+    .await
+    .expect("create claim event failure trigger");
+
+    let error = claim_jobs(&pool, "worker-claim-transaction", 30, 1)
+        .await
+        .expect_err("event failure should roll back the claim transaction");
+    let Error::QueryError(query_error) = error else {
+        panic!("expected query error from injected event failure");
+    };
+    assert_eq!(
+        query_error.internal_message(),
+        "claim jobs event insert: injected claim event failure"
+    );
+
+    let job = load_job(&pool, job_id).await;
+    assert_eq!(job.status, JobStatus::Pending);
+    assert_eq!(job.attempt, 0);
+    assert!(job.worker_id.is_none());
+    assert!(job.lease_expires_at.is_none());
+    assert!(job.last_heartbeat_at.is_none());
+    assert!(job.started_at.is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM job_execution_resource_claims
+             WHERE job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back resource claims"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM job_attempts
+             WHERE job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back attempts"),
+        0
+    );
+    assert_event_types(&pool, job_id, &[JobEventType::Enqueued]).await;
+
+    let step = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("list rolled-back workflow step")
+        .pop()
+        .expect("one workflow step");
+    assert_eq!(step.status, WorkflowStepStatus::Enqueued);
+    assert!(step.started_at.is_none());
 
     teardown_ephemeral_pool(pool, database).await;
 }
