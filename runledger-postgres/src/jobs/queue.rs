@@ -20,9 +20,13 @@ pub use self::dispatch::{
     enqueue_job_with_execution_resource_tx, enqueue_job_with_outcome_tx,
 };
 pub use self::lifecycle::{
-    complete_job_continuation, complete_job_continuation_with_outcome, complete_job_failure,
-    complete_job_failure_with_outcome, complete_job_success, complete_job_success_with_outcome,
-    heartbeat_job, update_job_progress,
+    complete_job_continuation, complete_job_continuation_for_lease,
+    complete_job_continuation_with_outcome, complete_job_continuation_with_outcome_for_lease,
+    complete_job_failure, complete_job_failure_for_lease, complete_job_failure_with_outcome,
+    complete_job_failure_with_outcome_for_lease, complete_job_success,
+    complete_job_success_for_lease, complete_job_success_with_outcome,
+    complete_job_success_with_outcome_for_lease, heartbeat_job, heartbeat_job_for_lease,
+    update_job_progress, update_job_progress_for_lease,
 };
 pub use self::reaper::{
     reap_expired_leases, reap_expired_leases_with_diagnostics,

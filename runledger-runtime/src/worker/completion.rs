@@ -6,7 +6,7 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::QueryErrorKind;
 use runledger_postgres::jobs::{
-    self, JobCompletionUpdate, JobContinuationUpdate, JobFailureUpdate,
+    self, JobCompletionUpdate, JobContinuationUpdate, JobFailureUpdate, JobLeaseIdentity,
 };
 use tracing::{error, info, warn};
 
@@ -45,6 +45,12 @@ impl<'a> CompletionObservation<'a> {
             terminal_observer_tasks,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct CompletionLease<'context, 'worker> {
+    context: &'context JobContext,
+    identity: JobLeaseIdentity<'worker>,
 }
 
 async fn handle_completion_persist_failure(
@@ -94,6 +100,7 @@ pub(super) async fn complete_job_after_handler(
     registry: &JobRegistry,
     context: &JobContext,
     job: &jobs::JobQueueRecord,
+    lease_identity: JobLeaseIdentity<'_>,
     completion: JobCompletion,
     observation: CompletionObservation<'_>,
 ) {
@@ -104,17 +111,22 @@ pub(super) async fn complete_job_after_handler(
                 registry,
                 context,
                 job,
+                lease_identity,
                 completion,
                 observation,
             )
             .await;
         }
         JobCompletionDisposition::ContinueAfter(delay) => {
+            let lease = CompletionLease {
+                context,
+                identity: lease_identity,
+            };
             complete_job_continuation_after_handler(
                 pool,
                 registry,
-                context,
                 job,
+                lease,
                 completion,
                 delay,
                 observation,
@@ -129,6 +141,7 @@ async fn complete_job_success_after_handler(
     registry: &JobRegistry,
     context: &JobContext,
     job: &jobs::JobQueueRecord,
+    lease_identity: JobLeaseIdentity<'_>,
     completion: JobCompletion,
     observation: CompletionObservation<'_>,
 ) {
@@ -138,12 +151,9 @@ async fn complete_job_success_after_handler(
         checkpoint: completion.checkpoint.as_ref(),
         output: completion.output(),
     };
-    match jobs::complete_job_success_with_outcome(
+    match jobs::complete_job_success_with_outcome_for_lease(
         pool,
-        job.id,
-        job.run_number,
-        job.attempt,
-        &context.worker_id,
+        lease_identity,
         Some(&completion_update),
     )
     .await
@@ -163,6 +173,7 @@ async fn complete_job_success_after_handler(
                     registry,
                     context,
                     job,
+                    lease_identity,
                     failure,
                     observation,
                 )
@@ -217,8 +228,8 @@ async fn complete_job_success_after_handler(
 async fn complete_job_continuation_after_handler(
     pool: &runledger_postgres::DbPool,
     registry: &JobRegistry,
-    context: &JobContext,
     job: &jobs::JobQueueRecord,
+    lease: CompletionLease<'_, '_>,
     completion: JobCompletion,
     delay: Duration,
     observation: CompletionObservation<'_>,
@@ -229,12 +240,9 @@ async fn complete_job_continuation_after_handler(
         progress_total: completion.progress_total,
         checkpoint: completion.checkpoint.as_ref(),
     };
-    match jobs::complete_job_continuation_with_outcome(
+    match jobs::complete_job_continuation_with_outcome_for_lease(
         pool,
-        job.id,
-        job.run_number,
-        job.attempt,
-        &context.worker_id,
+        lease.identity,
         &continuation,
     )
     .await
@@ -251,8 +259,9 @@ async fn complete_job_continuation_after_handler(
                 complete_job_failure_after_handler(
                     pool,
                     registry,
-                    context,
+                    lease.context,
                     job,
+                    lease.identity,
                     failure,
                     observation,
                 )
@@ -326,6 +335,7 @@ pub(super) async fn complete_job_failure_after_handler(
     registry: &JobRegistry,
     context: &JobContext,
     job: &jobs::JobQueueRecord,
+    lease_identity: JobLeaseIdentity<'_>,
     mut failure: JobFailure,
     observation: CompletionObservation<'_>,
 ) {
@@ -347,12 +357,9 @@ pub(super) async fn complete_job_failure_after_handler(
                 Some(retry_timing) => failure_payload.with_retry_timing(retry_timing),
                 None => failure_payload,
             };
-            jobs::complete_job_failure_with_outcome(
+            jobs::complete_job_failure_with_outcome_for_lease(
                 pool,
-                job.id,
-                job.run_number,
-                job.attempt,
-                &context.worker_id,
+                lease_identity,
                 &failure_payload,
             )
             .await

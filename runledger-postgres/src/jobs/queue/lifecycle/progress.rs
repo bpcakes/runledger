@@ -3,15 +3,12 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, DbTx, Error, Result};
 
-use super::super::super::types::JobProgressUpdate;
+use super::super::super::types::{JobLeaseIdentity, JobProgressUpdate};
 use super::common::{UPDATE_PROGRESS_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
 
 async fn update_job_progress_row_tx(
     tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
-    worker_id: &str,
+    identity: JobLeaseIdentity<'_>,
     progress: &JobProgressUpdate<'_>,
 ) -> Result<u64> {
     let rows_affected = sqlx::query!(
@@ -35,10 +32,10 @@ async fn update_job_progress_row_tx(
          FROM locked_job
          WHERE job_queue.id = locked_job.id
            AND job_queue.lease_expires_at > clock_timestamp()",
-        job_id,
-        run_number,
-        attempt,
-        worker_id,
+        identity.job_id,
+        identity.run_number,
+        identity.attempt,
+        identity.worker_id,
         progress.stage.map(|s| s.as_db_value()),
         progress.progress_done,
         progress.progress_total,
@@ -54,9 +51,7 @@ async fn update_job_progress_row_tx(
 
 async fn insert_stage_changed_event_tx(
     tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
+    identity: JobLeaseIdentity<'_>,
     stage: &str,
 ) -> Result<()> {
     sqlx::query!(
@@ -69,9 +64,9 @@ async fn insert_stage_changed_event_tx(
             payload
          )
          VALUES ($1, $2, $3, 'STAGE_CHANGED', $4, '{}'::jsonb)",
-        job_id,
-        run_number,
-        attempt,
+        identity.job_id,
+        identity.run_number,
+        identity.attempt,
         stage,
     )
     .execute(&mut **tx)
@@ -83,9 +78,7 @@ async fn insert_stage_changed_event_tx(
 
 async fn insert_progress_event_tx(
     tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
+    identity: JobLeaseIdentity<'_>,
     progress_done: Option<i64>,
     progress_total: Option<i64>,
 ) -> Result<()> {
@@ -100,9 +93,9 @@ async fn insert_progress_event_tx(
             payload
          )
          VALUES ($1, $2, $3, 'PROGRESS', $4, $5, '{}'::jsonb)",
-        job_id,
-        run_number,
-        attempt,
+        identity.job_id,
+        identity.run_number,
+        identity.attempt,
         progress_done,
         progress_total,
     )
@@ -115,9 +108,7 @@ async fn insert_progress_event_tx(
 
 async fn mark_execution_started_persisted_tx(
     tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
+    identity: JobLeaseIdentity<'_>,
 ) -> Result<()> {
     sqlx::query!(
         "UPDATE job_attempts
@@ -126,9 +117,9 @@ async fn mark_execution_started_persisted_tx(
            AND run_number = $2
            AND attempt = $3
            AND execution_started_persisted_at IS NULL",
-        job_id,
-        run_number,
-        attempt,
+        identity.job_id,
+        identity.run_number,
+        identity.attempt,
     )
     .execute(&mut **tx)
     .await
@@ -147,14 +138,26 @@ pub async fn update_job_progress(
     worker_id: &str,
     progress: &JobProgressUpdate<'_>,
 ) -> Result<()> {
+    update_job_progress_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        progress,
+    )
+    .await
+}
+
+/// Updates progress for an exact live job lease.
+pub async fn update_job_progress_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
+    progress: &JobProgressUpdate<'_>,
+) -> Result<()> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    let updated =
-        update_job_progress_row_tx(&mut tx, job_id, run_number, attempt, worker_id, progress)
-            .await?;
+    let updated = update_job_progress_row_tx(&mut tx, identity, progress).await?;
 
     if updated == 0 {
         return rollback_and_return_lease_mismatch(tx, UPDATE_PROGRESS_LEASE_MISMATCH_CONTEXT)
@@ -162,20 +165,17 @@ pub async fn update_job_progress(
     }
 
     if progress.stage == Some(JobStage::Running) {
-        mark_execution_started_persisted_tx(&mut tx, job_id, run_number, attempt).await?;
+        mark_execution_started_persisted_tx(&mut tx, identity).await?;
     }
 
     if let Some(stage) = progress.stage {
-        insert_stage_changed_event_tx(&mut tx, job_id, run_number, attempt, stage.as_db_value())
-            .await?;
+        insert_stage_changed_event_tx(&mut tx, identity, stage.as_db_value()).await?;
     }
 
     if progress.progress_done.is_some() || progress.progress_total.is_some() {
         insert_progress_event_tx(
             &mut tx,
-            job_id,
-            run_number,
-            attempt,
+            identity,
             progress.progress_done,
             progress.progress_total,
         )

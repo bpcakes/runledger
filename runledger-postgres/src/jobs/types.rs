@@ -884,6 +884,47 @@ pub struct JobLogRecordInput {
     pub payload: Value,
 }
 
+/// Exact identity of a live job lease.
+///
+/// Lifecycle mutations use every field to fence an operation to one claimed
+/// attempt. Reusing this value avoids accidentally pairing a job identifier
+/// with the run, attempt, or worker from another lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobLeaseIdentity<'a> {
+    pub job_id: Uuid,
+    pub run_number: i32,
+    pub attempt: i32,
+    pub worker_id: &'a str,
+}
+
+impl<'a> JobLeaseIdentity<'a> {
+    /// Creates an identity for one exact live job lease.
+    #[must_use]
+    pub const fn new(job_id: Uuid, run_number: i32, attempt: i32, worker_id: &'a str) -> Self {
+        Self {
+            job_id,
+            run_number,
+            attempt,
+            worker_id,
+        }
+    }
+}
+
+#[cfg(test)]
+mod job_lease_identity_tests {
+    use super::*;
+
+    #[test]
+    fn construction_retains_each_lease_fence() {
+        let identity = JobLeaseIdentity::new(Uuid::nil(), 7, 3, "worker-identity-test");
+
+        assert_eq!(identity.job_id, Uuid::nil());
+        assert_eq!(identity.run_number, 7);
+        assert_eq!(identity.attempt, 3);
+        assert_eq!(identity.worker_id, "worker-identity-test");
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct JobProgressUpdate<'a> {
     pub stage: Option<JobStage>,

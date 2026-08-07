@@ -8,7 +8,9 @@ use super::super::super::errors::{
     ensure_rejection_rollback_succeeded, validate_completion_progress,
 };
 use super::super::super::row_decode::parse_job_type_name;
-use super::super::super::types::{JobCompletionUpdate, JobSuccessCompletionOutcome};
+use super::super::super::types::{
+    JobCompletionUpdate, JobLeaseIdentity, JobSuccessCompletionOutcome,
+};
 use super::super::super::workflows::on_terminal;
 use super::common::{
     COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT, coalesce_completion_progress,
@@ -42,10 +44,7 @@ fn success_progress_update<'a>(
 
 async fn mark_job_succeeded_tx(
     tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
-    worker_id: &str,
+    identity: JobLeaseIdentity<'_>,
     progress: &SuccessProgressUpdate<'_>,
 ) -> Result<u64> {
     let rows_affected = sqlx::query(
@@ -72,10 +71,10 @@ async fn mark_job_succeeded_tx(
            AND lease_expires_at IS NOT NULL
            AND job_queue.lease_expires_at > clock_timestamp()",
     )
-    .bind(job_id)
-    .bind(run_number)
-    .bind(attempt)
-    .bind(worker_id)
+    .bind(identity.job_id)
+    .bind(identity.run_number)
+    .bind(identity.attempt)
+    .bind(identity.worker_id)
     .bind(progress.stage.as_db_value())
     .bind(progress.progress_done)
     .bind(progress.progress_total)
@@ -91,9 +90,7 @@ async fn mark_job_succeeded_tx(
 
 async fn insert_job_succeeded_event_tx(
     tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
+    identity: JobLeaseIdentity<'_>,
     progress: &SuccessProgressUpdate<'_>,
 ) -> Result<()> {
     sqlx::query!(
@@ -108,9 +105,9 @@ async fn insert_job_succeeded_event_tx(
             payload
          )
          VALUES ($1, $2, $3, 'SUCCEEDED', $4, $5, $6, '{}'::jsonb)",
-        job_id,
-        run_number,
-        attempt,
+        identity.job_id,
+        identity.run_number,
+        identity.attempt,
         progress.stage.as_db_value(),
         progress.progress_done,
         progress.progress_total,
@@ -134,7 +131,21 @@ pub async fn complete_job_success(
     worker_id: &str,
     progress: Option<&JobCompletionUpdate<'_>>,
 ) -> Result<()> {
-    complete_job_success_with_outcome(pool, job_id, run_number, attempt, worker_id, progress)
+    complete_job_success_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        progress,
+    )
+    .await
+}
+
+/// Completes an exact live job lease successfully.
+pub async fn complete_job_success_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
+    progress: Option<&JobCompletionUpdate<'_>>,
+) -> Result<()> {
+    complete_job_success_with_outcome_for_lease(pool, identity, progress)
         .await
         .map(|_| ())
 }
@@ -147,21 +158,28 @@ pub async fn complete_job_success_with_outcome(
     worker_id: &str,
     progress: Option<&JobCompletionUpdate<'_>>,
 ) -> Result<JobSuccessCompletionOutcome> {
+    complete_job_success_with_outcome_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        progress,
+    )
+    .await
+}
+
+/// Completes an exact live job lease successfully and returns its durable outcome.
+pub async fn complete_job_success_with_outcome_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
+    progress: Option<&JobCompletionUpdate<'_>>,
+) -> Result<JobSuccessCompletionOutcome> {
     let mut progress = success_progress_update(progress)?;
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    let Some(lookup) = lock_live_completion_lease_tx(
-        &mut tx,
-        job_id,
-        run_number,
-        attempt,
-        worker_id,
-        "lock job success progress",
-    )
-    .await?
+    let Some(lookup) =
+        lock_live_completion_lease_tx(&mut tx, identity, "lock job success progress").await?
     else {
         return rollback_and_return_lease_mismatch(tx, COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT)
             .await;
@@ -175,28 +193,20 @@ pub async fn complete_job_success_with_outcome(
         return Err(validation_error);
     }
 
-    let updated =
-        mark_job_succeeded_tx(&mut tx, job_id, run_number, attempt, worker_id, &progress).await?;
+    let updated = mark_job_succeeded_tx(&mut tx, identity, &progress).await?;
 
     if updated == 0 {
         return rollback_and_return_lease_mismatch(tx, COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT)
             .await;
     }
 
-    finish_successful_attempt_tx(
-        &mut tx,
-        job_id,
-        run_number,
-        attempt,
-        "complete job success attempt",
-    )
-    .await?;
-    insert_job_succeeded_event_tx(&mut tx, job_id, run_number, attempt, &progress).await?;
+    finish_successful_attempt_tx(&mut tx, identity, "complete job success attempt").await?;
+    insert_job_succeeded_event_tx(&mut tx, identity, &progress).await?;
     let job_type = parse_job_type_name(lookup.job_type)?;
 
     on_terminal(
         &mut tx,
-        job_id,
+        identity.job_id,
         WorkflowStepStatus::Succeeded,
         Some("SUCCEEDED"),
         None,
@@ -210,11 +220,11 @@ pub async fn complete_job_success_with_outcome(
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
     Ok(JobSuccessCompletionOutcome {
-        job_id,
+        job_id: identity.job_id,
         job_type,
         organization_id: lookup.organization_id,
-        run_number,
-        attempt,
+        run_number: identity.run_number,
+        attempt: identity.attempt,
         max_attempts: lookup.max_attempts,
         progress_done: progress.progress_done,
         progress_total: progress.progress_total,

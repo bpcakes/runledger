@@ -3,6 +3,7 @@ use sqlx::types::Uuid;
 use crate::{DbPool, Error, Result};
 
 use super::super::super::errors::validate_positive_lease_duration;
+use super::super::super::types::JobLeaseIdentity;
 use super::common::{HEARTBEAT_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
 
 pub async fn heartbeat_job(
@@ -11,6 +12,20 @@ pub async fn heartbeat_job(
     run_number: i32,
     attempt: i32,
     worker_id: &str,
+    lease_duration_seconds: i32,
+) -> Result<()> {
+    heartbeat_job_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        lease_duration_seconds,
+    )
+    .await
+}
+
+/// Renews an exact live job lease.
+pub async fn heartbeat_job_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
     lease_duration_seconds: i32,
 ) -> Result<()> {
     validate_positive_lease_duration(lease_duration_seconds)?;
@@ -39,10 +54,10 @@ pub async fn heartbeat_job(
          FROM locked_job
          WHERE job_queue.id = locked_job.id
            AND job_queue.lease_expires_at > clock_timestamp()",
-        job_id,
-        run_number,
-        attempt,
-        worker_id,
+        identity.job_id,
+        identity.run_number,
+        identity.attempt,
+        identity.worker_id,
         lease_duration_seconds,
     )
     .execute(&mut *tx)
@@ -69,10 +84,10 @@ pub async fn heartbeat_job(
             'HEARTBEAT',
             jsonb_build_object('worker_id', $4::text)
          )",
-        job_id,
-        run_number,
-        attempt,
-        worker_id,
+        identity.job_id,
+        identity.run_number,
+        identity.attempt,
+        identity.worker_id,
     )
     .execute(&mut *tx)
     .await

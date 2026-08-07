@@ -9,7 +9,7 @@ use super::super::super::errors::{
     validate_completion_progress,
 };
 use super::super::super::row_decode::parse_job_type_name;
-use super::super::super::types::{JobContinuationOutcome, JobContinuationUpdate};
+use super::super::super::types::{JobContinuationOutcome, JobContinuationUpdate, JobLeaseIdentity};
 use super::super::super::workflows::on_handler_continuation;
 use super::super::advance::{
     AdvanceJobToNextRun, LiveLeaseGuard, advance_live_lease_to_next_run_tx,
@@ -65,16 +65,23 @@ pub async fn complete_job_continuation(
     worker_id: &str,
     continuation: &JobContinuationUpdate<'_>,
 ) -> Result<()> {
-    complete_job_continuation_with_outcome(
+    complete_job_continuation_for_lease(
         pool,
-        job_id,
-        run_number,
-        attempt,
-        worker_id,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
         continuation,
     )
     .await
-    .map(|_| ())
+}
+
+/// Closes an exact live lease and schedules the next run of the job.
+pub async fn complete_job_continuation_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
+    continuation: &JobContinuationUpdate<'_>,
+) -> Result<()> {
+    complete_job_continuation_with_outcome_for_lease(pool, identity, continuation)
+        .await
+        .map(|_| ())
 }
 
 pub async fn complete_job_continuation_with_outcome(
@@ -83,6 +90,20 @@ pub async fn complete_job_continuation_with_outcome(
     run_number: i32,
     attempt: i32,
     worker_id: &str,
+    continuation: &JobContinuationUpdate<'_>,
+) -> Result<JobContinuationOutcome> {
+    complete_job_continuation_with_outcome_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        continuation,
+    )
+    .await
+}
+
+/// Closes an exact live lease, schedules the next run, and returns its outcome.
+pub async fn complete_job_continuation_with_outcome_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
     continuation: &JobContinuationUpdate<'_>,
 ) -> Result<JobContinuationOutcome> {
     let delay_us = continuation_delay_microseconds(continuation.delay)?;
@@ -97,15 +118,8 @@ pub async fn complete_job_continuation_with_outcome(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    let Some(lookup) = lock_live_completion_lease_tx(
-        &mut tx,
-        job_id,
-        run_number,
-        attempt,
-        worker_id,
-        "lock job continuation",
-    )
-    .await?
+    let Some(lookup) =
+        lock_live_completion_lease_tx(&mut tx, identity, "lock job continuation").await?
     else {
         return rollback_and_return_lease_mismatch(
             tx,
@@ -114,7 +128,8 @@ pub async fn complete_job_continuation_with_outcome(
         .await;
     };
     if let Some(workflow_step_id) = lookup.workflow_step_id
-        && let Err(error) = on_handler_continuation(&mut tx, job_id, workflow_step_id).await
+        && let Err(error) =
+            on_handler_continuation(&mut tx, identity.job_id, workflow_step_id).await
     {
         ensure_rejection_rollback_succeeded(tx.rollback().await)?;
         return Err(error);
@@ -138,7 +153,7 @@ pub async fn complete_job_continuation_with_outcome(
     let Some(next_run) = advance_live_lease_to_next_run_tx(
         &mut tx,
         &AdvanceJobToNextRun {
-            job_id,
+            job_id: identity.job_id,
             preserve_missing_resume_state: true,
             progress_done: progress.progress_done,
             progress_total: progress.progress_total,
@@ -147,9 +162,9 @@ pub async fn complete_job_continuation_with_outcome(
             status_reason: Some(HANDLER_CONTINUATION_REASON),
         },
         LiveLeaseGuard {
-            run_number,
-            attempt,
-            worker_id,
+            run_number: identity.run_number,
+            attempt: identity.attempt,
+            worker_id: identity.worker_id,
         },
         "complete job continuation",
     )
@@ -162,20 +177,13 @@ pub async fn complete_job_continuation_with_outcome(
         .await;
     };
 
-    finish_successful_attempt_tx(
-        &mut tx,
-        job_id,
-        run_number,
-        attempt,
-        "close continued job attempt",
-    )
-    .await?;
+    finish_successful_attempt_tx(&mut tx, identity, "close continued job attempt").await?;
     insert_requeued_event_tx(
         &mut tx,
         RequeuedJobEvent {
-            job_id,
-            completed_run_number: run_number,
-            attempt: Some(attempt),
+            job_id: identity.job_id,
+            completed_run_number: identity.run_number,
+            attempt: Some(identity.attempt),
             stage: Some(JobStage::Queued.as_db_value()),
             progress_done: progress.progress_done,
             progress_total: progress.progress_total,
@@ -195,12 +203,12 @@ pub async fn complete_job_continuation_with_outcome(
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
     Ok(JobContinuationOutcome {
-        job_id,
+        job_id: identity.job_id,
         job_type,
         organization_id: lookup.organization_id,
-        completed_run_number: run_number,
+        completed_run_number: identity.run_number,
         next_run_number: next_run.run_number,
-        attempt,
+        attempt: identity.attempt,
         max_attempts: lookup.max_attempts,
         next_run_at: next_run.next_run_at,
         progress_done: progress.progress_done,

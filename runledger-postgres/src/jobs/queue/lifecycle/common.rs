@@ -4,6 +4,7 @@ use sqlx::types::Uuid;
 use crate::{DbTx, Error, Result};
 
 use super::super::super::errors::{lease_owner_mismatch_error, validate_completion_progress};
+use super::super::super::types::JobLeaseIdentity;
 
 pub(super) const HEARTBEAT_LEASE_MISMATCH_CONTEXT: &str =
     "heartbeat job transaction lease mismatch";
@@ -30,10 +31,7 @@ pub(super) struct CompletionLeaseRow {
 
 pub(super) async fn lock_live_completion_lease_tx(
     tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
-    worker_id: &str,
+    identity: JobLeaseIdentity<'_>,
     error_context: &'static str,
 ) -> Result<Option<CompletionLeaseRow>> {
     sqlx::query_as!(
@@ -55,10 +53,10 @@ pub(super) async fn lock_live_completion_lease_tx(
            AND lease_expires_at IS NOT NULL
            AND lease_expires_at > clock_timestamp()
          FOR UPDATE"#,
-        job_id,
-        run_number,
-        attempt,
-        worker_id,
+        identity.job_id,
+        identity.run_number,
+        identity.attempt,
+        identity.worker_id,
     )
     .fetch_optional(&mut **tx)
     .await
@@ -77,9 +75,7 @@ pub(super) fn coalesce_completion_progress(
 
 pub(super) async fn finish_successful_attempt_tx(
     tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
+    identity: JobLeaseIdentity<'_>,
     error_context: &'static str,
 ) -> Result<()> {
     sqlx::query!(
@@ -92,9 +88,9 @@ pub(super) async fn finish_successful_attempt_tx(
          WHERE job_id = $1
            AND run_number = $2
            AND attempt = $3",
-        job_id,
-        run_number,
-        attempt,
+        identity.job_id,
+        identity.run_number,
+        identity.attempt,
     )
     .execute(&mut **tx)
     .await

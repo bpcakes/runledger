@@ -6,7 +6,7 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 use runledger_core::jobs::{JobCompletion, JobContext, JobFailure};
 use runledger_postgres::QueryErrorKind;
-use runledger_postgres::jobs::{self, JobProgressUpdate};
+use runledger_postgres::jobs::{self, JobLeaseIdentity, JobProgressUpdate};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant, MissedTickBehavior, sleep_until};
@@ -295,9 +295,10 @@ async fn process_claimed_job_with_terminal_observers(
             worker_id: worker_id.clone(),
             checkpoint: job.checkpoint.clone(),
         };
+        let lease_identity = JobLeaseIdentity::new(job.id, job.run_number, job.attempt, &worker_id);
         let observed_job = observed_job(&job, &worker_id);
 
-        if !mark_job_running_or_abort(&pool, &context, &job).await {
+        if !mark_job_running_or_abort(&pool, &context, &job, lease_identity).await {
             return;
         }
         let mut running_notification =
@@ -308,6 +309,7 @@ async fn process_claimed_job_with_terminal_observers(
             Arc::clone(&registry),
             &context,
             &job,
+            lease_identity,
             lease_ttl_seconds,
         )
         .await
@@ -318,6 +320,7 @@ async fn process_claimed_job_with_terminal_observers(
                     registry.as_ref(),
                     &context,
                     &job,
+                    lease_identity,
                     completion,
                     CompletionObservation::new(
                         &observers,
@@ -335,6 +338,7 @@ async fn process_claimed_job_with_terminal_observers(
                     registry.as_ref(),
                     &context,
                     &job,
+                    lease_identity,
                     failure,
                     CompletionObservation::new(
                         &observers,
@@ -400,6 +404,7 @@ async fn mark_job_running_or_abort(
     pool: &runledger_postgres::DbPool,
     context: &JobContext,
     job: &jobs::JobQueueRecord,
+    lease_identity: JobLeaseIdentity<'_>,
 ) -> bool {
     let running_progress = JobProgressUpdate {
         stage: Some(runledger_core::jobs::JobStage::Running),
@@ -408,15 +413,8 @@ async fn mark_job_running_or_abort(
         checkpoint: None,
     };
 
-    let Err(source) = jobs::update_job_progress(
-        pool,
-        job.id,
-        job.run_number,
-        job.attempt,
-        &context.worker_id,
-        &running_progress,
-    )
-    .await
+    let Err(source) =
+        jobs::update_job_progress_for_lease(pool, lease_identity, &running_progress).await
     else {
         return true;
     };
@@ -517,6 +515,7 @@ async fn execute_job_handler_with_heartbeats(
     registry: Arc<JobRegistry>,
     context: &JobContext,
     job: &jobs::JobQueueRecord,
+    lease_identity: JobLeaseIdentity<'_>,
     lease_ttl_seconds: i32,
 ) -> Result<JobCompletion, JobExecutionFailure> {
     let mut execution =
@@ -545,12 +544,9 @@ async fn execute_job_handler_with_heartbeats(
                 )));
             }
             _ = ticker.tick() => {
-                if let Err(error) = jobs::heartbeat_job(
+                if let Err(error) = jobs::heartbeat_job_for_lease(
                     &pool,
-                    job.id,
-                    job.run_number,
-                    job.attempt,
-                    &context.worker_id,
+                    lease_identity,
                     lease_ttl_seconds,
                 )
                 .await

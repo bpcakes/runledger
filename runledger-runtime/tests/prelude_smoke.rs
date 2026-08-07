@@ -4,7 +4,7 @@ use runledger_core::prelude::*;
 use runledger_postgres::prelude::*;
 use runledger_runtime::prelude::*;
 use serde_json::{Value, json};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{postgres::PgPoolOptions, types::Uuid};
 
 const UNUSED_LAZY_POOL_URL: &str = "postgres://postgres:postgres@127.0.0.1:65535/runledger";
 
@@ -64,6 +64,10 @@ async fn all_preludes_can_be_glob_imported_together() {
     let pool: DbPool = PgPoolOptions::new()
         .connect_lazy(UNUSED_LAZY_POOL_URL)
         .expect("construct lazy pool");
+    let lease_identity = JobLeaseIdentity::new(Uuid::nil(), 1, 1, "prelude-smoke");
+    heartbeat_job_for_lease(&pool, lease_identity, 0)
+        .await
+        .expect_err("zero lease duration must be rejected before using the lazy pool");
     let catalog = JobCatalog::new().job("jobs.prelude.smoke", PreludeHandler);
 
     let supervisor = Supervisor::builder(

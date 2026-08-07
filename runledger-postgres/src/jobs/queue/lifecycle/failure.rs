@@ -11,20 +11,13 @@ use super::super::super::errors::invalid_retry_timing_error;
 use super::super::super::row_decode::parse_job_type_name;
 use super::super::super::types::{
     JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
+    JobLeaseIdentity,
 };
 use super::super::super::workflows::{on_retry_scheduled, on_terminal};
 use super::common::{
     COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT, INSERT_FAILED_EVENT_RETRY_CONTEXT,
     INSERT_FAILED_EVENT_TERMINAL_CONTEXT, rollback_and_return_lease_mismatch,
 };
-
-#[derive(Clone, Copy)]
-struct FailureJobIdentity<'a> {
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
-    worker_id: &'a str,
-}
 
 struct FailureLookupRow {
     max_attempts: i32,
@@ -76,7 +69,7 @@ impl ResolvedRetryTiming {
 
 async fn load_failure_lookup_row(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
 ) -> Result<Option<FailureLookupRow>> {
     let row = sqlx::query!(
         "WITH locked_job AS MATERIALIZED (
@@ -274,7 +267,7 @@ fn resolve_retry_timing(
 
 async fn apply_terminal_failure(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     lookup: &FailureLookupRow,
     outcome: FailureOutcome<'_>,
 ) -> Result<()> {
@@ -301,7 +294,7 @@ async fn apply_terminal_failure(
 
 async fn mark_dead_lettered_job_queue_for_failure_tx(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     outcome: FailureOutcome<'_>,
 ) -> Result<()> {
     sqlx::query!(
@@ -338,7 +331,7 @@ async fn mark_dead_lettered_job_queue_for_failure_tx(
 
 async fn upsert_job_dead_letter_for_failure_tx(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     lookup: &FailureLookupRow,
     outcome: FailureOutcome<'_>,
 ) -> Result<()> {
@@ -384,7 +377,7 @@ async fn upsert_job_dead_letter_for_failure_tx(
 
 async fn update_failed_attempt_terminal_tx(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     outcome: FailureOutcome<'_>,
 ) -> Result<()> {
     sqlx::query!(
@@ -414,7 +407,7 @@ async fn update_failed_attempt_terminal_tx(
 
 async fn insert_failed_event_for_failure_tx(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     outcome: FailureOutcome<'_>,
     error_context: &'static str,
 ) -> Result<()> {
@@ -443,7 +436,7 @@ async fn insert_failed_event_for_failure_tx(
 
 async fn insert_dead_lettered_event_for_failure_tx(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     outcome: FailureOutcome<'_>,
 ) -> Result<()> {
     sqlx::query!(
@@ -470,7 +463,7 @@ async fn insert_dead_lettered_event_for_failure_tx(
 
 async fn apply_retryable_failure(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     outcome: FailureOutcome<'_>,
     retry_timing: ResolvedRetryTiming,
 ) -> Result<()> {
@@ -494,7 +487,7 @@ async fn apply_retryable_failure(
 
 async fn mark_retryable_job_queue_for_failure_tx(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     outcome: FailureOutcome<'_>,
     next_run_at: DateTime<Utc>,
 ) -> Result<DateTime<Utc>> {
@@ -532,7 +525,7 @@ async fn mark_retryable_job_queue_for_failure_tx(
 
 async fn update_failed_attempt_retryable_tx(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     outcome: FailureOutcome<'_>,
     retry_timing: ResolvedRetryTiming,
 ) -> Result<()> {
@@ -569,7 +562,7 @@ async fn update_failed_attempt_retryable_tx(
 
 async fn insert_retry_scheduled_event_for_failure_tx(
     tx: &mut DbTx<'_>,
-    identity: FailureJobIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     retry_timing: ResolvedRetryTiming,
 ) -> Result<()> {
     // Keep the requested_retry_at and next_run_at field names as aliases for
@@ -616,7 +609,21 @@ pub async fn complete_job_failure(
     worker_id: &str,
     failure: &JobFailureUpdate<'_>,
 ) -> Result<()> {
-    complete_job_failure_with_outcome(pool, job_id, run_number, attempt, worker_id, failure)
+    complete_job_failure_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        failure,
+    )
+    .await
+}
+
+/// Completes an exact live job lease with failure.
+pub async fn complete_job_failure_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
+    failure: &JobFailureUpdate<'_>,
+) -> Result<()> {
+    complete_job_failure_with_outcome_for_lease(pool, identity, failure)
         .await
         .map(|_| ())
 }
@@ -629,24 +636,31 @@ pub async fn complete_job_failure_with_outcome(
     worker_id: &str,
     failure: &JobFailureUpdate<'_>,
 ) -> Result<JobFailureCompletionOutcome> {
+    complete_job_failure_with_outcome_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        failure,
+    )
+    .await
+}
+
+/// Completes an exact live job lease with failure and returns its durable outcome.
+pub async fn complete_job_failure_with_outcome_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
+    failure: &JobFailureUpdate<'_>,
+) -> Result<JobFailureCompletionOutcome> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
-
-    let identity = FailureJobIdentity {
-        job_id,
-        run_number,
-        attempt,
-        worker_id,
-    };
 
     let Some(lookup) = load_failure_lookup_row(&mut tx, identity).await? else {
         return rollback_and_return_lease_mismatch(tx, COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT)
             .await;
     };
 
-    let outcome = failure_outcome(attempt, lookup.max_attempts, failure);
+    let outcome = failure_outcome(identity.attempt, lookup.max_attempts, failure);
 
     let disposition = if let Some(reason) = outcome.dead_letter_reason {
         apply_terminal_failure(&mut tx, identity, &lookup, outcome).await?;
@@ -677,11 +691,11 @@ pub async fn complete_job_failure_with_outcome(
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
     Ok(JobFailureCompletionOutcome {
-        job_id,
+        job_id: identity.job_id,
         job_type: lookup.job_type,
         organization_id: lookup.organization_id,
-        run_number,
-        attempt,
+        run_number: identity.run_number,
+        attempt: identity.attempt,
         max_attempts: lookup.max_attempts,
         failure_kind: failure.kind,
         failure_code: failure.code.to_owned(),
