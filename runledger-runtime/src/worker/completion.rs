@@ -53,6 +53,142 @@ struct CompletionLease<'context, 'worker> {
     identity: JobLeaseIdentity<'worker>,
 }
 
+struct FailureCompletionPostCommitEffects {
+    observer_event: JobFailedEvent,
+    dead_letter: Option<JobDeadLetterInfo>,
+    checkpoint: Option<serde_json::Value>,
+    has_unknown_disposition: bool,
+}
+
+fn failure_update<'a>(
+    registry: &JobRegistry,
+    job: &jobs::JobQueueRecord,
+    failure: &'a JobFailure,
+) -> JobFailureUpdate<'a> {
+    let policy_retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
+        None
+    } else {
+        Some(policy_retry_delay_ms_for_failure(registry, job, failure))
+    };
+    let failure_update = JobFailureUpdate::new(
+        failure.kind,
+        failure.code,
+        failure.message.as_ref(),
+        policy_retry_delay_ms,
+    );
+
+    match failure.retry_timing() {
+        Some(retry_timing) => failure_update.with_retry_timing(retry_timing),
+        None => failure_update,
+    }
+}
+
+fn failure_completion_post_commit_effects(
+    outcome: jobs::JobFailureCompletionOutcome,
+    context: &JobContext,
+    failure: &JobFailure,
+    duration: Duration,
+) -> FailureCompletionPostCommitEffects {
+    let dead_letter = match &outcome.disposition {
+        jobs::JobFailureCompletionDisposition::DeadLettered { reason } => Some(
+            JobDeadLetterInfo::new(failure.clone(), *reason, Some(outcome.max_attempts)),
+        ),
+        jobs::JobFailureCompletionDisposition::RetryScheduled { .. }
+        | jobs::JobFailureCompletionDisposition::RetryScheduledAt { .. } => None,
+        #[allow(unreachable_patterns)]
+        _ => None,
+    };
+    let (disposition, has_unknown_disposition) = match outcome.disposition {
+        jobs::JobFailureCompletionDisposition::RetryScheduled {
+            retry_delay_ms,
+            next_run_at,
+        } => (
+            JobFailureDisposition::RetryScheduled {
+                retry_delay_ms,
+                next_run_at,
+            },
+            false,
+        ),
+        jobs::JobFailureCompletionDisposition::RetryScheduledAt {
+            requested_retry_at,
+            next_run_at,
+        } => (
+            JobFailureDisposition::RetryScheduledAt {
+                requested_retry_at,
+                next_run_at,
+            },
+            false,
+        ),
+        jobs::JobFailureCompletionDisposition::DeadLettered { reason } => {
+            (JobFailureDisposition::DeadLettered { reason }, false)
+        }
+        #[allow(unreachable_patterns)]
+        _ => (JobFailureDisposition::Unknown, true),
+    };
+
+    FailureCompletionPostCommitEffects {
+        observer_event: JobFailedEvent {
+            job: ObservedJob {
+                job_id: outcome.job_id,
+                job_type: outcome.job_type,
+                organization_id: outcome.organization_id,
+                run_number: outcome.run_number,
+                attempt: outcome.attempt,
+                max_attempts: outcome.max_attempts,
+                worker_id: context.worker_id.clone(),
+            },
+            duration,
+            failure: failure.clone(),
+            disposition,
+        },
+        dead_letter,
+        checkpoint: outcome.checkpoint,
+        has_unknown_disposition,
+    }
+}
+
+async fn notify_failure_observer(
+    observation: CompletionObservation<'_>,
+    job: &jobs::JobQueueRecord,
+    event: JobFailedEvent,
+) {
+    observation
+        .running_notification
+        .spawn_terminal_observer(
+            observation.terminal_observer_tasks,
+            job,
+            observation.observers.clone(),
+            TerminalJobObserverEvent::Failed(event),
+        )
+        .await;
+}
+
+async fn notify_dead_letter_after_handler_failure(
+    registry: &JobRegistry,
+    context: &JobContext,
+    job: &jobs::JobQueueRecord,
+    dead_letter: JobDeadLetterInfo,
+    checkpoint: Option<serde_json::Value>,
+) {
+    warn!(
+        job_id = %job.id,
+        job_type = %job.job_type,
+        run_number = job.run_number,
+        attempt = job.attempt,
+        max_attempts = job.max_attempts,
+        organization_id = ?job.organization_id,
+        worker_id = %context.worker_id,
+        dead_letter_reason = ?dead_letter.reason,
+        failure_kind = ?dead_letter.failure.kind,
+        failure_code = dead_letter.failure.code,
+        failure_message = %dead_letter.failure.message,
+        "job dead lettered after handler failure"
+    );
+    let mut dead_letter_context = context.clone();
+    dead_letter_context.checkpoint = checkpoint;
+    notify_handler_of_dead_letter(registry, &dead_letter_context, job, dead_letter).await;
+}
+
 async fn handle_completion_persist_failure(
     observation: CompletionObservation<'_>,
     job: &jobs::JobQueueRecord,
@@ -341,117 +477,48 @@ pub(super) async fn complete_job_failure_after_handler(
 ) {
     let mut invalid_retry_timing_rewritten = false;
     loop {
-        let policy_retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
-            None
-        } else {
-            Some(policy_retry_delay_ms_for_failure(registry, job, &failure))
-        };
-        let completion_result = {
-            let failure_payload = JobFailureUpdate::new(
-                failure.kind,
-                failure.code,
-                failure.message.as_ref(),
-                policy_retry_delay_ms,
-            );
-            let failure_payload = match failure.retry_timing() {
-                Some(retry_timing) => failure_payload.with_retry_timing(retry_timing),
-                None => failure_payload,
-            };
-            jobs::complete_job_failure_with_outcome_for_lease(
-                pool,
-                lease_identity,
-                &failure_payload,
-            )
-            .await
-        };
+        let failure_payload = failure_update(registry, job, &failure);
+        let completion_result = jobs::complete_job_failure_with_outcome_for_lease(
+            pool,
+            lease_identity,
+            &failure_payload,
+        )
+        .await;
 
         match completion_result {
             Ok(outcome) => {
-                let dead_letter = match &outcome.disposition {
-                    jobs::JobFailureCompletionDisposition::DeadLettered { reason } => {
-                        Some(JobDeadLetterInfo::new(
-                            failure.clone(),
-                            *reason,
-                            Some(outcome.max_attempts),
-                        ))
-                    }
-                    jobs::JobFailureCompletionDisposition::RetryScheduled { .. }
-                    | jobs::JobFailureCompletionDisposition::RetryScheduledAt { .. } => None,
-                    #[allow(unreachable_patterns)]
-                    _ => None,
-                };
-                let disposition = match outcome.disposition {
-                    jobs::JobFailureCompletionDisposition::RetryScheduled {
-                        retry_delay_ms,
-                        next_run_at,
-                    } => JobFailureDisposition::RetryScheduled {
-                        retry_delay_ms,
-                        next_run_at,
-                    },
-                    jobs::JobFailureCompletionDisposition::RetryScheduledAt {
-                        requested_retry_at,
-                        next_run_at,
-                    } => JobFailureDisposition::RetryScheduledAt {
-                        requested_retry_at,
-                        next_run_at,
-                    },
-                    jobs::JobFailureCompletionDisposition::DeadLettered { reason } => {
-                        JobFailureDisposition::DeadLettered { reason }
-                    }
-                    #[allow(unreachable_patterns)]
-                    _ => {
-                        warn!(
-                            job_id = %job.id,
-                            job_type = %job.job_type,
-                            run_number = job.run_number,
-                            attempt = job.attempt,
-                            "postgres returned an unknown job failure completion disposition; reporting unknown observer disposition"
-                        );
-                        JobFailureDisposition::Unknown
-                    }
-                };
-                observation
-                    .running_notification
-                    .spawn_terminal_observer(
-                        observation.terminal_observer_tasks,
-                        job,
-                        observation.observers.clone(),
-                        TerminalJobObserverEvent::Failed(JobFailedEvent {
-                            job: ObservedJob {
-                                job_id: outcome.job_id,
-                                job_type: outcome.job_type,
-                                organization_id: outcome.organization_id,
-                                run_number: outcome.run_number,
-                                attempt: outcome.attempt,
-                                max_attempts: outcome.max_attempts,
-                                worker_id: context.worker_id.clone(),
-                            },
-                            duration: observation.duration,
-                            failure: failure.clone(),
-                            disposition,
-                        }),
-                    )
-                    .await;
-
-                if let Some(dead_letter) = dead_letter {
+                let effects = failure_completion_post_commit_effects(
+                    outcome,
+                    context,
+                    &failure,
+                    observation.duration,
+                );
+                if effects.has_unknown_disposition {
                     warn!(
                         job_id = %job.id,
                         job_type = %job.job_type,
                         run_number = job.run_number,
                         attempt = job.attempt,
-                        max_attempts = job.max_attempts,
-                        organization_id = ?job.organization_id,
-                        worker_id = %context.worker_id,
-                        dead_letter_reason = ?dead_letter.reason,
-                        failure_kind = ?dead_letter.failure.kind,
-                        failure_code = dead_letter.failure.code,
-                        failure_message = %dead_letter.failure.message,
-                        "job dead lettered after handler failure"
+                        "postgres returned an unknown job failure completion disposition; reporting unknown observer disposition"
                     );
-                    let mut dead_letter_context = context.clone();
-                    dead_letter_context.checkpoint = outcome.checkpoint;
-                    notify_handler_of_dead_letter(registry, &dead_letter_context, job, dead_letter)
-                        .await;
+                }
+                let FailureCompletionPostCommitEffects {
+                    observer_event,
+                    dead_letter,
+                    checkpoint,
+                    has_unknown_disposition: _,
+                } = effects;
+                notify_failure_observer(observation, job, observer_event).await;
+
+                if let Some(dead_letter) = dead_letter {
+                    notify_dead_letter_after_handler_failure(
+                        registry,
+                        context,
+                        job,
+                        dead_letter,
+                        checkpoint,
+                    )
+                    .await;
                 }
                 return;
             }
