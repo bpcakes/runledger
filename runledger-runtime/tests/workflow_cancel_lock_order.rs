@@ -1603,19 +1603,30 @@ async fn cancel_workflow_run_does_not_release_blocked_on_terminal_dependents() {
     teardown_ephemeral_pool(pool, database).await;
 }
 
-async fn wait_for_cancel_to_block_on_job_lock(pool: &sqlx::PgPool) {
-    for _ in 0..100 {
-        let waiting = sqlx::query_scalar!(
+async fn wait_for_lock_activity(
+    pool: &sqlx::PgPool,
+    marker: &str,
+    attempts: u32,
+    query_error: &str,
+    timeout_message: &str,
+) {
+    // The test harness shares one PostgreSQL server across parallel ephemeral
+    // databases. `current_database()` keeps this probe from observing another
+    // test's intentionally blocked query.
+    for _ in 0..attempts {
+        let waiting = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1
                  FROM pg_stat_activity
-                 WHERE wait_event_type = 'Lock'
-                   AND query LIKE '%runledger:lock_workflow_step_jobs_for_update%'
-             ) AS \"waiting!\"",
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE $1
+             )",
         )
+        .bind(marker)
         .fetch_one(pool)
         .await
-        .expect("query waiting cancel activity");
+        .expect(query_error);
 
         if waiting {
             return;
@@ -1624,131 +1635,73 @@ async fn wait_for_cancel_to_block_on_job_lock(pool: &sqlx::PgPool) {
         sleep(Duration::from_millis(50)).await;
     }
 
-    panic!("cancel workflow run did not block on the job-row lock");
+    panic!("{timeout_message}");
+}
+
+async fn wait_for_cancel_to_block_on_job_lock(pool: &sqlx::PgPool) {
+    wait_for_lock_activity(
+        pool,
+        "%runledger:lock_workflow_step_jobs_for_update%",
+        100,
+        "query waiting cancel activity",
+        "cancel workflow run did not block on the job-row lock",
+    )
+    .await;
 }
 
 async fn wait_for_cancel_to_block_on_release_lock(pool: &sqlx::PgPool) {
-    for _ in 0..100 {
-        let waiting = sqlx::query_scalar!(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM pg_stat_activity
-                 WHERE wait_event_type = 'Lock'
-                   AND query LIKE '%runledger:lock_workflow_run_release%'
-             ) AS \"waiting!\"",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("query waiting cancel advisory activity");
-
-        if waiting {
-            return;
-        }
-
-        sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!("cancel workflow run did not block on the release advisory lock");
+    wait_for_lock_activity(
+        pool,
+        "%runledger:lock_workflow_run_release%",
+        100,
+        "query waiting cancel advisory activity",
+        "cancel workflow run did not block on the release advisory lock",
+    )
+    .await;
 }
 
 async fn wait_for_cancel_to_block_on_workflow_step_lock(pool: &sqlx::PgPool) {
-    for _ in 0..100 {
-        let waiting = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM pg_stat_activity
-                 WHERE wait_event_type = 'Lock'
-                   AND query LIKE '%runledger:lock_workflow_steps_for_update%'
-                   AND query NOT LIKE '%pg_stat_activity%'
-             )",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("query waiting cancel workflow step activity");
-
-        if waiting {
-            return;
-        }
-
-        sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!("cancel workflow run did not block on the workflow step lock");
+    wait_for_lock_activity(
+        pool,
+        "%runledger:lock_workflow_steps_for_update%",
+        100,
+        "query waiting cancel workflow step activity",
+        "cancel workflow run did not block on the workflow step lock",
+    )
+    .await;
 }
 
 async fn wait_for_handler_continuation_to_block_on_workflow_step(pool: &sqlx::PgPool) {
-    for _ in 0..100 {
-        let waiting = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM pg_stat_activity
-                 WHERE wait_event_type = 'Lock'
-                   AND query LIKE '%runledger:lock_workflow_step_for_handler_continuation%'
-                   AND query NOT LIKE '%pg_stat_activity%'
-             )",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("query waiting handler continuation activity");
-
-        if waiting {
-            return;
-        }
-
-        sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!("handler continuation did not block on the workflow step lock");
+    wait_for_lock_activity(
+        pool,
+        "%runledger:lock_workflow_step_for_handler_continuation%",
+        100,
+        "query waiting handler continuation activity",
+        "handler continuation did not block on the workflow step lock",
+    )
+    .await;
 }
 
 async fn wait_for_completion_to_block_on_shared_release_lock(pool: &sqlx::PgPool) {
-    for _ in 0..90 {
-        let waiting = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM pg_stat_activity
-                 WHERE wait_event_type = 'Lock'
-                   AND query LIKE '%runledger:lock_workflow_run_release_shared%'
-                   AND query NOT LIKE '%pg_stat_activity%'
-             )",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("query waiting completion advisory activity");
-
-        if waiting {
-            return;
-        }
-
-        sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!("job completion did not block on the shared release advisory lock");
+    wait_for_lock_activity(
+        pool,
+        "%runledger:lock_workflow_run_release_shared%",
+        90,
+        "query waiting completion advisory activity",
+        "job completion did not block on the shared release advisory lock",
+    )
+    .await;
 }
 
 async fn wait_for_workflow_step_lock_wait(pool: &sqlx::PgPool) {
-    for _ in 0..100 {
-        let waiting = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM pg_stat_activity
-                 WHERE wait_event_type = 'Lock'
-                   AND query LIKE '%runledger:lock_workflow_step_rows_for_update%'
-                   AND query NOT LIKE '%pg_stat_activity%'
-             )",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("query waiting workflow step activity");
-
-        if waiting {
-            return;
-        }
-
-        sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!("workflow step mutation did not block on the held workflow step lock");
+    wait_for_lock_activity(
+        pool,
+        "%runledger:lock_workflow_step_rows_for_update%",
+        100,
+        "query waiting workflow step activity",
+        "workflow step mutation did not block on the held workflow step lock",
+    )
+    .await;
 }
 
 async fn release_blocked_job_step_for_test(
