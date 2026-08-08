@@ -4,6 +4,7 @@ use runledger_core::jobs::{
     StepKey, WorkflowDependencyReleaseMode, WorkflowRunStatus, WorkflowStepEnqueue,
     WorkflowStepExecutionKind, WorkflowStepStatus, validate_workflow_step_append,
 };
+use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
 
 use crate::jobs::row_decode::{
@@ -50,6 +51,12 @@ struct AppendedStepState {
     candidate: StepReleaseCandidate,
     dependency_count_pending: i32,
     dependency_count_unsatisfied: i32,
+}
+
+#[derive(Debug)]
+struct InsertedAppend {
+    step_id_by_key: WorkflowStepIdsByKey,
+    appended_step_ids: Vec<Uuid>,
 }
 
 pub async fn append_workflow_steps(
@@ -140,13 +147,49 @@ pub async fn append_workflow_steps_tx(
         return Err(workflow_release_conflict_error(workflow_run.id));
     }
 
-    let defaults_by_job_type = fetch_job_definition_defaults_tx(tx, &input.steps).await?;
+    let inserted_append = insert_appended_step_records_tx(
+        tx,
+        workflow_run.id,
+        workflow_run.organization_id,
+        &locked_steps,
+        &input.steps,
+    )
+    .await?;
+
+    persist_appended_step_dependencies_and_mutation_tx(
+        tx,
+        workflow_run.id,
+        input,
+        &canonical_request,
+        &inserted_append.step_id_by_key,
+    )
+    .await?;
+
+    resolve_appended_steps_tx(tx, workflow_run.id, &inserted_append.appended_step_ids).await?;
+
+    load_append_result_tx(
+        tx,
+        workflow_run.id,
+        &input.steps,
+        workflow_run.organization_id,
+        AppendOutcome::Appended,
+    )
+    .await
+}
+
+async fn insert_appended_step_records_tx(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    workflow_organization_id: Option<Uuid>,
+    locked_steps: &[LockedWorkflowStepState],
+    steps: &[WorkflowStepEnqueue<'_>],
+) -> Result<InsertedAppend> {
+    let defaults_by_job_type = fetch_job_definition_defaults_tx(tx, steps).await?;
     let existing_statuses_by_key = locked_steps
         .iter()
         .map(|step| (step.step_key.as_str().to_owned(), step.status))
         .collect::<BTreeMap<_, _>>();
-    let new_step_keys = input
-        .steps
+    let new_step_keys = steps
         .iter()
         .map(|step| step.step_key().as_str().to_owned())
         .collect::<BTreeSet<_>>();
@@ -155,9 +198,9 @@ pub async fn append_workflow_steps_tx(
         .iter()
         .map(|step| (step.step_key.as_str().to_owned(), step.id))
         .collect::<WorkflowStepIdsByKey>();
-    let mut appended_step_ids = Vec::with_capacity(input.steps.len());
+    let mut appended_step_ids = Vec::with_capacity(steps.len());
 
-    for step in &input.steps {
+    for step in steps {
         let defaults = match step.execution_kind() {
             WorkflowStepExecutionKind::Job => {
                 Some(workflow_step_defaults(&defaults_by_job_type, step)?)
@@ -168,8 +211,8 @@ pub async fn append_workflow_steps_tx(
             initial_dependency_counters(&existing_statuses_by_key, &new_step_keys, step)?;
         let step_id = insert_workflow_step_record_tx(
             tx,
-            workflow_run.id,
-            workflow_step_effective_organization_id(workflow_run.organization_id, step),
+            workflow_run_id,
+            workflow_step_effective_organization_id(workflow_organization_id, step),
             step,
             defaults,
             dependency_count_pending,
@@ -180,25 +223,46 @@ pub async fn append_workflow_steps_tx(
         appended_step_ids.push(step_id);
     }
 
+    Ok(InsertedAppend {
+        step_id_by_key,
+        appended_step_ids,
+    })
+}
+
+async fn persist_appended_step_dependencies_and_mutation_tx(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    input: &AppendWorkflowStepsInputRecord<'_>,
+    canonical_request: &JsonValue,
+    step_id_by_key: &WorkflowStepIdsByKey,
+) -> Result<()> {
     insert_appended_workflow_step_dependencies_tx(
         tx,
-        workflow_run.id,
+        workflow_run_id,
         &input.steps,
-        &step_id_by_key,
+        step_id_by_key,
     )
     .await?;
     insert_workflow_mutation_row_tx(
         tx,
-        workflow_run.id,
+        workflow_run_id,
         input.mutation_key,
         input.mutation_metadata,
-        &canonical_request,
+        canonical_request,
     )
     .await?;
 
-    let appended_step_states = load_appended_step_states_tx(tx, &appended_step_ids).await?;
-    let mut touched_run_ids = BTreeSet::from([workflow_run.id]);
-    for step_id in &appended_step_ids {
+    Ok(())
+}
+
+async fn resolve_appended_steps_tx(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    appended_step_ids: &[Uuid],
+) -> Result<()> {
+    let appended_step_states = load_appended_step_states_tx(tx, appended_step_ids).await?;
+    let mut touched_run_ids = BTreeSet::from([workflow_run_id]);
+    for step_id in appended_step_ids {
         let Some(step_state) = appended_step_states.get(step_id) else {
             return Err(workflow_internal_state_error(format!(
                 "missing appended workflow step state for step id {step_id}"
@@ -212,15 +276,7 @@ pub async fn append_workflow_steps_tx(
     }
 
     recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
-
-    load_append_result_tx(
-        tx,
-        workflow_run.id,
-        &input.steps,
-        workflow_run.organization_id,
-        AppendOutcome::Appended,
-    )
-    .await
+    Ok(())
 }
 
 fn ensure_append_window_is_open(
