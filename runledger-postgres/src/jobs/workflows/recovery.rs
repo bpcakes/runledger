@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use runledger_core::jobs::{
-    JobStage, JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowRunStatus, WorkflowStepEnqueue,
-    WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind, WorkflowType,
+    JobStage, JobType, StepKey, WorkflowDependencyReleaseMode, WorkflowRunEnqueueBuilder,
+    WorkflowRunStatus, WorkflowStepEnqueue, WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind,
+    WorkflowType,
 };
 use serde_json::Value;
 use sqlx::types::Uuid;
@@ -19,8 +20,8 @@ use super::super::workflow_types::{
 use super::enqueue::{enqueue_or_get_active_workflow_tx, enqueue_workflow_run_tx};
 use super::read::load_workflow_run_by_id_tx;
 use super::snapshot::{
-    RecoveryEnqueueSnapshot, StoredCanonicalWorkflowStep, deserialize_recovery_append_snapshot,
-    deserialize_recovery_enqueue_snapshot,
+    RecoveryEnqueueSnapshot, StoredCanonicalWorkflowDependency, StoredCanonicalWorkflowStep,
+    deserialize_recovery_append_snapshot, deserialize_recovery_enqueue_snapshot,
 };
 
 #[derive(sqlx::FromRow)]
@@ -55,6 +56,69 @@ struct RecoverySourceStepState {
     timeout_seconds: Option<i32>,
     allow_handler_continuation: bool,
     execution_resource_key: Option<String>,
+}
+
+#[derive(Debug)]
+struct ValidatedRecoveryStep<'a> {
+    step_key: &'a str,
+    payload: &'a Value,
+    organization_id: Option<Uuid>,
+    stage: Option<JobStage>,
+    allow_handler_continuation: bool,
+    execution_resource_key: Option<&'a str>,
+    dependencies: ValidatedRecoveryDependencies<'a>,
+    kind: ValidatedRecoveryStepKind<'a>,
+}
+
+#[derive(Debug)]
+enum ValidatedRecoveryStepKind<'a> {
+    Job {
+        job_type: &'a str,
+        priority: i32,
+        max_attempts: i32,
+        timeout_seconds: i32,
+    },
+    External,
+}
+
+// Keeps snapshot dependency storage borrowed while proving every release mode
+// is closed before enqueue construction.
+#[derive(Clone, Copy, Debug)]
+struct ValidatedRecoveryDependencies<'a>(&'a [StoredCanonicalWorkflowDependency]);
+
+#[derive(Clone, Copy, Debug)]
+struct ValidatedRecoveryDependency<'a> {
+    prerequisite_step_key: &'a str,
+    release_mode: WorkflowDependencyReleaseMode,
+}
+
+impl<'a> ValidatedRecoveryDependencies<'a> {
+    fn validate(
+        step_key: &str,
+        dependencies: &'a [StoredCanonicalWorkflowDependency],
+    ) -> Result<Self> {
+        for dependency in dependencies {
+            if WorkflowDependencyReleaseMode::from_db_value(&dependency.release_mode).is_none() {
+                return Err(unsafe_recovery_snapshot_error(format!(
+                    "unknown release mode for step {step_key}"
+                )));
+            }
+        }
+        Ok(Self(dependencies))
+    }
+
+    fn iter(self) -> impl Iterator<Item = ValidatedRecoveryDependency<'a>> {
+        self.0.iter().map(|dependency| ValidatedRecoveryDependency {
+            prerequisite_step_key: &dependency.prerequisite_step_key,
+            release_mode: match dependency.release_mode.as_str() {
+                "ON_SUCCESS" => WorkflowDependencyReleaseMode::OnSuccess,
+                "ON_TERMINAL" => WorkflowDependencyReleaseMode::OnTerminal,
+                _ => unreachable!(
+                    "recovery dependency release modes are validated before conversion"
+                ),
+            },
+        })
+    }
 }
 
 /// Replays a terminal workflow as a new lineage-linked run in an internally
@@ -265,133 +329,197 @@ fn build_recovery_enqueue<'a>(
 
     let mut replay_steps = Vec::<WorkflowStepEnqueue<'a>>::with_capacity(steps.len());
     for step in steps {
-        let execution_kind = WorkflowStepExecutionKind::from_db_value(&step.execution_kind)
-            .ok_or_else(|| {
+        let validated_step = validate_recovery_step(step, source_step_state)?;
+        replay_steps.push(build_recovery_step_enqueue(validated_step)?);
+    }
+
+    build_recovery_run_enqueue(source, initial, replay_steps)
+}
+
+fn validate_recovery_step<'a>(
+    step: &'a StoredCanonicalWorkflowStep,
+    source_step_state: &'a BTreeMap<String, RecoverySourceStepState>,
+) -> Result<ValidatedRecoveryStep<'a>> {
+    let execution_kind = WorkflowStepExecutionKind::from_db_value(&step.execution_kind)
+        .ok_or_else(|| {
+            unsafe_recovery_snapshot_error(format!(
+                "unknown execution kind for step {}",
+                step.step_key
+            ))
+        })?;
+    let source_state = source_step_state.get(&step.step_key).ok_or_else(|| {
+        unsafe_recovery_snapshot_error(format!(
+            "reconstructed step {} is missing from the source run",
+            step.step_key
+        ))
+    })?;
+    let source_execution_kind = WorkflowStepExecutionKind::from_db_value(
+        &source_state.execution_kind,
+    )
+    .ok_or_else(|| {
+        unsafe_recovery_snapshot_error(format!(
+            "source step {} has unknown execution kind {}",
+            step.step_key, source_state.execution_kind
+        ))
+    })?;
+    if source_execution_kind != execution_kind {
+        return Err(unsafe_recovery_snapshot_error(format!(
+            "reconstructed step {} execution kind does not match the source run",
+            step.step_key
+        )));
+    }
+    if source_state.allow_handler_continuation != step.allow_handler_continuation {
+        return Err(unsafe_recovery_snapshot_error(format!(
+            "reconstructed step {} handler continuation setting does not match the source run",
+            step.step_key
+        )));
+    }
+    if source_state.execution_resource_key != step.execution_resource_key {
+        return Err(unsafe_recovery_snapshot_error(format!(
+            "reconstructed step {} execution resource does not match the source run",
+            step.step_key
+        )));
+    }
+
+    let kind = validate_recovery_step_kind(step, source_state, execution_kind)?;
+
+    let stage = step
+        .stage
+        .as_deref()
+        .map(|stage| {
+            JobStage::from_db_value(stage).ok_or_else(|| {
+                unsafe_recovery_snapshot_error(format!("unknown stage for step {}", step.step_key))
+            })
+        })
+        .transpose()?;
+    let dependencies = ValidatedRecoveryDependencies::validate(&step.step_key, &step.dependencies)?;
+
+    Ok(ValidatedRecoveryStep {
+        step_key: &step.step_key,
+        payload: &source_state.payload,
+        organization_id: step.organization_id,
+        stage,
+        allow_handler_continuation: step.allow_handler_continuation,
+        execution_resource_key: step.execution_resource_key.as_deref(),
+        dependencies,
+        kind,
+    })
+}
+
+fn validate_recovery_step_kind<'a>(
+    step: &'a StoredCanonicalWorkflowStep,
+    source_state: &RecoverySourceStepState,
+    execution_kind: WorkflowStepExecutionKind,
+) -> Result<ValidatedRecoveryStepKind<'a>> {
+    match execution_kind {
+        WorkflowStepExecutionKind::Job => {
+            let priority = resolved_source_step_setting(
+                step,
+                "priority",
+                step.priority,
+                source_state.priority,
+            )?;
+            let max_attempts = resolved_source_step_setting(
+                step,
+                "max_attempts",
+                step.max_attempts,
+                source_state.max_attempts,
+            )?;
+            let timeout_seconds = resolved_source_step_setting(
+                step,
+                "timeout_seconds",
+                step.timeout_seconds,
+                source_state.timeout_seconds,
+            )?;
+            let job_type = step.job_type.as_deref().ok_or_else(|| {
                 unsafe_recovery_snapshot_error(format!(
-                    "unknown execution kind for step {}",
+                    "job type missing for step {}",
                     step.step_key
                 ))
             })?;
-        let source_state = source_step_state.get(&step.step_key).ok_or_else(|| {
-            unsafe_recovery_snapshot_error(format!(
-                "reconstructed step {} is missing from the source run",
-                step.step_key
-            ))
-        })?;
-        let source_execution_kind = WorkflowStepExecutionKind::from_db_value(
-            &source_state.execution_kind,
-        )
-        .ok_or_else(|| {
-            unsafe_recovery_snapshot_error(format!(
-                "source step {} has unknown execution kind {}",
-                step.step_key, source_state.execution_kind
-            ))
-        })?;
-        if source_execution_kind != execution_kind {
-            return Err(unsafe_recovery_snapshot_error(format!(
-                "reconstructed step {} execution kind does not match the source run",
-                step.step_key
-            )));
+            Ok(ValidatedRecoveryStepKind::Job {
+                job_type,
+                priority,
+                max_attempts,
+                timeout_seconds,
+            })
         }
-        if source_state.allow_handler_continuation != step.allow_handler_continuation {
-            return Err(unsafe_recovery_snapshot_error(format!(
-                "reconstructed step {} handler continuation setting does not match the source run",
-                step.step_key
-            )));
+        WorkflowStepExecutionKind::External => {
+            if step.priority.is_some()
+                || step.max_attempts.is_some()
+                || step.timeout_seconds.is_some()
+                || source_state.priority.is_some()
+                || source_state.max_attempts.is_some()
+                || source_state.timeout_seconds.is_some()
+            {
+                return Err(unsafe_recovery_snapshot_error(format!(
+                    "external step {} contains job queue settings",
+                    step.step_key
+                )));
+            }
+            Ok(ValidatedRecoveryStepKind::External)
         }
-        if source_state.execution_resource_key != step.execution_resource_key {
-            return Err(unsafe_recovery_snapshot_error(format!(
-                "reconstructed step {} execution resource does not match the source run",
-                step.step_key
-            )));
-        }
-        let mut builder = match execution_kind {
-            WorkflowStepExecutionKind::Job => {
-                let priority = resolved_source_step_setting(
-                    step,
-                    "priority",
-                    step.priority,
-                    source_state.priority,
-                )?;
-                let max_attempts = resolved_source_step_setting(
-                    step,
-                    "max_attempts",
-                    step.max_attempts,
-                    source_state.max_attempts,
-                )?;
-                let timeout_seconds = resolved_source_step_setting(
-                    step,
-                    "timeout_seconds",
-                    step.timeout_seconds,
-                    source_state.timeout_seconds,
-                )?;
-                WorkflowStepEnqueueBuilder::new(
-                    StepKey::new(&step.step_key),
-                    JobType::new(step.job_type.as_deref().ok_or_else(|| {
-                        unsafe_recovery_snapshot_error(format!(
-                            "job type missing for step {}",
-                            step.step_key
-                        ))
-                    })?),
-                    &source_state.payload,
-                )
+    }
+}
+
+fn build_recovery_step_enqueue<'a>(
+    step: ValidatedRecoveryStep<'a>,
+) -> Result<WorkflowStepEnqueue<'a>> {
+    let ValidatedRecoveryStep {
+        step_key,
+        payload,
+        organization_id,
+        stage,
+        allow_handler_continuation,
+        execution_resource_key,
+        dependencies,
+        kind,
+    } = step;
+    let mut builder = match kind {
+        ValidatedRecoveryStepKind::Job {
+            job_type,
+            priority,
+            max_attempts,
+            timeout_seconds,
+        } => {
+            WorkflowStepEnqueueBuilder::new(StepKey::new(step_key), JobType::new(job_type), payload)
                 .priority(priority)
                 .max_attempts(max_attempts)
                 .timeout_seconds(timeout_seconds)
-            }
-            WorkflowStepExecutionKind::External => {
-                if step.priority.is_some()
-                    || step.max_attempts.is_some()
-                    || step.timeout_seconds.is_some()
-                    || source_state.priority.is_some()
-                    || source_state.max_attempts.is_some()
-                    || source_state.timeout_seconds.is_some()
-                {
-                    return Err(unsafe_recovery_snapshot_error(format!(
-                        "external step {} contains job queue settings",
-                        step.step_key
-                    )));
-                }
-                WorkflowStepEnqueueBuilder::new_external(
-                    StepKey::new(&step.step_key),
-                    &source_state.payload,
-                )
-            }
-        };
-        if let Some(organization_id) = step.organization_id {
-            builder = builder.organization_id(organization_id);
         }
-        if let Some(stage) = step.stage.as_deref() {
-            builder = builder.stage(JobStage::from_db_value(stage).ok_or_else(|| {
-                unsafe_recovery_snapshot_error(format!("unknown stage for step {}", step.step_key))
-            })?);
+        ValidatedRecoveryStepKind::External => {
+            WorkflowStepEnqueueBuilder::new_external(StepKey::new(step_key), payload)
         }
-        if step.allow_handler_continuation {
-            builder = builder.allow_handler_continuation();
-        }
-        if let Some(resource_key) = step.execution_resource_key.as_deref() {
-            builder = builder.execution_resource(resource_key);
-        }
-        for dependency in &step.dependencies {
-            let prerequisite = [StepKey::new(&dependency.prerequisite_step_key)];
-            builder = match dependency.release_mode.as_str() {
-                "ON_SUCCESS" => builder.depends_on_success(&prerequisite),
-                "ON_TERMINAL" => builder.depends_on_terminal(&prerequisite),
-                _ => {
-                    return Err(unsafe_recovery_snapshot_error(format!(
-                        "unknown release mode for step {}",
-                        step.step_key
-                    )));
-                }
-            };
-        }
-        replay_steps.push(
-            builder
-                .try_build()
-                .map_err(|error| unsafe_recovery_snapshot_error(error.to_string()))?,
-        );
+    };
+    if let Some(organization_id) = organization_id {
+        builder = builder.organization_id(organization_id);
     }
+    if let Some(stage) = stage {
+        builder = builder.stage(stage);
+    }
+    if allow_handler_continuation {
+        builder = builder.allow_handler_continuation();
+    }
+    if let Some(resource_key) = execution_resource_key {
+        builder = builder.execution_resource(resource_key);
+    }
+    for dependency in dependencies.iter() {
+        let prerequisite = [StepKey::new(dependency.prerequisite_step_key)];
+        builder = match dependency.release_mode {
+            WorkflowDependencyReleaseMode::OnSuccess => builder.depends_on_success(&prerequisite),
+            WorkflowDependencyReleaseMode::OnTerminal => builder.depends_on_terminal(&prerequisite),
+        };
+    }
+    builder
+        .try_build()
+        .map_err(|error| unsafe_recovery_snapshot_error(error.to_string()))
+}
 
+fn build_recovery_run_enqueue<'a>(
+    source: &'a RecoverySourceRow,
+    initial: &'a RecoveryEnqueueSnapshot,
+    replay_steps: Vec<WorkflowStepEnqueue<'a>>,
+) -> Result<runledger_core::jobs::WorkflowRunEnqueue<'a>> {
     let mut builder =
         WorkflowRunEnqueueBuilder::new(WorkflowType::new(&source.workflow_type), &initial.metadata);
     if let Some(organization_id) = source.organization_id {
@@ -623,4 +751,58 @@ fn recovery_active_constraint_error(active_run_id: Uuid) -> Error {
         "Workflow recovery is blocked by an active workflow.",
         format!("workflow recovery active key is owned by run {active_run_id}"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::{
+        Error, RecoverySourceStepState, StoredCanonicalWorkflowDependency,
+        StoredCanonicalWorkflowStep, validate_recovery_step,
+    };
+
+    #[test]
+    fn recovery_step_validation_preserves_stage_before_dependency_error_precedence() {
+        let step = StoredCanonicalWorkflowStep {
+            step_key: "child".to_owned(),
+            execution_kind: "JOB".to_owned(),
+            job_type: Some("jobs.test.recovery.child".to_owned()),
+            organization_id: None,
+            payload: json!({"source": "snapshot"}),
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            stage: Some("FUTURE_STAGE".to_owned()),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
+            dependencies: vec![StoredCanonicalWorkflowDependency {
+                prerequisite_step_key: "gate".to_owned(),
+                release_mode: "FUTURE_RELEASE_MODE".to_owned(),
+            }],
+        };
+        let source_state = BTreeMap::from([(
+            "child".to_owned(),
+            RecoverySourceStepState {
+                step_key: "child".to_owned(),
+                execution_kind: "JOB".to_owned(),
+                payload: json!({"source": "current"}),
+                priority: Some(100),
+                max_attempts: Some(3),
+                timeout_seconds: Some(60),
+                allow_handler_continuation: false,
+                execution_resource_key: None,
+            },
+        )]);
+
+        let error = validate_recovery_step(&step, &source_state)
+            .expect_err("invalid stage must precede the later release-mode validation");
+        let Error::QueryError(error) = error else {
+            panic!("expected unsafe recovery snapshot error");
+        };
+        assert_eq!(error.code(), "workflow.recovery_snapshot_unsafe");
+        assert_eq!(error.internal_message(), "unknown stage for step child");
+    }
 }
