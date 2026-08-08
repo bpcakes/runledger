@@ -521,7 +521,7 @@ pub(crate) async fn enqueue_root_steps_tx(tx: &mut DbTx<'_>, workflow_run_id: Uu
     })?;
 
     for row in rows {
-        let candidate = StepReleaseCandidate::from_init(StepReleaseCandidateInit {
+        let candidate = StepReleaseCandidate::from_decoded_fields(StepReleaseCandidateInit {
             id: row.id,
             workflow_run_id: row.workflow_run_id,
             execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,

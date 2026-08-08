@@ -477,7 +477,7 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                 )
             })?;
 
-            let candidate = StepReleaseCandidate::from_init(StepReleaseCandidateInit {
+            let candidate = StepReleaseCandidate::from_decoded_fields(StepReleaseCandidateInit {
                 id: row.id,
                 workflow_run_id: row.workflow_run_id,
                 execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,

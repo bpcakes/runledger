@@ -10,32 +10,74 @@ use super::locking::try_lock_workflow_run_release_shared_tx;
 pub(in crate::jobs::workflows) struct StepReleaseCandidate {
     id: Uuid,
     workflow_run_id: Uuid,
-    execution_kind: WorkflowStepExecutionKind,
-    job_type: Option<JobTypeName>,
     organization_id: Option<Uuid>,
     payload: serde_json::Value,
-    priority: Option<i32>,
-    max_attempts: Option<i32>,
-    timeout_seconds: Option<i32>,
-    stage: Option<JobStage>,
-    execution_resource_key: Option<String>,
+    stored_execution: StoredStepReleaseExecution,
+}
+
+#[derive(Clone, Debug)]
+enum StoredStepReleaseExecution {
+    Job {
+        job_type: Option<JobTypeName>,
+        priority: Option<i32>,
+        max_attempts: Option<i32>,
+        timeout_seconds: Option<i32>,
+        stage: Option<JobStage>,
+        execution_resource_key: Option<String>,
+    },
+    External,
+}
+
+#[derive(Debug)]
+enum ReleasableStepExecution<'candidate> {
+    Job(JobReleaseSpec<'candidate>),
+    External,
+}
+
+#[derive(Debug)]
+struct JobReleaseSpec<'candidate> {
+    job_type: &'candidate JobTypeName,
+    priority: i32,
+    max_attempts: i32,
+    timeout_seconds: i32,
+    stage: JobStage,
+    execution_resource_key: Option<&'candidate str>,
 }
 
 impl StepReleaseCandidate {
     #[must_use]
-    pub(in crate::jobs::workflows) fn from_init(init: StepReleaseCandidateInit) -> Self {
+    pub(in crate::jobs::workflows) fn from_decoded_fields(init: StepReleaseCandidateInit) -> Self {
+        let StepReleaseCandidateInit {
+            id,
+            workflow_run_id,
+            execution_kind,
+            job_type,
+            organization_id,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            stage,
+            execution_resource_key,
+        } = init;
+        let stored_execution = match execution_kind {
+            WorkflowStepExecutionKind::Job => StoredStepReleaseExecution::Job {
+                job_type,
+                priority,
+                max_attempts,
+                timeout_seconds,
+                stage,
+                execution_resource_key,
+            },
+            WorkflowStepExecutionKind::External => StoredStepReleaseExecution::External,
+        };
+
         Self {
-            id: init.id,
-            workflow_run_id: init.workflow_run_id,
-            execution_kind: init.execution_kind,
-            job_type: init.job_type,
-            organization_id: init.organization_id,
-            payload: init.payload,
-            priority: init.priority,
-            max_attempts: init.max_attempts,
-            timeout_seconds: init.timeout_seconds,
-            stage: init.stage,
-            execution_resource_key: init.execution_resource_key,
+            id,
+            workflow_run_id,
+            organization_id,
+            payload,
+            stored_execution,
         }
     }
 
@@ -47,6 +89,29 @@ impl StepReleaseCandidate {
     #[must_use]
     pub(in crate::jobs::workflows) fn workflow_run_id(&self) -> Uuid {
         self.workflow_run_id
+    }
+
+    fn releasable_execution(&self) -> Result<ReleasableStepExecution<'_>> {
+        match &self.stored_execution {
+            StoredStepReleaseExecution::Job {
+                job_type,
+                priority,
+                max_attempts,
+                timeout_seconds,
+                stage,
+                execution_resource_key,
+            } => Ok(ReleasableStepExecution::Job(
+                JobReleaseSpec::from_nullable_fields(
+                    job_type.as_ref(),
+                    *priority,
+                    *max_attempts,
+                    *timeout_seconds,
+                    *stage,
+                    execution_resource_key.as_deref(),
+                )?,
+            )),
+            StoredStepReleaseExecution::External => Ok(ReleasableStepExecution::External),
+        }
     }
 }
 
@@ -64,36 +129,50 @@ pub(in crate::jobs::workflows) struct StepReleaseCandidateInit {
     pub(in crate::jobs::workflows) execution_resource_key: Option<String>,
 }
 
-fn job_release_fields(
-    candidate: &StepReleaseCandidate,
-) -> Result<(&JobTypeName, i32, i32, i32, JobStage)> {
-    let Some(job_type) = candidate.job_type.as_ref() else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing job_type",
-        ));
-    };
-    let Some(priority) = candidate.priority else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing priority",
-        ));
-    };
-    let Some(max_attempts) = candidate.max_attempts else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing max_attempts",
-        ));
-    };
-    let Some(timeout_seconds) = candidate.timeout_seconds else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing timeout_seconds",
-        ));
-    };
-    let Some(stage) = candidate.stage else {
-        return Err(workflow_internal_state_error(
-            "job workflow step release is missing stage",
-        ));
-    };
+impl<'candidate> JobReleaseSpec<'candidate> {
+    fn from_nullable_fields(
+        job_type: Option<&'candidate JobTypeName>,
+        priority: Option<i32>,
+        max_attempts: Option<i32>,
+        timeout_seconds: Option<i32>,
+        stage: Option<JobStage>,
+        execution_resource_key: Option<&'candidate str>,
+    ) -> Result<Self> {
+        let Some(job_type) = job_type else {
+            return Err(workflow_internal_state_error(
+                "job workflow step release is missing job_type",
+            ));
+        };
+        let Some(priority) = priority else {
+            return Err(workflow_internal_state_error(
+                "job workflow step release is missing priority",
+            ));
+        };
+        let Some(max_attempts) = max_attempts else {
+            return Err(workflow_internal_state_error(
+                "job workflow step release is missing max_attempts",
+            ));
+        };
+        let Some(timeout_seconds) = timeout_seconds else {
+            return Err(workflow_internal_state_error(
+                "job workflow step release is missing timeout_seconds",
+            ));
+        };
+        let Some(stage) = stage else {
+            return Err(workflow_internal_state_error(
+                "job workflow step release is missing stage",
+            ));
+        };
 
-    Ok((job_type, priority, max_attempts, timeout_seconds, stage))
+        Ok(Self {
+            job_type,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            stage,
+            execution_resource_key,
+        })
+    }
 }
 
 pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
@@ -121,10 +200,11 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
         return Ok(());
     }
 
-    match candidate.execution_kind {
-        WorkflowStepExecutionKind::Job => {
-            let (job_type, priority, max_attempts, timeout_seconds, stage) =
-                job_release_fields(candidate)?;
+    // Preserve the release protocol's error precedence: malformed persisted
+    // job shapes are reported only after the advisory-lock and run-state gates.
+    let execution = candidate.releasable_execution()?;
+    match execution {
+        ReleasableStepExecution::Job(job) => {
             let row = sqlx::query!(
                 "INSERT INTO job_queue (
                     job_type,
@@ -140,15 +220,15 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                  )
                  VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8, $9)
                  RETURNING id, run_number",
-                job_type.as_str(),
+                job.job_type.as_str(),
                 candidate.organization_id,
                 &candidate.payload,
-                priority,
-                max_attempts,
-                timeout_seconds,
+                job.priority,
+                job.max_attempts,
+                job.timeout_seconds,
                 candidate.id,
-                stage.as_db_value(),
-                candidate.execution_resource_key,
+                job.stage.as_db_value(),
+                job.execution_resource_key,
             )
             .fetch_one(&mut **tx)
             .await
@@ -202,8 +282,8 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                  VALUES ($1, $2, 'ENQUEUED', $3, jsonb_build_object('job_type', $4::text))",
                 job_id,
                 run_number,
-                stage.as_db_value(),
-                job_type.as_str(),
+                job.stage.as_db_value(),
+                job.job_type.as_str(),
             )
             .execute(&mut **tx)
             .await
@@ -216,7 +296,7 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
 
             Ok(())
         }
-        WorkflowStepExecutionKind::External => {
+        ReleasableStepExecution::External => {
             let updated = sqlx::query!(
                 "UPDATE workflow_steps
                  SET status = 'WAITING_FOR_EXTERNAL',
@@ -279,4 +359,132 @@ async fn workflow_run_allows_step_release_tx(
     .map_err(|error| {
         Error::from_query_sqlx_with_context("check workflow run allows step release", error)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use runledger_core::jobs::{JobStage, JobTypeName, WorkflowStepExecutionKind};
+    use serde_json::json;
+    use sqlx::types::Uuid;
+
+    use crate::{Error, QueryErrorCategory};
+
+    use super::{
+        JobReleaseSpec, ReleasableStepExecution, StepReleaseCandidate, StepReleaseCandidateInit,
+    };
+
+    fn valid_job_candidate_init() -> StepReleaseCandidateInit {
+        StepReleaseCandidateInit {
+            id: Uuid::nil(),
+            workflow_run_id: Uuid::now_v7(),
+            execution_kind: WorkflowStepExecutionKind::Job,
+            job_type: Some(JobTypeName::new("jobs.test.release").expect("valid job type")),
+            organization_id: Some(Uuid::now_v7()),
+            payload: json!({"release": "candidate"}),
+            priority: Some(42),
+            max_attempts: Some(3),
+            timeout_seconds: Some(60),
+            stage: Some(JobStage::Queued),
+            execution_resource_key: Some("provider-account:release".to_owned()),
+        }
+    }
+
+    fn assert_job_release_shape_error(init: StepReleaseCandidateInit, expected_message: &str) {
+        let candidate = StepReleaseCandidate::from_decoded_fields(init);
+        let result = candidate.releasable_execution();
+        let Err(Error::QueryError(error)) = result else {
+            panic!("expected malformed job release shape to return an internal state error");
+        };
+        assert_eq!(error.category(), QueryErrorCategory::Internal);
+        assert_eq!(error.code(), "workflow.internal_state");
+        assert_eq!(error.internal_message(), expected_message);
+    }
+
+    #[test]
+    fn release_candidate_converts_complete_job_shape_into_release_spec() {
+        let init = valid_job_candidate_init();
+        let workflow_run_id = init.workflow_run_id;
+        let candidate = StepReleaseCandidate::from_decoded_fields(init);
+        let execution = candidate
+            .releasable_execution()
+            .expect("complete job shape should decode");
+
+        assert_eq!(candidate.id(), Uuid::nil());
+        assert_eq!(candidate.workflow_run_id(), workflow_run_id);
+        match execution {
+            ReleasableStepExecution::Job(JobReleaseSpec {
+                job_type,
+                priority,
+                max_attempts,
+                timeout_seconds,
+                stage,
+                execution_resource_key,
+            }) => {
+                assert_eq!(job_type.as_str(), "jobs.test.release");
+                assert_eq!(priority, 42);
+                assert_eq!(max_attempts, 3);
+                assert_eq!(timeout_seconds, 60);
+                assert_eq!(stage, JobStage::Queued);
+                assert_eq!(execution_resource_key, Some("provider-account:release"));
+            }
+            ReleasableStepExecution::External => {
+                panic!("complete job shape must retain job release settings")
+            }
+        }
+    }
+
+    #[test]
+    fn release_candidate_converts_external_shape_without_job_release_settings() {
+        let mut init = valid_job_candidate_init();
+        init.execution_kind = WorkflowStepExecutionKind::External;
+        init.job_type = None;
+        init.priority = None;
+        init.max_attempts = None;
+        init.timeout_seconds = None;
+        init.stage = None;
+        init.execution_resource_key = None;
+
+        let candidate = StepReleaseCandidate::from_decoded_fields(init);
+        assert!(matches!(
+            candidate
+                .releasable_execution()
+                .expect("external shape should decode"),
+            ReleasableStepExecution::External
+        ));
+    }
+
+    #[test]
+    fn release_candidate_preserves_job_shape_error_order() {
+        let mut missing_job_type = valid_job_candidate_init();
+        missing_job_type.job_type = None;
+        assert_job_release_shape_error(
+            missing_job_type,
+            "job workflow step release is missing job_type",
+        );
+
+        let mut missing_priority = valid_job_candidate_init();
+        missing_priority.priority = None;
+        assert_job_release_shape_error(
+            missing_priority,
+            "job workflow step release is missing priority",
+        );
+
+        let mut missing_max_attempts = valid_job_candidate_init();
+        missing_max_attempts.max_attempts = None;
+        assert_job_release_shape_error(
+            missing_max_attempts,
+            "job workflow step release is missing max_attempts",
+        );
+
+        let mut missing_timeout_seconds = valid_job_candidate_init();
+        missing_timeout_seconds.timeout_seconds = None;
+        assert_job_release_shape_error(
+            missing_timeout_seconds,
+            "job workflow step release is missing timeout_seconds",
+        );
+
+        let mut missing_stage = valid_job_candidate_init();
+        missing_stage.stage = None;
+        assert_job_release_shape_error(missing_stage, "job workflow step release is missing stage");
+    }
 }
