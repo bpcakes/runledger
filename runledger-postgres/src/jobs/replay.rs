@@ -13,7 +13,8 @@ use super::queue::events::EnqueuedEventPayload;
 use super::row_decode::parse_job_status;
 use super::rows::JobQueueRow;
 use super::transaction_isolation::{
-    begin_owned_read_committed_tx, ensure_read_committed_tx, finish_owned_transaction,
+    ReadCommittedTx, begin_owned_read_committed_tx, ensure_read_committed_tx,
+    finish_owned_transaction,
 };
 use super::types::{
     JobEnqueue, JobEnqueueDisposition, JobEnqueueOutcome, JobQueueRecord, JobScope,
@@ -276,7 +277,7 @@ pub async fn compare_and_replay_succeeded_job_tx(
     request: CompareAndReplaySucceededJob<'_>,
 ) -> Result<CompareAndReplaySucceededJobOutcome> {
     validate_job_replay_request(request.replay_request_key, request.reason)?;
-    ensure_read_committed_tx(
+    let mut read_committed_tx = ensure_read_committed_tx(
         tx,
         "successful job compare-and-replay",
         "job.compare_and_replay_unsupported_isolation",
@@ -284,13 +285,14 @@ pub async fn compare_and_replay_succeeded_job_tx(
     )
     .await?;
 
-    compare_and_replay_succeeded_job_read_committed_tx(tx, request).await
+    compare_and_replay_succeeded_job_read_committed_tx(&mut read_committed_tx, request).await
 }
 
 async fn compare_and_replay_succeeded_job_read_committed_tx(
-    tx: &mut DbTx<'_>,
+    tx: &mut ReadCommittedTx<'_, '_>,
     request: CompareAndReplaySucceededJob<'_>,
 ) -> Result<CompareAndReplaySucceededJobOutcome> {
+    let tx = tx.as_tx();
     if let Some(existing) = load_or_classify_existing_replay_tx(tx, &request).await? {
         return Ok(existing);
     }
@@ -370,8 +372,9 @@ pub async fn compare_and_replay_succeeded_job(
 
     validate_job_replay_request(request.replay_request_key, request.reason)?;
     let mut tx = begin_owned_read_committed_tx(pool, OPERATION).await?;
-    // `begin_owned_read_committed_tx` established the exact isolation required
-    // by the operation body, so the pool-owned path need not query it again.
-    let result = compare_and_replay_succeeded_job_read_committed_tx(&mut tx, request).await;
+    let result = {
+        let mut read_committed_tx = tx.as_read_committed_tx();
+        compare_and_replay_succeeded_job_read_committed_tx(&mut read_committed_tx, request).await
+    };
     finish_owned_transaction(tx, OPERATION, result).await
 }

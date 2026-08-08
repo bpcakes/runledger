@@ -6,7 +6,7 @@ use sqlx::types::Uuid;
 use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
 use super::super::row_decode::parse_job_status;
-use super::super::transaction_isolation::ensure_read_committed_tx;
+use super::super::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
 use super::super::types::{JobEnqueue, JobEnqueueDisposition, JobEnqueueOutcome};
 use super::events::{EnqueuedEventPayload, EnqueuedJobEvent, insert_enqueued_event_tx};
 
@@ -133,14 +133,64 @@ async fn enqueue_job_with_existing_lock_tx(
         validate_execution_resource_key(execution_resource_key)?;
     }
     if payload.idempotency_key.is_some() {
-        ensure_read_committed_tx(
+        let mut read_committed_tx = ensure_read_committed_tx(
             tx,
             "job idempotent enqueue",
             "job.enqueue_idempotency_unsupported_isolation",
             "Job idempotent enqueue requires READ COMMITTED transaction isolation.",
         )
         .await?;
+
+        return enqueue_idempotent_job_with_existing_lock_read_committed_tx(
+            &mut read_committed_tx,
+            payload,
+            execution_resource_key,
+            existing_job_lock,
+            event_payload,
+            stage,
+        )
+        .await;
     }
+
+    enqueue_job_with_existing_lock_tx_inner(
+        tx,
+        payload,
+        execution_resource_key,
+        existing_job_lock,
+        event_payload,
+        stage,
+    )
+    .await
+}
+
+async fn enqueue_idempotent_job_with_existing_lock_read_committed_tx(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    payload: &JobEnqueue<'_>,
+    execution_resource_key: Option<&str>,
+    existing_job_lock: ExistingJobLock,
+    event_payload: EnqueuedEventPayload<'_>,
+    stage: &'static str,
+) -> Result<JobEnqueueOutcome> {
+    debug_assert!(payload.idempotency_key.is_some());
+    enqueue_job_with_existing_lock_tx_inner(
+        tx.as_tx(),
+        payload,
+        execution_resource_key,
+        existing_job_lock,
+        event_payload,
+        stage,
+    )
+    .await
+}
+
+async fn enqueue_job_with_existing_lock_tx_inner(
+    tx: &mut DbTx<'_>,
+    payload: &JobEnqueue<'_>,
+    execution_resource_key: Option<&str>,
+    existing_job_lock: ExistingJobLock,
+    event_payload: EnqueuedEventPayload<'_>,
+    stage: &'static str,
+) -> Result<JobEnqueueOutcome> {
     let enqueue_request = payload
         .idempotency_key
         .map(|_| canonical_job_enqueue_request(payload, stage, execution_resource_key))

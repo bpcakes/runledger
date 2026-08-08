@@ -11,7 +11,7 @@ use crate::jobs::row_decode::{
     parse_job_stage, parse_job_type_name, parse_workflow_step_execution_kind,
 };
 use crate::jobs::rows::WorkflowStepRow;
-use crate::jobs::transaction_isolation::ensure_read_committed_tx;
+use crate::jobs::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
 use crate::jobs::workflow_types::{
     AppendWorkflowStepsInput as AppendWorkflowStepsInputRecord,
     AppendWorkflowStepsOutcome as AppendOutcome, AppendWorkflowStepsResult as AppendResult,
@@ -81,13 +81,22 @@ pub async fn append_workflow_steps_tx(
     if input.mutation_key.trim().is_empty() {
         return Err(workflow_append_blank_mutation_key_error());
     }
-    ensure_read_committed_tx(
+    let mut read_committed_tx = ensure_read_committed_tx(
         tx,
         "workflow append mutation",
         "workflow.append_unsupported_isolation",
         "Workflow append mutation requires READ COMMITTED transaction isolation.",
     )
     .await?;
+
+    append_workflow_steps_read_committed_tx(&mut read_committed_tx, input).await
+}
+
+async fn append_workflow_steps_read_committed_tx(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    input: &AppendWorkflowStepsInputRecord<'_>,
+) -> Result<AppendResult> {
+    let tx = tx.as_tx();
 
     let locked_steps =
         lock_workflow_steps_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;

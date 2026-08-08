@@ -17,7 +17,8 @@ use super::super::queue::events::{
 };
 use super::super::rows::JobQueueRow;
 use super::super::transaction_isolation::{
-    begin_owned_read_committed_tx, ensure_read_committed_tx, finish_owned_transaction,
+    ReadCommittedTx, begin_owned_read_committed_tx, ensure_read_committed_tx,
+    finish_owned_transaction,
 };
 use super::super::types::{CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobQueueRecord};
 use super::super::workflows::on_terminal;
@@ -356,9 +357,10 @@ pub async fn compare_and_requeue_job(
     const OPERATION: &str = "compare-and-requeue";
 
     let mut tx = begin_owned_read_committed_tx(pool, OPERATION).await?;
-    // `begin_owned_read_committed_tx` established the exact isolation required
-    // by the operation body, so the pool-owned path need not query it again.
-    let result = compare_and_requeue_job_read_committed_tx(&mut tx, request).await;
+    let result = {
+        let mut read_committed_tx = tx.as_read_committed_tx();
+        compare_and_requeue_job_read_committed_tx(&mut read_committed_tx, request).await
+    };
     finish_owned_transaction(tx, OPERATION, result).await
 }
 
@@ -380,7 +382,7 @@ pub async fn compare_and_requeue_job_tx(
     tx: &mut DbTx<'_>,
     request: CompareAndRequeueJob<'_>,
 ) -> Result<CompareAndRequeueJobOutcome> {
-    ensure_read_committed_tx(
+    let mut read_committed_tx = ensure_read_committed_tx(
         tx,
         "job compare-and-requeue",
         "job.compare_and_requeue_unsupported_isolation",
@@ -388,11 +390,11 @@ pub async fn compare_and_requeue_job_tx(
     )
     .await?;
 
-    compare_and_requeue_job_read_committed_tx(tx, request).await
+    compare_and_requeue_job_read_committed_tx(&mut read_committed_tx, request).await
 }
 
 async fn compare_and_requeue_job_read_committed_tx(
-    tx: &mut DbTx<'_>,
+    tx: &mut ReadCommittedTx<'_, '_>,
     request: CompareAndRequeueJob<'_>,
 ) -> Result<CompareAndRequeueJobOutcome> {
     compare_and_requeue_job_read_committed_tx_inner(tx, request, || {
@@ -402,7 +404,7 @@ async fn compare_and_requeue_job_read_committed_tx(
 }
 
 async fn compare_and_requeue_job_read_committed_tx_inner<AfterLockMiss, AfterLockMissFuture>(
-    tx: &mut DbTx<'_>,
+    tx: &mut ReadCommittedTx<'_, '_>,
     request: CompareAndRequeueJob<'_>,
     mut after_lock_miss: AfterLockMiss,
 ) -> Result<CompareAndRequeueJobOutcome>
@@ -410,6 +412,7 @@ where
     AfterLockMiss: FnMut() -> AfterLockMissFuture,
     AfterLockMissFuture: Future<Output = Result<()>>,
 {
+    let tx = tx.as_tx();
     let before = loop {
         if let Some(before) = lock_compare_and_requeue_candidate_tx(tx, &request).await? {
             break before;
@@ -582,6 +585,7 @@ mod tests {
     use serde_json::json;
 
     use super::compare_and_requeue_job_read_committed_tx_inner;
+    use crate::jobs::transaction_isolation::ensure_read_committed_tx;
     use crate::jobs::{
         CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobDefinitionUpsert, JobEnqueue,
         JobFailureUpdate, JobRequeueStatePolicy, JobScope, RequeueableJobStatus, claim_jobs,
@@ -640,42 +644,52 @@ mod tests {
         let mut transition = Some((claim.id, claim.run_number, claim.attempt, worker_id));
         let transition_pool = pool.clone();
         let mut recovery_tx = pool.begin().await.expect("begin recovery transaction");
-        let outcome = compare_and_requeue_job_read_committed_tx_inner(
-            &mut recovery_tx,
-            CompareAndRequeueJob {
-                scope: JobScope::Global,
-                job_id,
-                expected_status: RequeueableJobStatus::DeadLettered,
-                expected_run_number: claim.run_number,
-                state_policy: JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
-                reason: "recover terminal transition observed by later snapshot",
-            },
-            || {
-                let transition = transition.take();
-                let transition_pool = transition_pool.clone();
-                async move {
-                    if let Some((job_id, run_number, attempt, worker_id)) = transition {
-                        complete_job_failure(
-                            &transition_pool,
-                            job_id,
-                            run_number,
-                            attempt,
-                            &worker_id,
-                            &JobFailureUpdate::new(
-                                JobFailureKind::Terminal,
-                                "job.test.snapshot_race",
-                                "terminal transition between recovery reads",
-                                None,
-                            ),
-                        )
-                        .await?;
+        let outcome = {
+            let mut read_committed_tx = ensure_read_committed_tx(
+                &mut recovery_tx,
+                "compare-and-requeue snapshot race test",
+                "test.compare_and_requeue_unsupported_isolation",
+                "Test requires READ COMMITTED transaction isolation.",
+            )
+            .await
+            .expect("validate recovery transaction isolation");
+            compare_and_requeue_job_read_committed_tx_inner(
+                &mut read_committed_tx,
+                CompareAndRequeueJob {
+                    scope: JobScope::Global,
+                    job_id,
+                    expected_status: RequeueableJobStatus::DeadLettered,
+                    expected_run_number: claim.run_number,
+                    state_policy: JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
+                    reason: "recover terminal transition observed by later snapshot",
+                },
+                || {
+                    let transition = transition.take();
+                    let transition_pool = transition_pool.clone();
+                    async move {
+                        if let Some((job_id, run_number, attempt, worker_id)) = transition {
+                            complete_job_failure(
+                                &transition_pool,
+                                job_id,
+                                run_number,
+                                attempt,
+                                &worker_id,
+                                &JobFailureUpdate::new(
+                                    JobFailureKind::Terminal,
+                                    "job.test.snapshot_race",
+                                    "terminal transition between recovery reads",
+                                    None,
+                                ),
+                            )
+                            .await?;
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-            },
-        )
-        .await
-        .expect("recovery should retry the exact lock");
+                },
+            )
+            .await
+            .expect("recovery should retry the exact lock")
+        };
 
         let CompareAndRequeueJobOutcome::Requeued { before, after, .. } = outcome else {
             panic!("later exact snapshot must requeue instead of returning mismatch");

@@ -6,7 +6,7 @@ use runledger_core::jobs::{
 use serde_json::Value;
 use sqlx::types::Uuid;
 
-use crate::jobs::transaction_isolation::ensure_read_committed_tx;
+use crate::jobs::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
 use crate::{DbTx, Error, Result};
 
 use super::super::super::row_decode::{
@@ -76,6 +76,21 @@ fn external_completion_metadata_matches(
         && step.last_error_message.as_deref() == input.last_error_message
 }
 
+struct WorkflowStepTerminalTransition<'reason, 'code, 'message, 'output> {
+    job_id: Uuid,
+    terminal_status: WorkflowStepStatus,
+    status_reason: Option<&'reason str>,
+    last_error_code: Option<&'code str>,
+    last_error_message: Option<&'message str>,
+    output: Option<&'output Value>,
+}
+
+struct LockedWorkflowStepTerminalState {
+    id: Uuid,
+    workflow_run_id: Uuid,
+    status: WorkflowStepStatus,
+}
+
 async fn jsonb_values_match_tx(
     tx: &mut DbTx<'_>,
     left: Option<&Value>,
@@ -108,10 +123,18 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
     // the lookup below is reentrant. Cancellation follows the same job-row-first
     // ordering before taking the exclusive release advisory lock.
     validate_terminal_transition_status(terminal_status)?;
+    let transition = WorkflowStepTerminalTransition {
+        job_id,
+        terminal_status,
+        status_reason,
+        last_error_code,
+        last_error_message,
+        output,
+    };
 
     let linked_workflow_step_id: Option<Uuid> = sqlx::query_scalar!(
         "SELECT workflow_step_id FROM job_queue WHERE id = $1 FOR UPDATE",
-        job_id
+        transition.job_id
     )
     .fetch_optional(&mut **tx)
     .await
@@ -123,59 +146,48 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
     })?
     .flatten();
 
-    if linked_workflow_step_id.is_some() {
-        ensure_read_committed_tx(
+    if let Some(linked_workflow_step_id) = linked_workflow_step_id {
+        let mut read_committed_tx = ensure_read_committed_tx(
             tx,
             "workflow job terminal completion",
             "workflow.terminal_completion_unsupported_isolation",
             "Workflow job completion requires READ COMMITTED transaction isolation.",
         )
         .await?;
+
+        return process_linked_workflow_step_terminal_by_job_id_read_committed_tx(
+            &mut read_committed_tx,
+            &transition,
+            linked_workflow_step_id,
+        )
+        .await;
     }
 
-    let row = sqlx::query!(
-        "SELECT id, workflow_run_id, status::text AS \"status!\"
-         FROM workflow_steps
-         WHERE job_id = $1
-         FOR UPDATE",
-        job_id,
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context(
-            "lock workflow step by job id for terminal update",
-            error,
-        )
-    })?;
+    process_unlinked_workflow_step_terminal_by_job_id_tx(tx, &transition).await
+}
 
-    let Some(row) = row else {
-        if let Some(workflow_step_id) = linked_workflow_step_id {
-            return Err(workflow_internal_state_error(format!(
-                "workflow-managed job {job_id} links to workflow step {workflow_step_id} but workflow_steps.job_id has no matching row"
-            )));
-        }
-
-        return Ok(());
+async fn process_linked_workflow_step_terminal_by_job_id_read_committed_tx(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    transition: &WorkflowStepTerminalTransition<'_, '_, '_, '_>,
+    linked_workflow_step_id: Uuid,
+) -> Result<()> {
+    let tx = tx.as_tx();
+    let Some(step) = lock_workflow_step_for_terminal_transition_tx(tx, transition.job_id).await?
+    else {
+        return Err(workflow_internal_state_error(format!(
+            "workflow-managed job {} links to workflow step {linked_workflow_step_id} but workflow_steps.job_id has no matching row",
+            transition.job_id,
+        )));
     };
 
-    let step_id: Uuid = row.id;
-    let workflow_run_id: Uuid = row.workflow_run_id;
-    let current_status = parse_workflow_step_status(row.status)?;
-
-    if linked_workflow_step_id != Some(step_id) {
-        let message = match linked_workflow_step_id {
-            Some(linked_step_id) => format!(
-                "workflow step linkage mismatch for job {job_id}: job_queue.workflow_step_id={linked_step_id}, workflow_steps.id={step_id}"
-            ),
-            None => format!(
-                "workflow step linkage mismatch for job {job_id}: job_queue.workflow_step_id is NULL, workflow_steps.id={step_id}"
-            ),
-        };
-        return Err(workflow_internal_state_error(message));
+    if step.id != linked_workflow_step_id {
+        return Err(workflow_internal_state_error(format!(
+            "workflow step linkage mismatch for job {}: job_queue.workflow_step_id={linked_workflow_step_id}, workflow_steps.id={}",
+            transition.job_id, step.id,
+        )));
     }
 
-    if current_status.is_terminal() {
+    if step.status.is_terminal() {
         return Ok(());
     }
 
@@ -192,18 +204,18 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
              END,
              updated_at = now()
          WHERE id = $1",
-        step_id,
-        terminal_status.as_db_value(),
-        status_reason,
-        last_error_code,
-        last_error_message,
-        output,
+        step.id,
+        transition.terminal_status.as_db_value(),
+        transition.status_reason,
+        transition.last_error_code,
+        transition.last_error_message,
+        transition.output,
     )
     .execute(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("mark workflow step terminal", error))?;
 
-    let mut touched_run_ids = BTreeSet::from([workflow_run_id]);
+    let mut touched_run_ids = BTreeSet::from([step.workflow_run_id]);
     // Job-backed terminal completion already owns the job row. Real cancellation
     // locks job rows before taking the exclusive release lock, so cancellation
     // cannot hold the exclusive lock while also waiting on this job row. If the
@@ -215,11 +227,62 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
     // Invariant: dependency release runs later in this same transaction, on this
     // same connection, so its pg_try_advisory_xact_lock_shared call is reentrant
     // after this blocking shared acquire.
-    lock_workflow_run_release_shared_tx(tx, workflow_run_id).await?;
-    resolve_terminal_step_queue_tx(tx, step_id, terminal_status, &mut touched_run_ids).await?;
+    lock_workflow_run_release_shared_tx(tx, step.workflow_run_id).await?;
+    resolve_terminal_step_queue_tx(
+        tx,
+        step.id,
+        transition.terminal_status,
+        &mut touched_run_ids,
+    )
+    .await?;
     recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
 
     Ok(())
+}
+
+async fn process_unlinked_workflow_step_terminal_by_job_id_tx(
+    tx: &mut DbTx<'_>,
+    transition: &WorkflowStepTerminalTransition<'_, '_, '_, '_>,
+) -> Result<()> {
+    let Some(step) = lock_workflow_step_for_terminal_transition_tx(tx, transition.job_id).await?
+    else {
+        return Ok(());
+    };
+
+    Err(workflow_internal_state_error(format!(
+        "workflow step linkage mismatch for job {}: job_queue.workflow_step_id is NULL, workflow_steps.id={}",
+        transition.job_id, step.id,
+    )))
+}
+
+async fn lock_workflow_step_for_terminal_transition_tx(
+    tx: &mut DbTx<'_>,
+    job_id: Uuid,
+) -> Result<Option<LockedWorkflowStepTerminalState>> {
+    let row = sqlx::query!(
+        "SELECT id, workflow_run_id, status::text AS \"status!\"
+         FROM workflow_steps
+         WHERE job_id = $1
+         FOR UPDATE",
+        job_id,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context(
+            "lock workflow step by job id for terminal update",
+            error,
+        )
+    })?;
+
+    row.map(|row| {
+        Ok(LockedWorkflowStepTerminalState {
+            id: row.id,
+            workflow_run_id: row.workflow_run_id,
+            status: parse_workflow_step_status(row.status)?,
+        })
+    })
+    .transpose()
 }
 
 pub async fn complete_external_workflow_step(
@@ -243,13 +306,23 @@ pub async fn complete_external_workflow_step_tx(
 ) -> Result<WorkflowStepDbRecord> {
     validate_external_completion_status(input.terminal_status)?;
     validate_external_completion_output(input.terminal_status, input.output)?;
-    ensure_read_committed_tx(
+    let mut read_committed_tx = ensure_read_committed_tx(
         tx,
         "workflow external step completion",
         "workflow.external_completion_unsupported_isolation",
         "External workflow step completion requires READ COMMITTED transaction isolation.",
     )
     .await?;
+
+    complete_external_workflow_step_read_committed_tx(&mut read_committed_tx, input).await
+}
+
+async fn complete_external_workflow_step_read_committed_tx(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    input: &CompleteExternalWorkflowStepInput<'_>,
+) -> Result<WorkflowStepDbRecord> {
+    let tx = tx.as_tx();
+
     lock_workflow_step_rows_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;
 
     let row = sqlx::query_as!(

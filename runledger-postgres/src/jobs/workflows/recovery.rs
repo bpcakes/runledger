@@ -9,7 +9,8 @@ use serde_json::Value;
 use sqlx::types::Uuid;
 
 use crate::jobs::transaction_isolation::{
-    begin_owned_read_committed_tx, ensure_read_committed_tx, finish_owned_transaction,
+    ReadCommittedTx, begin_owned_read_committed_tx, ensure_read_committed_tx,
+    finish_owned_transaction,
 };
 use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
@@ -145,9 +146,10 @@ pub async fn recover_workflow_run(
 
     validate_recovery_request(request)?;
     let mut tx = begin_owned_read_committed_tx(pool, OPERATION).await?;
-    // `begin_owned_read_committed_tx` established the exact isolation required
-    // by the operation body, so the pool-owned path need not query it again.
-    let result = recover_workflow_run_read_committed_tx(&mut tx, request).await;
+    let result = {
+        let mut read_committed_tx = tx.as_read_committed_tx();
+        recover_workflow_run_read_committed_tx(&mut read_committed_tx, request).await
+    };
     finish_owned_transaction(tx, OPERATION, result).await
 }
 
@@ -161,7 +163,7 @@ pub async fn recover_workflow_run_tx(
     request: &WorkflowRecoveryRequest<'_>,
 ) -> Result<WorkflowRecoveryOutcome> {
     validate_recovery_request(request)?;
-    ensure_read_committed_tx(
+    let mut read_committed_tx = ensure_read_committed_tx(
         tx,
         "workflow recovery",
         "workflow.recovery_unsupported_isolation",
@@ -169,13 +171,14 @@ pub async fn recover_workflow_run_tx(
     )
     .await?;
 
-    recover_workflow_run_read_committed_tx(tx, request).await
+    recover_workflow_run_read_committed_tx(&mut read_committed_tx, request).await
 }
 
 async fn recover_workflow_run_read_committed_tx(
-    tx: &mut DbTx<'_>,
+    tx: &mut ReadCommittedTx<'_, '_>,
     request: &WorkflowRecoveryRequest<'_>,
 ) -> Result<WorkflowRecoveryOutcome> {
+    let tx = tx.as_tx();
     // The source lock serializes equal request keys and freezes append/cancel
     // mutations while the canonical snapshots are reconstructed.
     let source = sqlx::query_as::<_, RecoverySourceRow>(

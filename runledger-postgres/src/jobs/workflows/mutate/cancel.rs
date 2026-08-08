@@ -4,16 +4,13 @@ use runledger_core::jobs::{WorkflowRunStatus, WorkflowStepStatus};
 use sqlx::types::Uuid;
 
 use crate::jobs::admin::cancel_job_tx;
-use crate::jobs::transaction_isolation::ensure_read_committed_tx;
 use crate::jobs::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowRunDbRecord};
 use crate::{DbTx, Error, Result};
 
 use super::super::active_claims::release_or_defer_workflow_active_claim_tx;
 use super::super::errors::workflow_internal_state_error;
 use super::super::locking::{
-    LockedWorkflowStepState, lock_workflow_run_for_update_tx,
-    lock_workflow_run_release_exclusive_after_jobs_tx, lock_workflow_step_jobs_for_update_tx,
-    lock_workflow_steps_for_update_tx,
+    CancelWorkflowLockPhase, LockedWorkflowStepState, acquire_cancel_workflow_lock_phase_tx,
 };
 use super::super::read::load_workflow_run_by_id_tx;
 use super::super::runtime::{
@@ -29,32 +26,28 @@ pub async fn cancel_workflow_run_tx(
     last_error_code: Option<&str>,
     last_error_message: Option<&str>,
 ) -> Result<WorkflowRunDbRecord> {
-    ensure_read_committed_tx(
-        tx,
-        "workflow cancel",
-        "workflow.cancel_unsupported_isolation",
-        "Workflow cancellation requires READ COMMITTED transaction isolation.",
-    )
-    .await?;
+    let lock_phase =
+        acquire_cancel_workflow_lock_phase_tx(tx, workflow_run_id, organization_id).await?;
 
-    // Lock job rows before workflow-step rows so cancel does not wait on a
-    // step while an in-flight release has already locked that step and is
-    // inserting or updating its job row. After the advisory wait, that release
-    // has committed or rolled back, so the second job lock catches rows that
-    // became visible while cancel was waiting. Appended steps that skip release
-    // because cancel owns the advisory lock remain BLOCKED and are swept by the
-    // nonterminal-step reload below. This relies on PostgreSQL's default READ
-    // COMMITTED isolation so the second job-lock query observes rows committed
-    // while this transaction waited on the advisory lock.
-    lock_workflow_step_jobs_for_update_tx(tx, workflow_run_id, organization_id).await?;
-    lock_workflow_run_release_exclusive_after_jobs_tx(tx, workflow_run_id).await?;
-    // Catch job rows inserted by releases that committed while cancel was
-    // waiting on the advisory lock.
-    lock_workflow_step_jobs_for_update_tx(tx, workflow_run_id, organization_id).await?;
-    let locked_steps =
-        lock_workflow_steps_for_update_tx(tx, workflow_run_id, organization_id).await?;
-    let workflow_run =
-        lock_workflow_run_for_update_tx(tx, workflow_run_id, organization_id).await?;
+    cancel_workflow_run_after_lock_phase_tx(
+        lock_phase,
+        organization_id,
+        reason,
+        last_error_code,
+        last_error_message,
+    )
+    .await
+}
+
+async fn cancel_workflow_run_after_lock_phase_tx(
+    lock_phase: CancelWorkflowLockPhase<'_, '_>,
+    organization_id: Option<Uuid>,
+    reason: Option<&str>,
+    last_error_code: Option<&str>,
+    last_error_message: Option<&str>,
+) -> Result<WorkflowRunDbRecord> {
+    let (mut read_committed_tx, locked_steps, workflow_run) = lock_phase.into_parts();
+    let tx = read_committed_tx.as_tx();
 
     if workflow_run.status.is_terminal() {
         return load_workflow_run_by_id_tx(

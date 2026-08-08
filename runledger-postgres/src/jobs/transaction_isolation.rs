@@ -1,5 +1,36 @@
 use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
+/// A transaction whose effective isolation was checked as `READ COMMITTED`.
+///
+/// This is deliberately not dereferenceable: code that needs to execute a
+/// query must opt in through [`Self::as_tx`], while private operation bodies
+/// can require this value in their signature.
+pub(crate) struct ReadCommittedTx<'tx, 'db> {
+    tx: &'tx mut DbTx<'db>,
+}
+
+impl<'tx, 'db> ReadCommittedTx<'tx, 'db> {
+    pub(crate) fn as_tx(&mut self) -> &mut DbTx<'db> {
+        self.tx
+    }
+}
+
+/// An internally owned transaction that was explicitly opened at
+/// `READ COMMITTED` isolation.
+pub(crate) struct OwnedReadCommittedTx<'db> {
+    tx: DbTx<'db>,
+}
+
+impl<'db> OwnedReadCommittedTx<'db> {
+    pub(crate) fn as_read_committed_tx(&mut self) -> ReadCommittedTx<'_, 'db> {
+        ReadCommittedTx { tx: &mut self.tx }
+    }
+
+    fn into_inner(self) -> DbTx<'db> {
+        self.tx
+    }
+}
+
 fn transaction_error_context(action: &str, operation: &str) -> String {
     format!("{action} {operation} transaction")
 }
@@ -24,7 +55,7 @@ async fn rollback_owned_transaction(tx: DbTx<'_>, operation: &str, operation_err
 pub(crate) async fn begin_owned_read_committed_tx<'a>(
     pool: &'a DbPool,
     operation: &str,
-) -> Result<DbTx<'a>> {
+) -> Result<OwnedReadCommittedTx<'a>> {
     let begin_context = transaction_error_context("begin", operation);
     let mut tx = pool
         .begin()
@@ -41,15 +72,16 @@ pub(crate) async fn begin_owned_read_committed_tx<'a>(
         return Err(error);
     }
 
-    Ok(tx)
+    Ok(OwnedReadCommittedTx { tx })
 }
 
 /// Commits a successful internally owned operation or rolls back its error.
 pub(crate) async fn finish_owned_transaction<T>(
-    tx: DbTx<'_>,
+    tx: OwnedReadCommittedTx<'_>,
     operation: &str,
     operation_result: Result<T>,
 ) -> Result<T> {
+    let tx = tx.into_inner();
     match operation_result {
         Ok(value) => {
             let commit_context = transaction_error_context("commit", operation);
@@ -65,12 +97,12 @@ pub(crate) async fn finish_owned_transaction<T>(
     }
 }
 
-pub(crate) async fn ensure_read_committed_tx(
-    tx: &mut DbTx<'_>,
+pub(crate) async fn ensure_read_committed_tx<'tx, 'db>(
+    tx: &'tx mut DbTx<'db>,
     operation: &'static str,
     code: &'static str,
     client_message: &'static str,
-) -> Result<()> {
+) -> Result<ReadCommittedTx<'tx, 'db>> {
     // SHOW reports the effective isolation for the current transaction, so a
     // caller's SET TRANSACTION change is visible here. PostgreSQL treats READ
     // UNCOMMITTED as READ COMMITTED.
@@ -87,7 +119,7 @@ pub(crate) async fn ensure_read_committed_tx(
 
     let normalized = isolation.to_ascii_lowercase();
     if matches!(normalized.as_str(), "read committed" | "read uncommitted") {
-        return Ok(());
+        return Ok(ReadCommittedTx { tx });
     }
 
     Err(Error::QueryError(QueryError::from_classified(
@@ -128,15 +160,18 @@ mod tests {
         let mut commit_tx = begin_owned_read_committed_tx(&pool, "test commit")
             .await
             .expect("begin owned commit transaction");
-        let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
-            .fetch_one(&mut *commit_tx)
-            .await
-            .expect("inspect owned transaction isolation");
-        assert_eq!(isolation, "read committed");
-        sqlx::query("INSERT INTO owned_transaction_test_values (value) VALUES (1)")
-            .execute(&mut *commit_tx)
-            .await
-            .expect("insert committed sentinel");
+        {
+            let mut read_committed_tx = commit_tx.as_read_committed_tx();
+            let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+                .fetch_one(&mut **read_committed_tx.as_tx())
+                .await
+                .expect("inspect owned transaction isolation");
+            assert_eq!(isolation, "read committed");
+            sqlx::query("INSERT INTO owned_transaction_test_values (value) VALUES (1)")
+                .execute(&mut **read_committed_tx.as_tx())
+                .await
+                .expect("insert committed sentinel");
+        }
         finish_owned_transaction(commit_tx, "test commit", Ok(()))
             .await
             .expect("commit successful owned operation");
@@ -144,10 +179,13 @@ mod tests {
         let mut rollback_tx = begin_owned_read_committed_tx(&pool, "test rollback")
             .await
             .expect("begin owned rollback transaction");
-        sqlx::query("INSERT INTO owned_transaction_test_values (value) VALUES (2)")
-            .execute(&mut *rollback_tx)
-            .await
-            .expect("insert rolled-back sentinel");
+        {
+            let mut read_committed_tx = rollback_tx.as_read_committed_tx();
+            sqlx::query("INSERT INTO owned_transaction_test_values (value) VALUES (2)")
+                .execute(&mut **read_committed_tx.as_tx())
+                .await
+                .expect("insert rolled-back sentinel");
+        }
         let operation_result: Result<()> = Err(Error::ConfigError(
             "intentional operation failure".to_owned(),
         ));

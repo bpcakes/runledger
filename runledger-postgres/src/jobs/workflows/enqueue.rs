@@ -2,7 +2,7 @@ use runledger_core::jobs::{WorkflowRunEnqueue, validate_workflow_run_enqueue};
 use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
 
-use crate::jobs::transaction_isolation::ensure_read_committed_tx;
+use crate::jobs::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
 use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::row_decode::{
@@ -151,14 +151,33 @@ async fn enqueue_workflow_run_classified_tx(
 ) -> Result<EnqueueActiveWorkflowOutcome> {
     validate_workflow_run_enqueue(payload).map_err(workflow_dag_validation_error)?;
     if payload.idempotency_key().is_some() || payload.active_key().is_some() {
-        ensure_read_committed_tx(
+        let mut read_committed_tx = ensure_read_committed_tx(
             tx,
             "workflow coordinated enqueue",
             "workflow.enqueue_idempotency_unsupported_isolation",
             "Workflow idempotent or active-key enqueue requires READ COMMITTED transaction isolation.",
         )
         .await?;
+
+        return enqueue_coordinated_workflow_run_read_committed_tx(&mut read_committed_tx, payload)
+            .await;
     }
+
+    enqueue_workflow_run_classified_tx_inner(tx, payload).await
+}
+
+async fn enqueue_coordinated_workflow_run_read_committed_tx(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    payload: &WorkflowRunEnqueue<'_>,
+) -> Result<EnqueueActiveWorkflowOutcome> {
+    debug_assert!(payload.idempotency_key().is_some() || payload.active_key().is_some());
+    enqueue_workflow_run_classified_tx_inner(tx.as_tx(), payload).await
+}
+
+async fn enqueue_workflow_run_classified_tx_inner(
+    tx: &mut DbTx<'_>,
+    payload: &WorkflowRunEnqueue<'_>,
+) -> Result<EnqueueActiveWorkflowOutcome> {
     let enqueue_request = canonical_workflow_enqueue_request(payload)?;
 
     if let Some(active_key) = payload.active_key() {

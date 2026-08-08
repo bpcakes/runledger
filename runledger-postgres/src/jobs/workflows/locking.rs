@@ -5,6 +5,7 @@ use crate::jobs::row_decode::{
     parse_step_key_name, parse_workflow_run_status, parse_workflow_step_execution_kind,
     parse_workflow_step_status,
 };
+use crate::jobs::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
 use crate::jobs::workflow_types::WorkflowRunDbRecord;
 use crate::{DbTx, Error, Result};
 
@@ -55,6 +56,29 @@ impl LockedWorkflowStepState {
             status: parse_workflow_step_status(status)?,
             job_id,
         })
+    }
+}
+
+/// Cancellation's completed lock-acquisition phase.
+///
+/// The contained transaction capability is only available after cancellation
+/// has established the required isolation and acquired every workflow lock in
+/// its deadlock-avoidance order.
+pub(in crate::jobs::workflows) struct CancelWorkflowLockPhase<'tx, 'db> {
+    read_committed_tx: ReadCommittedTx<'tx, 'db>,
+    locked_steps: Vec<LockedWorkflowStepState>,
+    workflow_run: WorkflowRunDbRecord,
+}
+
+impl<'tx, 'db> CancelWorkflowLockPhase<'tx, 'db> {
+    pub(in crate::jobs::workflows) fn into_parts(
+        self,
+    ) -> (
+        ReadCommittedTx<'tx, 'db>,
+        Vec<LockedWorkflowStepState>,
+        WorkflowRunDbRecord,
+    ) {
+        (self.read_committed_tx, self.locked_steps, self.workflow_run)
     }
 }
 
@@ -247,6 +271,64 @@ pub(in crate::jobs::workflows) async fn lock_workflow_step_jobs_for_update_tx(
     })?;
 
     Ok(())
+}
+
+pub(in crate::jobs::workflows) async fn acquire_cancel_workflow_lock_phase_tx<'tx, 'db>(
+    tx: &'tx mut DbTx<'db>,
+    workflow_run_id: Uuid,
+    organization_id: Option<Uuid>,
+) -> Result<CancelWorkflowLockPhase<'tx, 'db>> {
+    let mut read_committed_tx = ensure_read_committed_tx(
+        tx,
+        "workflow cancel",
+        "workflow.cancel_unsupported_isolation",
+        "Workflow cancellation requires READ COMMITTED transaction isolation.",
+    )
+    .await?;
+
+    // Lock job rows before workflow-step rows so cancel does not wait on a
+    // step while an in-flight release has already locked that step and is
+    // inserting or updating its job row. After the advisory wait, that release
+    // has committed or rolled back, so the second job lock catches rows that
+    // became visible while cancel was waiting. Appended steps that skip release
+    // because cancel owns the advisory lock remain BLOCKED and are swept by the
+    // nonterminal-step reload below. This relies on PostgreSQL's default READ
+    // COMMITTED isolation so the second job-lock query observes rows committed
+    // while this transaction waited on the advisory lock.
+    lock_workflow_step_jobs_for_update_tx(
+        read_committed_tx.as_tx(),
+        workflow_run_id,
+        organization_id,
+    )
+    .await?;
+    lock_workflow_run_release_exclusive_after_jobs_tx(read_committed_tx.as_tx(), workflow_run_id)
+        .await?;
+    // Catch job rows inserted by releases that committed while cancel was
+    // waiting on the advisory lock.
+    lock_workflow_step_jobs_for_update_tx(
+        read_committed_tx.as_tx(),
+        workflow_run_id,
+        organization_id,
+    )
+    .await?;
+    let locked_steps = lock_workflow_steps_for_update_tx(
+        read_committed_tx.as_tx(),
+        workflow_run_id,
+        organization_id,
+    )
+    .await?;
+    let workflow_run = lock_workflow_run_for_update_tx(
+        read_committed_tx.as_tx(),
+        workflow_run_id,
+        organization_id,
+    )
+    .await?;
+
+    Ok(CancelWorkflowLockPhase {
+        read_committed_tx,
+        locked_steps,
+        workflow_run,
+    })
 }
 
 pub(in crate::jobs::workflows) async fn lock_workflow_step_rows_for_update_tx(
