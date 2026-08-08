@@ -39,6 +39,101 @@ enum WorkflowRunResultLookup {
     Ready(WorkflowRunResultRecord),
 }
 
+#[derive(Clone, Copy)]
+enum WaitStart {
+    Immediate,
+    Waiting,
+}
+
+enum ProbeMode {
+    DeadlineFinal,
+    BeforeDeadlineOrFinal,
+    Notification,
+    Poll(PollWake),
+}
+
+enum WakeReason {
+    Notification { needs_lookup: bool },
+    ListenerFailed(sqlx::Error),
+    Poll(PollWake),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PollWake {
+    Poll { instant: Instant },
+    Deadline { instant: Instant },
+}
+
+impl PollWake {
+    fn instant(self) -> Instant {
+        match self {
+            Self::Poll { instant } | Self::Deadline { instant } => instant,
+        }
+    }
+}
+
+enum WaitDecision {
+    Ready(WorkflowRunResultRecord),
+    Continue,
+    Timeout,
+}
+
+impl WaitDecision {
+    fn after_standard_probe(lookup: WorkflowRunResultLookup, deadline: Option<Instant>) -> Self {
+        match lookup {
+            WorkflowRunResultLookup::Ready(record) => Self::Ready(record),
+            WorkflowRunResultLookup::Pending if deadline_has_elapsed(deadline) => Self::Timeout,
+            WorkflowRunResultLookup::Pending => Self::Continue,
+        }
+    }
+
+    fn after_poll_probe(lookup: WorkflowRunResultLookup, wake: PollWake) -> Self {
+        match lookup {
+            WorkflowRunResultLookup::Ready(record) => Self::Ready(record),
+            WorkflowRunResultLookup::Pending if matches!(wake, PollWake::Deadline { .. }) => {
+                Self::Timeout
+            }
+            WorkflowRunResultLookup::Pending => Self::Continue,
+        }
+    }
+
+    fn after_deadline_probe(lookup: WorkflowRunResultLookup) -> Self {
+        match lookup {
+            WorkflowRunResultLookup::Ready(record) => Self::Ready(record),
+            WorkflowRunResultLookup::Pending => Self::Timeout,
+        }
+    }
+
+    fn into_wait_result(
+        self,
+    ) -> std::result::Result<Option<WorkflowRunResultRecord>, WorkflowRunHandleError> {
+        match self {
+            Self::Ready(record) => Ok(Some(record)),
+            Self::Continue => Ok(None),
+            Self::Timeout => Err(WorkflowRunHandleError::Timeout),
+        }
+    }
+
+    fn into_deadline_result(
+        self,
+    ) -> std::result::Result<WorkflowRunResultRecord, WorkflowRunHandleError> {
+        match self {
+            Self::Ready(record) => Ok(record),
+            Self::Continue | Self::Timeout => Err(WorkflowRunHandleError::Timeout),
+        }
+    }
+}
+
+struct WorkflowResultWaiter<'pool> {
+    pool: &'pool DbPool,
+    scope: WorkflowRunHandleScope,
+    workflow_run_id: Uuid,
+    start: WaitStart,
+    deadline: Option<Instant>,
+    poll_interval: Duration,
+    listener: Option<PgListener>,
+}
+
 impl WorkflowRunHandle {
     pub async fn get_status(
         &self,
@@ -60,174 +155,272 @@ impl WorkflowRunHandle {
         &self,
         options: WorkflowRunWaitOptions,
     ) -> std::result::Result<WorkflowRunResultRecord, WorkflowRunHandleError> {
+        WorkflowResultWaiter::new(&self.pool, self.scope, self.workflow_run_id, options)
+            .wait()
+            .await
+    }
+}
+
+impl<'pool> WorkflowResultWaiter<'pool> {
+    fn new(
+        pool: &'pool DbPool,
+        scope: WorkflowRunHandleScope,
+        workflow_run_id: Uuid,
+        options: WorkflowRunWaitOptions,
+    ) -> Self {
         let poll_interval = normalize_poll_interval(options.poll_interval);
-        if options.timeout == Some(Duration::ZERO) {
-            return match load_workflow_run_result_deadline_probe(
-                &self.pool,
-                self.scope,
-                self.workflow_run_id,
-            )
-            .await?
-            {
-                WorkflowRunResultLookup::Ready(record) => Ok(record),
-                WorkflowRunResultLookup::Pending => Err(WorkflowRunHandleError::Timeout),
-            };
+        let (start, deadline) = match options.timeout {
+            Some(Duration::ZERO) => (WaitStart::Immediate, None),
+            timeout => (WaitStart::Waiting, timeout.map(instant_after)),
+        };
+
+        Self {
+            pool,
+            scope,
+            workflow_run_id,
+            start,
+            deadline,
+            poll_interval,
+            listener: None,
         }
+    }
 
-        let deadline = options.timeout.map(instant_after);
+    async fn wait(
+        mut self,
+    ) -> std::result::Result<WorkflowRunResultRecord, WorkflowRunHandleError> {
+        match self.start {
+            WaitStart::Immediate => self.final_probe_result().await,
+            WaitStart::Waiting => self.wait_until_ready().await,
+        }
+    }
 
-        if let WorkflowRunResultLookup::Ready(record) =
-            load_workflow_run_result_before_deadline_or_final_probe(
-                &self.pool,
-                self.scope,
-                self.workflow_run_id,
-                deadline,
-            )
-            .await?
-        {
+    async fn wait_until_ready(
+        &mut self,
+    ) -> std::result::Result<WorkflowRunResultRecord, WorkflowRunHandleError> {
+        if let Some(record) = self.standard_probe_decision().await?.into_wait_result()? {
             return Ok(record);
         }
-        if deadline_has_elapsed(deadline) {
-            return Err(WorkflowRunHandleError::Timeout);
-        }
 
-        let mut listener = match connect_terminal_listener(&self.pool, deadline).await {
-            Ok(listener) => listener,
-            Err(WorkflowRunHandleError::Timeout) if deadline_has_elapsed(deadline) => {
-                return lookup_ready_or_timeout(
-                    load_workflow_run_result_deadline_probe(
-                        &self.pool,
-                        self.scope,
-                        self.workflow_run_id,
-                    )
-                    .await?,
-                );
+        match self.establish_listener().await {
+            Ok(()) => {}
+            Err(WorkflowRunHandleError::Timeout) if deadline_has_elapsed(self.deadline) => {
+                return self.final_probe_result().await;
             }
             Err(error) => return Err(error),
-        };
-        if deadline_has_elapsed(deadline) {
-            return lookup_ready_or_timeout(
-                load_workflow_run_result_deadline_probe(
-                    &self.pool,
-                    self.scope,
-                    self.workflow_run_id,
-                )
-                .await?,
-            );
+        }
+        if deadline_has_elapsed(self.deadline) {
+            return self.final_probe_result().await;
         }
 
         // Close the initial-read/LISTEN race. A terminal transition committed
         // just before LISTEN may not produce a notification for this connection.
-        if let WorkflowRunResultLookup::Ready(record) =
-            load_workflow_run_result_before_deadline_or_final_probe(
-                &self.pool,
-                self.scope,
-                self.workflow_run_id,
-                deadline,
-            )
-            .await?
-        {
+        if let Some(record) = self.standard_probe_decision().await?.into_wait_result()? {
             return Ok(record);
         }
-        if deadline_has_elapsed(deadline) {
-            return Err(WorkflowRunHandleError::Timeout);
+
+        self.wait_for_wakes().await
+    }
+
+    async fn establish_listener(&mut self) -> std::result::Result<(), WorkflowRunHandleError> {
+        let mut listener = match await_before_deadline(
+            self.deadline,
+            PgListener::connect_with(self.pool),
+        )
+        .await?
+        {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "workflow result listener connect failed; using polling"
+                );
+                return Ok(());
+            }
+        };
+
+        if !pool_can_spare_query_connection(self.pool) {
+            let pool_size = self.pool.size();
+            let pool_idle = self.pool.num_idle();
+            let max_connections = self.pool.options().get_max_connections();
+            tracing::debug!(
+                pool_size,
+                pool_idle,
+                max_connections,
+                "workflow result listener skipped; pool has no spare connection for race-closing reads"
+            );
+            return Ok(());
         }
 
+        if let Err(error) = await_before_deadline(
+            self.deadline,
+            listener.listen(WORKFLOW_RUN_TERMINAL_CHANNEL),
+        )
+        .await?
+        {
+            tracing::warn!(
+                error = %error,
+                "workflow result listener subscribe failed; using polling"
+            );
+            return Ok(());
+        }
+
+        self.listener = Some(listener);
+        Ok(())
+    }
+
+    async fn wait_for_wakes(
+        &mut self,
+    ) -> std::result::Result<WorkflowRunResultRecord, WorkflowRunHandleError> {
         // The poll wake-up is an absolute instant so notification traffic for
         // other workflow runs cannot keep resetting it and starve the polling
         // backstop.
-        let mut next_poll = instant_after(poll_interval);
+        let mut next_poll = instant_after(self.poll_interval);
 
         loop {
-            let wake = next_poll_wake(deadline, next_poll);
-
-            if let Some(active_listener) = listener.as_mut() {
-                tokio::select! {
-                    notification = active_listener.recv() => {
-                        match notification {
-                            Ok(notification) => {
-                                if listener_event_needs_result_lookup(
-                                    notification.payload(),
-                                    self.workflow_run_id,
-                                    deadline,
-                                ) {
-                                    if let WorkflowRunResultLookup::Ready(record) =
-                                        load_workflow_run_result_after_notification(
-                                            &self.pool,
-                                            self.scope,
-                                            self.workflow_run_id,
-                                            deadline,
-                                        )
-                                        .await?
-                                    {
-                                        return Ok(record);
-                                    }
-                                    if deadline_has_elapsed(deadline) {
-                                        return Err(WorkflowRunHandleError::Timeout);
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = %error,
-                                    workflow_run_id = %self.workflow_run_id,
-                                    "workflow result listener failed; falling back to polling"
-                                );
-                                listener = None;
-                                if deadline_has_elapsed(deadline) {
-                                    if let WorkflowRunResultLookup::Ready(record) =
-                                        load_workflow_run_result_deadline_probe(
-                                            &self.pool,
-                                            self.scope,
-                                            self.workflow_run_id,
-                                        )
-                                        .await?
-                                    {
-                                        return Ok(record);
-                                    }
-                                    return Err(WorkflowRunHandleError::Timeout);
-                                }
-                            }
-                        }
-                    }
-                    () = sleep_until(wake.instant) => {
-                        next_poll = instant_after(poll_interval);
-                        let lookup = load_workflow_run_result_after_poll_wake(
-                            &self.pool,
-                            self.scope,
-                            self.workflow_run_id,
-                            deadline,
-                            wake.reached_deadline,
-                        )
-                        .await?;
-                        if let WorkflowRunResultLookup::Ready(record) = lookup {
-                            return Ok(record);
-                        }
-                        if wake.reached_deadline {
-                            return Err(WorkflowRunHandleError::Timeout);
-                        }
+            let wake = next_poll_wake(self.deadline, next_poll);
+            match self.wait_for_wake(wake).await {
+                WakeReason::Notification {
+                    needs_lookup: false,
+                } => {}
+                WakeReason::Notification { needs_lookup: true } => {
+                    if let Some(record) = self
+                        .notification_probe_decision()
+                        .await?
+                        .into_wait_result()?
+                    {
+                        return Ok(record);
                     }
                 }
-                continue;
-            }
-
-            sleep_until(wake.instant).await;
-            next_poll = instant_after(poll_interval);
-            let lookup = load_workflow_run_result_after_poll_wake(
-                &self.pool,
-                self.scope,
-                self.workflow_run_id,
-                deadline,
-                wake.reached_deadline,
-            )
-            .await?;
-            if let WorkflowRunResultLookup::Ready(record) = lookup {
-                return Ok(record);
-            }
-            if wake.reached_deadline {
-                return Err(WorkflowRunHandleError::Timeout);
+                WakeReason::ListenerFailed(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        workflow_run_id = %self.workflow_run_id,
+                        "workflow result listener failed; falling back to polling"
+                    );
+                    self.listener = None;
+                    if deadline_has_elapsed(self.deadline) {
+                        return self.final_probe_result().await;
+                    }
+                }
+                WakeReason::Poll(wake) => {
+                    next_poll = instant_after(self.poll_interval);
+                    if let Some(record) =
+                        self.poll_probe_decision(wake).await?.into_wait_result()?
+                    {
+                        return Ok(record);
+                    }
+                }
             }
         }
+    }
+
+    async fn wait_for_wake(&mut self, wake: PollWake) -> WakeReason {
+        let workflow_run_id = self.workflow_run_id;
+        let deadline = self.deadline;
+
+        if let Some(active_listener) = self.listener.as_mut() {
+            tokio::select! {
+                notification = active_listener.recv() => {
+                    match notification {
+                        Ok(notification) => WakeReason::Notification {
+                            needs_lookup: listener_event_needs_result_lookup(
+                                notification.payload(),
+                                workflow_run_id,
+                                deadline,
+                            ),
+                        },
+                        Err(error) => WakeReason::ListenerFailed(error),
+                    }
+                }
+                () = sleep_until(wake.instant()) => WakeReason::Poll(wake),
+            }
+        } else {
+            sleep_until(wake.instant()).await;
+            WakeReason::Poll(wake)
+        }
+    }
+
+    async fn standard_probe_decision(
+        &self,
+    ) -> std::result::Result<WaitDecision, WorkflowRunHandleError> {
+        let lookup = self.probe(ProbeMode::BeforeDeadlineOrFinal).await?;
+        Ok(WaitDecision::after_standard_probe(lookup, self.deadline))
+    }
+
+    async fn notification_probe_decision(
+        &self,
+    ) -> std::result::Result<WaitDecision, WorkflowRunHandleError> {
+        let lookup = self.probe(ProbeMode::Notification).await?;
+        Ok(WaitDecision::after_standard_probe(lookup, self.deadline))
+    }
+
+    async fn poll_probe_decision(
+        &self,
+        wake: PollWake,
+    ) -> std::result::Result<WaitDecision, WorkflowRunHandleError> {
+        let lookup = self.probe(ProbeMode::Poll(wake)).await?;
+        Ok(WaitDecision::after_poll_probe(lookup, wake))
+    }
+
+    async fn final_probe_result(
+        &self,
+    ) -> std::result::Result<WorkflowRunResultRecord, WorkflowRunHandleError> {
+        let lookup = self.probe(ProbeMode::DeadlineFinal).await?;
+        WaitDecision::after_deadline_probe(lookup).into_deadline_result()
+    }
+
+    async fn probe(
+        &self,
+        mode: ProbeMode,
+    ) -> std::result::Result<WorkflowRunResultLookup, WorkflowRunHandleError> {
+        match mode {
+            ProbeMode::DeadlineFinal => self.deadline_probe().await,
+            ProbeMode::BeforeDeadlineOrFinal => self.before_deadline_or_final_probe().await,
+            ProbeMode::Notification => {
+                if deadline_has_elapsed(self.deadline) {
+                    self.deadline_probe().await
+                } else {
+                    self.before_deadline_or_final_probe().await
+                }
+            }
+            ProbeMode::Poll(wake) => match wake {
+                PollWake::Deadline { .. } => self.deadline_probe().await,
+                PollWake::Poll { .. } => self.before_deadline_or_final_probe().await,
+            },
+        }
+    }
+
+    async fn before_deadline_or_final_probe(
+        &self,
+    ) -> std::result::Result<WorkflowRunResultLookup, WorkflowRunHandleError> {
+        match load_workflow_run_result_before_deadline(
+            self.pool,
+            self.scope,
+            self.workflow_run_id,
+            self.deadline,
+        )
+        .await
+        {
+            Ok(WorkflowRunResultLookup::Pending) if deadline_has_elapsed(self.deadline) => {
+                self.deadline_probe().await
+            }
+            Ok(lookup) => Ok(lookup),
+            Err(WorkflowRunHandleError::Timeout) if deadline_has_elapsed(self.deadline) => {
+                self.deadline_probe().await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn deadline_probe(
+        &self,
+    ) -> std::result::Result<WorkflowRunResultLookup, WorkflowRunHandleError> {
+        tokio::time::timeout(
+            DEADLINE_RESULT_LOOKUP_TIMEOUT,
+            load_workflow_run_result(self.pool, self.scope, self.workflow_run_id),
+        )
+        .await
+        .map_err(|_| WorkflowRunHandleError::Timeout)?
     }
 }
 
@@ -273,48 +466,6 @@ pub async fn enqueue_workflow_run_handle(
 
 const DEADLINE_RESULT_LOOKUP_TIMEOUT: Duration = Duration::from_millis(250);
 
-async fn connect_terminal_listener(
-    pool: &DbPool,
-    deadline: Option<Instant>,
-) -> std::result::Result<Option<PgListener>, WorkflowRunHandleError> {
-    let mut listener = match await_before_deadline(deadline, PgListener::connect_with(pool)).await?
-    {
-        Ok(listener) => listener,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "workflow result listener connect failed; using polling"
-            );
-            return Ok(None);
-        }
-    };
-
-    if !pool_can_spare_query_connection(pool) {
-        let pool_size = pool.size();
-        let pool_idle = pool.num_idle();
-        let max_connections = pool.options().get_max_connections();
-        tracing::debug!(
-            pool_size,
-            pool_idle,
-            max_connections,
-            "workflow result listener skipped; pool has no spare connection for race-closing reads"
-        );
-        return Ok(None);
-    }
-
-    if let Err(error) =
-        await_before_deadline(deadline, listener.listen(WORKFLOW_RUN_TERMINAL_CHANNEL)).await?
-    {
-        tracing::warn!(
-            error = %error,
-            "workflow result listener subscribe failed; using polling"
-        );
-        return Ok(None);
-    }
-
-    Ok(Some(listener))
-}
-
 fn pool_can_spare_query_connection(pool: &DbPool) -> bool {
     pool.num_idle() > 0 || pool.size() < pool.options().get_max_connections()
 }
@@ -323,23 +474,16 @@ fn normalize_poll_interval(poll_interval: Duration) -> Duration {
     poll_interval.max(Duration::from_millis(1))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PollWake {
-    instant: Instant,
-    reached_deadline: bool,
-}
-
 fn next_poll_wake(deadline: Option<Instant>, next_poll: Instant) -> PollWake {
     let Some(deadline) = deadline else {
-        return PollWake {
-            instant: next_poll,
-            reached_deadline: false,
-        };
+        return PollWake::Poll { instant: next_poll };
     };
 
-    PollWake {
-        instant: min(next_poll, deadline),
-        reached_deadline: deadline <= next_poll || deadline <= Instant::now(),
+    let instant = min(next_poll, deadline);
+    if deadline <= next_poll || deadline <= Instant::now() {
+        PollWake::Deadline { instant }
+    } else {
+        PollWake::Poll { instant }
     }
 }
 
@@ -637,75 +781,6 @@ async fn load_workflow_run_result_before_deadline(
     .await?
 }
 
-async fn load_workflow_run_result_after_poll_wake(
-    pool: &DbPool,
-    scope: WorkflowRunHandleScope,
-    workflow_run_id: Uuid,
-    deadline: Option<Instant>,
-    reached_deadline: bool,
-) -> std::result::Result<WorkflowRunResultLookup, WorkflowRunHandleError> {
-    if reached_deadline {
-        return load_workflow_run_result_deadline_probe(pool, scope, workflow_run_id).await;
-    }
-
-    load_workflow_run_result_before_deadline_or_final_probe(pool, scope, workflow_run_id, deadline)
-        .await
-}
-
-async fn load_workflow_run_result_after_notification(
-    pool: &DbPool,
-    scope: WorkflowRunHandleScope,
-    workflow_run_id: Uuid,
-    deadline: Option<Instant>,
-) -> std::result::Result<WorkflowRunResultLookup, WorkflowRunHandleError> {
-    if deadline_has_elapsed(deadline) {
-        return load_workflow_run_result_deadline_probe(pool, scope, workflow_run_id).await;
-    }
-
-    load_workflow_run_result_before_deadline_or_final_probe(pool, scope, workflow_run_id, deadline)
-        .await
-}
-
-async fn load_workflow_run_result_before_deadline_or_final_probe(
-    pool: &DbPool,
-    scope: WorkflowRunHandleScope,
-    workflow_run_id: Uuid,
-    deadline: Option<Instant>,
-) -> std::result::Result<WorkflowRunResultLookup, WorkflowRunHandleError> {
-    match load_workflow_run_result_before_deadline(pool, scope, workflow_run_id, deadline).await {
-        Ok(WorkflowRunResultLookup::Pending) if deadline_has_elapsed(deadline) => {
-            load_workflow_run_result_deadline_probe(pool, scope, workflow_run_id).await
-        }
-        Ok(lookup) => Ok(lookup),
-        Err(WorkflowRunHandleError::Timeout) if deadline_has_elapsed(deadline) => {
-            load_workflow_run_result_deadline_probe(pool, scope, workflow_run_id).await
-        }
-        Err(error) => Err(error),
-    }
-}
-
-async fn load_workflow_run_result_deadline_probe(
-    pool: &DbPool,
-    scope: WorkflowRunHandleScope,
-    workflow_run_id: Uuid,
-) -> std::result::Result<WorkflowRunResultLookup, WorkflowRunHandleError> {
-    tokio::time::timeout(
-        DEADLINE_RESULT_LOOKUP_TIMEOUT,
-        load_workflow_run_result(pool, scope, workflow_run_id),
-    )
-    .await
-    .map_err(|_| WorkflowRunHandleError::Timeout)?
-}
-
-fn lookup_ready_or_timeout(
-    lookup: WorkflowRunResultLookup,
-) -> std::result::Result<WorkflowRunResultRecord, WorkflowRunHandleError> {
-    match lookup {
-        WorkflowRunResultLookup::Ready(record) => Ok(record),
-        WorkflowRunResultLookup::Pending => Err(WorkflowRunHandleError::Timeout),
-    }
-}
-
 fn handle_internal_error(message: &'static str) -> Error {
     Error::QueryError(QueryError::from_classified(
         QueryErrorCategory::Internal,
@@ -757,8 +832,32 @@ mod tests {
             instant_after(Duration::from_secs(30)),
         );
 
-        assert!(wake.reached_deadline);
-        assert!(wake.instant <= Instant::now());
+        let PollWake::Deadline { instant } = wake else {
+            panic!("elapsed deadline must select the final probe wake");
+        };
+        assert!(instant <= Instant::now());
+    }
+
+    #[test]
+    fn poll_decision_uses_the_pre_sleep_wake_classification() {
+        let wake = PollWake::Poll {
+            instant: Instant::now() - Duration::from_millis(1),
+        };
+
+        assert!(matches!(
+            WaitDecision::after_poll_probe(WorkflowRunResultLookup::Pending, wake),
+            WaitDecision::Continue
+        ));
+    }
+
+    #[test]
+    fn standard_probe_pending_after_deadline_times_out() {
+        let deadline = Some(Instant::now() - Duration::from_millis(1));
+
+        assert!(matches!(
+            WaitDecision::after_standard_probe(WorkflowRunResultLookup::Pending, deadline),
+            WaitDecision::Timeout
+        ));
     }
 
     #[test]
