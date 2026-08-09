@@ -30,8 +30,6 @@ struct WorkflowCancellationSweep<'a> {
     scope_organization_id: Option<Uuid>,
     metadata: CancellationMetadata<'a>,
     touched_run_ids: BTreeSet<Uuid>,
-    pending_steps: Vec<LockedWorkflowStepState>,
-    stalled_once: bool,
 }
 
 pub async fn cancel_workflow_run_tx(
@@ -87,9 +85,8 @@ async fn cancel_workflow_run_after_lock_phase_tx(
     .map_err(|error| Error::from_query_sqlx_with_context("mark workflow run canceled", error))?;
     notify_workflow_run_terminal_tx(tx, workflow_run.id, WorkflowRunStatus::Canceled).await?;
 
-    let mut sweep =
-        WorkflowCancellationSweep::new(workflow_run, organization_id, metadata, locked_steps);
-    sweep.sweep_tx(tx).await?;
+    let mut sweep = WorkflowCancellationSweep::new(workflow_run, organization_id, metadata);
+    sweep.sweep_tx(tx, locked_steps).await?;
 
     recompute_workflow_run_statuses_tx(tx, sweep.touched_run_ids()).await?;
     // Cancellation marks the run terminal before recompute, so recompute does
@@ -109,7 +106,6 @@ impl<'a> WorkflowCancellationSweep<'a> {
         workflow_run: WorkflowRunDbRecord,
         scope_organization_id: Option<Uuid>,
         metadata: CancellationMetadata<'a>,
-        pending_steps: Vec<LockedWorkflowStepState>,
     ) -> Self {
         let workflow_run_id = workflow_run.id;
 
@@ -118,8 +114,6 @@ impl<'a> WorkflowCancellationSweep<'a> {
             scope_organization_id,
             metadata,
             touched_run_ids: BTreeSet::from([workflow_run_id]),
-            pending_steps,
-            stalled_once: false,
         }
     }
 
@@ -131,29 +125,33 @@ impl<'a> WorkflowCancellationSweep<'a> {
         &self.touched_run_ids
     }
 
-    async fn sweep_tx(&mut self, tx: &mut DbTx<'_>) -> Result<()> {
+    async fn sweep_tx(
+        &mut self,
+        tx: &mut DbTx<'_>,
+        mut pending_steps: Vec<LockedWorkflowStepState>,
+    ) -> Result<()> {
+        let mut stalled_once = false;
         loop {
             let mut progressed = false;
-            for step in std::mem::take(&mut self.pending_steps) {
+            for step in pending_steps {
                 progressed |= self.cancel_nonterminal_workflow_step_tx(tx, &step).await?;
             }
 
-            self.pending_steps = self.load_nonterminal_workflow_steps_tx(tx).await?;
-            if self.pending_steps.is_empty() {
+            pending_steps = self.load_nonterminal_workflow_steps_tx(tx).await?;
+            if pending_steps.is_empty() {
                 break;
             }
             if !progressed {
-                if !self.stalled_once {
+                if !stalled_once {
                     // The locked range should normally make new nonterminal rows
                     // impossible here. Allow one fresh READ COMMITTED reload per
                     // no-progress streak before treating it as state corruption, so
                     // a row that became visible between loop statements can still
                     // be swept.
-                    self.stalled_once = true;
+                    stalled_once = true;
                     continue;
                 }
-                let pending_step_ids = self
-                    .pending_steps
+                let pending_step_ids = pending_steps
                     .iter()
                     .map(|step| step.id.to_string())
                     .collect::<Vec<_>>()
@@ -163,7 +161,7 @@ impl<'a> WorkflowCancellationSweep<'a> {
                     self.workflow_run.id, pending_step_ids
                 )));
             }
-            self.stalled_once = false;
+            stalled_once = false;
         }
 
         Ok(())

@@ -896,6 +896,48 @@ mod tests {
     }
 
     #[test]
+    fn invalid_organization_input_closes_without_changing_scope_or_cache() {
+        let fetch_generation = Arc::new(AtomicU64::new(0));
+        let mut app = App::new(test_config(), fetch_generation.clone());
+        let original_scope = Scope::for_org(Uuid::new_v4());
+        app.scope = original_scope;
+        app.jobs = Some(JobsData { jobs: Vec::new() });
+        app.active_input = ActiveInput::Organization {
+            text: "not-a-uuid".to_owned(),
+        };
+
+        assert!(!app.handle_key(key(crossterm::event::KeyCode::Enter)));
+        assert_eq!(app.scope, original_scope);
+        assert_eq!(app.last_error.as_deref(), Some("Invalid organization UUID"));
+        assert!(app.jobs.is_some());
+        assert_eq!(fetch_generation.load(Ordering::Acquire), 0);
+        assert_eq!(app.active_input(), &ActiveInput::None);
+    }
+
+    #[test]
+    fn command_input_preserves_refresh_and_non_refresh_return_semantics() {
+        let fetch_generation = Arc::new(AtomicU64::new(0));
+        let mut app = App::new(test_config(), fetch_generation.clone());
+        app.scope = Scope::for_org(Uuid::new_v4());
+        app.active_input = ActiveInput::Command {
+            text: "scope global".to_owned(),
+        };
+
+        assert!(app.handle_key(key(crossterm::event::KeyCode::Enter)));
+        assert_eq!(app.scope, Scope::global());
+        assert_eq!(fetch_generation.load(Ordering::Acquire), 1);
+        assert_eq!(app.active_input(), &ActiveInput::None);
+
+        app.active_input = ActiveInput::Command {
+            text: "refresh 5s".to_owned(),
+        };
+        assert!(!app.handle_key(key(crossterm::event::KeyCode::Enter)));
+        assert_eq!(app.config.refresh_ms, 5_000);
+        assert_eq!(fetch_generation.load(Ordering::Acquire), 1);
+        assert_eq!(app.active_input(), &ActiveInput::None);
+    }
+
+    #[test]
     fn type_filter_input_selects_the_target_and_invalidates_its_cache() {
         let fetch_generation = Arc::new(AtomicU64::new(0));
         let mut app = App::new(test_config(), fetch_generation.clone());

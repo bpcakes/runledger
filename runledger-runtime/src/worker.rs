@@ -55,8 +55,7 @@ pub async fn run_worker_loop_with_observer(
 }
 
 struct WorkerLoop {
-    // Keep the former function-local cancellation drop order: observer tasks
-    // before job tasks, then the shared execution state and inputs.
+    // Field order mirrors the former function locals' drop order; do not reorder.
     terminal_observer_tasks: TerminalObserverTasks,
     join_set: JoinSet<()>,
     semaphore: Arc<Semaphore>,
@@ -71,6 +70,11 @@ struct WorkerLoop {
 enum WorkerLoopControl {
     Continue,
     Drain(RuntimeLoopExit),
+}
+
+enum SpawnClaimedJobsOutcome {
+    Spawned,
+    SemaphoreClosed,
 }
 
 impl WorkerLoop {
@@ -142,8 +146,10 @@ impl WorkerLoop {
 
         let claimed_len = claimed.len();
         match self.spawn_claimed_jobs(claimed).await {
-            WorkerLoopControl::Continue => {}
-            drain @ WorkerLoopControl::Drain(_) => return drain,
+            SpawnClaimedJobsOutcome::Spawned => {}
+            SpawnClaimedJobsOutcome::SemaphoreClosed => {
+                return WorkerLoopControl::Drain(RuntimeLoopExit::Completed);
+            }
         }
 
         if claimed_len == claim_limit {
@@ -182,7 +188,7 @@ impl WorkerLoop {
     async fn spawn_claimed_jobs(
         &mut self,
         claimed: Vec<jobs::JobQueueRecord>,
-    ) -> WorkerLoopControl {
+    ) -> SpawnClaimedJobsOutcome {
         for job in claimed {
             let permit = match Arc::clone(&self.semaphore).acquire_owned().await {
                 Ok(permit) => permit,
@@ -191,7 +197,7 @@ impl WorkerLoop {
                     // this defensive branch fires, surface it as an unexpected
                     // loop completion rather than graceful shutdown.
                     warn!("worker semaphore closed; stopping worker loop");
-                    return WorkerLoopControl::Drain(RuntimeLoopExit::Completed);
+                    return SpawnClaimedJobsOutcome::SemaphoreClosed;
                 }
             };
             let pool_clone = self.pool.clone();
@@ -213,7 +219,7 @@ impl WorkerLoop {
             });
         }
 
-        WorkerLoopControl::Continue
+        SpawnClaimedJobsOutcome::Spawned
     }
 
     async fn wait_for_shutdown_or_poll_interval(&mut self) -> bool {
