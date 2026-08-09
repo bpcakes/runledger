@@ -93,10 +93,15 @@ impl JobRegistry {
     }
 
     #[must_use]
-    pub fn registered_types(&self) -> Vec<JobType<'_>> {
-        let mut keys: Vec<JobType<'_>> = self.handlers.keys().copied().collect();
+    pub(crate) fn registered_static_types(&self) -> Vec<JobType<'static>> {
+        let mut keys: Vec<JobType<'static>> = self.handlers.keys().copied().collect();
         keys.sort_unstable();
         keys
+    }
+
+    #[must_use]
+    pub fn registered_types(&self) -> Vec<JobType<'_>> {
+        self.registered_static_types()
     }
 }
 
