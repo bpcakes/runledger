@@ -43,6 +43,9 @@ const CONTINUATION_MAX_RUNS: i64 = 2;
 const HANDLER_CONTINUATION_REASON: &str = "HANDLER_CONTINUATION";
 const HANDLER_RETRY_AFTER: Duration = Duration::from_millis(25);
 const HANDLER_RETRY_AFTER_MS: i64 = 25;
+const SMOKE_RETRY_POLICY_DELAY_MS: i32 = 1;
+const RETRY_AFTER_FAILURE_CODE: &str = "smoke.provider_temporarily_unavailable";
+const RETRY_AT_FAILURE_CODE: &str = "smoke.provider_rate_limited";
 const REPLAY_REQUEST_KEY: &str = "external-smoke-success-replay";
 const REPLAY_REASON: &str = "prove fresh successful replay from a packaged consumer";
 
@@ -71,6 +74,13 @@ async fn packaged_crates_support_external_consumer_embedding() {
 
     let mut registry = JobRegistry::new();
     registry.register(handler);
+    for failure_code in [RETRY_AFTER_FAILURE_CODE, RETRY_AT_FAILURE_CODE] {
+        registry.register_retry_delay_override(
+            JobType::new(SMOKE_JOB_TYPE),
+            failure_code,
+            SMOKE_RETRY_POLICY_DELAY_MS,
+        );
+    }
 
     let mut tx = harness.pool.begin().await.expect("begin job definition tx");
     upsert_job_definition_tx(
@@ -554,13 +564,13 @@ impl JobHandler for SmokeHandler {
             "success" | "scheduled-success" => Ok(JobCompletion::success()),
             "continuation" => self.execute_continuation(context, &payload).await,
             "retry-after" if context.attempt == 1 => Err(JobFailure::retryable(
-                "smoke.provider_temporarily_unavailable",
+                RETRY_AFTER_FAILURE_CODE,
                 "Smoke provider requested a relative retry.",
             )
             .retry_not_before_delay(HANDLER_RETRY_AFTER)),
             "retry-after" => Ok(JobCompletion::success()),
             "retry-at" if context.attempt == 1 => Err(JobFailure::retryable(
-                "smoke.provider_rate_limited",
+                RETRY_AT_FAILURE_CODE,
                 "Smoke provider supplied an absolute reset timestamp.",
             )
             .retry_not_before(
