@@ -4,6 +4,37 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add `JobLeaseIdentity` and typed `_for_lease` variants for heartbeat,
+  progress, success, failure, and continuation lifecycle writes. The value
+  keeps the job ID, run number, attempt, and worker ID together as one exact
+  lease fence; the runtime now uses that identity throughout heartbeat and
+  completion persistence. Existing positional lifecycle functions remain
+  source-compatible wrappers.
+
+### Changed
+
+- Consolidate workflow step validation and persisted workflow snapshot codecs
+  so DAG building, append validation, append idempotency, and strict recovery
+  decoding share their structural rules without changing their public error
+  contracts.
+- Split queue claim/enqueue, job admin, workflow runtime/release/recovery,
+  worker completion, reaper terminal-hook, and workflow-result waiting logic
+  into focused internal phases. Checked `READ COMMITTED` capabilities and
+  explicit workflow lock/release phase types now encode transaction and lock
+  invariants while preserving external behavior.
+- Replace remaining nested `mod.rs` roots with named module files and isolate
+  lock-wait timing observations in the runtime cancellation regression tests.
+
+### Documentation
+
+- Refresh the README, downstream integration guide, LLM summary, public API
+  documentation, and maintainer routing guides for the 0.8 contracts and the
+  post-0.8 lease-identity API.
+
+No schema migrations have been added since 0.8.0.
+
 ## [0.8.0] - 2026-07-28
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.7.0...v0.8.0)
 

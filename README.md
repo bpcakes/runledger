@@ -640,7 +640,7 @@ quiescent, or while another run owns that key.
 
 ### Upgrade map for releases 0.6 through 0.8
 
-The current `0.8` line includes the contracts introduced in the preceding two
+The `0.8` release line includes the contracts introduced in the preceding two
 releases. When skipping versions, preserve each release's schema and runtime
 fence:
 
@@ -649,6 +649,10 @@ fence:
 | `0.6` | No new migration. | Deploy every job-state writer with continuation and typed recovery unused; wait for every pre-0.6 process and live lease to quiesce before activating either path. Migrate deprecated `requeue_job` callers to exact typed outcomes. |
 | `0.7` | Apply `202607190001_job_replays_and_continuation_metrics` before replay or metrics callers. | Successful replay and continuation metrics are additive. Use Runledger's filtered migration/schema helpers for expand-first deployment and code rollback. |
 | `0.8` | Apply `202607250001_harden_continuation_metrics_payload_validation` and `202607280001` through `202607280005` before any 0.8 runtime loop or persistence API runs. | Deploy every 0.8 writer with new paths unused, quiesce all older processes and leases, then canary workflow continuation, active keys, resources, retry hints, and workflow recovery. |
+
+Current main adds no migration after 0.8.0. Custom runtimes may adopt
+`JobLeaseIdentity` and its `_for_lease` lifecycle APIs without a coordinated
+schema or source migration; the positional functions remain available.
 
 For 0.8 source upgrades, construct `WorkflowDagStepValidationInput` with
 `WorkflowDagStepValidationInput::new(...)` and its option setters; it is now
@@ -1129,6 +1133,11 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   stable `job.lease_owner_mismatch` code, even when the lease was lost by time
   rather than to another worker. Once `lease_expires_at` passes there is no
   owner grace period for heartbeat/progress/success/failure/continuation writes.
+  Current main adds `JobLeaseIdentity` plus `heartbeat_job_for_lease`,
+  `update_job_progress_for_lease`, and success/failure/continuation
+  `_for_lease` variants for custom runtimes. Reuse one identity derived from the
+  claimed row and worker ID so those four lease fences cannot be mixed across
+  jobs; the positional functions remain compatibility wrappers.
 - **Transactional enqueue state.** Use `enqueue_job_with_outcome_tx` when the
   caller needs the job ID together with its locked `status`, `run_number`, and
   `Inserted`/`Existing` disposition. That API takes a mutation-ready lock on an
@@ -1300,7 +1309,7 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.8.0
+./scripts/prepare-release.sh 0.9.0
 ```
 
 The preparation script starts from a clean working tree or resumes an existing
@@ -1316,29 +1325,27 @@ build-verifies the packaged `runledger-tui` binary. If publishing manually, run
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.8.0
+./scripts/publish-release.sh 0.9.0
 ```
 
 Before publishing any crate, the publish script confirms that the release tag
 is absent locally and remotely, fetches the same-named remote branch and
 requires it to be an ancestor of `HEAD`, and dry-runs the branch and tag push.
 It then publishes crates in dependency order, dry-runs each once its workspace
-dependencies are indexed, creates a `v0.8.0` tag, and atomically pushes the
+dependencies are indexed, creates a `v0.9.0` tag, and atomically pushes the
 current branch and tag. Set `PUBLISH_REMOTE` to override the git remote for the
 final push.
 
 Observable contract changes to call out in release notes for this line:
 
-- Workflow job steps can opt into handler continuation, while handlers can
-  select retry not-before lower bounds without bypassing policy backoff.
-- Workflow active keys, execution-resource claims, and immutable recovery add
-  durable coordination and replay contracts with explicit rollout fences.
-- Release 0.8.0 adds
-  `202607250001_harden_continuation_metrics_payload_validation` and migrations
-  `202607280001_workflow_step_handler_continuation` through
-  `202607280005_workflow_recoveries`; apply the complete set before any 0.8
-  runtime loop or persistence API runs, then observe the runtime activation
-  fence before enabling new paths.
+- Low-level custom runtimes can carry an exact `JobLeaseIdentity` through
+  heartbeat, progress, and completion persistence instead of repeatedly
+  passing four positional lease-fence fields.
+- Existing positional lifecycle APIs remain compatibility wrappers, so the
+  lease-identity addition is source compatible.
+- The release adds no migrations beyond the schema required by 0.8.0; the
+  remaining changes are internal validation, transaction-phase, module, and
+  test refactors.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

@@ -3,9 +3,10 @@
 This guide is for agents integrating Runledger into another application. It is
 not an instruction file for agents maintaining this repository.
 
-This guide targets Runledger 0.8.0 and retains the operational contracts added
-in 0.6.0 and 0.7.0. Runledger requires Rust 1.88 or later and PostgreSQL 18 or
-later. An older PostgreSQL server with an extension-provided `uuidv7()`
+The 0.8.0 tag is this guide's release baseline, and the guide also covers the
+current unreleased lease-identity API. It retains the operational contracts
+added in 0.6.0 and 0.7.0. Runledger requires Rust 1.88 or later and PostgreSQL
+18 or later. An older PostgreSQL server with an extension-provided `uuidv7()`
 function is not a supported substitute.
 
 ## Choose The Highest-Level API
@@ -40,6 +41,7 @@ together.
 | Repeat a successful direct job | `compare_and_replay_succeeded_job` |
 | Recover a terminal workflow | `recover_workflow_run` |
 | Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
+| Custom worker lifecycle persistence | `JobLeaseIdentity` and the `_for_lease` lifecycle APIs on current main |
 | Admin/status views | `runledger_postgres::jobs` read/list/count APIs |
 
 Use `runledger_postgres::jobs::set_job_schedule_active` to pause or resume a
@@ -49,6 +51,39 @@ retime the schedule cursor.
 Use `runledger_postgres::jobs::count_workflow_runs` with
 `runledger_postgres::jobs::WorkflowRunCountFilter` for workflow status counters
 instead of fetching pages of runs just to count them.
+
+## Low-Level Lease Lifecycle
+
+Prefer `Supervisor` for ordinary workers. A custom runtime that directly
+claims and mutates jobs should create one `JobLeaseIdentity` from the claimed
+row and its worker ID, then reuse it for every lifecycle write:
+
+```rust
+use runledger_postgres::jobs::{
+    JobLeaseIdentity, complete_job_success_for_lease,
+    heartbeat_job_for_lease, update_job_progress_for_lease,
+};
+
+let lease = JobLeaseIdentity::new(
+    job.id,
+    job.run_number,
+    job.attempt,
+    worker_id,
+);
+
+heartbeat_job_for_lease(&pool, lease, lease_duration_seconds).await?;
+update_job_progress_for_lease(&pool, lease, &progress).await?;
+complete_job_success_for_lease(&pool, lease, Some(&completion)).await?;
+```
+
+The same pattern is available through `complete_job_failure_for_lease`,
+`complete_job_continuation_for_lease`, and every outcome-returning completion
+variant. All four identity fields still participate in the durable lease check;
+the type prevents callers from accidentally pairing a job ID with the run,
+attempt, or worker from another claim. A stale or expired identity returns the
+same `job.lease_owner_mismatch` error as the positional APIs. Those existing
+functions remain compatibility wrappers, so adopting the identity form is
+optional. This API is currently unreleased after the 0.8.0 baseline.
 
 ## Workflow DAG Rule
 
@@ -481,6 +516,10 @@ schema boundary:
 | 0.6.0 | No migration. | Deploy all job-state writers with direct continuation and typed compare-and-requeue unused. Quiesce every pre-0.6 process and live lease before activation. Move deprecated `requeue_job` callers to exact scope, typed no-mutation outcomes, and an explicit state policy. |
 | 0.7.0 | `202607190001_job_replays_and_continuation_metrics` before successful replay or metrics calls. | Replay creates a fresh lineage-linked job rather than mutating a successful source. Prefer decoded event payloads and Runledger's filtered schema helpers during expand-first rollout. |
 | 0.8.0 | `202607250001_harden_continuation_metrics_payload_validation` plus `202607280001` through `202607280005` before any 0.8 runtime loop or persistence API runs. | Deploy every writer with workflow continuation, active keys, resources, retry hints, and workflow recovery unused; quiesce all pre-0.8 processes and leases, then canary each path. |
+
+Current main adds no migration after 0.8.0. Custom runtimes may adopt
+`JobLeaseIdentity` and the `_for_lease` lifecycle APIs without a coordinated
+schema or source migration; the positional functions remain available.
 
 For 0.8 source compatibility, construct the now non-exhaustive
 `WorkflowDagStepValidationInput` through

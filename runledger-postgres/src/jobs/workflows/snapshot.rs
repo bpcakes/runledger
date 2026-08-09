@@ -359,10 +359,101 @@ const fn is_false(value: &bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use runledger_core::jobs::{
+        JobStage, JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder,
+        WorkflowType,
+    };
     use serde_json::json;
     use sqlx::types::Uuid;
 
-    use super::{deserialize_recovery_append_snapshot, deserialize_stored_append_request};
+    use super::{
+        canonical_append_request, canonical_workflow_enqueue_request,
+        deserialize_recovery_append_snapshot, deserialize_recovery_enqueue_snapshot,
+        deserialize_stored_append_request,
+    };
+
+    #[test]
+    fn canonical_snapshots_round_trip_through_strict_recovery_decoders() {
+        let workflow_organization_id = Uuid::now_v7();
+        let metadata = json!({"kind": "strict-round-trip"});
+        let gate_payload = json!({"gate": true});
+        let child_payload = json!({"child": true});
+        let gate = WorkflowStepEnqueueBuilder::new_external(StepKey::new("gate"), &gate_payload)
+            .try_build()
+            .expect("build external gate");
+        let child = WorkflowStepEnqueueBuilder::new(
+            StepKey::new("child"),
+            JobType::new("jobs.test.strict_round_trip"),
+            &child_payload,
+        )
+        .priority(7)
+        .max_attempts(2)
+        .timeout_seconds(45)
+        .stage(JobStage::Scheduled)
+        .allow_handler_continuation()
+        .execution_resource("provider-account:strict-round-trip")
+        .depends_on_success(&[StepKey::new("gate")])
+        .try_build()
+        .expect("build job step");
+        let workflow = WorkflowRunEnqueueBuilder::new(
+            WorkflowType::new("workflow.test.strict_round_trip"),
+            &metadata,
+        )
+        .organization_id(workflow_organization_id)
+        .active_key("strict-round-trip")
+        .result_step_key(StepKey::new("child"))
+        .step(gate)
+        .step(child.clone())
+        .try_build()
+        .expect("build workflow");
+
+        let enqueue_snapshot = canonical_workflow_enqueue_request(&workflow)
+            .expect("encode canonical workflow snapshot");
+        let decoded_enqueue = deserialize_recovery_enqueue_snapshot(enqueue_snapshot)
+            .expect("strict recovery decoder must accept canonical workflow snapshots");
+        assert_eq!(decoded_enqueue.metadata, metadata);
+        assert_eq!(
+            decoded_enqueue.active_key.as_deref(),
+            Some("strict-round-trip")
+        );
+        assert_eq!(decoded_enqueue.result_step_key.as_deref(), Some("child"));
+        assert_eq!(decoded_enqueue.steps.len(), 2);
+        let decoded_child = decoded_enqueue
+            .steps
+            .iter()
+            .find(|step| step.step_key == "child")
+            .expect("decoded workflow must contain child step");
+        assert_eq!(
+            decoded_child.organization_id,
+            Some(workflow_organization_id)
+        );
+        assert_eq!(decoded_child.stage.as_deref(), Some("scheduled"));
+        assert!(decoded_child.allow_handler_continuation);
+        assert_eq!(
+            decoded_child.execution_resource_key.as_deref(),
+            Some("provider-account:strict-round-trip")
+        );
+        assert_eq!(decoded_child.dependencies.len(), 1);
+
+        let append_snapshot = canonical_append_request(
+            StepKey::new("gate"),
+            Some(workflow_organization_id),
+            &[child],
+        )
+        .expect("encode canonical append snapshot");
+        let decoded_append = deserialize_recovery_append_snapshot(append_snapshot)
+            .expect("strict recovery decoder must accept canonical append snapshots");
+        assert_eq!(
+            decoded_append._append_window_step_key.as_deref(),
+            Some("gate")
+        );
+        assert_eq!(decoded_append.steps.len(), 1);
+        assert_eq!(decoded_append.steps[0].step_key, "child");
+        assert_eq!(
+            decoded_append.steps[0].organization_id,
+            Some(workflow_organization_id)
+        );
+    }
 
     #[test]
     fn append_idempotency_is_legacy_tolerant_while_recovery_is_strict() {

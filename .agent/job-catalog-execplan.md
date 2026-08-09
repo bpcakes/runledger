@@ -41,7 +41,7 @@ After this change, an application can build one generic `JobCatalog`, use it to 
   Evidence: `runledger-runtime/src/worker.rs` computes `claimable_job_types = registry.registered_types()` before calling `claim_prestart_jobs_for_types`.
 
 - Observation: Direct job enqueue, initial workflow job steps, appended workflow job steps, and job schedules all depend on `job_definitions`, but not all at the same time.
-  Evidence: `runledger-postgres/src/jobs/queue/dispatch.rs` selects enabled defaults from `job_definitions`; `runledger-postgres/src/jobs/workflows/steps.rs` fetches enabled defaults for workflow steps; `runledger-postgres/src/jobs/workflows/mutate/append.rs` calls the same defaults helper for appended steps; `migrations/202603280001_runledger_baseline.up.sql` gives `job_schedules.job_type` a foreign key to `job_definitions`.
+  Evidence: `runledger-postgres/src/jobs/queue/enqueue.rs` selects enabled defaults from `job_definitions`; `runledger-postgres/src/jobs/workflows/steps.rs` fetches enabled defaults for workflow steps; `runledger-postgres/src/jobs/workflows/mutate/append.rs` calls the same defaults helper for appended steps; `migrations/202603280001_runledger_baseline.up.sql` gives `job_schedules.job_type` a foreign key to `job_definitions`.
 
 - Observation: A schedule can be upserted for an existing but disabled job definition, then fail later when the scheduler tries to enqueue it.
   Evidence: `runledger-postgres/src/jobs/schedules.rs` relies on the foreign key during `upsert_job_schedule_tx`, while `runledger-runtime/src/scheduler.rs` materializes schedules through `enqueue_job_tx`, which only selects enabled definitions. `runledger-runtime/src/scheduler/tests.rs` has `materialize_due_schedules_ignores_disabled_job_definition`.
@@ -102,7 +102,7 @@ The current important files are:
 - `runledger-postgres/src/jobs/types.rs`: defines `JobDefinitionUpsert`, `JobEnqueue`, `JobScheduleUpsert`, and related records.
 - `runledger-postgres/src/jobs/workflow_types.rs`: defines `AppendWorkflowStepsInput`.
 - `runledger-postgres/src/jobs/queue/definitions.rs`: upserts and reads `job_definitions`.
-- `runledger-postgres/src/jobs/queue/dispatch.rs`: enqueues direct jobs using enabled job definitions.
+- `runledger-postgres/src/jobs/queue/enqueue.rs`: enqueues direct jobs using enabled job definitions.
 - `runledger-postgres/src/jobs/schedules.rs`: upserts schedules and validates schedule syntax.
 - `runledger-postgres/src/jobs/workflows/steps.rs`: fetches enabled job-definition defaults when inserting workflow job steps.
 - `runledger-postgres/src/jobs/workflows/mutate/append.rs`: appends workflow steps and also fetches enabled job-definition defaults.

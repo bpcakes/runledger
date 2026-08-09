@@ -6,14 +6,20 @@ PostgreSQL persistence for durable execution: queue lifecycle, workflow DAG stat
 ## Key entrypoints
 - `src/lib.rs`: crate API and shared DB error/result types.
 - `src/jobs.rs`: public jobs/workflow DB API exports.
-- `src/jobs/queue/*`: enqueue/claim/lifecycle/reaper paths.
+- `src/jobs/queue/{enqueue,claim,lifecycle,reaper}.rs` and
+  `src/jobs/queue/lifecycle/*`: queue persistence paths.
 - `src/jobs/workflows/*`: workflow run/step persistence and dependency resolution.
+- `src/jobs/admin/*`: admin reads, payload mutation, metrics, and direct-job recovery.
 - `src/jobs/runtime_configs.rs`: per-job runtime config persistence.
 - `src/jobs/logs.rs`: job log persistence.
 
 ## Edit here for X
-- Job enqueue/claim/retry/dead-letter behavior: `src/jobs/queue/*`.
+- Job enqueue/claim behavior: `src/jobs/queue/{enqueue,claim}.rs`.
+- Heartbeat/progress/completion behavior: `src/jobs/queue/lifecycle/*`.
+- Retry/dead-letter and lease cleanup behavior: `src/jobs/queue/lifecycle/failure.rs`,
+  `src/jobs/queue/reaper.rs`.
 - Workflow runtime/dependency transitions: `src/jobs/workflows/runtime/*`.
+- Workflow snapshot encoding/decoding: `src/jobs/workflows/snapshot.rs`.
 - Workflow run creation/read APIs: `src/jobs/workflows/enqueue.rs`, `src/jobs/workflows/read.rs`.
 - DB error categorization: `src/error.rs`, `src/error/classify/*`.
 

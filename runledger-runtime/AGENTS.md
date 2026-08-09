@@ -5,14 +5,18 @@ Generic runtime for durable execution: worker loop, scheduler loop, lease reaper
 
 ## Key entrypoints
 - `src/lib.rs`: crate API surface.
-- `src/worker.rs`: claim/execute/heartbeat loop.
+- `src/worker.rs` and `src/worker/*`: claim/execute/heartbeat loop, completion
+  persistence, dead-letter hooks, and observer dispatch.
 - `src/scheduler.rs`: schedule claim and enqueue loop.
-- `src/reaper.rs`: stale lease reaper loop.
+- `src/reaper.rs` and `src/reaper/*`: stale lease reaper loop, terminal hooks,
+  and observer dispatch.
 - `src/registry.rs`: handler registry.
 - `src/config.rs`: runtime configuration.
 
 ## Edit here for X
-- Worker lifecycle/heartbeat semantics: `src/worker.rs`.
+- Worker claim/execute/heartbeat semantics: `src/worker.rs`.
+- Worker completion persistence: `src/worker/completion.rs`.
+- Reaper terminal hook fanout: `src/reaper/terminal_hooks.rs`.
 - Scheduler cadence/jitter logic: `src/scheduler.rs`.
 - Lease cleanup runtime behavior: `src/reaper.rs`.
 - Handler registration container behavior: `src/registry.rs`.
