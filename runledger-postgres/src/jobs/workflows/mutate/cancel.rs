@@ -18,6 +18,22 @@ use super::super::runtime::{
     recompute_workflow_run_statuses_tx, resolve_terminal_step_queue_tx,
 };
 
+#[derive(Clone, Copy)]
+struct CancellationMetadata<'a> {
+    reason: Option<&'a str>,
+    last_error_code: Option<&'a str>,
+    last_error_message: Option<&'a str>,
+}
+
+struct WorkflowCancellationSweep<'a> {
+    workflow_run: WorkflowRunDbRecord,
+    organization_id: Option<Uuid>,
+    metadata: CancellationMetadata<'a>,
+    touched_run_ids: BTreeSet<Uuid>,
+    pending_steps: Vec<LockedWorkflowStepState>,
+    stalled_once: bool,
+}
+
 pub async fn cancel_workflow_run_tx(
     tx: &mut DbTx<'_>,
     workflow_run_id: Uuid,
@@ -26,25 +42,21 @@ pub async fn cancel_workflow_run_tx(
     last_error_code: Option<&str>,
     last_error_message: Option<&str>,
 ) -> Result<WorkflowRunDbRecord> {
-    let lock_phase =
-        acquire_cancel_workflow_lock_phase_tx(tx, workflow_run_id, organization_id).await?;
-
-    cancel_workflow_run_after_lock_phase_tx(
-        lock_phase,
-        organization_id,
+    let metadata = CancellationMetadata {
         reason,
         last_error_code,
         last_error_message,
-    )
-    .await
+    };
+    let lock_phase =
+        acquire_cancel_workflow_lock_phase_tx(tx, workflow_run_id, organization_id).await?;
+
+    cancel_workflow_run_after_lock_phase_tx(lock_phase, organization_id, metadata).await
 }
 
 async fn cancel_workflow_run_after_lock_phase_tx(
     lock_phase: CancelWorkflowLockPhase<'_, '_>,
     organization_id: Option<Uuid>,
-    reason: Option<&str>,
-    last_error_code: Option<&str>,
-    last_error_message: Option<&str>,
+    metadata: CancellationMetadata<'_>,
 ) -> Result<WorkflowRunDbRecord> {
     let (mut read_committed_tx, locked_steps, workflow_run) = lock_phase.into_parts();
     let tx = read_committed_tx.as_tx();
@@ -75,68 +87,94 @@ async fn cancel_workflow_run_after_lock_phase_tx(
     .map_err(|error| Error::from_query_sqlx_with_context("mark workflow run canceled", error))?;
     notify_workflow_run_terminal_tx(tx, workflow_run.id, WorkflowRunStatus::Canceled).await?;
 
-    let mut touched_run_ids = BTreeSet::from([workflow_run.id]);
-    let mut pending_steps = locked_steps;
-    let mut stalled_once = false;
-    loop {
-        let mut progressed = false;
-        for step in pending_steps {
-            progressed |= cancel_nonterminal_workflow_step_tx(
-                tx,
-                &workflow_run,
-                &step,
-                reason,
-                last_error_code,
-                last_error_message,
-                &mut touched_run_ids,
-            )
-            .await?;
-        }
+    let mut sweep =
+        WorkflowCancellationSweep::new(workflow_run, organization_id, metadata, locked_steps);
+    sweep.sweep_tx(tx).await?;
 
-        pending_steps =
-            load_nonterminal_workflow_steps_for_cancel_tx(tx, workflow_run.id, organization_id)
-                .await?;
-        if pending_steps.is_empty() {
-            break;
-        }
-        if !progressed {
-            if !stalled_once {
-                // The locked range should normally make new nonterminal rows
-                // impossible here. Allow one fresh READ COMMITTED reload per
-                // no-progress streak before treating it as state corruption, so
-                // a row that became visible between loop statements can still
-                // be swept.
-                stalled_once = true;
-                continue;
-            }
-            let pending_step_ids = pending_steps
-                .iter()
-                .map(|step| step.id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(workflow_internal_state_error(format!(
-                "workflow cancel found nonterminal steps on run {} but made no progress; pending step ids: {}",
-                workflow_run.id, pending_step_ids
-            )));
-        }
-        stalled_once = false;
-    }
-
-    recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
+    recompute_workflow_run_statuses_tx(tx, sweep.touched_run_ids()).await?;
     // Cancellation marks the run terminal before recompute, so recompute does
     // not observe a nonterminal-to-terminal transition for this run. Release
     // (or defer) its active claim explicitly after all jobs are canceled.
-    release_or_defer_workflow_active_claim_tx(tx, workflow_run.id).await?;
-    load_workflow_run_by_id_tx(tx, workflow_run.id, "load workflow run after cancel").await
+    release_or_defer_workflow_active_claim_tx(tx, sweep.workflow_run_id()).await?;
+    load_workflow_run_by_id_tx(
+        tx,
+        sweep.workflow_run_id(),
+        "load workflow run after cancel",
+    )
+    .await
 }
 
-async fn load_nonterminal_workflow_steps_for_cancel_tx(
-    tx: &mut DbTx<'_>,
-    workflow_run_id: Uuid,
-    organization_id: Option<Uuid>,
-) -> Result<Vec<LockedWorkflowStepState>> {
-    let rows = sqlx::query!(
-        "SELECT
+impl<'a> WorkflowCancellationSweep<'a> {
+    fn new(
+        workflow_run: WorkflowRunDbRecord,
+        organization_id: Option<Uuid>,
+        metadata: CancellationMetadata<'a>,
+        pending_steps: Vec<LockedWorkflowStepState>,
+    ) -> Self {
+        let workflow_run_id = workflow_run.id;
+
+        Self {
+            workflow_run,
+            organization_id,
+            metadata,
+            touched_run_ids: BTreeSet::from([workflow_run_id]),
+            pending_steps,
+            stalled_once: false,
+        }
+    }
+
+    fn workflow_run_id(&self) -> Uuid {
+        self.workflow_run.id
+    }
+
+    fn touched_run_ids(&self) -> &BTreeSet<Uuid> {
+        &self.touched_run_ids
+    }
+
+    async fn sweep_tx(&mut self, tx: &mut DbTx<'_>) -> Result<()> {
+        loop {
+            let mut progressed = false;
+            for step in std::mem::take(&mut self.pending_steps) {
+                progressed |= self.cancel_nonterminal_workflow_step_tx(tx, &step).await?;
+            }
+
+            self.pending_steps = self.load_nonterminal_workflow_steps_tx(tx).await?;
+            if self.pending_steps.is_empty() {
+                break;
+            }
+            if !progressed {
+                if !self.stalled_once {
+                    // The locked range should normally make new nonterminal rows
+                    // impossible here. Allow one fresh READ COMMITTED reload per
+                    // no-progress streak before treating it as state corruption, so
+                    // a row that became visible between loop statements can still
+                    // be swept.
+                    self.stalled_once = true;
+                    continue;
+                }
+                let pending_step_ids = self
+                    .pending_steps
+                    .iter()
+                    .map(|step| step.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(workflow_internal_state_error(format!(
+                    "workflow cancel found nonterminal steps on run {} but made no progress; pending step ids: {}",
+                    self.workflow_run.id, pending_step_ids
+                )));
+            }
+            self.stalled_once = false;
+        }
+
+        Ok(())
+    }
+
+    async fn load_nonterminal_workflow_steps_tx(
+        &self,
+        tx: &mut DbTx<'_>,
+    ) -> Result<Vec<LockedWorkflowStepState>> {
+        let rows = sqlx::query!(
+            "SELECT
             ws.id,
             ws.step_key,
             ws.execution_kind::text AS \"execution_kind!\",
@@ -155,103 +193,87 @@ async fn load_nonterminal_workflow_steps_for_cancel_tx(
            )
          ORDER BY ws.id ASC
          FOR UPDATE OF ws",
-        workflow_run_id,
-        organization_id,
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context(
-            "load remaining nonterminal workflow steps for cancel",
-            error,
+            self.workflow_run.id,
+            self.organization_id,
         )
-    })?;
-
-    rows.into_iter()
-        .map(|row| {
-            LockedWorkflowStepState::decode(
-                row.id,
-                row.step_key,
-                row.execution_kind,
-                row.organization_id,
-                row.status,
-                row.job_id,
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| {
+            Error::from_query_sqlx_with_context(
+                "load remaining nonterminal workflow steps for cancel",
+                error,
             )
-        })
-        .collect()
-}
+        })?;
 
-async fn cancel_nonterminal_workflow_step_tx(
-    tx: &mut DbTx<'_>,
-    workflow_run: &WorkflowRunDbRecord,
-    step: &LockedWorkflowStepState,
-    reason: Option<&str>,
-    last_error_code: Option<&str>,
-    last_error_message: Option<&str>,
-    touched_run_ids: &mut BTreeSet<Uuid>,
-) -> Result<bool> {
-    match step.status {
-        WorkflowStepStatus::Enqueued | WorkflowStepStatus::Running => {
-            let job_id = step.job_id.ok_or_else(|| {
-                workflow_internal_state_error(format!(
-                    "workflow step '{}' is job-backed but missing job_id during workflow cancel",
-                    step.step_key.as_str()
-                ))
-            })?;
-            let canceled = cancel_job_tx(tx, step.organization_id, job_id, reason).await?;
-            if canceled.is_none() {
-                return Err(workflow_internal_state_error(format!(
-                    "workflow-managed job {job_id} could not be canceled during workflow run cancel"
-                )));
-            }
-
-            Ok(true)
-        }
-        WorkflowStepStatus::WaitingForExternal => {
-            complete_external_workflow_step_tx(
-                tx,
-                &CompleteExternalWorkflowStepInput {
-                    workflow_run_id: workflow_run.id,
-                    organization_id: workflow_run.organization_id,
-                    step_key: step.step_key.as_borrowed(),
-                    terminal_status: WorkflowStepStatus::Canceled,
-                    status_reason: reason,
-                    last_error_code,
-                    last_error_message,
-                    output: None,
-                },
-            )
-            .await?;
-
-            Ok(true)
-        }
-        WorkflowStepStatus::Blocked => {
-            cancel_blocked_workflow_step_tx(
-                tx,
-                step.id,
-                reason,
-                last_error_code,
-                last_error_message,
-                touched_run_ids,
-            )
-            .await
-        }
-        WorkflowStepStatus::Succeeded
-        | WorkflowStepStatus::Failed
-        | WorkflowStepStatus::Canceled => Ok(false),
+        rows.into_iter()
+            .map(|row| {
+                LockedWorkflowStepState::decode(
+                    row.id,
+                    row.step_key,
+                    row.execution_kind,
+                    row.organization_id,
+                    row.status,
+                    row.job_id,
+                )
+            })
+            .collect()
     }
-}
 
-async fn cancel_blocked_workflow_step_tx(
-    tx: &mut DbTx<'_>,
-    step_id: Uuid,
-    reason: Option<&str>,
-    last_error_code: Option<&str>,
-    last_error_message: Option<&str>,
-    touched_run_ids: &mut BTreeSet<Uuid>,
-) -> Result<bool> {
-    let canceled = sqlx::query_scalar!(
-        "UPDATE workflow_steps
+    async fn cancel_nonterminal_workflow_step_tx(
+        &mut self,
+        tx: &mut DbTx<'_>,
+        step: &LockedWorkflowStepState,
+    ) -> Result<bool> {
+        match step.status {
+            WorkflowStepStatus::Enqueued | WorkflowStepStatus::Running => {
+                let job_id = step.job_id.ok_or_else(|| {
+                    workflow_internal_state_error(format!(
+                        "workflow step '{}' is job-backed but missing job_id during workflow cancel",
+                        step.step_key.as_str()
+                    ))
+                })?;
+                let canceled =
+                    cancel_job_tx(tx, step.organization_id, job_id, self.metadata.reason).await?;
+                if canceled.is_none() {
+                    return Err(workflow_internal_state_error(format!(
+                        "workflow-managed job {job_id} could not be canceled during workflow run cancel"
+                    )));
+                }
+
+                Ok(true)
+            }
+            WorkflowStepStatus::WaitingForExternal => {
+                complete_external_workflow_step_tx(
+                    tx,
+                    &CompleteExternalWorkflowStepInput {
+                        workflow_run_id: self.workflow_run.id,
+                        organization_id: self.workflow_run.organization_id,
+                        step_key: step.step_key.as_borrowed(),
+                        terminal_status: WorkflowStepStatus::Canceled,
+                        status_reason: self.metadata.reason,
+                        last_error_code: self.metadata.last_error_code,
+                        last_error_message: self.metadata.last_error_message,
+                        output: None,
+                    },
+                )
+                .await?;
+
+                Ok(true)
+            }
+            WorkflowStepStatus::Blocked => self.cancel_blocked_workflow_step_tx(tx, step.id).await,
+            WorkflowStepStatus::Succeeded
+            | WorkflowStepStatus::Failed
+            | WorkflowStepStatus::Canceled => Ok(false),
+        }
+    }
+
+    async fn cancel_blocked_workflow_step_tx(
+        &mut self,
+        tx: &mut DbTx<'_>,
+        step_id: Uuid,
+    ) -> Result<bool> {
+        let canceled = sqlx::query_scalar!(
+            "UPDATE workflow_steps
                          SET status = 'CANCELED',
                              finished_at = COALESCE(finished_at, now()),
                              status_reason = $2,
@@ -262,25 +284,31 @@ async fn cancel_blocked_workflow_step_tx(
                          WHERE id = $1
                            AND status = 'BLOCKED'
                          RETURNING workflow_run_id",
-        step_id,
-        reason,
-        last_error_code,
-        last_error_message,
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context(
-            "cancel blocked workflow step during workflow cancel",
-            error,
+            step_id,
+            self.metadata.reason,
+            self.metadata.last_error_code,
+            self.metadata.last_error_message,
         )
-    })?;
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| {
+            Error::from_query_sqlx_with_context(
+                "cancel blocked workflow step during workflow cancel",
+                error,
+            )
+        })?;
 
-    if canceled.is_some() {
-        resolve_terminal_step_queue_tx(tx, step_id, WorkflowStepStatus::Canceled, touched_run_ids)
+        if canceled.is_some() {
+            resolve_terminal_step_queue_tx(
+                tx,
+                step_id,
+                WorkflowStepStatus::Canceled,
+                &mut self.touched_run_ids,
+            )
             .await?;
-        return Ok(true);
-    }
+            return Ok(true);
+        }
 
-    Ok(false)
+        Ok(false)
+    }
 }
