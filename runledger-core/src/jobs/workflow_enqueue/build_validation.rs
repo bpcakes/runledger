@@ -1,12 +1,33 @@
 use std::collections::BTreeSet;
 
+use super::super::identifiers::{JobType, StepKey};
+use super::super::status::JobStage;
 use super::dag_validation::validate_workflow_run_enqueue;
 use super::errors::WorkflowBuildError;
 use super::step_validation::{
     WorkflowStepShapeValidationInput, WorkflowStepValidationError, validate_step_dependency_shape,
     validate_step_shape,
 };
-use super::types::{WorkflowRunEnqueue, WorkflowStepEnqueue};
+use super::types::{
+    WorkflowRunEnqueue, WorkflowStepDependencySpec, WorkflowStepEnqueue, WorkflowStepExecutionKind,
+};
+
+/// Permissive builder input validated before it becomes a [`WorkflowStepEnqueue`].
+#[derive(Debug, Clone)]
+pub(super) struct WorkflowStepEnqueueInput<'a> {
+    pub(super) step_key: StepKey<'a>,
+    pub(super) execution_kind: WorkflowStepExecutionKind,
+    pub(super) job_type: Option<JobType<'a>>,
+    pub(super) organization_id: Option<uuid::Uuid>,
+    pub(super) payload: &'a serde_json::Value,
+    pub(super) priority: Option<i32>,
+    pub(super) max_attempts: Option<i32>,
+    pub(super) timeout_seconds: Option<i32>,
+    pub(super) stage: Option<JobStage>,
+    pub(super) allow_handler_continuation: bool,
+    pub(super) execution_resource_key: Option<&'a str>,
+    pub(super) dependencies: Vec<WorkflowStepDependencySpec<'a>>,
+}
 
 impl From<WorkflowStepValidationError> for WorkflowBuildError {
     fn from(error: WorkflowStepValidationError) -> Self {
@@ -55,8 +76,8 @@ impl From<WorkflowStepValidationError> for WorkflowBuildError {
     }
 }
 
-pub(super) fn validate_step_enqueue(
-    step: &WorkflowStepEnqueue<'_>,
+pub(super) fn validate_step_enqueue_input(
+    step: &WorkflowStepEnqueueInput<'_>,
 ) -> Result<(), WorkflowStepValidationError> {
     validate_step_shape(WorkflowStepShapeValidationInput {
         step_key: step.step_key.as_str(),
@@ -70,10 +91,35 @@ pub(super) fn validate_step_enqueue(
         execution_resource_key: step.execution_resource_key,
     })?;
 
+    validate_step_dependencies(step.step_key.as_str(), &step.dependencies)
+}
+
+pub(super) fn validate_step_enqueue(
+    step: &WorkflowStepEnqueue<'_>,
+) -> Result<(), WorkflowStepValidationError> {
+    validate_step_shape(WorkflowStepShapeValidationInput {
+        step_key: step.step_key.as_str(),
+        execution_kind: step.execution_kind(),
+        job_type: step.job_type().map(|job_type| job_type.as_str()),
+        priority: step.priority(),
+        max_attempts: step.max_attempts(),
+        timeout_seconds: step.timeout_seconds(),
+        stage: step.stage(),
+        allow_handler_continuation: step.allows_handler_continuation(),
+        execution_resource_key: step.execution_resource_key(),
+    })?;
+
+    validate_step_dependencies(step.step_key.as_str(), step.dependencies())
+}
+
+fn validate_step_dependencies<'dependency>(
+    step_key: &str,
+    dependencies: &[WorkflowStepDependencySpec<'dependency>],
+) -> Result<(), WorkflowStepValidationError> {
     let mut seen_dependencies: BTreeSet<&str> = BTreeSet::new();
-    for dependency in &step.dependencies {
+    for dependency in dependencies {
         validate_step_dependency_shape(
-            step.step_key.as_str(),
+            step_key,
             dependency.prerequisite_step_key.as_str(),
             &mut seen_dependencies,
         )?;

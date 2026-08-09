@@ -456,6 +456,77 @@ mod tests {
     }
 
     #[test]
+    fn canonical_snapshot_preserves_execution_variant_persistence_shape() {
+        let metadata = json!({"source": "execution-variant"});
+        let external_payload = json!({"approval": true});
+        let job_payload = json!({"send": true});
+        let external =
+            WorkflowStepEnqueueBuilder::new_external(StepKey::new("approval"), &external_payload)
+                .try_build()
+                .expect("build external step");
+        let job = WorkflowStepEnqueueBuilder::new(
+            StepKey::new("send"),
+            JobType::new("jobs.test.send"),
+            &job_payload,
+        )
+        .priority(8)
+        .max_attempts(4)
+        .timeout_seconds(45)
+        .stage(JobStage::Scheduled)
+        .allow_handler_continuation()
+        .execution_resource("provider-account:send")
+        .depends_on_success(&[StepKey::new("approval")])
+        .try_build()
+        .expect("build job step");
+        let workflow = WorkflowRunEnqueueBuilder::new(
+            WorkflowType::new("workflow.test.execution_variant"),
+            &metadata,
+        )
+        .step(job)
+        .step(external)
+        .try_build()
+        .expect("build workflow");
+
+        assert_eq!(
+            canonical_workflow_enqueue_request(&workflow).expect("encode canonical snapshot"),
+            json!({
+                "metadata": {"source": "execution-variant"},
+                "steps": [
+                    {
+                        "step_key": "approval",
+                        "execution_kind": "EXTERNAL",
+                        "job_type": null,
+                        "organization_id": null,
+                        "payload": {"approval": true},
+                        "priority": null,
+                        "max_attempts": null,
+                        "timeout_seconds": null,
+                        "stage": null,
+                        "dependencies": [],
+                    },
+                    {
+                        "step_key": "send",
+                        "execution_kind": "JOB",
+                        "job_type": "jobs.test.send",
+                        "organization_id": null,
+                        "payload": {"send": true},
+                        "priority": 8,
+                        "max_attempts": 4,
+                        "timeout_seconds": 45,
+                        "stage": "scheduled",
+                        "allow_handler_continuation": true,
+                        "execution_resource_key": "provider-account:send",
+                        "dependencies": [{
+                            "prerequisite_step_key": "approval",
+                            "release_mode": "ON_SUCCESS",
+                        }],
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
     fn append_idempotency_is_legacy_tolerant_while_recovery_is_strict() {
         let workflow_organization_id = Some(Uuid::now_v7());
         let legacy_snapshot = json!({

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use runledger_core::jobs::{
-    JobStage, WorkflowDependencyReleaseMode, WorkflowRunEnqueue, WorkflowStepEnqueue,
-    WorkflowStepExecutionKind,
+    JobStage, WorkflowDependencyReleaseMode, WorkflowJobStepExecution, WorkflowRunEnqueue,
+    WorkflowStepEnqueue, WorkflowStepExecution,
 };
 use sqlx::types::Uuid;
 
@@ -40,21 +40,19 @@ pub(in crate::jobs::workflows) fn workflow_step_effective_organization_id(
 pub(in crate::jobs::workflows) fn workflow_step_effective_stage(
     step: &WorkflowStepEnqueue<'_>,
 ) -> Option<&'static str> {
-    match step.execution_kind() {
-        WorkflowStepExecutionKind::Job => {
-            Some(step.stage().unwrap_or(JobStage::Queued).as_db_value())
+    match step.execution() {
+        WorkflowStepExecution::Job(execution) => {
+            Some(execution.stage().unwrap_or(JobStage::Queued).as_db_value())
         }
-        WorkflowStepExecutionKind::External => None,
+        WorkflowStepExecution::External => None,
     }
 }
 
 pub(in crate::jobs::workflows) fn workflow_step_defaults<'a>(
     defaults_by_job_type: &'a DefaultsByJobType,
-    step: &WorkflowStepEnqueue<'_>,
+    execution: WorkflowJobStepExecution<'_>,
 ) -> Result<&'a JobDefinitionDefaults> {
-    let job_type = step
-        .job_type()
-        .ok_or_else(|| workflow_internal_state_error("job workflow step missing job_type"))?;
+    let job_type = execution.job_type();
 
     defaults_by_job_type
         .get(job_type.as_str())
@@ -71,27 +69,25 @@ pub(in crate::jobs::workflows) async fn insert_workflow_step_record_tx(
     dependency_count_unsatisfied: i32,
 ) -> Result<Uuid> {
     let dependency_count_total = dependency_count_total(step)?;
-    let (job_type, priority, max_attempts, timeout_seconds, stage) = match step.execution_kind() {
-        WorkflowStepExecutionKind::Job => {
+    let (job_type, priority, max_attempts, timeout_seconds, stage) = match step.execution() {
+        WorkflowStepExecution::Job(execution) => {
             let defaults = defaults.ok_or_else(|| {
                 workflow_internal_state_error("missing job definition defaults for job step")
             })?;
-            let job_type = step.job_type().ok_or_else(|| {
-                workflow_internal_state_error("missing job_type for job workflow step")
-            })?;
 
             (
-                Some(job_type.as_str()),
-                Some(step.priority().unwrap_or(defaults.default_priority)),
-                Some(step.max_attempts().unwrap_or(defaults.max_attempts)),
+                Some(execution.job_type().as_str()),
+                Some(execution.priority().unwrap_or(defaults.default_priority)),
+                Some(execution.max_attempts().unwrap_or(defaults.max_attempts)),
                 Some(
-                    step.timeout_seconds()
+                    execution
+                        .timeout_seconds()
                         .unwrap_or(defaults.default_timeout_seconds),
                 ),
-                workflow_step_effective_stage(step),
+                Some(execution.stage().unwrap_or(JobStage::Queued).as_db_value()),
             )
         }
-        WorkflowStepExecutionKind::External => (None, None, None, None, None),
+        WorkflowStepExecution::External => (None, None, None, None, None),
     };
     let step_id: Uuid = sqlx::query_scalar!(
         "INSERT INTO workflow_steps (
@@ -162,11 +158,11 @@ pub(in crate::jobs::workflows) async fn insert_workflow_steps_tx(
 ) -> Result<WorkflowStepIdsByKey> {
     let mut step_id_by_key = WorkflowStepIdsByKey::new();
     for step in payload.steps() {
-        let defaults = match step.execution_kind() {
-            WorkflowStepExecutionKind::Job => {
-                Some(workflow_step_defaults(defaults_by_job_type, step)?)
+        let defaults = match step.execution() {
+            WorkflowStepExecution::Job(execution) => {
+                Some(workflow_step_defaults(defaults_by_job_type, execution)?)
             }
-            WorkflowStepExecutionKind::External => None,
+            WorkflowStepExecution::External => None,
         };
         let step_id = insert_workflow_step_record_tx(
             tx,
@@ -266,13 +262,11 @@ pub(in crate::jobs::workflows) async fn fetch_job_definition_defaults_tx(
 ) -> Result<DefaultsByJobType> {
     let job_types: Vec<String> = steps
         .iter()
-        .filter(|step| step.execution_kind() == WorkflowStepExecutionKind::Job)
-        .map(|step| {
-            step.job_type()
-                .map(|job_type| job_type.as_str().to_owned())
-                .ok_or_else(|| workflow_internal_state_error("job workflow step missing job_type"))
+        .filter_map(|step| match step.execution() {
+            WorkflowStepExecution::Job(execution) => Some(execution.job_type().as_str().to_owned()),
+            WorkflowStepExecution::External => None,
         })
-        .collect::<Result<BTreeSet<_>>>()?
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
 
@@ -304,19 +298,15 @@ pub(in crate::jobs::workflows) async fn fetch_job_definition_defaults_tx(
         })
         .collect();
 
-    if let Some(step) = steps
-        .iter()
-        .filter(|step| step.execution_kind() == WorkflowStepExecutionKind::Job)
-        .find(|step| {
-            step.job_type()
-                .is_none_or(|job_type| !defaults_by_job_type.contains_key(job_type.as_str()))
-        })
-    {
-        return Err(workflow_definition_not_available_error(
-            step.job_type()
-                .map(|job_type| job_type.as_str())
-                .unwrap_or("<missing-job-type>"),
-        ));
+    if let Some(job_type) = steps.iter().find_map(|step| match step.execution() {
+        WorkflowStepExecution::Job(execution)
+            if !defaults_by_job_type.contains_key(execution.job_type().as_str()) =>
+        {
+            Some(execution.job_type().as_str())
+        }
+        WorkflowStepExecution::Job(_) | WorkflowStepExecution::External => None,
+    }) {
+        return Err(workflow_definition_not_available_error(job_type));
     }
 
     Ok(defaults_by_job_type)

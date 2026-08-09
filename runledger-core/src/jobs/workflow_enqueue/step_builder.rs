@@ -2,11 +2,11 @@ use uuid::Uuid;
 
 use super::super::identifiers::{JobType, StepKey};
 use super::super::status::JobStage;
-use super::build_validation::validate_step_enqueue;
+use super::build_validation::{WorkflowStepEnqueueInput, validate_step_enqueue_input};
 use super::errors::WorkflowBuildError;
 use super::types::{
-    WorkflowDependencyReleaseMode, WorkflowStepDependencySpec, WorkflowStepEnqueue,
-    WorkflowStepExecutionKind,
+    WorkflowDependencyReleaseMode, WorkflowJobStepExecution, WorkflowStepDependencySpec,
+    WorkflowStepEnqueue, WorkflowStepExecution, WorkflowStepExecutionKind,
 };
 
 /// Builder for [`WorkflowStepEnqueue`].
@@ -423,7 +423,7 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
     /// assert_eq!(step.step_key(), StepKey::new("step.a"));
     /// ```
     pub fn try_build(self) -> Result<WorkflowStepEnqueue<'a>, WorkflowBuildError> {
-        let step = WorkflowStepEnqueue {
+        let input = WorkflowStepEnqueueInput {
             step_key: self.step_key,
             execution_kind: self.execution_kind,
             job_type: self.job_type,
@@ -437,7 +437,48 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
             execution_resource_key: self.execution_resource_key,
             dependencies: self.dependencies,
         };
-        validate_step_enqueue(&step)?;
-        Ok(step)
+        validate_step_enqueue_input(&input)?;
+
+        let WorkflowStepEnqueueInput {
+            step_key,
+            execution_kind,
+            job_type,
+            organization_id,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            stage,
+            allow_handler_continuation,
+            execution_resource_key,
+            dependencies,
+        } = input;
+        let execution = match execution_kind {
+            WorkflowStepExecutionKind::Job => {
+                let Some(job_type) = job_type else {
+                    return Err(WorkflowBuildError::BlankStepJobType {
+                        step_key: step_key.as_str().to_owned(),
+                    });
+                };
+                WorkflowStepExecution::Job(WorkflowJobStepExecution::new(
+                    job_type,
+                    priority,
+                    max_attempts,
+                    timeout_seconds,
+                    stage,
+                    allow_handler_continuation,
+                    execution_resource_key,
+                ))
+            }
+            WorkflowStepExecutionKind::External => WorkflowStepExecution::External,
+        };
+
+        Ok(WorkflowStepEnqueue {
+            step_key,
+            execution,
+            organization_id,
+            payload,
+            dependencies,
+        })
     }
 }

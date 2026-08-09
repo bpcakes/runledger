@@ -28,7 +28,8 @@ pub use status::{
 pub use workflow_enqueue::{
     WorkflowBuildError, WorkflowDagBuilder, WorkflowDagDependencyValidationInput,
     WorkflowDagStepValidationInput, WorkflowDagValidationError, WorkflowDependencyReleaseMode,
-    WorkflowRunEnqueue, WorkflowRunEnqueueBuilder, WorkflowStepDependencySpec, WorkflowStepEnqueue,
-    WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind, validate_workflow_dag,
+    WorkflowJobStepExecution, WorkflowRunEnqueue, WorkflowRunEnqueueBuilder,
+    WorkflowStepDependencySpec, WorkflowStepEnqueue, WorkflowStepEnqueueBuilder,
+    WorkflowStepExecution, WorkflowStepExecutionKind, validate_workflow_dag,
     validate_workflow_run_enqueue, validate_workflow_step_append,
 };

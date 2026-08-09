@@ -28,8 +28,9 @@ pub use errors::WorkflowBuildError;
 pub use run_builder::WorkflowRunEnqueueBuilder;
 pub use step_builder::WorkflowStepEnqueueBuilder;
 pub use types::{
-    WorkflowDependencyReleaseMode, WorkflowRunEnqueue, WorkflowStepDependencySpec,
-    WorkflowStepEnqueue, WorkflowStepExecutionKind,
+    WorkflowDependencyReleaseMode, WorkflowJobStepExecution, WorkflowRunEnqueue,
+    WorkflowStepDependencySpec, WorkflowStepEnqueue, WorkflowStepExecution,
+    WorkflowStepExecutionKind,
 };
 
 #[cfg(test)]

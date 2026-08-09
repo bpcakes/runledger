@@ -2,7 +2,8 @@ use uuid::Uuid;
 
 use super::super::{
     WorkflowBuildError, WorkflowDagBuilder, WorkflowDependencyReleaseMode,
-    WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind,
+    WorkflowRunEnqueueBuilder, WorkflowStepDependencySpec, WorkflowStepEnqueueBuilder,
+    WorkflowStepExecution, WorkflowStepExecutionKind,
 };
 use crate::jobs::{JobType, StepKey, WorkflowType};
 
@@ -115,6 +116,111 @@ fn workflow_step_enqueue_builder_defaults_stage_to_queued() {
     assert_eq!(step.job_type(), Some(JobType::new("jobs.test.a")));
     assert!(!step.allows_handler_continuation());
     assert_eq!(step.execution_resource_key(), None);
+}
+
+#[test]
+fn workflow_step_enqueue_builder_exposes_validated_execution_variants() {
+    let payload = serde_json::json!({"test": true});
+    let job = WorkflowStepEnqueueBuilder::new(
+        StepKey::new("step.job"),
+        JobType::new("jobs.test.job"),
+        &payload,
+    )
+    .priority(10)
+    .max_attempts(3)
+    .timeout_seconds(30)
+    .stage(crate::jobs::JobStage::Scheduled)
+    .allow_handler_continuation()
+    .execution_resource("provider-account:job")
+    .try_build()
+    .expect("job step should build");
+
+    match job.execution() {
+        WorkflowStepExecution::Job(execution) => {
+            assert_eq!(execution.job_type(), JobType::new("jobs.test.job"));
+            assert_eq!(execution.priority(), Some(10));
+            assert_eq!(execution.max_attempts(), Some(3));
+            assert_eq!(execution.timeout_seconds(), Some(30));
+            assert_eq!(execution.stage(), Some(crate::jobs::JobStage::Scheduled));
+            assert!(execution.allows_handler_continuation());
+            assert_eq!(
+                execution.execution_resource_key(),
+                Some("provider-account:job")
+            );
+        }
+        WorkflowStepExecution::External => panic!("job builder must produce a job execution"),
+    }
+
+    let external =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("step.external"), &payload)
+            .try_build()
+            .expect("external step should build");
+    assert!(matches!(
+        external.execution(),
+        WorkflowStepExecution::External
+    ));
+    assert_eq!(external.job_type(), None);
+    assert_eq!(external.priority(), None);
+    assert_eq!(external.max_attempts(), None);
+    assert_eq!(external.timeout_seconds(), None);
+    assert_eq!(external.stage(), None);
+    assert!(!external.allows_handler_continuation());
+    assert_eq!(external.execution_resource_key(), None);
+}
+
+#[test]
+fn workflow_step_enqueue_builder_preserves_raw_validation_precedence() {
+    let payload = serde_json::json!({"test": true});
+
+    assert_eq!(
+        WorkflowStepEnqueueBuilder::new(StepKey::new(" "), JobType::new(" "), &payload,)
+            .max_attempts(0)
+            .try_build()
+            .expect_err("blank step key must win over other invalid job fields"),
+        WorkflowBuildError::BlankStepKey { step_index: None }
+    );
+    assert_eq!(
+        WorkflowStepEnqueueBuilder::new(StepKey::new("step.invalid"), JobType::new(" "), &payload,)
+            .max_attempts(0)
+            .try_build()
+            .expect_err("blank job type must win over an invalid retry limit"),
+        WorkflowBuildError::BlankStepJobType {
+            step_key: "step.invalid".to_owned(),
+        }
+    );
+    assert_eq!(
+        WorkflowStepEnqueueBuilder::new(
+            StepKey::new("step.dependency"),
+            JobType::new("jobs.test.dependency"),
+            &payload,
+        )
+        .dependency(WorkflowStepDependencySpec {
+            prerequisite_step_key: StepKey::new(" "),
+            release_mode: None,
+        })
+        .try_build()
+        .expect_err("invalid dependencies must fail before a step is constructed"),
+        WorkflowBuildError::BlankDependencyStepKey {
+            step_key: "step.dependency".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn workflow_step_enqueue_debug_preserves_legacy_field_shape() {
+    let payload = serde_json::json!({"test": true});
+    let step = WorkflowStepEnqueueBuilder::new(
+        StepKey::new("step.debug"),
+        JobType::new("jobs.test.debug"),
+        &payload,
+    )
+    .try_build()
+    .expect("step should build");
+
+    assert_eq!(
+        format!("{step:?}"),
+        "WorkflowStepEnqueue { step_key: StepKey(\"step.debug\"), execution_kind: Job, job_type: Some(JobType(\"jobs.test.debug\")), organization_id: None, payload: Object {\"test\": Bool(true)}, priority: None, max_attempts: None, timeout_seconds: None, stage: Some(Queued), allow_handler_continuation: false, execution_resource_key: None, dependencies: [] }"
+    );
 }
 
 #[test]

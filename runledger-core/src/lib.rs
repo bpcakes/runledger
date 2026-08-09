@@ -97,10 +97,11 @@ pub mod prelude {
         JobHandler, JobHandlerRegistry, JobRetryTiming, JobStage, JobStatus, JobType, JobTypeName,
         StepKey, StepKeyName, WorkflowBuildError, WorkflowDagBuilder,
         WorkflowDagDependencyValidationInput, WorkflowDagStepValidationInput,
-        WorkflowDagValidationError, WorkflowDependencyReleaseMode, WorkflowRunEnqueue,
-        WorkflowRunEnqueueBuilder, WorkflowRunStatus, WorkflowStepDependencySpec,
-        WorkflowStepEnqueue, WorkflowStepEnqueueBuilder, WorkflowStepExecutionKind,
-        WorkflowStepStatus, WorkflowType, WorkflowTypeName, validate_workflow_dag,
-        validate_workflow_run_enqueue, validate_workflow_step_append,
+        WorkflowDagValidationError, WorkflowDependencyReleaseMode, WorkflowJobStepExecution,
+        WorkflowRunEnqueue, WorkflowRunEnqueueBuilder, WorkflowRunStatus,
+        WorkflowStepDependencySpec, WorkflowStepEnqueue, WorkflowStepEnqueueBuilder,
+        WorkflowStepExecution, WorkflowStepExecutionKind, WorkflowStepStatus, WorkflowType,
+        WorkflowTypeName, validate_workflow_dag, validate_workflow_run_enqueue,
+        validate_workflow_step_append,
     };
 }

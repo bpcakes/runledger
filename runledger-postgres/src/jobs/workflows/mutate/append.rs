@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use runledger_core::jobs::{
     StepKey, WorkflowDependencyReleaseMode, WorkflowRunStatus, WorkflowStepEnqueue,
-    WorkflowStepExecutionKind, WorkflowStepStatus, validate_workflow_step_append,
+    WorkflowStepExecution, WorkflowStepExecutionKind, WorkflowStepStatus,
+    validate_workflow_step_append,
 };
 use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
@@ -210,11 +211,11 @@ async fn insert_appended_step_records_tx(
     let mut appended_step_ids = Vec::with_capacity(steps.len());
 
     for step in steps {
-        let defaults = match step.execution_kind() {
-            WorkflowStepExecutionKind::Job => {
-                Some(workflow_step_defaults(&defaults_by_job_type, step)?)
+        let defaults = match step.execution() {
+            WorkflowStepExecution::Job(execution) => {
+                Some(workflow_step_defaults(&defaults_by_job_type, execution)?)
             }
-            WorkflowStepExecutionKind::External => None,
+            WorkflowStepExecution::External => None,
         };
         let (dependency_count_pending, dependency_count_unsatisfied) =
             initial_dependency_counters(&existing_statuses_by_key, &new_step_keys, step)?;

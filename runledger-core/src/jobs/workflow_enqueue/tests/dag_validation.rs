@@ -7,8 +7,8 @@ use crate::jobs::{
 use super::super::{
     WorkflowDagDependencyValidationInput, WorkflowDagStepValidationInput,
     WorkflowDagValidationError, WorkflowRunEnqueue, WorkflowStepDependencySpec,
-    WorkflowStepEnqueue, validate_workflow_dag, validate_workflow_run_enqueue,
-    validate_workflow_step_append,
+    WorkflowStepEnqueue, WorkflowStepEnqueueBuilder, validate_workflow_dag,
+    validate_workflow_run_enqueue, validate_workflow_step_append,
 };
 
 fn dag_step<'a>(
@@ -33,6 +33,18 @@ fn dag_step<'a>(
         dependencies,
     )
     .stage(stage)
+}
+
+fn job_step<'a>(
+    step_key: &'a str,
+    job_type: &'a str,
+    payload: &'a serde_json::Value,
+    dependencies: Vec<WorkflowStepDependencySpec<'a>>,
+) -> WorkflowStepEnqueue<'a> {
+    WorkflowStepEnqueueBuilder::new(StepKey::new(step_key), JobType::new(job_type), payload)
+        .set_dependencies(dependencies)
+        .try_build()
+        .expect("test step should be valid")
 }
 
 #[test]
@@ -289,23 +301,7 @@ fn validate_workflow_run_enqueue_returns_dag_errors() {
         idempotency_key: None,
         active_key: None,
         result_step_key: None,
-        steps: vec![WorkflowStepEnqueue {
-            step_key: StepKey::new("a"),
-            execution_kind: WorkflowStepExecutionKind::Job,
-            job_type: Some(JobType::new("jobs.test.a")),
-            organization_id: None,
-            payload: &payload,
-            priority: None,
-            max_attempts: None,
-            timeout_seconds: None,
-            stage: Some(JobStage::Queued),
-            allow_handler_continuation: false,
-            execution_resource_key: None,
-            dependencies: vec![WorkflowStepDependencySpec {
-                prerequisite_step_key: StepKey::new("a"),
-                release_mode: None,
-            }],
-        }],
+        steps: vec![job_step("a", "jobs.test.a", &payload, Vec::new())],
     };
 
     let result = validate_workflow_run_enqueue(&enqueue);
@@ -324,20 +320,7 @@ fn validate_workflow_run_enqueue_rejects_blank_result_step_key() {
         idempotency_key: None,
         active_key: None,
         result_step_key: Some(StepKey::new(" ")),
-        steps: vec![WorkflowStepEnqueue {
-            step_key: StepKey::new("a"),
-            execution_kind: WorkflowStepExecutionKind::Job,
-            job_type: Some(JobType::new("jobs.test.a")),
-            organization_id: None,
-            payload: &payload,
-            priority: None,
-            max_attempts: None,
-            timeout_seconds: None,
-            stage: Some(JobStage::Queued),
-            allow_handler_continuation: false,
-            execution_resource_key: None,
-            dependencies: Vec::new(),
-        }],
+        steps: vec![job_step("a", "jobs.test.a", &payload, Vec::new())],
     };
 
     let result = validate_workflow_run_enqueue(&enqueue);
@@ -356,20 +339,7 @@ fn validate_workflow_run_enqueue_rejects_unknown_result_step_key() {
         idempotency_key: None,
         active_key: None,
         result_step_key: Some(StepKey::new("missing")),
-        steps: vec![WorkflowStepEnqueue {
-            step_key: StepKey::new("a"),
-            execution_kind: WorkflowStepExecutionKind::Job,
-            job_type: Some(JobType::new("jobs.test.a")),
-            organization_id: None,
-            payload: &payload,
-            priority: None,
-            max_attempts: None,
-            timeout_seconds: None,
-            stage: Some(JobStage::Queued),
-            allow_handler_continuation: false,
-            execution_resource_key: None,
-            dependencies: Vec::new(),
-        }],
+        steps: vec![job_step("a", "jobs.test.a", &payload, Vec::new())],
     };
 
     let result = validate_workflow_run_enqueue(&enqueue);
@@ -383,50 +353,10 @@ fn validate_workflow_run_enqueue_rejects_unknown_result_step_key() {
 }
 
 #[test]
-fn validate_workflow_step_append_rejects_blank_new_step_key() {
-    let existing_step_keys = BTreeSet::new();
-    let payload = serde_json::json!({"ok": true});
-    let new_steps = vec![WorkflowStepEnqueue {
-        step_key: StepKey::new(" "),
-        execution_kind: WorkflowStepExecutionKind::Job,
-        job_type: Some(JobType::new("jobs.test.a")),
-        organization_id: None,
-        payload: &payload,
-        priority: None,
-        max_attempts: None,
-        timeout_seconds: None,
-        stage: Some(JobStage::Queued),
-        allow_handler_continuation: false,
-        execution_resource_key: None,
-        dependencies: Vec::new(),
-    }];
-
-    let result = validate_workflow_step_append(&existing_step_keys, &new_steps);
-
-    assert_eq!(
-        result,
-        Err(WorkflowDagValidationError::BlankStepKey { step_index: 0 })
-    );
-}
-
-#[test]
 fn validate_workflow_step_append_rejects_duplicate_existing_step_key() {
     let existing_step_keys = BTreeSet::from([StepKeyName::new("step.a").expect("valid step key")]);
     let payload = serde_json::json!({"ok": true});
-    let new_steps = vec![WorkflowStepEnqueue {
-        step_key: StepKey::new("step.a"),
-        execution_kind: WorkflowStepExecutionKind::Job,
-        job_type: Some(JobType::new("jobs.test.a")),
-        organization_id: None,
-        payload: &payload,
-        priority: None,
-        max_attempts: None,
-        timeout_seconds: None,
-        stage: Some(JobStage::Queued),
-        allow_handler_continuation: false,
-        execution_resource_key: None,
-        dependencies: Vec::new(),
-    }];
+    let new_steps = vec![job_step("step.a", "jobs.test.a", &payload, Vec::new())];
 
     let result = validate_workflow_step_append(&existing_step_keys, &new_steps);
 
@@ -439,48 +369,19 @@ fn validate_workflow_step_append_rejects_duplicate_existing_step_key() {
 }
 
 #[test]
-fn validate_workflow_step_append_checks_each_step_before_duplicate_step_keys() {
+fn validate_workflow_step_append_rejects_duplicate_step_keys() {
     let existing_step_keys = BTreeSet::new();
     let payload = serde_json::json!({"ok": true});
     let new_steps = vec![
-        WorkflowStepEnqueue {
-            step_key: StepKey::new("duplicate"),
-            execution_kind: WorkflowStepExecutionKind::Job,
-            job_type: Some(JobType::new("jobs.test.a")),
-            organization_id: None,
-            payload: &payload,
-            priority: None,
-            max_attempts: None,
-            timeout_seconds: None,
-            stage: Some(JobStage::Queued),
-            allow_handler_continuation: false,
-            execution_resource_key: None,
-            dependencies: vec![WorkflowStepDependencySpec {
-                prerequisite_step_key: StepKey::new(" "),
-                release_mode: None,
-            }],
-        },
-        WorkflowStepEnqueue {
-            step_key: StepKey::new("duplicate"),
-            execution_kind: WorkflowStepExecutionKind::Job,
-            job_type: Some(JobType::new("jobs.test.b")),
-            organization_id: None,
-            payload: &payload,
-            priority: None,
-            max_attempts: None,
-            timeout_seconds: None,
-            stage: Some(JobStage::Queued),
-            allow_handler_continuation: false,
-            execution_resource_key: None,
-            dependencies: Vec::new(),
-        },
+        job_step("duplicate", "jobs.test.a", &payload, Vec::new()),
+        job_step("duplicate", "jobs.test.b", &payload, Vec::new()),
     ];
 
     let result = validate_workflow_step_append(&existing_step_keys, &new_steps);
 
     assert_eq!(
         result,
-        Err(WorkflowDagValidationError::BlankDependencyStepKey {
+        Err(WorkflowDagValidationError::DuplicateStepKey {
             step_key: "duplicate".to_owned(),
         })
     );
@@ -491,40 +392,24 @@ fn validate_workflow_step_append_rejects_cycles_within_new_steps() {
     let existing_step_keys = BTreeSet::new();
     let payload = serde_json::json!({"ok": true});
     let new_steps = vec![
-        WorkflowStepEnqueue {
-            step_key: StepKey::new("a"),
-            execution_kind: WorkflowStepExecutionKind::Job,
-            job_type: Some(JobType::new("jobs.test.a")),
-            organization_id: None,
-            payload: &payload,
-            priority: None,
-            max_attempts: None,
-            timeout_seconds: None,
-            stage: Some(JobStage::Queued),
-            allow_handler_continuation: false,
-            execution_resource_key: None,
-            dependencies: vec![WorkflowStepDependencySpec {
+        job_step(
+            "a",
+            "jobs.test.a",
+            &payload,
+            vec![WorkflowStepDependencySpec {
                 prerequisite_step_key: StepKey::new("b"),
                 release_mode: None,
             }],
-        },
-        WorkflowStepEnqueue {
-            step_key: StepKey::new("b"),
-            execution_kind: WorkflowStepExecutionKind::Job,
-            job_type: Some(JobType::new("jobs.test.b")),
-            organization_id: None,
-            payload: &payload,
-            priority: None,
-            max_attempts: None,
-            timeout_seconds: None,
-            stage: Some(JobStage::Queued),
-            allow_handler_continuation: false,
-            execution_resource_key: None,
-            dependencies: vec![WorkflowStepDependencySpec {
+        ),
+        job_step(
+            "b",
+            "jobs.test.b",
+            &payload,
+            vec![WorkflowStepDependencySpec {
                 prerequisite_step_key: StepKey::new("a"),
                 release_mode: None,
             }],
-        },
+        ),
     ];
 
     let result = validate_workflow_step_append(&existing_step_keys, &new_steps);
