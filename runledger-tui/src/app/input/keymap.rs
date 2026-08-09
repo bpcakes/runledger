@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::super::{App, JobDetailPane, Screen, TopScreen};
+use super::super::{ActiveInput, App, FilterTarget, JobDetailPane, Screen, TopScreen};
 
 impl App {
     pub fn update_payload_visible_rows(&mut self, visible_rows: usize) {
@@ -15,17 +15,8 @@ impl App {
 
     /// Returns true when a data refresh should be scheduled.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if self.show_org_input {
-            return self.handle_org_input_key(key);
-        }
-        if self.show_filter_input {
-            return self.handle_filter_input_key(key);
-        }
-        if self.show_search_input {
-            return self.handle_search_input_key(key);
-        }
-        if self.show_command_input {
-            return self.handle_command_input_key(key);
+        if !matches!(self.active_input(), ActiveInput::None) {
+            return self.handle_active_input_key(key);
         }
         if self.show_help && key.code != KeyCode::Char('?') && key.code != KeyCode::Esc {
             return false;
@@ -58,37 +49,45 @@ impl App {
                 });
             }
             KeyCode::Char('o') => {
-                self.show_org_input = true;
-                self.org_input = self
-                    .scope
-                    .organization_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_default();
+                self.active_input = ActiveInput::Organization {
+                    text: self
+                        .scope
+                        .organization_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_default(),
+                };
             }
             KeyCode::Char('/') => {
-                self.show_search_input = true;
-                self.search_input = self.table_search.clone().unwrap_or_default();
+                self.active_input = ActiveInput::Search {
+                    text: self.table_search.clone().unwrap_or_default(),
+                };
             }
             KeyCode::Char('t') => {
-                self.show_filter_input = true;
-                self.filter_input_workflow = matches!(
+                let target = if matches!(
                     self.screen,
                     Screen::Workflows | Screen::WorkflowDetail { .. }
-                );
-                self.filter_input = if self.filter_input_workflow {
+                ) {
+                    FilterTarget::Workflow
+                } else {
+                    FilterTarget::Job
+                };
+                let text = if target == FilterTarget::Workflow {
                     self.workflow_type_filter.clone().unwrap_or_default()
                 } else {
                     self.job_type_filter.clone().unwrap_or_default()
                 };
+                self.active_input = ActiveInput::Filter { target, text };
             }
             KeyCode::Char('w') if matches!(self.screen, Screen::Workflows) => {
-                self.show_filter_input = true;
-                self.filter_input_workflow = true;
-                self.filter_input = self.workflow_type_filter.clone().unwrap_or_default();
+                self.active_input = ActiveInput::Filter {
+                    target: FilterTarget::Workflow,
+                    text: self.workflow_type_filter.clone().unwrap_or_default(),
+                };
             }
             KeyCode::Char(':') => {
-                self.show_command_input = true;
-                self.command_input.clear();
+                self.active_input = ActiveInput::Command {
+                    text: String::new(),
+                };
             }
             KeyCode::Char('c') => {
                 refresh = self.clear_context_filters();

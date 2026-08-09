@@ -69,11 +69,11 @@ pub async fn run(pool: DbPool, config: Config) -> std::io::Result<()> {
             ));
         }
 
-        let block_fetch = {
+        let fetch_allowed = {
             let guard = app.lock().await;
-            !guard.show_org_input && !guard.show_filter_input
+            !guard.blocks_fetch()
         };
-        if need_fetch && !in_flight.load(Ordering::Acquire) && block_fetch {
+        if need_fetch && !in_flight.load(Ordering::Acquire) && fetch_allowed {
             let req = {
                 let guard = app.lock().await;
                 FetchRequest {

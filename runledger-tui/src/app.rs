@@ -42,6 +42,27 @@ pub enum JobDetailPane {
     Payload,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilterTarget {
+    Job,
+    Workflow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActiveInput {
+    None,
+    Organization { text: String },
+    Filter { target: FilterTarget, text: String },
+    Search { text: String },
+    Command { text: String },
+}
+
+impl ActiveInput {
+    fn blocks_fetch(&self) -> bool {
+        matches!(self, Self::Organization { .. } | Self::Filter { .. })
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ViewState {
     pub list_selection: usize,
@@ -81,16 +102,8 @@ pub struct App {
     pub workflow_type_filter: Option<String>,
     pub job_detail_pane: JobDetailPane,
     pub show_help: bool,
-    pub show_org_input: bool,
-    pub org_input: String,
-    pub show_filter_input: bool,
-    pub filter_input: String,
-    pub filter_input_workflow: bool,
-    pub show_search_input: bool,
-    pub search_input: String,
+    active_input: ActiveInput,
     pub table_search: Option<String>,
-    pub show_command_input: bool,
-    pub command_input: String,
     pub refresh_paused: bool,
     pub dashboard: Option<DashboardData>,
     pub jobs: Option<JobsData>,
@@ -128,16 +141,8 @@ impl App {
             workflow_type_filter: None,
             job_detail_pane: JobDetailPane::Summary,
             show_help: false,
-            show_org_input: false,
-            org_input: String::new(),
-            show_filter_input: false,
-            filter_input: String::new(),
-            filter_input_workflow: false,
-            show_search_input: false,
-            search_input: String::new(),
+            active_input: ActiveInput::None,
             table_search: None,
-            show_command_input: false,
-            command_input: String::new(),
             refresh_paused: false,
             dashboard: None,
             jobs: None,
@@ -157,6 +162,14 @@ impl App {
 
     fn bump_fetch_generation(&self) {
         self.fetch_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn active_input(&self) -> &ActiveInput {
+        &self.active_input
+    }
+
+    pub(crate) fn blocks_fetch(&self) -> bool {
+        self.active_input.blocks_fetch()
     }
 
     pub fn top_screen_index(&self) -> usize {
@@ -773,6 +786,132 @@ mod tests {
             steps_total: 1,
             dependencies_total: 0,
         }
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn active_input_representation_keeps_modal_modes_mutually_exclusive() {
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+
+        assert_eq!(app.active_input(), &ActiveInput::None);
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('o')));
+        assert_eq!(
+            app.active_input(),
+            &ActiveInput::Organization {
+                text: String::new()
+            }
+        );
+
+        app.handle_key(key(crossterm::event::KeyCode::Char(':')));
+        assert_eq!(
+            app.active_input(),
+            &ActiveInput::Organization {
+                text: ":".to_owned()
+            },
+            "an active organization input consumes command keys instead of opening a second input"
+        );
+
+        app.handle_key(key(crossterm::event::KeyCode::Esc));
+        app.handle_key(key(crossterm::event::KeyCode::Char(':')));
+        assert_eq!(
+            app.active_input(),
+            &ActiveInput::Command {
+                text: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn only_organization_and_filter_inputs_block_fetches() {
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+
+        assert!(!app.blocks_fetch());
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('o')));
+        assert!(app.blocks_fetch());
+        app.handle_key(key(crossterm::event::KeyCode::Esc));
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('t')));
+        assert!(app.blocks_fetch());
+        app.handle_key(key(crossterm::event::KeyCode::Esc));
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('/')));
+        assert!(!app.blocks_fetch());
+        app.handle_key(key(crossterm::event::KeyCode::Esc));
+
+        app.handle_key(key(crossterm::event::KeyCode::Char(':')));
+        assert!(!app.blocks_fetch());
+    }
+
+    #[test]
+    fn type_filter_input_selects_the_target_and_invalidates_its_cache() {
+        let fetch_generation = Arc::new(AtomicU64::new(0));
+        let mut app = App::new(test_config(), fetch_generation.clone());
+        app.jobs = Some(JobsData { jobs: Vec::new() });
+        app.definitions = Some(DefinitionsData {
+            definitions: Vec::new(),
+        });
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('t')));
+        assert_eq!(
+            app.active_input(),
+            &ActiveInput::Filter {
+                target: FilterTarget::Job,
+                text: String::new()
+            }
+        );
+        app.handle_key(key(crossterm::event::KeyCode::Char('j')));
+        assert!(app.handle_key(key(crossterm::event::KeyCode::Enter)));
+        assert_eq!(app.job_type_filter.as_deref(), Some("j"));
+        assert!(app.jobs.is_none());
+        assert!(app.definitions.is_none());
+        assert_eq!(fetch_generation.load(Ordering::Acquire), 1);
+
+        app.screen = Screen::Workflows;
+        app.workflows = Some(WorkflowsData { runs: Vec::new() });
+        app.handle_key(key(crossterm::event::KeyCode::Char('t')));
+        assert_eq!(
+            app.active_input(),
+            &ActiveInput::Filter {
+                target: FilterTarget::Workflow,
+                text: String::new()
+            }
+        );
+        app.handle_key(key(crossterm::event::KeyCode::Char('w')));
+        assert!(app.handle_key(key(crossterm::event::KeyCode::Enter)));
+        assert_eq!(app.workflow_type_filter.as_deref(), Some("w"));
+        assert!(app.workflows.is_none());
+        assert_eq!(fetch_generation.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn search_input_edits_without_scheduling_a_fetch_and_resets_selection() {
+        let fetch_generation = Arc::new(AtomicU64::new(0));
+        let mut app = App::new(test_config(), fetch_generation.clone());
+        app.screen = Screen::Queue;
+        app.jobs = Some(JobsData { jobs: Vec::new() });
+        app.table_search = Some("saved".to_owned());
+        app.list_selection = 9;
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('/')));
+        assert_eq!(
+            app.active_input(),
+            &ActiveInput::Search {
+                text: "saved".to_owned()
+            }
+        );
+        app.handle_key(key(crossterm::event::KeyCode::Backspace));
+        app.handle_key(key(crossterm::event::KeyCode::Char('d')));
+        assert!(!app.handle_key(key(crossterm::event::KeyCode::Enter)));
+
+        assert_eq!(app.table_search.as_deref(), Some("saved"));
+        assert_eq!(app.list_selection, 0);
+        assert_eq!(fetch_generation.load(Ordering::Acquire), 0);
+        assert_eq!(app.active_input(), &ActiveInput::None);
     }
 
     #[test]

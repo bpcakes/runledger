@@ -9,7 +9,7 @@ mod workflows;
 use ratatui::Frame;
 use ratatui::layout::Constraint;
 
-use crate::app::App;
+use crate::app::{ActiveInput, App, FilterTarget};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_help {
@@ -18,38 +18,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    if app.show_org_input {
+    if !matches!(app.active_input(), ActiveInput::None) {
         render::draw_top_chrome_underlay(f, app);
-        draw_org_input(f, app);
-        return;
-    }
-
-    if app.show_filter_input {
-        render::draw_top_chrome_underlay(f, app);
-        draw_filter_input(f, app);
-        return;
-    }
-
-    if app.show_search_input {
-        render::draw_top_chrome_underlay(f, app);
-        draw_search_input(f, app);
-        return;
-    }
-
-    if app.show_command_input {
-        render::draw_top_chrome_underlay(f, app);
-        draw_command_input(f, app);
+        match app.active_input() {
+            ActiveInput::None => {}
+            ActiveInput::Organization { text } => draw_org_input(f, text),
+            ActiveInput::Filter { target, text } => draw_filter_input(f, *target, text),
+            ActiveInput::Search { text } => draw_search_input(f, text),
+            ActiveInput::Command { text } => draw_command_input(f, text),
+        }
         return;
     }
 
     render::draw_top_chrome(f, app);
 }
 
-fn draw_org_input(f: &mut Frame, app: &App) {
+fn draw_org_input(f: &mut Frame, input: &str) {
     let area = centered_popup(f.area(), 60, 20);
     f.render_widget(ratatui::widgets::Clear, area);
     let hint = "Organization UUID (empty = global). Enter confirm, Esc cancel.";
-    let text = format!("{hint}\n\n> {}", app.org_input);
+    let text = format!("{hint}\n\n> {input}");
     let block = ratatui::widgets::Paragraph::new(text).block(
         ratatui::widgets::Block::default()
             .title(" Organization scope ")
@@ -58,15 +46,14 @@ fn draw_org_input(f: &mut Frame, app: &App) {
     f.render_widget(block, area);
 }
 
-fn draw_filter_input(f: &mut Frame, app: &App) {
+fn draw_filter_input(f: &mut Frame, target: FilterTarget, input: &str) {
     let area = centered_popup(f.area(), 60, 20);
     f.render_widget(ratatui::widgets::Clear, area);
-    let label = if app.filter_input_workflow {
-        "workflow_type substring (empty = any)"
-    } else {
-        "job_type substring (empty = any)"
+    let label = match target {
+        FilterTarget::Job => "job_type substring (empty = any)",
+        FilterTarget::Workflow => "workflow_type substring (empty = any)",
     };
-    let text = format!("{label}\n\n> {}", app.filter_input);
+    let text = format!("{label}\n\n> {input}");
     let block = ratatui::widgets::Paragraph::new(text).block(
         ratatui::widgets::Block::default()
             .title(" Filter ")
@@ -75,13 +62,10 @@ fn draw_filter_input(f: &mut Frame, app: &App) {
     f.render_widget(block, area);
 }
 
-fn draw_search_input(f: &mut Frame, app: &App) {
+fn draw_search_input(f: &mut Frame, input: &str) {
     let area = centered_popup(f.area(), 60, 20);
     f.render_widget(ratatui::widgets::Clear, area);
-    let text = format!(
-        "Search current table (empty = clear)\n\n/ {}",
-        app.search_input
-    );
+    let text = format!("Search current table (empty = clear)\n\n/ {input}");
     let block = ratatui::widgets::Paragraph::new(text).block(
         ratatui::widgets::Block::default()
             .title(" Search ")
@@ -90,13 +74,11 @@ fn draw_search_input(f: &mut Frame, app: &App) {
     f.render_widget(block, area);
 }
 
-fn draw_command_input(f: &mut Frame, app: &App) {
+fn draw_command_input(f: &mut Frame, input: &str) {
     let area = centered_popup(f.area(), 70, 20);
     f.render_widget(ratatui::widgets::Clear, area);
-    let text = format!(
-        "Commands: filter status dlq | scope global | refresh 5s | copy id\n\n: {}",
-        app.command_input
-    );
+    let text =
+        format!("Commands: filter status dlq | scope global | refresh 5s | copy id\n\n: {input}");
     let block = ratatui::widgets::Paragraph::new(text).block(
         ratatui::widgets::Block::default()
             .title(" Command ")
