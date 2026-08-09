@@ -56,7 +56,7 @@ handlers, process model, and admin surface.
   - [Active workflow keys](#active-workflow-keys)
   - [Durable execution resources](#durable-execution-resources)
   - [Workflow recovery](#workflow-recovery)
-  - [Upgrade map for releases 0.6 through 0.8](#upgrade-map-for-releases-06-through-08)
+  - [Upgrade map for releases 0.6 through 0.9](#upgrade-map-for-releases-06-through-09)
   - [0.7 to 0.8 activation and rollback](#07-to-08-activation-and-rollback)
   - [Schedules](#schedules)
   - [Job definition catalog](#job-definition-catalog)
@@ -92,12 +92,12 @@ Add the libraries to your service:
 
 ```toml
 [dependencies]
-runledger-core = "0.8"
-runledger-postgres = "0.8"
-runledger-runtime = "0.8"
+runledger-core = "0.9"
+runledger-postgres = "0.9"
+runledger-runtime = "0.9"
 
 [dev-dependencies]
-runledger-test-support = "0.8"
+runledger-test-support = "0.9"
 ```
 
 The published crates require **Rust 1.88+** and **PostgreSQL 18+**. Older
@@ -638,21 +638,18 @@ the function neither commits nor rolls back it. A source must be terminal.
 Recovery of an active-key workflow can remain blocked until its old claim is
 quiescent, or while another run owns that key.
 
-### Upgrade map for releases 0.6 through 0.8
+### Upgrade map for releases 0.6 through 0.9
 
-The `0.8` release line includes the contracts introduced in the preceding two
-releases. When skipping versions, preserve each release's schema and runtime
-fence:
+The `0.9` release line includes the contracts introduced in the preceding
+three releases. When skipping versions, preserve each release's schema and
+runtime fence:
 
 | Release | Schema requirement | Activation requirement |
 | --- | --- | --- |
 | `0.6` | No new migration. | Deploy every job-state writer with continuation and typed recovery unused; wait for every pre-0.6 process and live lease to quiesce before activating either path. Migrate deprecated `requeue_job` callers to exact typed outcomes. |
 | `0.7` | Apply `202607190001_job_replays_and_continuation_metrics` before replay or metrics callers. | Successful replay and continuation metrics are additive. Use Runledger's filtered migration/schema helpers for expand-first deployment and code rollback. |
 | `0.8` | Apply `202607250001_harden_continuation_metrics_payload_validation` and `202607280001` through `202607280005` before any 0.8 runtime loop or persistence API runs. | Deploy every 0.8 writer with new paths unused, quiesce all older processes and leases, then canary workflow continuation, active keys, resources, retry hints, and workflow recovery. |
-
-Current main adds no migration after 0.8.0. Custom runtimes may adopt
-`JobLeaseIdentity` and its `_for_lease` lifecycle APIs without a coordinated
-schema or source migration; the positional functions remain available.
+| `0.9` | No migration after 0.8.0. | Custom runtimes may adopt `JobLeaseIdentity` and its `_for_lease` lifecycle APIs without a coordinated schema or source migration; the positional functions remain available. |
 
 For 0.8 source upgrades, construct `WorkflowDagStepValidationInput` with
 `WorkflowDagStepValidationInput::new(...)` and its option setters; it is now
@@ -1133,7 +1130,7 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   stable `job.lease_owner_mismatch` code, even when the lease was lost by time
   rather than to another worker. Once `lease_expires_at` passes there is no
   owner grace period for heartbeat/progress/success/failure/continuation writes.
-  Current main adds `JobLeaseIdentity` plus `heartbeat_job_for_lease`,
+  Release 0.9.0 adds `JobLeaseIdentity` plus `heartbeat_job_for_lease`,
   `update_job_progress_for_lease`, and success/failure/continuation
   `_for_lease` variants for custom runtimes. Reuse one identity derived from the
   claimed row and worker ID so those four lease fences cannot be mixed across

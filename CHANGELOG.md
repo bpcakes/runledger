@@ -4,6 +4,9 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-09
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.8.0...v0.9.0)
+
 ### Added
 
 - Add `JobLeaseIdentity` and typed `_for_lease` variants for heartbeat,
@@ -31,7 +34,7 @@ All notable changes to this workspace are documented here.
 
 - Refresh the README, downstream integration guide, LLM summary, public API
   documentation, and maintainer routing guides for the 0.8 contracts and the
-  post-0.8 lease-identity API.
+  0.9 lease-identity API.
 
 No schema migrations have been added since 0.8.0.
 
