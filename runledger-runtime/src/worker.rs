@@ -118,7 +118,7 @@ impl WorkerLoop {
         }
 
         if self.claimable_job_types.is_empty() {
-            if self.wait_for_shutdown().await {
+            if self.wait_for_shutdown_or_poll_interval().await {
                 return WorkerLoopControl::Drain(RuntimeLoopExit::Shutdown);
             }
             return WorkerLoopControl::Continue;
@@ -126,7 +126,7 @@ impl WorkerLoop {
 
         let available = self.semaphore.available_permits();
         if available == 0 {
-            if self.wait_for_shutdown().await {
+            if self.wait_for_shutdown_or_poll_interval().await {
                 return WorkerLoopControl::Drain(RuntimeLoopExit::Shutdown);
             }
             return WorkerLoopControl::Continue;
@@ -136,20 +136,21 @@ impl WorkerLoop {
         let claimed = self.claim(claim_limit).await;
 
         if claimed.is_empty() {
-            self.wait_for_shutdown().await;
+            self.wait_for_shutdown_or_poll_interval().await;
             return WorkerLoopControl::Continue;
         }
 
         let claimed_len = claimed.len();
-        if !self.spawn_claimed_jobs(claimed).await {
-            return WorkerLoopControl::Drain(RuntimeLoopExit::Completed);
+        match self.spawn_claimed_jobs(claimed).await {
+            WorkerLoopControl::Continue => {}
+            drain @ WorkerLoopControl::Drain(_) => return drain,
         }
 
         if claimed_len == claim_limit {
             return WorkerLoopControl::Continue;
         }
 
-        if self.wait_for_shutdown().await {
+        if self.wait_for_shutdown_or_poll_interval().await {
             return WorkerLoopControl::Drain(RuntimeLoopExit::Shutdown);
         }
 
@@ -178,7 +179,10 @@ impl WorkerLoop {
         }
     }
 
-    async fn spawn_claimed_jobs(&mut self, claimed: Vec<jobs::JobQueueRecord>) -> bool {
+    async fn spawn_claimed_jobs(
+        &mut self,
+        claimed: Vec<jobs::JobQueueRecord>,
+    ) -> WorkerLoopControl {
         for job in claimed {
             let permit = match Arc::clone(&self.semaphore).acquire_owned().await {
                 Ok(permit) => permit,
@@ -187,7 +191,7 @@ impl WorkerLoop {
                     // this defensive branch fires, surface it as an unexpected
                     // loop completion rather than graceful shutdown.
                     warn!("worker semaphore closed; stopping worker loop");
-                    return false;
+                    return WorkerLoopControl::Drain(RuntimeLoopExit::Completed);
                 }
             };
             let pool_clone = self.pool.clone();
@@ -209,10 +213,10 @@ impl WorkerLoop {
             });
         }
 
-        true
+        WorkerLoopControl::Continue
     }
 
-    async fn wait_for_shutdown(&mut self) -> bool {
+    async fn wait_for_shutdown_or_poll_interval(&mut self) -> bool {
         shutdown::wait_for_request_or_timeout(&mut self.shutdown, self.config.poll_interval).await
     }
 

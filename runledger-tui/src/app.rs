@@ -58,8 +58,18 @@ pub(crate) enum ActiveInput {
 }
 
 impl ActiveInput {
-    fn blocks_fetch(&self) -> bool {
-        matches!(self, Self::Organization { .. } | Self::Filter { .. })
+    fn allows_fetch(&self) -> bool {
+        !matches!(self, Self::Organization { .. } | Self::Filter { .. })
+    }
+
+    fn text_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::None => None,
+            Self::Organization { text }
+            | Self::Filter { text, .. }
+            | Self::Search { text }
+            | Self::Command { text } => Some(text),
+        }
     }
 }
 
@@ -168,8 +178,8 @@ impl App {
         &self.active_input
     }
 
-    pub(crate) fn blocks_fetch(&self) -> bool {
-        self.active_input.blocks_fetch()
+    pub(crate) fn allows_fetch(&self) -> bool {
+        self.active_input.allows_fetch()
     }
 
     pub fn top_screen_index(&self) -> usize {
@@ -812,7 +822,7 @@ mod tests {
             &ActiveInput::Organization {
                 text: ":".to_owned()
             },
-            "an active organization input consumes command keys instead of opening a second input"
+            "an active organization input routes character keys to its current buffer"
         );
 
         app.handle_key(key(crossterm::event::KeyCode::Esc));
@@ -829,22 +839,60 @@ mod tests {
     fn only_organization_and_filter_inputs_block_fetches() {
         let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
 
-        assert!(!app.blocks_fetch());
+        assert!(app.allows_fetch());
 
         app.handle_key(key(crossterm::event::KeyCode::Char('o')));
-        assert!(app.blocks_fetch());
+        assert!(!app.allows_fetch());
         app.handle_key(key(crossterm::event::KeyCode::Esc));
 
         app.handle_key(key(crossterm::event::KeyCode::Char('t')));
-        assert!(app.blocks_fetch());
+        assert!(!app.allows_fetch());
         app.handle_key(key(crossterm::event::KeyCode::Esc));
 
         app.handle_key(key(crossterm::event::KeyCode::Char('/')));
-        assert!(!app.blocks_fetch());
+        assert!(app.allows_fetch());
         app.handle_key(key(crossterm::event::KeyCode::Esc));
 
         app.handle_key(key(crossterm::event::KeyCode::Char(':')));
-        assert!(!app.blocks_fetch());
+        assert!(app.allows_fetch());
+    }
+
+    #[test]
+    fn ignored_keys_preserve_every_active_input_variant() {
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let cases = [
+            (
+                ActiveInput::Organization {
+                    text: "organization".to_owned(),
+                },
+                crossterm::event::KeyCode::Left,
+            ),
+            (
+                ActiveInput::Filter {
+                    target: FilterTarget::Workflow,
+                    text: "workflow".to_owned(),
+                },
+                crossterm::event::KeyCode::Tab,
+            ),
+            (
+                ActiveInput::Search {
+                    text: "search".to_owned(),
+                },
+                crossterm::event::KeyCode::Down,
+            ),
+            (
+                ActiveInput::Command {
+                    text: "command".to_owned(),
+                },
+                crossterm::event::KeyCode::PageUp,
+            ),
+        ];
+
+        for (active_input, ignored_key) in cases {
+            app.active_input = active_input.clone();
+            assert!(!app.handle_key(key(ignored_key)));
+            assert_eq!(app.active_input(), &active_input);
+        }
     }
 
     #[test]

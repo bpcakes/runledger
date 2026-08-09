@@ -27,7 +27,7 @@ struct CancellationMetadata<'a> {
 
 struct WorkflowCancellationSweep<'a> {
     workflow_run: WorkflowRunDbRecord,
-    organization_id: Option<Uuid>,
+    scope_organization_id: Option<Uuid>,
     metadata: CancellationMetadata<'a>,
     touched_run_ids: BTreeSet<Uuid>,
     pending_steps: Vec<LockedWorkflowStepState>,
@@ -107,7 +107,7 @@ async fn cancel_workflow_run_after_lock_phase_tx(
 impl<'a> WorkflowCancellationSweep<'a> {
     fn new(
         workflow_run: WorkflowRunDbRecord,
-        organization_id: Option<Uuid>,
+        scope_organization_id: Option<Uuid>,
         metadata: CancellationMetadata<'a>,
         pending_steps: Vec<LockedWorkflowStepState>,
     ) -> Self {
@@ -115,7 +115,7 @@ impl<'a> WorkflowCancellationSweep<'a> {
 
         Self {
             workflow_run,
-            organization_id,
+            scope_organization_id,
             metadata,
             touched_run_ids: BTreeSet::from([workflow_run_id]),
             pending_steps,
@@ -194,7 +194,7 @@ impl<'a> WorkflowCancellationSweep<'a> {
          ORDER BY ws.id ASC
          FOR UPDATE OF ws",
             self.workflow_run.id,
-            self.organization_id,
+            self.scope_organization_id,
         )
         .fetch_all(&mut **tx)
         .await
