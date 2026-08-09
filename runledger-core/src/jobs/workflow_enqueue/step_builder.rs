@@ -455,6 +455,9 @@ impl<'a> WorkflowStepEnqueueBuilder<'a> {
         } = input;
         let execution = match execution_kind {
             WorkflowStepExecutionKind::Job => {
+                // Shape validation above guarantees this branch has a job type.
+                // Keep the checked fallback so this conversion remains panic-free
+                // if that validation contract changes later.
                 let Some(job_type) = job_type else {
                     return Err(WorkflowBuildError::BlankStepJobType {
                         step_key: step_key.as_str().to_owned(),

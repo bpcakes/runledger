@@ -84,7 +84,7 @@ pub(in crate::jobs::workflows) async fn insert_workflow_step_record_tx(
                         .timeout_seconds()
                         .unwrap_or(defaults.default_timeout_seconds),
                 ),
-                Some(execution.stage().unwrap_or(JobStage::Queued).as_db_value()),
+                workflow_step_effective_stage(step),
             )
         }
         WorkflowStepExecution::External => (None, None, None, None, None),

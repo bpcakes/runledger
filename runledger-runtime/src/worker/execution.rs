@@ -301,7 +301,6 @@ impl ClaimedJobExecution {
         &self,
         context: &JobContext,
     ) -> Result<JobCompletion, JobExecutionFailure> {
-        let pool = self.pool.clone();
         let registry = Arc::clone(&self.registry);
         let mut execution = Box::pin(
             AssertUnwindSafe(execute_job_handler(registry, context, &self.job)).catch_unwind(),
@@ -332,7 +331,7 @@ impl ClaimedJobExecution {
                 }
                 _ = ticker.tick() => {
                     if let Err(error) = jobs::heartbeat_job_for_lease(
-                        &pool,
+                        &self.pool,
                         self.lease_identity(),
                         self.lease_ttl_seconds,
                     )

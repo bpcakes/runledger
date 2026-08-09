@@ -461,6 +461,9 @@ pub fn validate_workflow_step_append(
 
     let mut new_step_key_to_index: BTreeMap<&str, usize> = BTreeMap::new();
     for (build_step_index, step) in new_steps.iter().enumerate() {
+        // Public builders already enforce this shape. Revalidate at the append
+        // boundary as defense in depth for crate-internal construction and to
+        // preserve the indexed DAG error mapping owned by this API.
         validate_step_enqueue(step).map_err(|error| {
             WorkflowDagValidationError::from_step_validation_error(error, build_step_index)
         })?;
