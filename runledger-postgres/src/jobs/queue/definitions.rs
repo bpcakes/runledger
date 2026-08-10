@@ -137,95 +137,141 @@ impl StdError for JobDefinitionCatalogSyncError {
     }
 }
 
-pub async fn sync_catalog_job_definitions_tx(
-    tx: &mut DbTx<'_>,
-    definitions: &[JobDefinitionUpsert<'_>],
-    mode: JobDefinitionCatalogSyncMode,
-) -> std::result::Result<JobDefinitionCatalogSyncReport, JobDefinitionCatalogSyncError> {
-    let disabled_job_types = definition_job_type_names(
-        definitions
+enum ValidatedDefinitionCatalogSyncScope<'scope> {
+    Additive {
+        mode: JobDefinitionCatalogSyncMode,
+    },
+    Exact {
+        scope_job_types: &'scope [JobTypeName],
+        catalog_job_types: Vec<JobTypeName>,
+        has_absent_scope_job_types: bool,
+    },
+}
+
+struct DefinitionCatalogSync<'definitions, 'payload, 'scope> {
+    definitions: &'definitions [JobDefinitionUpsert<'payload>],
+    disabled_job_types: Vec<JobTypeName>,
+    scope: ValidatedDefinitionCatalogSyncScope<'scope>,
+}
+
+impl<'definitions, 'payload, 'scope> DefinitionCatalogSync<'definitions, 'payload, 'scope> {
+    fn additive(
+        definitions: &'definitions [JobDefinitionUpsert<'payload>],
+        mode: JobDefinitionCatalogSyncMode,
+    ) -> std::result::Result<Self, JobDefinitionCatalogSyncError> {
+        let disabled_job_types = definition_job_type_names(
+            definitions
+                .iter()
+                .filter(|definition| !definition.is_enabled),
+        )?;
+
+        Ok(Self {
+            definitions,
+            disabled_job_types,
+            scope: ValidatedDefinitionCatalogSyncScope::Additive { mode },
+        })
+    }
+
+    fn exact(
+        definitions: &'definitions [JobDefinitionUpsert<'payload>],
+        scope_job_types: &'scope [JobTypeName],
+    ) -> std::result::Result<Self, JobDefinitionCatalogSyncError> {
+        let catalog_job_types = definition_job_type_names(definitions.iter())?;
+        validate_non_empty_job_types("exact catalog sync job definitions", &catalog_job_types)
+            .map_err(|error| JobDefinitionCatalogSyncError::ValidationFailure(Box::new(error)))?;
+        validate_non_empty_job_types("exact catalog sync scope", scope_job_types)
+            .map_err(|error| JobDefinitionCatalogSyncError::ValidationFailure(Box::new(error)))?;
+
+        let disabled_job_types = definition_job_type_names(
+            definitions
+                .iter()
+                .filter(|definition| !definition.is_enabled),
+        )?;
+        let has_absent_scope_job_types = scope_job_types
             .iter()
-            .filter(|definition| !definition.is_enabled),
-    )?;
-    let disabled_catalog_job_types = if disabled_job_types.is_empty() {
-        Vec::new()
-    } else {
-        prepare_definition_disable_critical_section_tx(tx).await?;
-        reject_active_schedules_for_disabled_job_types_tx(tx, &disabled_job_types).await?;
+            .any(|job_type| !catalog_job_types.contains(job_type));
+
+        Ok(Self {
+            definitions,
+            disabled_job_types,
+            scope: ValidatedDefinitionCatalogSyncScope::Exact {
+                scope_job_types,
+                catalog_job_types,
+                has_absent_scope_job_types,
+            },
+        })
+    }
+
+    async fn execute(
+        &self,
+        tx: &mut DbTx<'_>,
+    ) -> std::result::Result<JobDefinitionCatalogSyncReport, JobDefinitionCatalogSyncError> {
+        // Preserve the disable protocol's lock and validation order: acquire
+        // the guard, reject unsafe schedule references, write definitions, and
+        // only then disable exact-scope rows absent from the catalog.
+        if self.requires_disable_guard() {
+            prepare_definition_disable_critical_section_tx(tx).await?;
+        }
+
+        let disabled_catalog_job_types = self.inspect_disabled_catalog_definitions_tx(tx).await?;
+        self.reject_active_schedules_for_absent_definitions_tx(tx)
+            .await?;
+        self.upsert_definitions_tx(tx).await?;
+        let disabled_absent_job_types = self.disable_absent_definitions_tx(tx).await?;
+
+        Ok(JobDefinitionCatalogSyncReport {
+            disabled_absent_job_types,
+            disabled_catalog_job_types,
+        })
+    }
+
+    fn requires_disable_guard(&self) -> bool {
+        !self.disabled_job_types.is_empty()
+            || matches!(
+                &self.scope,
+                ValidatedDefinitionCatalogSyncScope::Exact {
+                    has_absent_scope_job_types: true,
+                    ..
+                }
+            )
+    }
+
+    async fn inspect_disabled_catalog_definitions_tx(
+        &self,
+        tx: &mut DbTx<'_>,
+    ) -> std::result::Result<Vec<JobTypeName>, JobDefinitionCatalogSyncError> {
+        if self.disabled_job_types.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        reject_active_schedules_for_disabled_job_types_tx(tx, &self.disabled_job_types).await?;
         // Report rows that this sync will newly create as disabled or change
         // from enabled to disabled. Already-disabled rows are intentionally
         // omitted from the report.
-        list_job_types_missing_or_enabled_definitions_tx(tx, &disabled_job_types)
+        list_job_types_missing_or_enabled_definitions_tx(tx, &self.disabled_job_types)
             .await
             .map_err(|error| {
                 JobDefinitionCatalogSyncError::DefinitionInspectFailure(Box::new(error))
-            })?
-    };
+            })
+    }
 
-    for definition in definitions {
-        let upsert_result = match (mode, definition.is_enabled) {
-            (JobDefinitionCatalogSyncMode::PreserveExistingEnabledForEnabledDefinitions, true) => {
-                upsert_job_definition_preserving_enabled_tx(tx, definition).await
-            }
-            (JobDefinitionCatalogSyncMode::PreserveExistingEnabledForEnabledDefinitions, false)
-            | (JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState, _) => {
-                apply_job_definition_upsert_tx(tx, definition).await
-            }
+    async fn reject_active_schedules_for_absent_definitions_tx(
+        &self,
+        tx: &mut DbTx<'_>,
+    ) -> std::result::Result<(), JobDefinitionCatalogSyncError> {
+        let ValidatedDefinitionCatalogSyncScope::Exact {
+            scope_job_types,
+            catalog_job_types,
+            has_absent_scope_job_types: true,
+        } = &self.scope
+        else {
+            return Ok(());
         };
-        upsert_result.map_err(
-            |source| JobDefinitionCatalogSyncError::DefinitionSyncFailure {
-                job_type: definition.job_type.as_str().to_owned(),
-                source: Box::new(source),
-            },
-        )?;
-    }
 
-    Ok(JobDefinitionCatalogSyncReport {
-        disabled_absent_job_types: Vec::new(),
-        disabled_catalog_job_types,
-    })
-}
-
-pub async fn sync_catalog_job_definitions_exact_tx(
-    tx: &mut DbTx<'_>,
-    definitions: &[JobDefinitionUpsert<'_>],
-    scope_job_types: &[JobTypeName],
-) -> std::result::Result<JobDefinitionCatalogSyncReport, JobDefinitionCatalogSyncError> {
-    let catalog_job_types = definition_job_type_names(definitions.iter())?;
-    validate_non_empty_job_types("exact catalog sync job definitions", &catalog_job_types)
-        .map_err(|error| JobDefinitionCatalogSyncError::ValidationFailure(Box::new(error)))?;
-    validate_non_empty_job_types("exact catalog sync scope", scope_job_types)
-        .map_err(|error| JobDefinitionCatalogSyncError::ValidationFailure(Box::new(error)))?;
-
-    let disabled_job_types = definition_job_type_names(
-        definitions
-            .iter()
-            .filter(|definition| !definition.is_enabled),
-    )?;
-    let has_absent_scope_job_types = scope_job_types
-        .iter()
-        .any(|job_type| !catalog_job_types.contains(job_type));
-    let requires_disable_guard = !disabled_job_types.is_empty() || has_absent_scope_job_types;
-    if requires_disable_guard {
-        prepare_definition_disable_critical_section_tx(tx).await?;
-    }
-
-    let disabled_catalog_job_types = if disabled_job_types.is_empty() {
-        Vec::new()
-    } else {
-        reject_active_schedules_for_disabled_job_types_tx(tx, &disabled_job_types).await?;
-        list_job_types_missing_or_enabled_definitions_tx(tx, &disabled_job_types)
-            .await
-            .map_err(|error| {
-                JobDefinitionCatalogSyncError::DefinitionInspectFailure(Box::new(error))
-            })?
-    };
-
-    if has_absent_scope_job_types {
         if let Some(reference) =
             schedule_definition_guard::find_active_schedule_for_enabled_absent_job_types_tx(
                 tx,
-                &catalog_job_types,
+                catalog_job_types,
                 scope_job_types,
             )
             .await
@@ -233,33 +279,88 @@ pub async fn sync_catalog_job_definitions_exact_tx(
         {
             return Err(JobDefinitionCatalogSyncError::ActiveScheduleForAbsentJobType(reference));
         }
+
+        Ok(())
     }
 
-    // Re-enabling catalog definitions does not need the disable guard because it
-    // cannot orphan active schedules or authorize work for a row being disabled.
-    for definition in definitions {
-        apply_job_definition_upsert_tx(tx, definition)
-            .await
-            .map_err(
-                |source| JobDefinitionCatalogSyncError::DefinitionSyncFailure {
+    async fn upsert_definitions_tx(
+        &self,
+        tx: &mut DbTx<'_>,
+    ) -> std::result::Result<(), JobDefinitionCatalogSyncError> {
+        // Exact sync restores catalog enabled state. Re-enabling cannot orphan
+        // an active schedule, so it does not independently require the disable
+        // guard when no definition is being disabled.
+        for definition in self.definitions {
+            let upsert_result = match (self.upsert_mode(), definition.is_enabled) {
+                (
+                    JobDefinitionCatalogSyncMode::PreserveExistingEnabledForEnabledDefinitions,
+                    true,
+                ) => upsert_job_definition_preserving_enabled_tx(tx, definition).await,
+                (
+                    JobDefinitionCatalogSyncMode::PreserveExistingEnabledForEnabledDefinitions,
+                    false,
+                )
+                | (JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState, _) => {
+                    apply_job_definition_upsert_tx(tx, definition).await
+                }
+            };
+            upsert_result.map_err(|source| {
+                JobDefinitionCatalogSyncError::DefinitionSyncFailure {
                     job_type: definition.job_type.as_str().to_owned(),
                     source: Box::new(source),
-                },
-            )?;
+                }
+            })?;
+        }
+
+        Ok(())
     }
 
-    let disabled_absent_job_types = if has_absent_scope_job_types {
-        disable_enabled_job_definitions_except_tx(tx, &catalog_job_types, scope_job_types)
-            .await
-            .map_err(|error| JobDefinitionCatalogSyncError::DisableAbsentFailure(Box::new(error)))?
-    } else {
-        Vec::new()
-    };
+    fn upsert_mode(&self) -> JobDefinitionCatalogSyncMode {
+        match self.scope {
+            ValidatedDefinitionCatalogSyncScope::Additive { mode } => mode,
+            ValidatedDefinitionCatalogSyncScope::Exact { .. } => {
+                JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState
+            }
+        }
+    }
 
-    Ok(JobDefinitionCatalogSyncReport {
-        disabled_absent_job_types,
-        disabled_catalog_job_types,
-    })
+    async fn disable_absent_definitions_tx(
+        &self,
+        tx: &mut DbTx<'_>,
+    ) -> std::result::Result<Vec<JobTypeName>, JobDefinitionCatalogSyncError> {
+        let ValidatedDefinitionCatalogSyncScope::Exact {
+            scope_job_types,
+            catalog_job_types,
+            has_absent_scope_job_types: true,
+        } = &self.scope
+        else {
+            return Ok(Vec::new());
+        };
+
+        disable_enabled_job_definitions_except_tx(tx, catalog_job_types, scope_job_types)
+            .await
+            .map_err(|error| JobDefinitionCatalogSyncError::DisableAbsentFailure(Box::new(error)))
+    }
+}
+
+pub async fn sync_catalog_job_definitions_tx(
+    tx: &mut DbTx<'_>,
+    definitions: &[JobDefinitionUpsert<'_>],
+    mode: JobDefinitionCatalogSyncMode,
+) -> std::result::Result<JobDefinitionCatalogSyncReport, JobDefinitionCatalogSyncError> {
+    DefinitionCatalogSync::additive(definitions, mode)?
+        .execute(tx)
+        .await
+}
+
+pub async fn sync_catalog_job_definitions_exact_tx(
+    tx: &mut DbTx<'_>,
+    definitions: &[JobDefinitionUpsert<'_>],
+    scope_job_types: &[JobTypeName],
+) -> std::result::Result<JobDefinitionCatalogSyncReport, JobDefinitionCatalogSyncError> {
+    DefinitionCatalogSync::exact(definitions, scope_job_types)?
+        .execute(tx)
+        .await
 }
 
 /// Creates or updates a job definition inside an existing transaction.
