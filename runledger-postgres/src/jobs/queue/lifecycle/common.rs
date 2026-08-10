@@ -16,8 +16,6 @@ pub(super) const COMPLETE_CONTINUATION_LEASE_MISMATCH_CONTEXT: &str =
     "complete job continuation transaction lease mismatch";
 pub(super) const COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT: &str =
     "complete job failure transaction missing leased row";
-pub(super) const INSERT_FAILED_EVENT_TERMINAL_CONTEXT: &str = "insert failed event terminal";
-pub(super) const INSERT_FAILED_EVENT_RETRY_CONTEXT: &str = "insert failed event retry";
 
 pub(super) struct CompletionLeaseRow {
     pub(super) job_type: String,

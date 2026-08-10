@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use runledger_core::jobs::{JobFailure, WorkflowStepStatus};
+use runledger_core::jobs::JobFailure;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -12,11 +12,12 @@ use super::super::types::{
     ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult, ReapedLeaseDisposition,
     ReapedLeaseRecord, ReapedTerminalLeaseRecord,
 };
-use super::super::workflows::{
-    on_retry_scheduled, on_terminal, release_quiesced_workflow_active_claims_tx,
-};
+use super::super::workflows::release_quiesced_workflow_active_claims_tx;
 use super::attempts::ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART;
 use super::claim::release_expired_execution_resource_claims_tx;
+use super::failure_transition::{
+    DeadLetterSnapshot, ExpiredLeaseTransition, FailureIdentity, LEASE_EXPIRED_FAILURE,
+};
 use super::release::{
     TryReleaseUnstartedClaimResult, UnstartedClaimIdentity, try_release_unstarted_job_claim_tx,
 };
@@ -363,16 +364,6 @@ struct ReapExpiredLeaseRow {
     legacy_execution_started_persisted_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Copy)]
-struct ReapLeaseIdentity {
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
-}
-
-const LEASE_EXPIRED_KIND: &str = "LEASE_EXPIRED";
-const LEASE_EXPIRED_CODE: &str = "job.lease_expired";
-const LEASE_EXPIRED_MESSAGE: &str = "Job lease expired before completion.";
 const MAX_DEFERRED_ROW_ERRORS: usize = 16;
 
 enum ReapExpiredLeaseDisposition {
@@ -441,15 +432,23 @@ fn terminal_dead_lettered_from(
 }
 
 fn lease_expired_failure() -> JobFailure {
-    JobFailure::lease_expired(LEASE_EXPIRED_CODE, LEASE_EXPIRED_MESSAGE)
+    JobFailure::lease_expired(
+        LEASE_EXPIRED_FAILURE.code(),
+        LEASE_EXPIRED_FAILURE.message(),
+    )
 }
 
-fn identity_for(row: &ReapExpiredLeaseRow) -> ReapLeaseIdentity {
-    ReapLeaseIdentity {
-        job_id: row.job_id,
-        run_number: row.run_number,
-        attempt: row.attempt,
-    }
+fn failure_transition_for(row: &ReapExpiredLeaseRow) -> ExpiredLeaseTransition<'_> {
+    ExpiredLeaseTransition::new(
+        FailureIdentity::new(row.job_id, row.run_number, row.attempt),
+        DeadLetterSnapshot::new(
+            &row.job_type,
+            row.organization_id,
+            &row.payload_snapshot,
+            row.checkpoint_snapshot.as_ref(),
+        ),
+        started_without_renewal_heartbeat(row),
+    )
 }
 
 fn log_trusted_deferred_row_error(row: &ReapExpiredLeaseRow, error: &Error) {
@@ -565,301 +564,6 @@ fn started_without_renewal_heartbeat(row: &ReapExpiredLeaseRow) -> bool {
         .is_none_or(|last_heartbeat_at| last_heartbeat_at <= execution_started_persisted_at)
 }
 
-async fn update_dead_lettered_queue_row(
-    tx: &mut DbTx<'_>,
-    identity: ReapLeaseIdentity,
-) -> Result<()> {
-    sqlx::query!(
-        "UPDATE job_queue
-         SET status = 'DEAD_LETTERED',
-             lease_expires_at = NULL,
-             last_heartbeat_at = NULL,
-             worker_id = NULL,
-             finished_at = now(),
-             output = NULL,
-             status_reason = 'LEASE_EXPIRED',
-             last_error_code = 'job.lease_expired',
-             last_error_message = 'Job lease expired before completion.',
-             updated_at = now()
-         WHERE id = $1
-           AND run_number = $2",
-        identity.job_id,
-        identity.run_number,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("reap mark dead lettered", error))?;
-    Ok(())
-}
-
-async fn update_dead_lettered_attempt(
-    tx: &mut DbTx<'_>,
-    identity: ReapLeaseIdentity,
-) -> Result<()> {
-    sqlx::query!(
-        "UPDATE job_attempts
-         SET finished_at = now(),
-             outcome = 'LEASE_EXPIRED',
-             error_code = 'job.lease_expired',
-             error_message = 'Job lease expired before completion.'
-         WHERE job_id = $1
-           AND run_number = $2
-           AND attempt = $3",
-        identity.job_id,
-        identity.run_number,
-        identity.attempt,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("reap update dead lettered attempt", error)
-    })?;
-    Ok(())
-}
-
-async fn insert_dead_letter_row(tx: &mut DbTx<'_>, row: &ReapExpiredLeaseRow) -> Result<()> {
-    sqlx::query!(
-        "INSERT INTO job_dead_letters (
-            job_id,
-            job_type,
-            organization_id,
-            run_number,
-            attempt,
-            error_code,
-            error_message,
-            payload_snapshot,
-            checkpoint_snapshot,
-            failed_at
-         )
-         VALUES (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            'job.lease_expired',
-            'Job lease expired before completion.',
-            $6::jsonb,
-            $7::jsonb,
-            now()
-         )
-         ON CONFLICT (job_id)
-         DO UPDATE
-            SET run_number = EXCLUDED.run_number,
-                attempt = EXCLUDED.attempt,
-                error_code = EXCLUDED.error_code,
-                error_message = EXCLUDED.error_message,
-                payload_snapshot = EXCLUDED.payload_snapshot,
-                checkpoint_snapshot = EXCLUDED.checkpoint_snapshot,
-                failed_at = EXCLUDED.failed_at",
-        row.job_id,
-        row.job_type.as_str(),
-        row.organization_id,
-        row.run_number,
-        row.attempt,
-        row.payload_snapshot,
-        row.checkpoint_snapshot,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("reap insert dead letter row", error))?;
-    Ok(())
-}
-
-async fn insert_failed_event(
-    tx: &mut DbTx<'_>,
-    row: &ReapExpiredLeaseRow,
-    identity: ReapLeaseIdentity,
-) -> Result<()> {
-    sqlx::query!(
-        "INSERT INTO job_events (job_id, run_number, attempt, event_type, payload)
-         VALUES (
-            $1,
-            $2,
-            $3,
-            'FAILED',
-            jsonb_build_object(
-                'kind', 'LEASE_EXPIRED',
-                'error_code', 'job.lease_expired',
-                'error_message', 'Job lease expired before completion.',
-                'started_without_renewal_heartbeat', $4::bool
-            )
-         )",
-        identity.job_id,
-        identity.run_number,
-        identity.attempt,
-        started_without_renewal_heartbeat(row),
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("reap failed event", error))?;
-    Ok(())
-}
-
-async fn insert_dead_lettered_event(
-    tx: &mut DbTx<'_>,
-    row: &ReapExpiredLeaseRow,
-    identity: ReapLeaseIdentity,
-) -> Result<()> {
-    sqlx::query!(
-        "INSERT INTO job_events (job_id, run_number, attempt, event_type, payload)
-         VALUES (
-            $1,
-            $2,
-            $3,
-            'DEAD_LETTERED',
-            jsonb_build_object(
-                'kind', 'LEASE_EXPIRED',
-                'error_code', 'job.lease_expired',
-                'started_without_renewal_heartbeat', $4::bool
-            )
-         )",
-        identity.job_id,
-        identity.run_number,
-        identity.attempt,
-        started_without_renewal_heartbeat(row),
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("reap dead lettered event", error))?;
-    Ok(())
-}
-
-async fn handle_exhausted_expired_lease(
-    tx: &mut DbTx<'_>,
-    row: &ReapExpiredLeaseRow,
-) -> Result<()> {
-    let identity = identity_for(row);
-    update_dead_lettered_queue_row(tx, identity).await?;
-    update_dead_lettered_attempt(tx, identity).await?;
-    insert_dead_letter_row(tx, row).await?;
-    insert_failed_event(tx, row, identity).await?;
-    insert_dead_lettered_event(tx, row, identity).await?;
-
-    on_terminal(
-        tx,
-        identity.job_id,
-        WorkflowStepStatus::Failed,
-        Some(LEASE_EXPIRED_KIND),
-        Some(LEASE_EXPIRED_CODE),
-        Some(LEASE_EXPIRED_MESSAGE),
-        None,
-    )
-    .await?;
-
-    Ok(())
-}
-
-async fn update_retryable_queue_row(
-    tx: &mut DbTx<'_>,
-    identity: ReapLeaseIdentity,
-    retry_delay_ms: i32,
-) -> Result<DateTime<Utc>> {
-    sqlx::query_scalar!(
-        "UPDATE job_queue
-         SET status = 'PENDING',
-             lease_expires_at = NULL,
-             last_heartbeat_at = NULL,
-             worker_id = NULL,
-             next_run_at = now() + ($2::bigint * interval '1 millisecond'),
-             output = NULL,
-             status_reason = 'LEASE_EXPIRED',
-             last_error_code = 'job.lease_expired',
-             last_error_message = 'Job lease expired before completion.',
-             updated_at = now()
-         WHERE id = $1
-           AND run_number = $3
-         RETURNING next_run_at",
-        identity.job_id,
-        i64::from(retry_delay_ms),
-        identity.run_number,
-    )
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("reap mark retryable", error))
-}
-
-async fn update_retry_attempt(
-    tx: &mut DbTx<'_>,
-    identity: ReapLeaseIdentity,
-    retry_delay_ms: i32,
-) -> Result<()> {
-    sqlx::query!(
-        "UPDATE job_attempts
-         SET finished_at = now(),
-             outcome = 'LEASE_EXPIRED',
-             error_code = 'job.lease_expired',
-             error_message = 'Job lease expired before completion.',
-             retry_delay_ms = $4
-         WHERE job_id = $1
-           AND run_number = $2
-           AND attempt = $3",
-        identity.job_id,
-        identity.run_number,
-        identity.attempt,
-        retry_delay_ms,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("reap update retry attempt", error))?;
-    Ok(())
-}
-
-async fn insert_retry_scheduled_event(
-    tx: &mut DbTx<'_>,
-    row: &ReapExpiredLeaseRow,
-    identity: ReapLeaseIdentity,
-    retry_delay_ms: i32,
-    next_run_at: DateTime<Utc>,
-) -> Result<()> {
-    sqlx::query!(
-        "INSERT INTO job_events (job_id, run_number, attempt, event_type, payload)
-         VALUES (
-            $1,
-            $2,
-            $3,
-            'RETRY_SCHEDULED',
-            jsonb_build_object(
-                'kind', 'LEASE_EXPIRED',
-                'retry_delay_ms', $4::int4,
-                'next_run_at', $5::timestamptz,
-                'started_without_renewal_heartbeat', $6::bool
-            )
-         )",
-        identity.job_id,
-        identity.run_number,
-        identity.attempt,
-        retry_delay_ms,
-        next_run_at,
-        started_without_renewal_heartbeat(row),
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("reap retry event", error))?;
-    Ok(())
-}
-
-async fn handle_retryable_expired_lease(
-    tx: &mut DbTx<'_>,
-    row: &ReapExpiredLeaseRow,
-    default_retry_delay_ms: i32,
-) -> Result<DateTime<Utc>> {
-    let identity = identity_for(row);
-    let next_run_at = update_retryable_queue_row(tx, identity, default_retry_delay_ms).await?;
-    update_retry_attempt(tx, identity, default_retry_delay_ms).await?;
-    insert_failed_event(tx, row, identity).await?;
-    insert_retry_scheduled_event(tx, row, identity, default_retry_delay_ms, next_run_at).await?;
-    on_retry_scheduled(
-        tx,
-        identity.job_id,
-        Some(LEASE_EXPIRED_KIND),
-        Some(LEASE_EXPIRED_CODE),
-        Some(LEASE_EXPIRED_MESSAGE),
-    )
-    .await?;
-    Ok(next_run_at)
-}
-
 async fn reap_expired_lease_row_tx(
     tx: &mut DbTx<'_>,
     row: &ReapExpiredLeaseRow,
@@ -892,12 +596,13 @@ async fn reap_expired_lease_row_tx(
         }
     }
 
+    let transition = failure_transition_for(row);
     if is_exhausted(row) {
-        handle_exhausted_expired_lease(tx, row).await?;
+        transition.apply_terminal(tx).await?;
         return Ok(ReapExpiredLeaseDisposition::DeadLetteredTerminal);
     }
 
-    let next_run_at = handle_retryable_expired_lease(tx, row, default_retry_delay_ms).await?;
+    let next_run_at = transition.apply_retry(tx, default_retry_delay_ms).await?;
     Ok(ReapExpiredLeaseDisposition::RetryScheduled {
         retry_delay_ms: default_retry_delay_ms,
         next_run_at,

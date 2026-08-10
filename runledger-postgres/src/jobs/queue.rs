@@ -4,6 +4,7 @@ mod claim;
 mod definitions;
 mod enqueue;
 pub(crate) mod events;
+mod failure_transition;
 mod lifecycle;
 mod reaper;
 mod release;
