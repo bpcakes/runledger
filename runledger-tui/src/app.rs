@@ -13,6 +13,7 @@ use crate::scope::Scope;
 
 pub(crate) mod fetch;
 mod input;
+mod search;
 
 use self::fetch::FetchOutcome;
 
@@ -396,84 +397,35 @@ impl App {
 
     pub fn list_len(&self) -> usize {
         match &self.screen {
-            Screen::Dashboard => self.dashboard.as_ref().map_or(0, |d| {
-                d.metrics
-                    .iter()
-                    .filter(|metric| self.dashboard_metric_matches_search(d, metric))
-                    .count()
-            }),
-            Screen::Queue => self.jobs.as_ref().map_or(0, |d| {
-                d.jobs.iter().filter(|j| self.job_matches_search(j)).count()
-            }),
+            Screen::Dashboard => self
+                .dashboard
+                .as_ref()
+                .map_or(0, |data| self.visible_dashboard_metrics(data).count()),
+            Screen::Queue => self
+                .jobs
+                .as_ref()
+                .map_or(0, |data| self.visible_jobs(&data.jobs).count()),
             Screen::JobDetail { .. } => match self.job_detail_pane {
-                JobDetailPane::Events => self.job_detail.as_ref().map_or(0, |d| {
-                    d.events
-                        .iter()
-                        .filter(|event| self.job_event_matches_search(event))
-                        .count()
-                }),
-                JobDetailPane::Logs => self.job_detail.as_ref().map_or(0, |d| {
-                    d.logs
-                        .iter()
-                        .filter(|l| {
-                            self.matches_table_search(|| {
-                                vec![l.id.to_string(), l.level.clone(), l.message.clone()]
-                            })
-                        })
-                        .count()
-                }),
+                JobDetailPane::Events => self
+                    .job_detail
+                    .as_ref()
+                    .map_or(0, |data| self.visible_job_events(&data.events).count()),
+                JobDetailPane::Logs => self
+                    .job_detail
+                    .as_ref()
+                    .map_or(0, |data| self.visible_job_logs(&data.logs).count()),
                 _ => 0,
             },
-            Screen::Workflows => self.workflows.as_ref().map_or(0, |d| {
-                d.runs
-                    .iter()
-                    .filter(|r| {
-                        self.matches_table_search(|| {
-                            vec![
-                                r.id.to_string(),
-                                r.workflow_type.as_str().to_owned(),
-                                crate::format::workflow_run_status_label(r.status).to_owned(),
-                            ]
-                        })
-                    })
-                    .count()
-            }),
-            Screen::WorkflowDetail { .. } => self.workflow_detail.as_ref().map_or(0, |d| {
-                d.steps
-                    .iter()
-                    .filter(|s| {
-                        self.matches_table_search(|| {
-                            vec![
-                                s.step_key.as_str().to_owned(),
-                                crate::format::workflow_step_status_label(s.status).to_owned(),
-                                s.job_type
-                                    .as_ref()
-                                    .map(|t| t.as_str().to_owned())
-                                    .unwrap_or_default(),
-                                s.job_id.map(|id| id.to_string()).unwrap_or_default(),
-                            ]
-                        })
-                    })
-                    .count()
-            }),
-            Screen::Definitions => self.definitions.as_ref().map_or(0, |d| {
-                d.definitions
-                    .iter()
-                    .filter(|def| {
-                        self.matches_table_search(|| {
-                            vec![
-                                def.job_type.as_str().to_owned(),
-                                def.version.to_string(),
-                                if def.is_enabled {
-                                    "enabled"
-                                } else {
-                                    "disabled"
-                                }
-                                .to_owned(),
-                            ]
-                        })
-                    })
-                    .count()
+            Screen::Workflows => self
+                .workflows
+                .as_ref()
+                .map_or(0, |data| self.visible_workflow_runs(&data.runs).count()),
+            Screen::WorkflowDetail { .. } => self
+                .workflow_detail
+                .as_ref()
+                .map_or(0, |data| self.visible_workflow_steps(&data.steps).count()),
+            Screen::Definitions => self.definitions.as_ref().map_or(0, |data| {
+                self.visible_definitions(&data.definitions).count()
             }),
         }
     }
@@ -538,63 +490,6 @@ impl App {
         } else if self.list_selection >= len {
             self.list_selection = len - 1;
         }
-    }
-
-    pub fn table_search_query(&self) -> Option<&str> {
-        self.table_search.as_deref().filter(|q| !q.is_empty())
-    }
-
-    pub fn matches_table_search<I, S, F>(&self, fields: F) -> bool
-    where
-        F: FnOnce() -> I,
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let Some(query) = self.table_search_query() else {
-            return true;
-        };
-        let query = query.to_ascii_lowercase();
-        fields()
-            .into_iter()
-            .any(|field| field.as_ref().to_ascii_lowercase().contains(&query))
-    }
-
-    pub(crate) fn dashboard_metric_matches_search(
-        &self,
-        data: &DashboardData,
-        metric: &runledger_postgres::jobs::JobMetricsRecord,
-    ) -> bool {
-        self.matches_table_search(|| data.row_for(metric).into_fields())
-    }
-
-    pub(crate) fn job_event_matches_search(
-        &self,
-        event: &runledger_postgres::jobs::JobEventRecord,
-    ) -> bool {
-        self.matches_table_search(|| {
-            vec![
-                event.id.to_string(),
-                event.event_type.as_db_value().to_owned(),
-                event
-                    .stage
-                    .map(|stage| stage.as_db_value())
-                    .unwrap_or("")
-                    .to_owned(),
-                event.payload.to_string(),
-            ]
-        })
-    }
-
-    fn job_matches_search(&self, job: &runledger_postgres::jobs::JobQueueRecord) -> bool {
-        self.matches_table_search(|| {
-            vec![
-                job.id.to_string(),
-                job.job_type.as_str().to_owned(),
-                crate::format::job_status_label(job.status).to_owned(),
-                job.stage.as_db_value().to_owned(),
-                job.worker_id.as_deref().unwrap_or("").to_owned(),
-            ]
-        })
     }
 }
 
@@ -1044,6 +939,38 @@ mod tests {
     }
 
     #[test]
+    fn workflow_step_search_keeps_count_selection_and_activation_aligned() {
+        const SEARCH_SENTINEL: &str = "target-search-step";
+
+        let hidden_job_id = Uuid::new_v4();
+        let target_job_id = Uuid::new_v4();
+        let mut detail = workflow_detail_with_step(Some(hidden_job_id));
+        detail.steps[0].step_key = StepKeyName::new("hidden.step").expect("valid step key");
+        let mut target = detail.steps[0].clone();
+        target.id = Uuid::new_v4();
+        target.step_key = StepKeyName::new(SEARCH_SENTINEL).expect("valid step key");
+        target.job_id = Some(target_job_id);
+        detail.steps.push(target);
+        detail.steps_total = 2;
+
+        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        app.screen = Screen::WorkflowDetail {
+            run_id: detail.run.id,
+        };
+        app.workflow_detail = Some(detail);
+        app.table_search = Some(SEARCH_SENTINEL.to_owned());
+
+        assert_eq!(app.list_len(), 1);
+        app.handle_key(key(crossterm::event::KeyCode::Enter));
+        assert_eq!(
+            app.screen,
+            Screen::JobDetail {
+                job_id: target_job_id
+            }
+        );
+    }
+
+    #[test]
     fn payload_only_event_search_keeps_count_and_selection_aligned() {
         const SEARCH_SENTINEL: &str = "payload-only-replay-reason";
 
@@ -1069,13 +996,9 @@ mod tests {
             workflow_run_id: None,
         });
 
+        let events = &app.job_detail.as_ref().expect("job detail").events;
         let matching_event_ids = app
-            .job_detail
-            .as_ref()
-            .expect("job detail")
-            .events
-            .iter()
-            .filter(|event| app.job_event_matches_search(event))
+            .visible_job_events(events)
             .map(|event| event.id)
             .collect::<Vec<_>>();
 

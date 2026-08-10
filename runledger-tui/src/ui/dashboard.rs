@@ -37,10 +37,8 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &Dashbo
     f.render_widget(Paragraph::new(scope_banner(app.scope)), chunks[0]);
     draw_kpis(f, chunks[1], data);
 
-    let rows: Vec<TableRow> = data
-        .metrics
-        .iter()
-        .filter(|metric| app.dashboard_metric_matches_search(data, metric))
+    let rows: Vec<TableRow> = app
+        .visible_dashboard_metrics(data)
         .enumerate()
         .map(|(i, metric)| {
             let row = data.row_for(metric);

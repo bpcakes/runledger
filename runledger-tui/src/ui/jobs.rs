@@ -38,20 +38,8 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobsDa
         TableColumn::left("Worker", Constraint::Length(14)).optional(2),
         TableColumn::right("Updated", Constraint::Length(10)).optional(1),
     ];
-    let rows: Vec<TableRow> = data
-        .jobs
-        .iter()
-        .filter(|j| {
-            app.matches_table_search(|| {
-                vec![
-                    j.id.to_string(),
-                    j.job_type.as_str().to_owned(),
-                    job_status_label(j.status).to_owned(),
-                    j.stage.as_db_value().to_owned(),
-                    j.worker_id.as_deref().unwrap_or("").to_owned(),
-                ]
-            })
-        })
+    let rows: Vec<TableRow> = app
+        .visible_jobs(&data.jobs)
         .map(|j| {
             TableRow::new(vec![
                 table_cell(short_uuid(j.id), CellAlign::Left),

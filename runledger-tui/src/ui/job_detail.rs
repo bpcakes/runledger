@@ -151,11 +151,7 @@ fn draw_summary(f: &mut Frame, area: ratatui::layout::Rect, data: &JobDetailData
 }
 
 fn draw_events(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobDetailData) {
-    let events: Vec<_> = data
-        .events
-        .iter()
-        .filter(|event| app.job_event_matches_search(event))
-        .collect();
+    let events: Vec<_> = app.visible_job_events(&data.events).collect();
     let selected_event_details = events
         .get(app.list_selection.min(events.len().saturating_sub(1)))
         .and_then(|event| event_details(event));
@@ -325,12 +321,8 @@ fn draw_logs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobDe
         TableColumn::left("Message", Constraint::Min(32)),
         TableColumn::right("When", Constraint::Length(19)).optional(1),
     ];
-    let rows: Vec<TableRow> = data
-        .logs
-        .iter()
-        .filter(|l| {
-            app.matches_table_search(|| vec![l.id.to_string(), l.level.clone(), l.message.clone()])
-        })
+    let rows: Vec<TableRow> = app
+        .visible_job_logs(&data.logs)
         .map(|l| {
             TableRow::new(vec![
                 table_cell(l.id.to_string(), CellAlign::Right),

@@ -38,18 +38,8 @@ pub fn draw_runs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &W
         TableColumn::right("Started", Constraint::Length(10)).optional(1),
         TableColumn::right("Finished", Constraint::Length(19)).optional(2),
     ];
-    let rows: Vec<TableRow> = data
-        .runs
-        .iter()
-        .filter(|r| {
-            app.matches_table_search(|| {
-                vec![
-                    r.id.to_string(),
-                    r.workflow_type.as_str().to_owned(),
-                    workflow_run_status_label(r.status).to_owned(),
-                ]
-            })
-        })
+    let rows: Vec<TableRow> = app
+        .visible_workflow_runs(&data.runs)
         .map(|r| {
             TableRow::new(vec![
                 table_cell(short_uuid(r.id), CellAlign::Left),
@@ -116,23 +106,7 @@ pub fn draw_detail(
         TableColumn::right("Deps", Constraint::Length(8)).optional(1),
         TableColumn::left("Job ID", Constraint::Length(15)).optional(2),
     ];
-    let filtered_steps: Vec<_> = data
-        .steps
-        .iter()
-        .filter(|s| {
-            app.matches_table_search(|| {
-                vec![
-                    s.step_key.as_str().to_owned(),
-                    workflow_step_status_label(s.status).to_owned(),
-                    s.job_type
-                        .as_ref()
-                        .map(|t| t.as_str().to_owned())
-                        .unwrap_or_default(),
-                    s.job_id.map(|id| id.to_string()).unwrap_or_default(),
-                ]
-            })
-        })
-        .collect();
+    let filtered_steps: Vec<_> = app.visible_workflow_steps(&data.steps).collect();
     let selected_step_id = filtered_steps
         .get(
             app.list_selection
@@ -144,10 +118,9 @@ pub fn draw_detail(
     } else {
         TableEnterAction::None
     };
-    let step_rows: Vec<TableRow> = data
-        .steps
+    let step_rows: Vec<TableRow> = filtered_steps
         .iter()
-        .filter(|s| filtered_steps.iter().any(|filtered| filtered.id == s.id))
+        .copied()
         .map(|s| {
             TableRow::new(vec![
                 table_cell(s.step_key.as_str(), CellAlign::Left),

@@ -104,62 +104,30 @@ impl App {
 
     fn selected_dashboard_job_type(&self) -> Option<String> {
         let dashboard = self.dashboard.as_ref()?;
-        dashboard
-            .metrics
-            .iter()
-            .filter(|metric| self.dashboard_metric_matches_search(dashboard, metric))
+        self.visible_dashboard_metrics(dashboard)
             .nth(self.list_selection)
             .map(|metric| metric.job_type.as_str().to_owned())
     }
 
     fn selected_job_id(&self) -> Option<Uuid> {
-        self.jobs
-            .as_ref()?
-            .jobs
-            .iter()
-            .filter(|j| self.job_matches_search(j))
+        let jobs = &self.jobs.as_ref()?.jobs;
+        self.visible_jobs(jobs)
             .nth(self.list_selection)
-            .map(|j| j.id)
+            .map(|job| job.id)
     }
 
     fn selected_workflow_run_id(&self) -> Option<Uuid> {
-        self.workflows
-            .as_ref()?
-            .runs
-            .iter()
-            .filter(|r| {
-                self.matches_table_search(|| {
-                    vec![
-                        r.id.to_string(),
-                        r.workflow_type.as_str().to_owned(),
-                        crate::format::workflow_run_status_label(r.status).to_owned(),
-                    ]
-                })
-            })
+        let runs = &self.workflows.as_ref()?.runs;
+        self.visible_workflow_runs(runs)
             .nth(self.list_selection)
-            .map(|r| r.id)
+            .map(|run| run.id)
     }
 
     pub(crate) fn selected_workflow_step_job_id(&self) -> Option<Uuid> {
-        self.workflow_detail
-            .as_ref()?
-            .steps
-            .iter()
-            .filter(|s| {
-                self.matches_table_search(|| {
-                    vec![
-                        s.step_key.as_str().to_owned(),
-                        crate::format::workflow_step_status_label(s.status).to_owned(),
-                        s.job_type
-                            .as_ref()
-                            .map(|t| t.as_str().to_owned())
-                            .unwrap_or_default(),
-                        s.job_id.map(|id| id.to_string()).unwrap_or_default(),
-                    ]
-                })
-            })
+        let steps = &self.workflow_detail.as_ref()?.steps;
+        self.visible_workflow_steps(steps)
             .nth(self.list_selection)
-            .and_then(|s| s.job_id)
+            .and_then(|step| step.job_id)
     }
 
     fn selected_identifier(&self) -> Option<String> {
@@ -173,26 +141,9 @@ impl App {
                 .map(|id| id.to_string())
                 .or_else(|| Some(run_id.to_string())),
             Screen::Definitions => self
-                .definitions
-                .as_ref()?
-                .definitions
-                .iter()
-                .filter(|def| {
-                    self.matches_table_search(|| {
-                        vec![
-                            def.job_type.as_str().to_owned(),
-                            def.version.to_string(),
-                            if def.is_enabled {
-                                "enabled"
-                            } else {
-                                "disabled"
-                            }
-                            .to_owned(),
-                        ]
-                    })
-                })
+                .visible_definitions(&self.definitions.as_ref()?.definitions)
                 .nth(self.list_selection)
-                .map(|def| def.job_type.as_str().to_owned()),
+                .map(|definition| definition.job_type.as_str().to_owned()),
         }
     }
 
