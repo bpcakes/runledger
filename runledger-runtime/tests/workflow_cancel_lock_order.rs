@@ -17,12 +17,13 @@ use sqlx::types::Uuid;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
+use runledger_test_support::{
+    EphemeralDatabase, setup_ephemeral_pool_with_untracked_migrations as setup_ephemeral_pool,
+    teardown_ephemeral_pool,
+};
 use support::{query_error_code, register_job_definition};
-use test_support::{EphemeralDatabase, setup_ephemeral_pool, teardown_ephemeral_pool};
 
 mod support;
-#[path = "../test_support.rs"]
-mod test_support;
 
 // These tests observe blocking through SQL markers in pg_stat_activity. If a
 // marker changes, update the matching wait helper rather than weakening the

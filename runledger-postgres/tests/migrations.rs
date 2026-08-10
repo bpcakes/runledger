@@ -2,28 +2,20 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use runledger_postgres::{
     MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
     migrate_after_idempotency_cutover,
 };
-use runledger_test_support::{TestDbConnectionBudgetPermit, acquire_test_db_connection_budget};
+use runledger_test_support::{
+    EphemeralDatabase, acquire_test_db_connection_budget, setup_unmigrated_ephemeral_pool,
+    teardown_ephemeral_pool,
+};
 use serde_json::{Value, json};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use testcontainers::{
-    ContainerAsync, GenericImage, ImageExt, core::ContainerPort, runners::AsyncRunner,
-};
 
-const DEFAULT_POSTGRES_IMAGE: &str = "postgres:18";
-const POSTGRES_USER: &str = "runledger";
-const POSTGRES_PASSWORD: &str = "runledger";
-const POSTGRES_DB: &str = "postgres";
-const TEST_ADMIN_DATABASE_URL_ENV: &str = "RUNLEDGER_TEST_ADMIN_DATABASE_URL";
-const MAX_POSTGRES_BOOTSTRAP_ATTEMPTS: u8 = 40;
-const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
 const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
 const V0_6_LATEST_MIGRATION_VERSION: i64 = 202606030001;
 const REPLAY_METRICS_MIGRATION_VERSION: i64 = 202607190001;
@@ -51,97 +43,21 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     WORKFLOW_RECOVERIES_MIGRATION_VERSION,
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
-const TEST_HARNESS_ADMIN_CONNECTIONS: u32 = 1;
-
-static DATABASE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct TestHarness {
-    admin_url: String,
-    database_name: String,
     pool: PgPool,
-    _connection_budget: TestDbConnectionBudgetPermit,
-    _container: Option<ContainerAsync<GenericImage>>,
+    database: EphemeralDatabase,
 }
 
 impl TestHarness {
     async fn fresh(prefix: &str) -> Self {
-        let connection_budget = acquire_test_db_connection_budget(
-            TEST_HARNESS_POOL_CONNECTIONS + TEST_HARNESS_ADMIN_CONNECTIONS,
-        )
-        .await;
-        let (admin_url, container) =
-            if let Ok(admin_url) = std::env::var(TEST_ADMIN_DATABASE_URL_ENV) {
-                wait_for_postgres(&admin_url).await;
-                (admin_url, None)
-            } else {
-                let image_ref = std::env::var("RUNLEDGER_TEST_PG_IMAGE")
-                    .unwrap_or_else(|_| DEFAULT_POSTGRES_IMAGE.into());
-                let (repository, tag) = parse_image_ref(&image_ref);
-                let container = GenericImage::new(repository, tag)
-                    .with_exposed_port(ContainerPort::Tcp(5432))
-                    .with_env_var("POSTGRES_USER", POSTGRES_USER)
-                    .with_env_var("POSTGRES_PASSWORD", POSTGRES_PASSWORD)
-                    .with_env_var("POSTGRES_DB", POSTGRES_DB)
-                    .start()
-                    .await
-                    .expect("start postgres container");
-
-                let port = resolve_host_port(&container, 5432).await;
-                let admin_url = postgres_admin_url(port);
-                wait_for_postgres(&admin_url).await;
-                (admin_url, Some(container))
-            };
-
-        let database_name = build_database_name(prefix);
-        let admin_pool = connect_admin_pool(&admin_url)
-            .await
-            .expect("connect admin postgres");
-        let create_sql = format!("CREATE DATABASE {database_name}");
-        sqlx::raw_sql(&create_sql)
-            .execute(&admin_pool)
-            .await
-            .expect("create ephemeral database");
-        admin_pool.close().await;
-
-        let database_url = with_database_name(&admin_url, &database_name);
-        let pool = PgPoolOptions::new()
-            .max_connections(TEST_HARNESS_POOL_CONNECTIONS)
-            .connect(&database_url)
-            .await
-            .expect("connect postgres");
-
-        Self {
-            admin_url,
-            database_name,
-            pool,
-            _connection_budget: connection_budget,
-            _container: container,
-        }
+        let (pool, database) =
+            setup_unmigrated_ephemeral_pool(prefix, TEST_HARNESS_POOL_CONNECTIONS).await;
+        Self { pool, database }
     }
 
     async fn teardown(self) {
-        self.pool.close().await;
-
-        let admin_pool = connect_admin_pool(&self.admin_url)
-            .await
-            .expect("connect admin postgres");
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid)
-             FROM pg_stat_activity
-             WHERE datname = $1
-               AND pid <> pg_backend_pid()",
-        )
-        .bind(&self.database_name)
-        .fetch_all(&admin_pool)
-        .await
-        .expect("terminate database backends");
-
-        let drop_sql = format!("DROP DATABASE IF EXISTS {}", self.database_name);
-        sqlx::raw_sql(&drop_sql)
-            .execute(&admin_pool)
-            .await
-            .expect("drop ephemeral database");
-        admin_pool.close().await;
+        teardown_ephemeral_pool(self.pool, self.database).await;
     }
 }
 
@@ -518,7 +434,7 @@ async fn raw_version_missing_strands_session_lock_until_pool_close_but_safe_path
         .expect("apply current migrations before raw compatibility check");
 
     let _migration_connection_budget = acquire_test_db_connection_budget(2).await;
-    let database_url = with_database_name(&harness.admin_url, &harness.database_name);
+    let database_url = harness.database.url.clone();
     let raw_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -1320,155 +1236,6 @@ async fn advisory_lock_count_for_database(pool: &PgPool) -> i64 {
     .fetch_one(pool)
     .await
     .expect("count database advisory locks")
-}
-
-async fn connect_admin_pool(admin_url: &str) -> Result<PgPool, sqlx::Error> {
-    PgPoolOptions::new()
-        .max_connections(1)
-        .connect(admin_url)
-        .await
-}
-
-async fn resolve_host_port(container: &ContainerAsync<GenericImage>, internal_port: u16) -> u16 {
-    for attempt in 1..=MAX_PORT_RESOLVE_ATTEMPTS {
-        match container.get_host_port_ipv4(internal_port).await {
-            Ok(port) => return port,
-            Err(err) => {
-                if attempt == MAX_PORT_RESOLVE_ATTEMPTS {
-                    panic!(
-                        "resolve mapped postgres port after {MAX_PORT_RESOLVE_ATTEMPTS} attempts: {err}"
-                    );
-                }
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
-    }
-
-    unreachable!()
-}
-
-async fn wait_for_postgres(admin_url: &str) {
-    for attempt in 1..=MAX_POSTGRES_BOOTSTRAP_ATTEMPTS {
-        match connect_admin_pool(admin_url).await {
-            Ok(pool) => {
-                let version_result = sqlx::query_scalar::<_, i32>(
-                    "SELECT current_setting('server_version_num')::int",
-                )
-                .fetch_one(&pool)
-                .await;
-                pool.close().await;
-                match version_result {
-                    Ok(server_version_num) if server_version_num >= 180_000 => return,
-                    Ok(server_version_num) => panic!(
-                        "Runledger migration tests require PostgreSQL 18 or later; connected server_version_num was {server_version_num}"
-                    ),
-                    Err(error) if attempt == MAX_POSTGRES_BOOTSTRAP_ATTEMPTS => panic!(
-                        "read PostgreSQL server_version_num after {MAX_POSTGRES_BOOTSTRAP_ATTEMPTS} attempts: {error}"
-                    ),
-                    Err(_) => {}
-                }
-            }
-            Err(err) => {
-                if attempt == MAX_POSTGRES_BOOTSTRAP_ATTEMPTS {
-                    panic!(
-                        "connect to PostgreSQL 18+ after {MAX_POSTGRES_BOOTSTRAP_ATTEMPTS} attempts: {err}"
-                    );
-                }
-            }
-        }
-
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    panic!("unexpected PostgreSQL 18 bootstrap loop termination");
-}
-
-fn postgres_admin_url(port: u16) -> String {
-    format!("postgres://{POSTGRES_USER}:{POSTGRES_PASSWORD}@127.0.0.1:{port}/{POSTGRES_DB}")
-}
-
-fn parse_image_ref(image_ref: &str) -> (String, String) {
-    let (name_and_tag, digest) = image_ref
-        .split_once('@')
-        .map_or((image_ref, None), |(name_and_tag, digest)| {
-            (name_and_tag, Some(digest))
-        });
-
-    let last_slash = name_and_tag.rfind('/');
-    let split_tag = name_and_tag
-        .rfind(':')
-        .filter(|index| last_slash.is_none_or(|slash| *index > slash));
-
-    let (repository, mut tag) = split_tag.map_or_else(
-        || (name_and_tag.to_owned(), String::from("latest")),
-        |index| {
-            (
-                name_and_tag[..index].to_owned(),
-                name_and_tag[index + 1..].to_owned(),
-            )
-        },
-    );
-
-    if let Some(digest) = digest {
-        tag.push('@');
-        tag.push_str(digest);
-    }
-
-    (repository, tag)
-}
-
-fn build_database_name(prefix: &str) -> String {
-    let sanitized_prefix = sanitize_identifier(prefix);
-    let compact_prefix = if sanitized_prefix.len() > 24 {
-        sanitized_prefix[..24].to_string()
-    } else {
-        sanitized_prefix
-    };
-    let index = DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}_{}_{}", compact_prefix, std::process::id(), index)
-}
-
-fn with_database_name(admin_url: &str, database_name: &str) -> String {
-    let (base, _) = admin_url
-        .rsplit_once('/')
-        .expect("DATABASE_URL must include database name");
-    format!("{base}/{database_name}")
-}
-
-fn sanitize_identifier(input: &str) -> String {
-    let mut normalized = String::with_capacity(input.len() + 3);
-    let mut previous_was_underscore = false;
-
-    for ch in input.chars() {
-        let mapped = if ch.is_ascii_alphanumeric() || ch == '_' {
-            ch.to_ascii_lowercase()
-        } else {
-            '_'
-        };
-
-        if mapped == '_' {
-            if !previous_was_underscore {
-                normalized.push(mapped);
-            }
-            previous_was_underscore = true;
-        } else {
-            normalized.push(mapped);
-            previous_was_underscore = false;
-        }
-    }
-
-    if normalized.is_empty() {
-        normalized.push_str("db");
-    }
-    if normalized
-        .chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_digit())
-    {
-        normalized.insert_str(0, "db_");
-    }
-
-    normalized
 }
 
 fn runledger_migration_versions() -> Vec<i64> {

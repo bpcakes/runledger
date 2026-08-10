@@ -18,12 +18,12 @@ use serde_json::{Value, json};
 use sqlx::types::Uuid;
 use tokio::sync::Barrier;
 
+use runledger_test_support::{
+    setup_ephemeral_pool_with_untracked_migrations as setup_ephemeral_pool, teardown_ephemeral_pool,
+};
 use support::{query_error_code, register_job_definition};
-use test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 
 mod support;
-#[path = "../test_support.rs"]
-mod test_support;
 
 fn assert_error_does_not_expose(error: &runledger_postgres::Error, sensitive: &str) {
     assert!(

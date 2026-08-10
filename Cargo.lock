@@ -2305,7 +2305,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
- "testcontainers",
  "tokio",
  "tracing",
 ]
@@ -2320,9 +2319,9 @@ dependencies = [
  "futures-util",
  "runledger-core",
  "runledger-postgres",
+ "runledger-test-support",
  "serde_json",
  "sqlx",
- "testcontainers",
  "thiserror",
  "tokio",
  "tracing",

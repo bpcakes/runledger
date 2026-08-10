@@ -18,10 +18,9 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, sleep, timeout};
 
-#[path = "../test_support.rs"]
-mod test_support;
-
-use test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
+use runledger_test_support::{
+    setup_ephemeral_pool_with_untracked_migrations as setup_ephemeral_pool, teardown_ephemeral_pool,
+};
 
 struct BlockingHandler {
     runs: Arc<AtomicUsize>,

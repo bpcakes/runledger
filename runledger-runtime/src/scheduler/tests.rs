@@ -16,8 +16,10 @@ use super::{
     run_scheduler_loop,
 };
 use crate::config::JobsConfig;
-use crate::test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use crate::{Error, RuntimeLoopExit, SchedulerError};
+use runledger_test_support::{
+    setup_ephemeral_pool_with_untracked_migrations as setup_ephemeral_pool, teardown_ephemeral_pool,
+};
 
 fn scheduler_loop_test_config() -> JobsConfig {
     JobsConfig {

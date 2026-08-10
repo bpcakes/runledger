@@ -26,6 +26,31 @@ pub async fn setup_ephemeral_pool(
     prefix: &str,
     max_connections: u32,
 ) -> (PgPool, EphemeralDatabase) {
+    let (pool, database) = setup_unmigrated_ephemeral_pool(prefix, max_connections).await;
+
+    let migrations_dir = runledger_migrations_dir();
+    let migrator = sqlx::migrate::Migrator::new(migrations_dir.as_path())
+        .await
+        .expect("load migrations");
+    migrator.run(&pool).await.expect("run migrations");
+    (pool, database)
+}
+
+pub async fn setup_ephemeral_pool_with_untracked_migrations(
+    prefix: &str,
+    max_connections: u32,
+) -> (PgPool, EphemeralDatabase) {
+    let (pool, database) = setup_unmigrated_ephemeral_pool(prefix, max_connections).await;
+    apply_untracked_runledger_migrations(&pool)
+        .await
+        .expect("run migrations");
+    (pool, database)
+}
+
+pub async fn setup_unmigrated_ephemeral_pool(
+    prefix: &str,
+    max_connections: u32,
+) -> (PgPool, EphemeralDatabase) {
     let permit = acquire_ephemeral_db_permit(max_connections.saturating_add(1)).await;
     let database = create_ephemeral_database_with_permit(prefix, permit)
         .await
@@ -35,13 +60,32 @@ pub async fn setup_ephemeral_pool(
         .connect(&database.url)
         .await
         .expect("connect postgres");
-
-    let migrations_dir = runledger_migrations_dir();
-    let migrator = sqlx::migrate::Migrator::new(migrations_dir.as_path())
-        .await
-        .expect("load migrations");
-    migrator.run(&pool).await.expect("run migrations");
     (pool, database)
+}
+
+async fn apply_untracked_runledger_migrations(
+    pool: &PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for migration_path in runledger_migration_paths()? {
+        let sql = std::fs::read_to_string(&migration_path)?;
+        sqlx::raw_sql(&sql).execute(pool).await?;
+    }
+    Ok(())
+}
+
+fn runledger_migration_paths() -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut paths = std::fs::read_dir(runledger_migrations_dir())?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    paths.retain(|path| path.extension().is_some_and(|ext| ext == "sql"));
+    paths.retain(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".up.sql"))
+    });
+    paths.sort();
+    Ok(paths)
 }
 
 fn runledger_migrations_dir() -> PathBuf {
@@ -243,4 +287,36 @@ fn sanitize_identifier(input: &str) -> String {
     }
 
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn setup_modes_preserve_migration_history_semantics() {
+        let (pool, database) = setup_unmigrated_ephemeral_pool("support_unmigrated", 1).await;
+        assert!(!relation_exists(&pool, "job_queue").await);
+        assert!(!relation_exists(&pool, "_sqlx_migrations").await);
+        teardown_ephemeral_pool(pool, database).await;
+
+        let (pool, database) =
+            setup_ephemeral_pool_with_untracked_migrations("support_untracked", 1).await;
+        assert!(relation_exists(&pool, "job_queue").await);
+        assert!(!relation_exists(&pool, "_sqlx_migrations").await);
+        teardown_ephemeral_pool(pool, database).await;
+
+        let (pool, database) = setup_ephemeral_pool("support_tracked", 1).await;
+        assert!(relation_exists(&pool, "job_queue").await);
+        assert!(relation_exists(&pool, "_sqlx_migrations").await);
+        teardown_ephemeral_pool(pool, database).await;
+    }
+
+    async fn relation_exists(pool: &PgPool, name: &str) -> bool {
+        sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .expect("query relation existence")
+    }
 }

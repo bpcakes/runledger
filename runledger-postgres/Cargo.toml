@@ -28,5 +28,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 runledger-test-support = { workspace = true }
-testcontainers = { version = "0.27", features = ["watchdog"] }
 tokio = { workspace = true }
