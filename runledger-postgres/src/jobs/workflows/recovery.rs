@@ -16,7 +16,7 @@ use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
 use super::super::workflow_types::{
     EnqueueActiveWorkflowOutcome, WorkflowRecoveryDisposition, WorkflowRecoveryOutcome,
-    WorkflowRecoveryRequest,
+    WorkflowRecoveryRequest, WorkflowRunDbRecord,
 };
 use super::enqueue::{enqueue_or_get_active_workflow_tx, enqueue_workflow_run_tx};
 use super::read::load_workflow_run_by_id_tx;
@@ -57,6 +57,14 @@ struct RecoverySourceStepState {
     timeout_seconds: Option<i32>,
     allow_handler_continuation: bool,
     execution_resource_key: Option<String>,
+}
+
+struct RecoveryBlueprint {
+    workflow_type: String,
+    organization_id: Option<Uuid>,
+    initial: RecoveryEnqueueSnapshot,
+    steps: Vec<StoredCanonicalWorkflowStep>,
+    source_step_state: BTreeMap<String, RecoverySourceStepState>,
 }
 
 #[derive(Debug)]
@@ -122,6 +130,108 @@ impl<'a> ValidatedRecoveryDependencies<'a> {
     }
 }
 
+impl RecoveryBlueprint {
+    async fn load_tx(
+        tx: &mut DbTx<'_>,
+        source_run_id: Uuid,
+        source: RecoverySourceRow,
+    ) -> Result<Self> {
+        let RecoverySourceRow {
+            workflow_type,
+            organization_id,
+            status: _,
+            enqueue_request,
+        } = source;
+        let enqueue_request = enqueue_request.ok_or_else(|| {
+            recovery_snapshot_missing_error(source_run_id, "canonical enqueue request")
+        })?;
+        let mut initial =
+            deserialize_recovery_enqueue_snapshot(enqueue_request).map_err(|error| {
+                unsafe_recovery_snapshot_error(format!("invalid enqueue snapshot: {error}"))
+            })?;
+        let mutations = sqlx::query_as::<_, RecoveryMutationRow>(
+            "SELECT mutation_kind, request
+             FROM workflow_run_mutations
+             WHERE workflow_run_id = $1
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(source_run_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| {
+            Error::from_query_sqlx_with_context("load workflow recovery append history", error)
+        })?;
+
+        let mut steps_by_key = BTreeMap::new();
+        for step in std::mem::take(&mut initial.steps) {
+            insert_recovery_step(&mut steps_by_key, step)?;
+        }
+        for mutation in mutations {
+            if mutation.mutation_kind != "APPEND_STEPS" {
+                return Err(unsafe_recovery_snapshot_error(format!(
+                    "unsupported workflow mutation kind {}",
+                    mutation.mutation_kind
+                )));
+            }
+            let append =
+                deserialize_recovery_append_snapshot(mutation.request).map_err(|error| {
+                    unsafe_recovery_snapshot_error(format!("invalid append snapshot: {error}"))
+                })?;
+            for step in append.steps {
+                insert_recovery_step(&mut steps_by_key, step)?;
+            }
+        }
+
+        Ok(Self {
+            workflow_type,
+            organization_id,
+            initial,
+            steps: steps_by_key.into_values().collect(),
+            source_step_state: load_recovery_source_step_state_tx(tx, source_run_id).await?,
+        })
+    }
+
+    async fn enqueue_tx(&self, tx: &mut DbTx<'_>) -> Result<WorkflowRunDbRecord> {
+        let enqueue = self.build_enqueue()?;
+        if self.initial.active_key.is_some() {
+            match enqueue_or_get_active_workflow_tx(tx, &enqueue).await? {
+                EnqueueActiveWorkflowOutcome::Inserted(run) => Ok(run),
+                EnqueueActiveWorkflowOutcome::ExistingActive(run) => {
+                    Err(recovery_active_constraint_error(run.id))
+                }
+                EnqueueActiveWorkflowOutcome::ExistingIdempotent(_) => {
+                    Err(unsafe_recovery_snapshot_error(
+                        "recovery enqueue unexpectedly matched an idempotency key",
+                    ))
+                }
+            }
+        } else {
+            enqueue_workflow_run_tx(tx, &enqueue).await
+        }
+    }
+
+    fn build_enqueue(&self) -> Result<runledger_core::jobs::WorkflowRunEnqueue<'_>> {
+        // This is a load-bearing reconstruction invariant: every path that
+        // adds workflow steps must also append its canonical request to
+        // workflow_run_mutations. The supported append API does so atomically.
+        if self.source_step_state.len() != self.steps.len() {
+            return Err(unsafe_recovery_snapshot_error(format!(
+                "reconstructed {} workflow steps but source run stores {}",
+                self.steps.len(),
+                self.source_step_state.len()
+            )));
+        }
+
+        let mut replay_steps = Vec::<WorkflowStepEnqueue<'_>>::with_capacity(self.steps.len());
+        for step in &self.steps {
+            let validated_step = validate_recovery_step(step, &self.source_step_state)?;
+            replay_steps.push(build_recovery_step_enqueue(validated_step)?);
+        }
+
+        build_recovery_run_enqueue(self, replay_steps)
+    }
+}
+
 /// Replays a terminal workflow as a new lineage-linked run in an internally
 /// owned `READ COMMITTED` transaction.
 ///
@@ -181,23 +291,7 @@ async fn recover_workflow_run_read_committed_tx(
     let tx = tx.as_tx();
     // The source lock serializes equal request keys and freezes append/cancel
     // mutations while the canonical snapshots are reconstructed.
-    let source = sqlx::query_as::<_, RecoverySourceRow>(
-        "SELECT
-            workflow_type,
-            organization_id,
-            status::text AS status,
-            enqueue_request
-         FROM workflow_runs
-         WHERE id = $1
-           AND organization_id IS NOT DISTINCT FROM $2
-         FOR UPDATE",
-    )
-    .bind(request.source_run_id)
-    .bind(request.organization_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("lock workflow recovery source", error))?
-    .ok_or_else(|| recovery_source_not_found_error(request.source_run_id))?;
+    let source = lock_recovery_source_tx(tx, request).await?;
 
     if let Some(existing) =
         load_existing_recovery_tx(tx, request.source_run_id, request.request_key).await?
@@ -227,63 +321,44 @@ async fn recover_workflow_run_read_committed_tx(
         ensure_source_step_belongs_to_run_tx(tx, request.source_run_id, source_step_id).await?;
     }
 
-    let enqueue_request = source.enqueue_request.clone().ok_or_else(|| {
-        recovery_snapshot_missing_error(request.source_run_id, "canonical enqueue request")
-    })?;
-    let mut initial = deserialize_recovery_enqueue_snapshot(enqueue_request).map_err(|error| {
-        unsafe_recovery_snapshot_error(format!("invalid enqueue snapshot: {error}"))
-    })?;
-    let mutations = sqlx::query_as::<_, RecoveryMutationRow>(
-        "SELECT mutation_kind, request
-         FROM workflow_run_mutations
-         WHERE workflow_run_id = $1
-         ORDER BY created_at ASC, id ASC",
+    let blueprint = RecoveryBlueprint::load_tx(tx, request.source_run_id, source).await?;
+    let run = blueprint.enqueue_tx(tx).await?;
+    insert_recovery_lineage_tx(tx, run.id, request).await?;
+
+    Ok(WorkflowRecoveryOutcome {
+        run,
+        disposition: WorkflowRecoveryDisposition::Inserted,
+    })
+}
+
+async fn lock_recovery_source_tx(
+    tx: &mut DbTx<'_>,
+    request: &WorkflowRecoveryRequest<'_>,
+) -> Result<RecoverySourceRow> {
+    sqlx::query_as::<_, RecoverySourceRow>(
+        "SELECT
+            workflow_type,
+            organization_id,
+            status::text AS status,
+            enqueue_request
+         FROM workflow_runs
+         WHERE id = $1
+           AND organization_id IS NOT DISTINCT FROM $2
+         FOR UPDATE",
     )
     .bind(request.source_run_id)
-    .fetch_all(&mut **tx)
+    .bind(request.organization_id)
+    .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("load workflow recovery append history", error)
-    })?;
+    .map_err(|error| Error::from_query_sqlx_with_context("lock workflow recovery source", error))?
+    .ok_or_else(|| recovery_source_not_found_error(request.source_run_id))
+}
 
-    let mut steps_by_key = BTreeMap::new();
-    for step in std::mem::take(&mut initial.steps) {
-        insert_recovery_step(&mut steps_by_key, step)?;
-    }
-    for mutation in mutations {
-        if mutation.mutation_kind != "APPEND_STEPS" {
-            return Err(unsafe_recovery_snapshot_error(format!(
-                "unsupported workflow mutation kind {}",
-                mutation.mutation_kind
-            )));
-        }
-        let append = deserialize_recovery_append_snapshot(mutation.request).map_err(|error| {
-            unsafe_recovery_snapshot_error(format!("invalid append snapshot: {error}"))
-        })?;
-        for step in append.steps {
-            insert_recovery_step(&mut steps_by_key, step)?;
-        }
-    }
-    let steps = steps_by_key.into_values().collect::<Vec<_>>();
-    let source_step_state = load_recovery_source_step_state_tx(tx, request.source_run_id).await?;
-    let enqueue = build_recovery_enqueue(&source, &initial, &steps, &source_step_state)?;
-
-    let run = if initial.active_key.is_some() {
-        match enqueue_or_get_active_workflow_tx(tx, &enqueue).await? {
-            EnqueueActiveWorkflowOutcome::Inserted(run) => run,
-            EnqueueActiveWorkflowOutcome::ExistingActive(run) => {
-                return Err(recovery_active_constraint_error(run.id));
-            }
-            EnqueueActiveWorkflowOutcome::ExistingIdempotent(_) => {
-                return Err(unsafe_recovery_snapshot_error(
-                    "recovery enqueue unexpectedly matched an idempotency key",
-                ));
-            }
-        }
-    } else {
-        enqueue_workflow_run_tx(tx, &enqueue).await?
-    };
-
+async fn insert_recovery_lineage_tx(
+    tx: &mut DbTx<'_>,
+    recovery_run_id: Uuid,
+    request: &WorkflowRecoveryRequest<'_>,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO workflow_recoveries (
             recovery_run_id,
@@ -295,7 +370,7 @@ async fn recover_workflow_run_read_committed_tx(
          )
          VALUES ($1, $2, $3, $4, $5, $6)",
     )
-    .bind(run.id)
+    .bind(recovery_run_id)
     .bind(request.source_run_id)
     .bind(request.source_step_id)
     .bind(request.request_key)
@@ -307,36 +382,7 @@ async fn recover_workflow_run_read_committed_tx(
         Error::from_query_sqlx_with_context("insert workflow recovery lineage", error)
     })?;
 
-    Ok(WorkflowRecoveryOutcome {
-        run,
-        disposition: WorkflowRecoveryDisposition::Inserted,
-    })
-}
-
-fn build_recovery_enqueue<'a>(
-    source: &'a RecoverySourceRow,
-    initial: &'a RecoveryEnqueueSnapshot,
-    steps: &'a [StoredCanonicalWorkflowStep],
-    source_step_state: &'a BTreeMap<String, RecoverySourceStepState>,
-) -> Result<runledger_core::jobs::WorkflowRunEnqueue<'a>> {
-    // This is a load-bearing reconstruction invariant: every path that adds
-    // workflow steps must also append its canonical request to
-    // workflow_run_mutations. The supported append API does so atomically.
-    if source_step_state.len() != steps.len() {
-        return Err(unsafe_recovery_snapshot_error(format!(
-            "reconstructed {} workflow steps but source run stores {}",
-            steps.len(),
-            source_step_state.len()
-        )));
-    }
-
-    let mut replay_steps = Vec::<WorkflowStepEnqueue<'a>>::with_capacity(steps.len());
-    for step in steps {
-        let validated_step = validate_recovery_step(step, source_step_state)?;
-        replay_steps.push(build_recovery_step_enqueue(validated_step)?);
-    }
-
-    build_recovery_run_enqueue(source, initial, replay_steps)
+    Ok(())
 }
 
 fn validate_recovery_step<'a>(
@@ -519,19 +565,20 @@ fn build_recovery_step_enqueue<'a>(
 }
 
 fn build_recovery_run_enqueue<'a>(
-    source: &'a RecoverySourceRow,
-    initial: &'a RecoveryEnqueueSnapshot,
+    blueprint: &'a RecoveryBlueprint,
     replay_steps: Vec<WorkflowStepEnqueue<'a>>,
 ) -> Result<runledger_core::jobs::WorkflowRunEnqueue<'a>> {
-    let mut builder =
-        WorkflowRunEnqueueBuilder::new(WorkflowType::new(&source.workflow_type), &initial.metadata);
-    if let Some(organization_id) = source.organization_id {
+    let mut builder = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new(&blueprint.workflow_type),
+        &blueprint.initial.metadata,
+    );
+    if let Some(organization_id) = blueprint.organization_id {
         builder = builder.organization_id(organization_id);
     }
-    if let Some(active_key) = initial.active_key.as_deref() {
+    if let Some(active_key) = blueprint.initial.active_key.as_deref() {
         builder = builder.active_key(active_key);
     }
-    if let Some(result_step_key) = initial.result_step_key.as_deref() {
+    if let Some(result_step_key) = blueprint.initial.result_step_key.as_deref() {
         builder = builder.result_step_key(StepKey::new(result_step_key));
     }
     for step in replay_steps {
