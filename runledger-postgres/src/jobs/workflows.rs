@@ -25,6 +25,7 @@ pub use self::runtime::{complete_external_workflow_step, complete_external_workf
 
 mod active_claims;
 mod enqueue;
+mod enqueue_persistence;
 mod errors;
 mod handles;
 mod hooks;
