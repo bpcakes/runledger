@@ -1,9 +1,5 @@
 use runledger_core::jobs::{WorkflowRunEnqueue, validate_workflow_run_enqueue};
-use sqlx::types::Uuid;
 
-use super::super::row_decode::{
-    parse_job_stage, parse_job_type_name, parse_workflow_step_execution_kind,
-};
 use super::super::workflow_types::{EnqueueActiveWorkflowOutcome, WorkflowRunDbRecord};
 use super::active_claims::{
     insert_workflow_active_claim_tx, load_existing_active_workflow_run_tx,
@@ -18,7 +14,7 @@ use super::errors::{
     workflow_internal_state_error,
 };
 use super::read::load_workflow_run_by_id_tx;
-use super::release::{StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx};
+use super::release::enqueue_root_steps_tx;
 use super::runtime::recompute_workflow_run_statuses_tx;
 use super::snapshot::canonical_workflow_enqueue_request;
 use super::steps::{
@@ -235,54 +231,6 @@ async fn enqueue_workflow_run_classified_tx_inner(
     )
     .await?;
     Ok(EnqueueActiveWorkflowOutcome::Inserted(workflow_run))
-}
-
-pub(crate) async fn enqueue_root_steps_tx(tx: &mut DbTx<'_>, workflow_run_id: Uuid) -> Result<()> {
-    let rows = sqlx::query!(
-        "SELECT
-            id,
-            workflow_run_id,
-            execution_kind::text AS \"execution_kind!\",
-            job_type,
-            organization_id,
-            payload,
-            priority,
-            max_attempts,
-            timeout_seconds,
-            stage,
-            execution_resource_key
-         FROM workflow_steps
-         WHERE workflow_run_id = $1
-           AND status = 'BLOCKED'
-           AND dependency_count_pending = 0
-         ORDER BY created_at ASC
-         FOR UPDATE",
-        workflow_run_id,
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("lookup root workflow steps for enqueue", error)
-    })?;
-
-    for row in rows {
-        let candidate = StepReleaseCandidate::from_decoded_fields(StepReleaseCandidateInit {
-            id: row.id,
-            workflow_run_id: row.workflow_run_id,
-            execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,
-            job_type: row.job_type.map(parse_job_type_name).transpose()?,
-            organization_id: row.organization_id,
-            payload: row.payload,
-            priority: row.priority,
-            max_attempts: row.max_attempts,
-            timeout_seconds: row.timeout_seconds,
-            stage: row.stage.map(parse_job_stage).transpose()?,
-            execution_resource_key: row.execution_resource_key,
-        });
-        release_candidate_step_tx(tx, &candidate).await?;
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
