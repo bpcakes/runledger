@@ -1,6 +1,86 @@
 use sqlx::types::Uuid;
 
+use super::super::workflow_types::WorkflowRunDbRecord;
+use super::read::load_workflow_run_by_id_tx;
 use crate::{DbTx, Error, Result};
+
+fn workflow_active_claim_scope(organization_id: Option<Uuid>) -> String {
+    organization_id.map_or_else(
+        || "global".to_owned(),
+        |organization_id| format!("organization:{organization_id}"),
+    )
+}
+
+pub(super) async fn lock_workflow_active_key_tx(
+    tx: &mut DbTx<'_>,
+    organization_id: Option<Uuid>,
+    active_key: &str,
+) -> Result<()> {
+    let scope = workflow_active_claim_scope(organization_id);
+    // Hash collisions only over-serialize; the (scope, active_key) primary key
+    // remains the authoritative ownership guard.
+    sqlx::query_scalar::<_, ()>("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
+        .bind(&scope)
+        .bind(active_key)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| Error::from_query_sqlx_with_context("lock workflow active key", error))?;
+    Ok(())
+}
+
+pub(super) async fn load_existing_active_workflow_run_tx(
+    tx: &mut DbTx<'_>,
+    organization_id: Option<Uuid>,
+    active_key: &str,
+) -> Result<Option<WorkflowRunDbRecord>> {
+    let scope = workflow_active_claim_scope(organization_id);
+    let workflow_run_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT workflow_run_id
+         FROM workflow_active_claims
+         WHERE scope = $1
+           AND active_key = $2
+         FOR UPDATE",
+    )
+    .bind(&scope)
+    .bind(active_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("load existing workflow active claim", error)
+    })?;
+
+    let Some(workflow_run_id) = workflow_run_id else {
+        return Ok(None);
+    };
+    load_workflow_run_by_id_tx(tx, workflow_run_id, "load existing active workflow run")
+        .await
+        .map(Some)
+}
+
+pub(super) async fn insert_workflow_active_claim_tx(
+    tx: &mut DbTx<'_>,
+    organization_id: Option<Uuid>,
+    active_key: &str,
+    workflow_run_id: Uuid,
+) -> Result<()> {
+    let scope = workflow_active_claim_scope(organization_id);
+    sqlx::query(
+        "INSERT INTO workflow_active_claims (
+            scope,
+            active_key,
+            workflow_run_id,
+            release_pending
+         )
+         VALUES ($1, $2, $3, false)",
+    )
+    .bind(&scope)
+    .bind(active_key)
+    .bind(workflow_run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("insert workflow active claim", error))?;
+    Ok(())
+}
 
 pub(crate) async fn release_or_defer_workflow_active_claim_tx(
     tx: &mut DbTx<'_>,

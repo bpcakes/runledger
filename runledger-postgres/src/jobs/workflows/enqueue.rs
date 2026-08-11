@@ -2,14 +2,15 @@ use runledger_core::jobs::{WorkflowRunEnqueue, validate_workflow_run_enqueue};
 use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
 
-use crate::jobs::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
-use crate::{DbPool, DbTx, Error, Result};
-
 use super::super::row_decode::{
     parse_job_stage, parse_job_type_name, parse_workflow_step_execution_kind,
 };
 use super::super::rows::WorkflowRunEnqueueRow;
 use super::super::workflow_types::{EnqueueActiveWorkflowOutcome, WorkflowRunDbRecord};
+use super::active_claims::{
+    insert_workflow_active_claim_tx, load_existing_active_workflow_run_tx,
+    lock_workflow_active_key_tx,
+};
 use super::errors::{
     workflow_active_key_api_required_error, workflow_active_key_required_error,
     workflow_enqueue_conflicting_retry_error, workflow_internal_state_error,
@@ -24,6 +25,8 @@ use super::steps::{
     insert_workflow_steps_tx,
 };
 use super::validation::workflow_dag_validation_error;
+use crate::jobs::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
+use crate::{DbPool, DbTx, Error, Result};
 
 struct WorkflowRunInsertOutcome {
     record: WorkflowRunDbRecord,
@@ -236,84 +239,6 @@ async fn enqueue_workflow_run_classified_tx_inner(
     )
     .await?;
     Ok(EnqueueActiveWorkflowOutcome::Inserted(workflow_run))
-}
-
-fn workflow_active_claim_scope(organization_id: Option<Uuid>) -> String {
-    organization_id.map_or_else(
-        || "global".to_owned(),
-        |organization_id| format!("organization:{organization_id}"),
-    )
-}
-
-async fn lock_workflow_active_key_tx(
-    tx: &mut DbTx<'_>,
-    organization_id: Option<Uuid>,
-    active_key: &str,
-) -> Result<()> {
-    let scope = workflow_active_claim_scope(organization_id);
-    // Hash collisions only over-serialize; the (scope, active_key) primary key
-    // remains the authoritative ownership guard.
-    sqlx::query_scalar::<_, ()>("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
-        .bind(&scope)
-        .bind(active_key)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|error| Error::from_query_sqlx_with_context("lock workflow active key", error))?;
-    Ok(())
-}
-
-async fn load_existing_active_workflow_run_tx(
-    tx: &mut DbTx<'_>,
-    organization_id: Option<Uuid>,
-    active_key: &str,
-) -> Result<Option<WorkflowRunDbRecord>> {
-    let scope = workflow_active_claim_scope(organization_id);
-    let workflow_run_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT workflow_run_id
-         FROM workflow_active_claims
-         WHERE scope = $1
-           AND active_key = $2
-         FOR UPDATE",
-    )
-    .bind(&scope)
-    .bind(active_key)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("load existing workflow active claim", error)
-    })?;
-
-    let Some(workflow_run_id) = workflow_run_id else {
-        return Ok(None);
-    };
-    load_workflow_run_by_id_tx(tx, workflow_run_id, "load existing active workflow run")
-        .await
-        .map(Some)
-}
-
-async fn insert_workflow_active_claim_tx(
-    tx: &mut DbTx<'_>,
-    organization_id: Option<Uuid>,
-    active_key: &str,
-    workflow_run_id: Uuid,
-) -> Result<()> {
-    let scope = workflow_active_claim_scope(organization_id);
-    sqlx::query(
-        "INSERT INTO workflow_active_claims (
-            scope,
-            active_key,
-            workflow_run_id,
-            release_pending
-         )
-         VALUES ($1, $2, $3, false)",
-    )
-    .bind(&scope)
-    .bind(active_key)
-    .bind(workflow_run_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("insert workflow active claim", error))?;
-    Ok(())
 }
 
 async fn insert_workflow_run_record_tx(
