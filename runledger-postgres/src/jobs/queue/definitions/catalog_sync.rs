@@ -3,22 +3,15 @@ use std::{error::Error as StdError, fmt};
 use crate::{DbTx, Error, QueryError, QueryErrorCategory, Result};
 use runledger_core::jobs::JobTypeName;
 
-use self::crud::{apply_job_definition_upsert_tx, upsert_job_definition_preserving_enabled_tx};
-use super::super::row_decode::parse_job_type_name;
-use super::super::schedule_definition_guard::{
+use super::super::super::row_decode::parse_job_type_name;
+use super::super::super::schedule_definition_guard::{
     self, GuardLockContext, ScheduleDefinitionLockError,
 };
-use super::super::types::{JobDefinitionUpsert, JobScheduleJobTypeReference};
-
-mod crud;
-
-pub use self::crud::{
-    get_job_definition_by_type, insert_job_definition_if_missing_tx, list_job_definitions,
-    update_job_definition, upsert_job_definition_tx,
-};
+use super::super::super::types::{JobDefinitionUpsert, JobScheduleJobTypeReference};
+use super::crud::{apply_job_definition_upsert_tx, upsert_job_definition_preserving_enabled_tx};
 
 /// Summary of definition rows changed by a catalog sync.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobDefinitionCatalogSyncReport {
     /// Enabled definitions in the exact-sync scope that were absent from the
     /// catalog and changed to disabled.
@@ -29,7 +22,7 @@ pub struct JobDefinitionCatalogSyncReport {
 }
 
 /// Enabled-state handling for additive catalog definition sync.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobDefinitionCatalogSyncMode {
     /// Preserve stored `is_enabled` for enabled catalog definitions on conflict.
     ///
@@ -42,8 +35,8 @@ pub enum JobDefinitionCatalogSyncMode {
 }
 
 /// Error returned while applying a catalog-owned job-definition sync.
-#[non_exhaustive]
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum JobDefinitionCatalogSyncError {
     /// An active schedule references an enabled scoped definition absent from
     /// the catalog.
