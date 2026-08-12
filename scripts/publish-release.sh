@@ -123,21 +123,6 @@ require_remote_tag_absent() {
   fi
 }
 
-require_remote_branch_ancestor() {
-  local remote="$1"
-  local branch="$2"
-  local remote_ref="refs/heads/${branch}"
-  local remote_head
-
-  git fetch --quiet --no-tags "$remote" "$remote_ref" \
-    || die "failed to fetch ${remote_ref} from remote '${remote}'"
-  remote_head="$(git rev-parse FETCH_HEAD)"
-
-  if ! git merge-base --is-ancestor "$remote_head" HEAD; then
-    die "remote branch ${remote}/${branch} is not an ancestor of HEAD; publishing would risk a non-fast-forward push"
-  fi
-}
-
 require_dry_run_push() {
   local remote="$1"
   local branch="$2"
@@ -185,6 +170,7 @@ cd "$ROOT_DIR"
 
 require_command cargo
 require_command curl
+require_command gh
 require_command git
 require_clean_worktree
 validate_version "$VERSION"
@@ -200,7 +186,7 @@ git remote get-url "$PUBLISH_REMOTE" >/dev/null \
   || die "git remote '${PUBLISH_REMOTE}' does not exist"
 
 require_remote_tag_absent "$PUBLISH_REMOTE" "$TAG"
-require_remote_branch_ancestor "$PUBLISH_REMOTE" "$current_branch"
+./scripts/verify-release-ci.sh "$PUBLISH_REMOTE" "$current_branch"
 require_dry_run_push "$PUBLISH_REMOTE" "$current_branch" "$TAG"
 
 for crate in "${PUBLISHABLE_CRATES[@]}"; do

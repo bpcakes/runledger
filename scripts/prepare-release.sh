@@ -234,6 +234,7 @@ cargo update \
 ./scripts/refresh-sqlx-cache.sh
 cargo test --workspace
 ./scripts/run-external-consumer-smoke.sh
+./scripts/check-package-licenses.sh
 
 cargo publish --allow-dirty --dry-run -p runledger-core
 

@@ -4,6 +4,35 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-12
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.9.0...v0.9.1)
+
+### Added
+
+- Add the validated `WorkflowStepExecution` and `WorkflowJobStepExecution`
+  views, exposed through `WorkflowStepEnqueue::execution()`. Existing workflow
+  builders, getters, persistence shapes, and execution behavior remain
+  unchanged.
+
+### Changed
+
+- Split schedule persistence, job-definition storage, workflow enqueue and
+  recovery, failure transitions, claimed-job execution, worker tests, TUI input
+  state, and test support into focused internal modules without changing their
+  public behavior.
+- Include the repository's MIT license text in every published crate archive.
+- Harden release verification with packaged-license and semantic-versioning
+  checks, current GitHub Actions dependencies, and a publication preflight that
+  requires the exact remote commit's CI run to be successful.
+
+### Testing
+
+- Stabilize the packaged retry smoke test and expand regression coverage for
+  workflow-step validation, cancellation lock ordering, worker execution,
+  search state, and module-boundary refactors.
+
+No schema migrations have been added since 0.8.0.
+
 ## [0.9.0] - 2026-08-09
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.8.0...v0.9.0)
 

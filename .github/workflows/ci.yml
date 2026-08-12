@@ -25,14 +25,15 @@ jobs:
     name: Lint and compile
     runs-on: ubuntu-latest
     steps:
-      # actions/checkout v4.3.1
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust toolchain
         run: |
           rustup toolchain install --profile minimal --component rustfmt --component clippy
-      # Swatinem/rust-cache v2.9.1
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      # Swatinem/rust-cache v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: cargo fmt --all -- --check
+      - run: ./scripts/check-package-licenses.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo check --workspace
       - run: cargo test --workspace --no-run
@@ -41,13 +42,13 @@ jobs:
     name: Test and smoke
     runs-on: ubuntu-latest
     steps:
-      # actions/checkout v4.3.1
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust toolchain
         run: |
           rustup toolchain install --profile minimal --component rustfmt --component clippy
-      # Swatinem/rust-cache v2.9.1
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      # Swatinem/rust-cache v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Wait for Docker
         run: |
           for attempt in $(seq 1 30); do
@@ -67,10 +68,24 @@ jobs:
     name: Cargo deny
     runs-on: ubuntu-latest
     steps:
-      # actions/checkout v4.3.1
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
       - run: cargo deny check
+
+  semver:
+    name: Semver compatibility
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # obi1kenobi/cargo-semver-checks-action v2
+      - name: Check public APIs against 0.9.0
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239
+        with:
+          package: runledger-core,runledger-test-support,runledger-postgres,runledger-runtime
+          baseline-version: 0.9.0
+          release-type: patch

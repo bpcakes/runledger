@@ -1306,7 +1306,7 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.9.0
+./scripts/prepare-release.sh 0.9.1
 ```
 
 The preparation script starts from a clean working tree or resumes an existing
@@ -1315,34 +1315,36 @@ It rejects changes outside the files it generates. The script bumps publishable
 crate and root workspace dependency versions, refreshes the root and standalone
 smoke lockfiles plus SQLx offline metadata, runs workspace tests and the locked
 packaged smoke test, dry-runs `runledger-core`, packages the library crates, and
-build-verifies the packaged `runledger-tui` binary. If publishing manually, run
+build-verifies the packaged `runledger-tui` binary. It also verifies that every
+crate archive contains the repository license. If publishing manually, run
 `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres` or
 `runledger-runtime` and commit any resulting `.sqlx/` changes.
 
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.9.0
+./scripts/publish-release.sh 0.9.1
 ```
 
 Before publishing any crate, the publish script confirms that the release tag
-is absent locally and remotely, fetches the same-named remote branch and
-requires it to be an ancestor of `HEAD`, and dry-runs the branch and tag push.
-It then publishes crates in dependency order, dry-runs each once its workspace
-dependencies are indexed, creates a `v0.9.0` tag, and atomically pushes the
-current branch and tag. Set `PUBLISH_REMOTE` to override the git remote for the
-final push.
+is absent locally and remotely, requires the same-named remote branch to point
+at the exact local commit, and verifies that commit's completed GitHub Actions
+`CI` run and every job succeeded. It then dry-runs the branch and tag push,
+publishes crates in dependency order, dry-runs each once its workspace
+dependencies are indexed, creates a `v0.9.1` tag, and atomically pushes the
+current branch and tag. The publication preflight requires an authenticated
+GitHub CLI. Set `PUBLISH_REMOTE` to override the git remote for the final push.
 
 Observable contract changes to call out in release notes for this line:
 
-- Low-level custom runtimes can carry an exact `JobLeaseIdentity` through
-  heartbeat, progress, and completion persistence instead of repeatedly
-  passing four positional lease-fence fields.
-- Existing positional lifecycle APIs remain compatibility wrappers, so the
-  lease-identity addition is source compatible.
+- `WorkflowStepEnqueue::execution()` provides a typed view of existing
+  job-backed and external workflow-step execution settings.
+- Existing workflow builders and individual execution-setting getters remain
+  source compatible, and persisted workflow snapshots retain their existing
+  shape.
 - The release adds no migrations beyond the schema required by 0.8.0; the
-  remaining changes are internal validation, transaction-phase, module, and
-  test refactors.
+  remaining changes are internal module, validation, transaction-phase, TUI,
+  test, packaging, and release-tooling improvements.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
@@ -1352,6 +1354,7 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 .
 ├── Cargo.toml                # workspace manifest
 ├── README.md
+├── LICENSE
 ├── CHANGELOG.md
 ├── llms.txt                  # prompt-facing summary
 ├── migrations/               # canonical schema source
@@ -1368,6 +1371,4 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 ## License
 
 The crates are published under the **MIT** license, as declared in each crate's
-`Cargo.toml`. Note that no `LICENSE` file is currently checked in at the
-repository root — add one to make the license explicit for the repository as a
-whole.
+`Cargo.toml`. See [`LICENSE`](LICENSE) for the repository license text.
