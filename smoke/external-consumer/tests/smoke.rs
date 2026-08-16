@@ -573,9 +573,7 @@ impl JobHandler for SmokeHandler {
                 RETRY_AT_FAILURE_CODE,
                 "Smoke provider supplied an absolute reset timestamp.",
             )
-            .retry_not_before(
-                Utc::now() + ChronoDuration::milliseconds(HANDLER_RETRY_AFTER_MS),
-            )),
+            .retry_not_before(Utc::now() + ChronoDuration::milliseconds(HANDLER_RETRY_AFTER_MS))),
             "retry-at" => Ok(JobCompletion::success()),
             "terminal" => Err(JobFailure::terminal(
                 "smoke.terminal_failure",
