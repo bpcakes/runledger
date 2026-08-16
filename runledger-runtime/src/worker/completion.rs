@@ -116,7 +116,10 @@ fn failure_completion_post_commit_effects(
         ),
         jobs::JobFailureCompletionDisposition::RetryScheduled { .. }
         | jobs::JobFailureCompletionDisposition::RetryScheduledAt { .. } => None,
-        #[allow(unreachable_patterns)]
+        #[allow(
+            unreachable_patterns,
+            reason = "future non-exhaustive dispositions cannot provide known dead-letter metadata"
+        )]
         _ => None,
     };
     let (disposition, has_unknown_disposition) = match outcome.disposition {
@@ -143,7 +146,10 @@ fn failure_completion_post_commit_effects(
         jobs::JobFailureCompletionDisposition::DeadLettered { reason } => {
             (JobFailureDisposition::DeadLettered { reason }, false)
         }
-        #[allow(unreachable_patterns)]
+        #[allow(
+            unreachable_patterns,
+            reason = "map future non-exhaustive persistence dispositions to the public unknown variant"
+        )]
         _ => (JobFailureDisposition::Unknown, true),
     };
 

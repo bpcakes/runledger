@@ -266,7 +266,10 @@ pub use migrations::{
     MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
     migrate_after_idempotency_cutover,
 };
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    reason = "deprecated migration entrypoints remain re-exported for semver compatibility"
+)]
 pub use migrations::{ensure_schema_compatible, migrate};
 
 /// Common `runledger-postgres` imports for integration crates.
@@ -276,7 +279,10 @@ pub use migrations::{ensure_schema_compatible, migrate};
 /// `runledger-core` contracts, so it can be glob-imported alongside
 /// `runledger_core::prelude::*` and `runledger_runtime::prelude::*`.
 pub mod prelude {
-    #[allow(deprecated)]
+    #[allow(
+        deprecated,
+        reason = "the prelude retains deprecated exports for semver compatibility"
+    )]
     pub use crate::jobs::{
         AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,
         CompareAndReplaySucceededJob, CompareAndReplaySucceededJobOutcome, CompareAndRequeueJob,

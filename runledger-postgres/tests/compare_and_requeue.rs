@@ -755,7 +755,10 @@ async fn compare_and_requeue_rejects_non_read_committed_transactions_up_front() 
 }
 
 #[tokio::test]
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "the regression test exercises the legacy requeue compatibility entrypoint"
+)]
 async fn canceled_live_job_waits_for_its_original_lease_window_before_requeue() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_compare_requeue_cancel_quiescence", 4).await;

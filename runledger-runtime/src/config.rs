@@ -199,6 +199,10 @@ mod tests {
     }
 
     impl ScopedEnv {
+        #[allow(
+            unsafe_code,
+            reason = "Rust 2024 requires unsafe environment mutation, serialized here by ENV_LOCK"
+        )]
         fn set(overrides: &[(&str, Option<&str>)]) -> Self {
             let guard = ENV_LOCK
                 .get_or_init(|| Mutex::new(()))
@@ -228,6 +232,10 @@ mod tests {
     }
 
     impl Drop for ScopedEnv {
+        #[allow(
+            unsafe_code,
+            reason = "Rust 2024 requires unsafe environment mutation, serialized here by the held ENV_LOCK guard"
+        )]
         fn drop(&mut self) {
             // SAFETY: env mutation is serialized through ENV_LOCK.
             unsafe {

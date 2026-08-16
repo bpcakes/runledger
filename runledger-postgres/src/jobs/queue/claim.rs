@@ -280,6 +280,10 @@ async fn record_claim_side_effects_tx(
     Ok(())
 }
 
+#[allow(
+    clippy::allow_attributes_without_reason,
+    reason = "SQLx query macro expansion contains generated allow attributes without lint reasons"
+)]
 async fn fetch_claim_ids(tx: &mut DbTx<'_>, request: &ClaimRequest<'_>) -> Result<Vec<Uuid>> {
     let resource_head_window = resource_head_window_limit(request.limit);
     let query_result = match request.allowed_job_types {

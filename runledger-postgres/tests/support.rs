@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each integration-test crate uses a different subset of this shared support module"
+)]
 
 use runledger_core::jobs::JobType;
 use runledger_postgres::DbPool;

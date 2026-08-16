@@ -235,7 +235,10 @@ async fn handler_continuation_closes_attempt_and_starts_a_fresh_run() {
     assert_eq!(terminal_metrics.active_continued_count, 0);
     assert_eq!(terminal_metrics.max_active_run_number, 0);
 
-    #[allow(deprecated)]
+    #[expect(
+        deprecated,
+        reason = "the regression test exercises the legacy admin requeue compatibility entrypoint"
+    )]
     let admin_requeued = runledger_postgres::jobs::requeue_job(
         &pool,
         None,

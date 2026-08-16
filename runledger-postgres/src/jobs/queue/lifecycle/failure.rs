@@ -201,7 +201,10 @@ fn resolve_retry_timing(
                 Err(error) => return Err(error),
             }
         }
-        #[allow(unreachable_patterns)]
+        #[allow(
+            unreachable_patterns,
+            reason = "reject future non-exhaustive retry timing variants until explicitly supported"
+        )]
         _ => {
             return Err(invalid_retry_timing_error(
                 "handler selected an unsupported retry timing variant".to_owned(),

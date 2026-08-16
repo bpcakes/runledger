@@ -29,7 +29,10 @@ mod types;
 mod workflow_types;
 mod workflows;
 
-#[allow(deprecated)]
+#[allow(
+    deprecated,
+    reason = "deprecated admin entrypoints remain re-exported for semver compatibility"
+)]
 pub use admin::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
     compare_and_requeue_job, compare_and_requeue_job_tx, get_job_by_id,
@@ -120,7 +123,10 @@ pub mod test_support {
 
     pub use super::workflows::test_support::workflow_run_release_lock_key;
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the test fixture mirrors the complete reaped lease record shape"
+    )]
     pub fn reaped_lease_record(
         job_id: Uuid,
         job_type: JobTypeName,
@@ -146,7 +152,10 @@ pub mod test_support {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the test fixture mirrors the complete checkpoint-bearing reaped lease record shape"
+    )]
     pub fn reaped_lease_record_with_checkpoint(
         job_id: Uuid,
         job_type: JobTypeName,

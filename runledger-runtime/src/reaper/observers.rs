@@ -154,7 +154,10 @@ fn reaped_lease_disposition(disposition: &ReapedLeaseDisposition) -> JobLeaseRea
                 reason: JobDeadLetterReason::LeaseExpired,
             }
         }
-        #[allow(unreachable_patterns)]
+        #[allow(
+            unreachable_patterns,
+            reason = "map future non-exhaustive persistence dispositions to the public unknown variant"
+        )]
         _ => JobLeaseReapedDisposition::Unknown,
     }
 }
