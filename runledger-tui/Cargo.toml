@@ -11,6 +11,9 @@ homepage = "https://github.com/bpcakes/runledger"
 keywords = ["jobs", "workflows", "postgres", "tui"]
 categories = ["command-line-utilities", "asynchronous"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "runledger-tui"
 path = "src/main.rs"

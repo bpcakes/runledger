@@ -19,6 +19,22 @@ default-members = [
     "runledger-runtime",
 ]
 
+[workspace.lints.rust]
+warnings = "deny"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "deny"
+future_not_send = "deny"
+large_futures = "deny"
+large_stack_frames = "deny"
+
 [workspace.dependencies]
 runledger-core = { version = "0.9.1", path = "runledger-core" }
 runledger-postgres = { version = "0.9.1", path = "runledger-postgres" }

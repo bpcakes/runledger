@@ -13,6 +13,9 @@ exclude = ["AGENTS.md"]
 keywords = ["jobs", "workflows", "postgres", "queue"]
 categories = ["asynchronous", "database"]
 
+[lints]
+workspace = true
+
 [features]
 test-support = []
 

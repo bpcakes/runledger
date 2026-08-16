@@ -122,7 +122,8 @@ mod tests {
 
     #[test]
     fn short_uuid_truncates_middle() {
-        let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")
+            .expect("fixed UUID fixture should parse");
         let s = short_uuid(id);
         assert!(s.contains('…'));
         assert!(s.starts_with("550e8400"));
