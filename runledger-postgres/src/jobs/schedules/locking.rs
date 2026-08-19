@@ -112,33 +112,13 @@ async fn cap_local_statement_timeout_tx(
     statement_timeout_ms: i64,
     context: &'static str,
 ) -> Result<()> {
-    sqlx::query_scalar::<_, String>(
-        "WITH previous AS MATERIALIZED (
-             SELECT
-                current_setting('statement_timeout') AS statement_timeout,
-                setting::bigint AS statement_timeout_ms
-             FROM pg_settings
-             WHERE name = 'statement_timeout'
-         )
-         SELECT previous.statement_timeout
-         FROM previous,
-              LATERAL (
-                SELECT set_config(
-                    'statement_timeout',
-                    CASE
-                        WHEN previous.statement_timeout_ms = 0 THEN $1
-                        WHEN previous.statement_timeout_ms <= $2 THEN previous.statement_timeout
-                        ELSE $1
-                    END,
-                    true
-                )
-              ) AS applied",
+    super::super::transaction_settings::cap_local_statement_timeout_tx(
+        tx,
+        statement_timeout,
+        statement_timeout_ms,
+        context,
     )
-    .bind(statement_timeout)
-    .bind(statement_timeout_ms)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context(context, error))?;
+    .await?;
 
     Ok(())
 }
