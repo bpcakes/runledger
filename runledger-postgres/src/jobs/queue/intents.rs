@@ -1,5 +1,8 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
-use runledger_core::jobs::{JobStage, JobType};
+use runledger_core::jobs::{JobStage, JobType, JobTypeName};
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -39,6 +42,110 @@ struct PreparedIntent<'a> {
     execution_resource_key: Option<&'a str>,
     stage: &'static str,
     enqueue_request: Value,
+}
+
+struct IntentPromotionRequest {
+    job_type: JobTypeName,
+    organization_id: Option<Uuid>,
+    payload: Value,
+    priority: Option<i32>,
+    max_attempts: Option<i32>,
+    timeout_seconds: Option<i32>,
+    next_run_at: Option<DateTime<Utc>>,
+    idempotency_key: String,
+    stage: JobStage,
+    execution_resource_key: Option<String>,
+}
+
+impl IntentPromotionRequest {
+    fn as_job_enqueue(&self) -> JobEnqueue<'_> {
+        JobEnqueue {
+            job_type: self.job_type.as_borrowed(),
+            organization_id: self.organization_id,
+            payload: &self.payload,
+            priority: self.priority,
+            max_attempts: self.max_attempts,
+            timeout_seconds: self.timeout_seconds,
+            next_run_at: self.next_run_at,
+            idempotency_key: Some(&self.idempotency_key),
+            stage: Some(self.stage),
+        }
+    }
+}
+
+struct PreparedIntentPromotion {
+    id: Uuid,
+    request: IntentPromotionRequest,
+    current_enqueue_request: Value,
+    persisted_enqueue_request: Value,
+}
+
+impl PreparedIntentPromotion {
+    fn try_from_row(row: JobEnqueueIntentPromotionRow) -> Result<Self> {
+        if row.enqueue_request_version != JOB_ENQUEUE_REQUEST_VERSION {
+            return Err(intent_snapshot_version_error(
+                row.id,
+                row.enqueue_request_version,
+            ));
+        }
+
+        let request = IntentPromotionRequest {
+            job_type: parse_job_type_name(row.job_type)?,
+            organization_id: row.organization_id,
+            payload: row.payload,
+            priority: row.priority,
+            max_attempts: row.max_attempts,
+            timeout_seconds: row.timeout_seconds,
+            next_run_at: row.next_run_at,
+            idempotency_key: row.idempotency_key,
+            stage: parse_job_stage(row.stage)?,
+            execution_resource_key: row.execution_resource_key,
+        };
+        validate_execution_resource_key_if_present(request.execution_resource_key.as_deref())?;
+
+        let enqueue = request.as_job_enqueue();
+        let current_enqueue_request = canonical_job_enqueue_request_v1(
+            &enqueue,
+            request.stage.as_db_value(),
+            request.execution_resource_key.as_deref(),
+        )?;
+
+        Ok(Self {
+            id: row.id,
+            request,
+            current_enqueue_request,
+            persisted_enqueue_request: row.enqueue_request,
+        })
+    }
+}
+
+enum IntentPromotionCandidate {
+    Ready(PreparedIntentPromotion),
+    Invalid { id: Uuid, error: Error },
+}
+
+impl IntentPromotionCandidate {
+    fn from_row(row: JobEnqueueIntentPromotionRow) -> Self {
+        let id = row.id;
+        match PreparedIntentPromotion::try_from_row(row) {
+            Ok(prepared) => Self::Ready(prepared),
+            Err(error) => Self::Invalid { id, error },
+        }
+    }
+
+    fn id(&self) -> Uuid {
+        match self {
+            Self::Ready(prepared) => prepared.id,
+            Self::Invalid { id, .. } => *id,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct IntentSnapshotComparison<'a> {
+    id: Uuid,
+    current_enqueue_request: &'a Value,
+    persisted_enqueue_request: &'a Value,
 }
 
 struct JobEnqueueIntentMetricsRow {
@@ -522,8 +629,15 @@ async fn promote_job_enqueue_intents_read_committed_tx(
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("claim job enqueue intents", error))?;
 
+    let candidates = rows
+        .into_iter()
+        .map(IntentPromotionCandidate::from_row)
+        .collect::<Vec<_>>();
+    let mismatched_snapshots = compare_intent_snapshots_tx(tx, &candidates).await?;
+
     let mut report = JobEnqueueIntentPromotionReport::default();
-    for row in rows {
+    for candidate in candidates {
+        let intent_id = candidate.id();
         // Keep these control statements dynamic: compiling three fixed
         // SAVEPOINT statements would create SQLx cache entries without adding
         // result-shape safety.
@@ -534,17 +648,29 @@ async fn promote_job_enqueue_intents_read_committed_tx(
                 Error::from_query_sqlx_with_context("create intent promotion savepoint", error)
             })?;
 
-        let disposition = match promote_one_intent_tx(tx, &row).await {
+        let promotion_result = match candidate {
+            IntentPromotionCandidate::Ready(prepared)
+                if mismatched_snapshots.contains(&prepared.id) =>
+            {
+                Err(intent_snapshot_mismatch_error(prepared.id))
+            }
+            IntentPromotionCandidate::Ready(prepared) => {
+                promote_prepared_intent_tx(tx, &prepared).await
+            }
+            IntentPromotionCandidate::Invalid { error, .. } => Err(error),
+        };
+
+        let disposition = match promotion_result {
             Ok(disposition) => disposition,
             Err(error) => {
                 rollback_intent_promotion_savepoint(tx).await?;
                 if let Some((code, client_message)) = terminal_intent_failure(&error) {
-                    mark_intent_conflicted_tx(tx, row.id, code, client_message).await?;
-                    log_query_intent_promotion_failure(row.id, &error, "conflicted");
+                    mark_intent_conflicted_tx(tx, intent_id, code, client_message).await?;
+                    log_query_intent_promotion_failure(intent_id, &error, "conflicted");
                     IntentPromotionDisposition::Conflicted
                 } else if let Some((code, client_message)) = deferred_intent_failure(&error) {
-                    mark_intent_retry_deferred_tx(tx, row.id, code, client_message).await?;
-                    log_query_intent_promotion_failure(row.id, &error, "retry_deferred");
+                    mark_intent_retry_deferred_tx(tx, intent_id, code, client_message).await?;
+                    log_query_intent_promotion_failure(intent_id, &error, "retry_deferred");
                     IntentPromotionDisposition::RetryDeferred
                 } else {
                     return Err(error);
@@ -579,58 +705,70 @@ async fn promote_job_enqueue_intents_read_committed_tx(
     Ok(report)
 }
 
-async fn promote_one_intent_tx(
+async fn compare_intent_snapshots_tx(
     tx: &mut ReadCommittedTx<'_, '_>,
-    row: &JobEnqueueIntentPromotionRow,
-) -> Result<IntentPromotionDisposition> {
-    let stage = parse_job_stage(row.stage.clone())?;
-    let job_type = JobType::try_new(&row.job_type).map_err(|_| invalid_intent_row_error())?;
-    // Supported versions are filtered in the claim query. Retain this guard so
-    // future query changes cannot feed an incompatible snapshot to v1 logic.
-    if row.enqueue_request_version != JOB_ENQUEUE_REQUEST_VERSION {
-        return Err(intent_snapshot_version_error(
-            row.id,
-            row.enqueue_request_version,
-        ));
+    candidates: &[IntentPromotionCandidate],
+) -> Result<HashSet<Uuid>> {
+    let comparisons = candidates
+        .iter()
+        .filter_map(|candidate| match candidate {
+            IntentPromotionCandidate::Ready(prepared) => Some(IntentSnapshotComparison {
+                id: prepared.id,
+                current_enqueue_request: &prepared.current_enqueue_request,
+                persisted_enqueue_request: &prepared.persisted_enqueue_request,
+            }),
+            IntentPromotionCandidate::Invalid { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    if comparisons.is_empty() {
+        return Ok(HashSet::new());
     }
-    validate_execution_resource_key_if_present(row.execution_resource_key.as_deref())?;
 
-    let enqueue = JobEnqueue {
-        job_type,
-        organization_id: row.organization_id,
-        payload: &row.payload,
-        priority: row.priority,
-        max_attempts: row.max_attempts,
-        timeout_seconds: row.timeout_seconds,
-        next_run_at: row.next_run_at,
-        idempotency_key: Some(&row.idempotency_key),
-        stage: Some(stage),
-    };
-    let current_snapshot = canonical_job_enqueue_request_v1(
-        &enqueue,
-        stage.as_db_value(),
-        row.execution_resource_key.as_deref(),
-    )?;
-    // PostgreSQL JSONB equality is deliberate. Rust `Value` equality does not
-    // model PostgreSQL's numeric normalization, so comparing in memory could
-    // reject a snapshot that ordinary enqueue idempotency accepts.
-    let snapshot_matches = sqlx::query_scalar!(
-        "SELECT $1::jsonb = $2::jsonb AS \"matches!\"",
-        &current_snapshot,
-        &row.enqueue_request,
+    let comparisons = serde_json::to_value(comparisons).map_err(|error| {
+        Error::QueryError(QueryError::from_classified(
+            QueryErrorCategory::Internal,
+            "job.intent_snapshot_comparison_failed",
+            "Job enqueue intent request snapshots could not be compared.",
+            format!("failed to serialize job enqueue intent snapshot comparisons: {error}"),
+        ))
+    })?;
+
+    // Keep PostgreSQL JSONB equality while comparing the whole claimed batch in
+    // one round trip. Rust `Value` equality does not model PostgreSQL numeric
+    // normalization.
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT comparison.id
+         FROM jsonb_to_recordset($1::jsonb) AS comparison(
+            id uuid,
+            current_enqueue_request jsonb,
+            persisted_enqueue_request jsonb
+         )
+         WHERE comparison.current_enqueue_request <> comparison.persisted_enqueue_request",
     )
-    .fetch_one(&mut **tx.as_tx())
+    .bind(comparisons)
+    .fetch_all(&mut **tx.as_tx())
     .await
     .map_err(|error| {
-        Error::from_query_sqlx_with_context("compare job enqueue intent snapshot", error)
-    })?;
-    if !snapshot_matches {
-        return Err(intent_snapshot_mismatch_error(row.id));
-    }
+        Error::from_query_sqlx_with_context("compare job enqueue intent snapshots", error)
+    })
+    .map(|ids| ids.into_iter().collect())
+}
 
-    match enqueue_job_from_intent_tx(tx, &enqueue, row.execution_resource_key.as_deref()).await? {
+async fn promote_prepared_intent_tx(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    prepared: &PreparedIntentPromotion,
+) -> Result<IntentPromotionDisposition> {
+    let enqueue = prepared.request.as_job_enqueue();
+
+    match enqueue_job_from_intent_tx(
+        tx,
+        &enqueue,
+        prepared.request.execution_resource_key.as_deref(),
+    )
+    .await?
+    {
         IntentEnqueueResolution::Enqueued(outcome) => {
-            mark_intent_promoted_tx(tx, row.id, outcome.job_id).await?;
+            mark_intent_promoted_tx(tx, prepared.id, outcome.job_id).await?;
             Ok(match outcome.disposition {
                 JobEnqueueDisposition::Inserted => IntentPromotionDisposition::Inserted,
                 JobEnqueueDisposition::Existing => IntentPromotionDisposition::Existing,
@@ -643,8 +781,8 @@ async fn promote_one_intent_tx(
             code,
             client_message,
         } => {
-            mark_intent_conflicted_tx(tx, row.id, code, client_message).await?;
-            log_intent_promotion_failure(row.id, code, None, None, "conflicted");
+            mark_intent_conflicted_tx(tx, prepared.id, code, client_message).await?;
+            log_intent_promotion_failure(prepared.id, code, None, None, "conflicted");
             Ok(IntentPromotionDisposition::Conflicted)
         }
     }
