@@ -1,7 +1,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -17,11 +18,16 @@ const DEFAULT_POSTGRES_IMAGE: &str = "postgres:18";
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
 const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DOCKER_CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 static PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
+// Each parent test starts its own PostgreSQL container. Keep those probes from
+// overwhelming a constrained shared Docker daemon in CI.
+static LIFECYCLE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn shared_container_is_removed_after_normal_process_exit() {
+    let _guard = lifecycle_test_guard();
     if docker_lifecycle_assertions_are_unavailable() {
         return;
     }
@@ -35,6 +41,7 @@ fn shared_container_is_removed_after_normal_process_exit() {
 
 #[test]
 fn shared_container_is_removed_after_forced_process_termination() {
+    let _guard = lifecycle_test_guard();
     if docker_lifecycle_assertions_are_unavailable() {
         return;
     }
@@ -48,6 +55,7 @@ fn shared_container_is_removed_after_forced_process_termination() {
 
 #[test]
 fn shared_container_starts_without_a_docker_cli_for_the_optional_reaper() {
+    let _guard = lifecycle_test_guard();
     if docker_lifecycle_assertions_are_unavailable() {
         return;
     }
@@ -59,6 +67,7 @@ fn shared_container_starts_without_a_docker_cli_for_the_optional_reaper() {
 
 #[test]
 fn shared_container_starts_when_optional_reaper_cli_hangs() {
+    let _guard = lifecycle_test_guard();
     if docker_lifecycle_assertions_are_unavailable() {
         return;
     }
@@ -146,7 +155,8 @@ impl Drop for TemporaryFile {
 struct ProbeProcess {
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    output: mpsc::Receiver<Result<String, String>>,
+    captured_output: String,
     owner: String,
     expected_image: String,
 }
@@ -177,18 +187,23 @@ impl ProbeProcess {
             .env("TESTCONTAINERS_COMMAND", "remove")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
         if let Some(docker_cli) = docker_cli {
             command.env(DOCKER_CLI_ENV, docker_cli);
         }
         let mut child = command.spawn().expect("spawn lifecycle probe child");
         let stdin = child.stdin.take().expect("pipe lifecycle probe stdin");
         let stdout = child.stdout.take().expect("pipe lifecycle probe stdout");
+        let stderr = child.stderr.take().expect("pipe lifecycle probe stderr");
+        let (output_sender, output) = mpsc::channel();
+        spawn_probe_output_reader("stdout", stdout, output_sender.clone());
+        spawn_probe_output_reader("stderr", stderr, output_sender);
 
         Self {
             child,
             stdin: Some(stdin),
-            stdout: BufReader::new(stdout),
+            output,
+            captured_output: String::new(),
             owner,
             expected_image,
         }
@@ -221,19 +236,25 @@ impl ProbeProcess {
     }
 
     fn assert_database_ready(&mut self) {
-        let mut output = String::new();
+        let deadline = Instant::now() + PROBE_READY_TIMEOUT;
         let ready_line = loop {
-            let mut line = String::new();
-            let bytes = self
-                .stdout
-                .read_line(&mut line)
-                .expect("read lifecycle probe output");
-            output.push_str(&line);
-
-            assert!(
-                bytes > 0,
-                "lifecycle probe exited before becoming ready:\n{output}"
-            );
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let line = match self.output.recv_timeout(remaining) {
+                Ok(Ok(line)) => line,
+                Ok(Err(error)) => panic!(
+                    "failed to read lifecycle probe output ({error}):\n{}",
+                    self.captured_output
+                ),
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                    "lifecycle probe did not become ready within {PROBE_READY_TIMEOUT:?}:\n{}",
+                    self.captured_output
+                ),
+                Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
+                    "lifecycle probe exited before becoming ready:\n{}",
+                    self.captured_output
+                ),
+            };
+            self.captured_output.push_str(&line);
 
             if let Some(marker_index) = line.find(READY_MARKER) {
                 break line[marker_index..].to_owned();
@@ -260,13 +281,11 @@ impl ProbeProcess {
     fn finish_normally(&mut self) {
         drop(self.stdin.take());
         let status = self.child.wait().expect("wait for lifecycle probe child");
-        let mut remaining_output = String::new();
-        self.stdout
-            .read_to_string(&mut remaining_output)
-            .expect("read remaining lifecycle probe output");
+        self.capture_remaining_output();
         assert!(
             status.success(),
-            "lifecycle probe did not exit normally ({status}):\n{remaining_output}"
+            "lifecycle probe did not exit normally ({status}):\n{}",
+            self.captured_output
         );
     }
 
@@ -284,6 +303,51 @@ impl ProbeProcess {
             "forcibly terminated lifecycle probe unexpectedly succeeded"
         );
     }
+
+    fn capture_remaining_output(&mut self) {
+        loop {
+            match self.output.recv_timeout(Duration::from_secs(1)) {
+                Ok(Ok(line)) => self.captured_output.push_str(&line),
+                Ok(Err(error)) => {
+                    self.captured_output
+                        .push_str(&format!("failed to read probe output: {error}\n"));
+                    return;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn lifecycle_test_guard() -> MutexGuard<'static, ()> {
+    LIFECYCLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn spawn_probe_output_reader<R>(
+    stream_name: &'static str,
+    stream: R,
+    output: mpsc::Sender<Result<String, String>>,
+) where
+    R: Read + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(format!("runledger-container-lifecycle-{stream_name}"))
+        .spawn(move || {
+            for line in BufReader::new(stream).lines() {
+                let line = line
+                    .map(|line| format!("{line}\n"))
+                    .map_err(|error| format!("{stream_name}: {error}"));
+                let is_error = line.is_err();
+                if output.send(line).is_err() || is_error {
+                    break;
+                }
+            }
+        })
+        .expect("spawn lifecycle probe output reader");
 }
 
 fn external_postgres_is_configured() -> bool {
