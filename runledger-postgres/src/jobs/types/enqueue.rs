@@ -265,6 +265,39 @@ impl<'a> JobEnqueueIntentListFilter<'a> {
     }
 }
 
+/// Bounded filters for durable enqueue-intent metrics grouped by job type.
+#[derive(Clone, Debug)]
+pub struct JobEnqueueIntentMetricsFilter<'a> {
+    pub(crate) organization_id: Option<Uuid>,
+    pub(crate) job_type: Option<JobType<'a>>,
+    pub(crate) limit: i64,
+    pub(crate) offset: i64,
+}
+
+impl<'a> JobEnqueueIntentMetricsFilter<'a> {
+    #[must_use]
+    pub const fn new(limit: i64, offset: i64) -> Self {
+        Self {
+            organization_id: None,
+            job_type: None,
+            limit,
+            offset,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_organization_id(mut self, organization_id: Uuid) -> Self {
+        self.organization_id = Some(organization_id);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_job_type(mut self, job_type: JobType<'a>) -> Self {
+        self.job_type = Some(job_type);
+        self
+    }
+}
+
 /// Operational backlog signals for one intent job type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]

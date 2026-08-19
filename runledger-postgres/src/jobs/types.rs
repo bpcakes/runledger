@@ -10,9 +10,10 @@ pub use self::definitions::{
 pub use self::enqueue::{
     CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobEnqueue, JobEnqueueDisposition,
     JobEnqueueIntent, JobEnqueueIntentDisposition, JobEnqueueIntentListFilter,
-    JobEnqueueIntentMetricsRecord, JobEnqueueIntentOutcome, JobEnqueueIntentPromotionReport,
-    JobEnqueueIntentRecord, JobEnqueueIntentStatus, JobEnqueueOutcome, JobQueueRecord,
-    JobRequeueStatePolicy, JobScope, NonRequeueableJobStatusError, RequeueableJobStatus,
+    JobEnqueueIntentMetricsFilter, JobEnqueueIntentMetricsRecord, JobEnqueueIntentOutcome,
+    JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord, JobEnqueueIntentStatus,
+    JobEnqueueOutcome, JobQueueRecord, JobRequeueStatePolicy, JobScope,
+    NonRequeueableJobStatusError, RequeueableJobStatus,
 };
 pub(crate) use self::events::{
     BASIC_REQUEUE_KIND, COMPARE_AND_REQUEUE_KIND, HANDLER_CONTINUATION_KIND,

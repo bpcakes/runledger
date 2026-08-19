@@ -19,8 +19,9 @@ use super::super::transaction_isolation::{
 };
 use super::super::types::{
     JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentDisposition,
-    JobEnqueueIntentListFilter, JobEnqueueIntentMetricsRecord, JobEnqueueIntentOutcome,
-    JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord, JobEnqueueIntentStatus,
+    JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentMetricsRecord,
+    JobEnqueueIntentOutcome, JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord,
+    JobEnqueueIntentStatus,
 };
 use super::enqueue::{
     IntentEnqueueResolution, JOB_ENQUEUE_REQUEST_VERSION, canonical_job_enqueue_request_v1,
@@ -507,13 +508,15 @@ pub async fn list_job_enqueue_intents(
 /// `oldest_pending_at` describe only intents that are currently pending;
 /// attempts made by terminal promoted or conflicted intents are not backlog.
 /// Job types represented only by promoted intents older than 24 hours are
-/// omitted because every returned signal for them would be zero.
+/// omitted because every returned signal for them would be zero. Results use
+/// stable job-type ordering and the requested page must be in the shared
+/// `1..=1000` limit range with a non-negative offset.
 pub async fn get_job_enqueue_intent_metrics(
     pool: &DbPool,
-    organization_id: Option<Uuid>,
-    job_type: Option<JobType<'_>>,
+    filter: &JobEnqueueIntentMetricsFilter<'_>,
 ) -> Result<Vec<JobEnqueueIntentMetricsRecord>> {
-    let job_type = job_type.map(|job_type| job_type.as_str());
+    validate_pagination(filter.limit, filter.offset)?;
+    let job_type = filter.job_type.map(|job_type| job_type.as_str());
     let rows = sqlx::query_as!(
         JobEnqueueIntentMetricsRow,
         "WITH status_metrics AS (
@@ -574,9 +577,13 @@ pub async fn get_job_enqueue_intent_metrics(
             MIN(oldest_pending_at) AS oldest_pending_at
          FROM status_metrics
          GROUP BY job_type
-         ORDER BY job_type",
-        organization_id,
+         ORDER BY job_type
+         LIMIT $3
+         OFFSET $4",
+        filter.organization_id,
         job_type,
+        filter.limit,
+        filter.offset,
     )
     .fetch_all(pool)
     .await

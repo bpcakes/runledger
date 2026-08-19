@@ -4,11 +4,11 @@ use chrono::{Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{JobStage, JobStatus, JobType};
 use runledger_postgres::jobs::{
     JobDefinitionUpdate, JobEnqueue, JobEnqueueIntent, JobEnqueueIntentDisposition,
-    JobEnqueueIntentListFilter, JobEnqueueIntentStatus, delete_promoted_job_enqueue_intents_before,
-    delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, get_job_by_id,
-    get_job_enqueue_intent_by_id, get_job_enqueue_intent_metrics, list_job_enqueue_intents,
-    list_job_events, promote_job_enqueue_intents_for_types, record_job_enqueue_intent,
-    record_job_enqueue_intent_tx, update_job_definition,
+    JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentStatus,
+    delete_promoted_job_enqueue_intents_before, delete_promoted_job_enqueue_intents_for_jobs_tx,
+    enqueue_job, get_job_by_id, get_job_enqueue_intent_by_id, get_job_enqueue_intent_metrics,
+    list_job_enqueue_intents, list_job_events, promote_job_enqueue_intents_for_types,
+    record_job_enqueue_intent, record_job_enqueue_intent_tx, update_job_definition,
 };
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::json;
@@ -439,9 +439,12 @@ async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
         .await
         .expect("record intent");
 
-    let metrics = get_job_enqueue_intent_metrics(&pool, Some(organization_id), None)
-        .await
-        .expect("read pending metrics");
+    let metrics = get_job_enqueue_intent_metrics(
+        &pool,
+        &JobEnqueueIntentMetricsFilter::new(10, 0).with_organization_id(organization_id),
+    )
+    .await
+    .expect("read pending metrics");
     assert_eq!(metrics.len(), 1);
     assert_eq!(metrics[0].pending_count, 1);
     assert_eq!(metrics[0].retrying_count, 0);
@@ -493,9 +496,12 @@ async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
         1
     );
 
-    let metrics = get_job_enqueue_intent_metrics(&pool, Some(organization_id), None)
-        .await
-        .expect("read promoted metrics");
+    let metrics = get_job_enqueue_intent_metrics(
+        &pool,
+        &JobEnqueueIntentMetricsFilter::new(10, 0).with_organization_id(organization_id),
+    )
+    .await
+    .expect("read promoted metrics");
     assert_eq!(metrics[0].pending_count, 0);
     assert_eq!(metrics[0].retrying_count, 0);
     assert_eq!(metrics[0].max_promotion_attempts, 0);
@@ -512,10 +518,13 @@ async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
     .await
     .expect("age promoted intent beyond the metrics window");
     assert!(
-        get_job_enqueue_intent_metrics(&pool, Some(organization_id), None)
-            .await
-            .expect("read metrics after recent-promotion window")
-            .is_empty(),
+        get_job_enqueue_intent_metrics(
+            &pool,
+            &JobEnqueueIntentMetricsFilter::new(10, 0).with_organization_id(organization_id),
+        )
+        .await
+        .expect("read metrics after recent-promotion window")
+        .is_empty(),
         "retained promoted history outside the metrics window must not create zero-valued groups"
     );
 
@@ -604,6 +613,81 @@ async fn global_and_organization_scopes_keep_the_same_key_independent() {
         .collect::<Vec<_>>(),
         vec![organization_outcome.intent_id]
     );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn intent_metrics_are_bounded_and_page_in_stable_job_type_order() {
+    let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_metrics_page", 4).await;
+    let organization_id = Uuid::from_u128(88);
+    let payload = json!({"event": "metrics-page"});
+    let job_types = [
+        "jobs.test.intent_metrics.a",
+        "jobs.test.intent_metrics.b",
+        "jobs.test.intent_metrics.c",
+    ];
+
+    for job_type in job_types {
+        let outcome = record_job_enqueue_intent(
+            &pool,
+            &JobEnqueueIntent::new(JobType::new(job_type), &payload, job_type)
+                .with_organization_id(organization_id),
+        )
+        .await
+        .expect("record organization-scoped metrics intent");
+        assert_eq!(outcome.status, JobEnqueueIntentStatus::Pending);
+    }
+    let global = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(
+            JobType::new("jobs.test.intent_metrics.global"),
+            &payload,
+            "metrics-global",
+        ),
+    )
+    .await
+    .expect("record out-of-scope global metrics intent");
+    assert_eq!(global.status, JobEnqueueIntentStatus::Pending);
+
+    let first_page = get_job_enqueue_intent_metrics(
+        &pool,
+        &JobEnqueueIntentMetricsFilter::new(2, 0).with_organization_id(organization_id),
+    )
+    .await
+    .expect("read first metrics page");
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|record| record.job_type.as_str())
+            .collect::<Vec<_>>(),
+        &job_types[..2]
+    );
+
+    let second_page = get_job_enqueue_intent_metrics(
+        &pool,
+        &JobEnqueueIntentMetricsFilter::new(2, 2).with_organization_id(organization_id),
+    )
+    .await
+    .expect("read second metrics page");
+    assert_eq!(
+        second_page
+            .iter()
+            .map(|record| record.job_type.as_str())
+            .collect::<Vec<_>>(),
+        &job_types[2..]
+    );
+
+    let exact_type = get_job_enqueue_intent_metrics(
+        &pool,
+        &JobEnqueueIntentMetricsFilter::new(10, 0)
+            .with_organization_id(organization_id)
+            .with_job_type(JobType::new(job_types[1])),
+    )
+    .await
+    .expect("read exact-type metrics page");
+    assert_eq!(exact_type.len(), 1);
+    assert_eq!(exact_type[0].job_type.as_str(), job_types[1]);
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -1200,9 +1284,12 @@ async fn promotion_keeps_savepoint_headroom_below_postgres_subtransaction_cache(
     assert_eq!(first.retry_deferred, 24);
     assert_eq!(first.conflicted, 0);
     assert_eq!(first.total_promoted, 0);
-    let metrics = get_job_enqueue_intent_metrics(&pool, None, Some(JobType::new(JOB_TYPE)))
-        .await
-        .expect("read state after capped batch");
+    let metrics = get_job_enqueue_intent_metrics(
+        &pool,
+        &JobEnqueueIntentMetricsFilter::new(10, 0).with_job_type(JobType::new(JOB_TYPE)),
+    )
+    .await
+    .expect("read state after capped batch");
     assert_eq!(metrics[0].pending_count, 25);
     assert_eq!(metrics[0].retrying_count, 24);
     assert_eq!(metrics[0].conflicted_count, 0);
@@ -1370,9 +1457,12 @@ async fn enqueue_event_failure_defers_only_failed_intent_and_rolls_back_its_job(
                 .expect("deferred intent records its attempt time")
     );
     assert!(failing.last_error_code.is_some());
-    let metrics = get_job_enqueue_intent_metrics(&pool, None, Some(JobType::new(JOB_TYPE)))
-        .await
-        .expect("read retrying intent metrics");
+    let metrics = get_job_enqueue_intent_metrics(
+        &pool,
+        &JobEnqueueIntentMetricsFilter::new(10, 0).with_job_type(JobType::new(JOB_TYPE)),
+    )
+    .await
+    .expect("read retrying intent metrics");
     assert_eq!(metrics[0].retrying_count, 1);
     assert_eq!(metrics[0].max_promotion_attempts, 1);
     assert_eq!(

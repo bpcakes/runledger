@@ -5,9 +5,10 @@ use runledger_core::jobs::{
     WorkflowStepEnqueueBuilder, WorkflowType,
 };
 use runledger_postgres::jobs::{
-    JOB_LIST_PAGE_LIMIT_MAX, JobDefinitionListFilter, JobDefinitionUpsert, JobListFilter,
-    JobRuntimeConfigListFilter, WorkflowRunListFilter, count_workflow_step_dependencies,
-    count_workflow_steps, enqueue_workflow_run, list_job_definitions, list_job_events,
+    JOB_LIST_PAGE_LIMIT_MAX, JobDefinitionListFilter, JobDefinitionUpsert,
+    JobEnqueueIntentMetricsFilter, JobListFilter, JobRuntimeConfigListFilter,
+    WorkflowRunListFilter, count_workflow_step_dependencies, count_workflow_steps,
+    enqueue_workflow_run, get_job_enqueue_intent_metrics, list_job_definitions, list_job_events,
     list_job_logs, list_job_runtime_configs, list_jobs, list_workflow_runs,
     list_workflow_step_dependencies_page, list_workflow_steps, list_workflow_steps_page,
     upsert_job_definition_tx,
@@ -213,6 +214,20 @@ async fn invalid_pagination_rejects_before_database_access() {
             },
         )
         .await,
+    );
+
+    assert_invalid_pagination(
+        get_job_enqueue_intent_metrics(&pool, &JobEnqueueIntentMetricsFilter::new(0, 0)).await,
+    );
+    assert_invalid_pagination(
+        get_job_enqueue_intent_metrics(
+            &pool,
+            &JobEnqueueIntentMetricsFilter::new(JOB_LIST_PAGE_LIMIT_MAX + 1, 0),
+        )
+        .await,
+    );
+    assert_invalid_pagination(
+        get_job_enqueue_intent_metrics(&pool, &JobEnqueueIntentMetricsFilter::new(1, -1)).await,
     );
     assert_invalid_pagination(
         list_job_runtime_configs(
