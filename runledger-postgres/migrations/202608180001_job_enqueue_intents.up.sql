@@ -127,14 +127,25 @@ CREATE INDEX idx_job_enqueue_intents_pending_type
     INCLUDE (enqueue_request_version)
     WHERE status = 'PENDING';
 
-CREATE INDEX idx_job_enqueue_intents_metrics
-    ON job_enqueue_intents (job_type, status, created_at)
-    INCLUDE (promoted_at, promotion_attempts);
+CREATE INDEX idx_job_enqueue_intents_pending_metrics
+    ON job_enqueue_intents (job_type, created_at)
+    INCLUDE (promotion_attempts)
+    WHERE status = 'PENDING';
 
-CREATE INDEX idx_job_enqueue_intents_org_metrics
-    ON job_enqueue_intents (organization_id, job_type, status, created_at)
-    INCLUDE (promoted_at, promotion_attempts)
-    WHERE organization_id IS NOT NULL;
+CREATE INDEX idx_job_enqueue_intents_org_pending_metrics
+    ON job_enqueue_intents (organization_id, job_type, created_at)
+    INCLUDE (promotion_attempts)
+    WHERE status = 'PENDING'
+      AND organization_id IS NOT NULL;
+
+CREATE INDEX idx_job_enqueue_intents_conflicted_metrics
+    ON job_enqueue_intents (job_type)
+    WHERE status = 'CONFLICTED';
+
+CREATE INDEX idx_job_enqueue_intents_org_conflicted_metrics
+    ON job_enqueue_intents (organization_id, job_type)
+    WHERE status = 'CONFLICTED'
+      AND organization_id IS NOT NULL;
 
 CREATE INDEX idx_job_enqueue_intents_org_created
     ON job_enqueue_intents (organization_id, created_at DESC, id DESC)
@@ -142,6 +153,7 @@ CREATE INDEX idx_job_enqueue_intents_org_created
 
 CREATE INDEX idx_job_enqueue_intents_promoted_cleanup
     ON job_enqueue_intents (promoted_at, id)
+    INCLUDE (job_type, organization_id)
     WHERE status = 'PROMOTED';
 
 -- PostgreSQL does not automatically index the referencing side of a foreign

@@ -104,7 +104,10 @@ failures retry indefinitely so a prolonged outage cannot silently discard work;
 alert on oldest pending age, `retrying_count`, and `max_promotion_attempts` from
 `get_job_enqueue_intent_metrics`, then repair the database policy. Conflicted
 intents remain immutable evidence; safe replacement work requires a deliberately
-new application idempotency key.
+new application idempotency key. Metrics aggregate pending, conflicted, and
+recently promoted populations through separate selective predicates; promoted
+history older than the reported 24-hour window is not scanned to produce empty
+signals.
 
 The maximum per-worker promotion drain rate is
 `min(claim_batch_size, 24) / poll_interval`. Pending and conflicted rows are

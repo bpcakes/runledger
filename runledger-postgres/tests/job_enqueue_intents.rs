@@ -327,6 +327,23 @@ async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
     assert_eq!(metrics[0].promoted_24h, 1);
     assert_eq!(metrics[0].oldest_pending_at, None);
 
+    sqlx::query(
+        "UPDATE job_enqueue_intents
+         SET promoted_at = now() - interval '25 hours'
+         WHERE id = $1",
+    )
+    .bind(recorded.intent_id)
+    .execute(&pool)
+    .await
+    .expect("age promoted intent beyond the metrics window");
+    assert!(
+        get_job_enqueue_intent_metrics(&pool, Some(organization_id), None)
+            .await
+            .expect("read metrics after recent-promotion window")
+            .is_empty(),
+        "retained promoted history outside the metrics window must not create zero-valued groups"
+    );
+
     let listed = list_job_enqueue_intents(
         &pool,
         &JobEnqueueIntentListFilter::new(10, 0)

@@ -220,19 +220,38 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     .expect("read promoted intent job index");
     assert!(promoted_job_index.contains("(promoted_job_id)"));
     assert!(promoted_job_index.contains("WHERE (promoted_job_id IS NOT NULL)"));
-    let intent_metrics_index = sqlx::query_scalar::<_, String>(
-        "SELECT pg_get_indexdef('idx_job_enqueue_intents_metrics'::regclass)",
+    let pending_metrics_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_pending_metrics'::regclass)",
     )
     .fetch_one(&harness.pool)
     .await
-    .expect("read intent metrics index");
-    assert!(intent_metrics_index.contains("(job_type, status, created_at)"));
-    assert!(intent_metrics_index.contains("INCLUDE (promoted_at, promotion_attempts)"));
+    .expect("read pending intent metrics index");
+    assert!(pending_metrics_index.contains("(job_type, created_at)"));
+    assert!(pending_metrics_index.contains("INCLUDE (promotion_attempts)"));
+    assert!(pending_metrics_index.contains("WHERE (status = 'PENDING'::text)"));
+    let conflicted_metrics_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_conflicted_metrics'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read conflicted intent metrics index");
+    assert!(conflicted_metrics_index.contains("(job_type)"));
+    assert!(conflicted_metrics_index.contains("WHERE (status = 'CONFLICTED'::text)"));
+    let promoted_cleanup_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_promoted_cleanup'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read promoted intent cleanup index");
+    assert!(promoted_cleanup_index.contains("(promoted_at, id)"));
+    assert!(promoted_cleanup_index.contains("INCLUDE (job_type, organization_id)"));
+    assert!(promoted_cleanup_index.contains("WHERE (status = 'PROMOTED'::text)"));
     for index_name in [
         "uq_job_enqueue_intents_type_idempotency_org",
         "uq_job_enqueue_intents_type_idempotency_global",
         "idx_job_enqueue_intents_org_created",
-        "idx_job_enqueue_intents_org_metrics",
+        "idx_job_enqueue_intents_org_pending_metrics",
+        "idx_job_enqueue_intents_org_conflicted_metrics",
     ] {
         assert_eq!(
             sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")

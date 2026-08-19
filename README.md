@@ -314,6 +314,8 @@ conflicted intents as immutable evidence; if replacement work is safe, the
 application must submit it deliberately under a new idempotency key.
 Query `get_job_enqueue_intent_metrics` to alert on oldest pending age,
 `retrying_count`, `max_promotion_attempts`, and increases in conflict count.
+Its promoted population is limited to the reported 24-hour window, so retained
+promoted history older than that window is not scanned merely to emit zeroes.
 Pending and conflicted rows remain idempotency/audit evidence and have no
 generic delete or cancel API: correcting or abandoning unexecuted application
 work requires an application-owned authorization and audit policy rather than

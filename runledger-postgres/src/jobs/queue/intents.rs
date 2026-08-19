@@ -502,6 +502,10 @@ pub async fn list_job_enqueue_intents(
 }
 
 /// Returns durable intent backlog and promotion signals grouped by job type.
+///
+/// Each lifecycle population is aggregated behind its own selective predicate.
+/// Job types represented only by promoted intents older than 24 hours are
+/// omitted because every returned signal for them would be zero.
 pub async fn get_job_enqueue_intent_metrics(
     pool: &DbPool,
     organization_id: Option<Uuid>,
@@ -510,26 +514,63 @@ pub async fn get_job_enqueue_intent_metrics(
     let job_type = job_type.map(|job_type| job_type.as_str());
     let rows = sqlx::query_as!(
         JobEnqueueIntentMetricsRow,
-        "SELECT
-            job_type,
-            COUNT(*) FILTER (WHERE status = 'PENDING')::bigint AS \"pending_count!\",
-            COUNT(*) FILTER (
-                WHERE status = 'PENDING'
-                  AND promotion_attempts > 0
-            )::bigint AS \"retrying_count!\",
-            COALESCE(
-                MAX(promotion_attempts) FILTER (WHERE status = 'PENDING'),
-                0
-            )::integer AS \"max_promotion_attempts!\",
-            COUNT(*) FILTER (WHERE status = 'CONFLICTED')::bigint AS \"conflicted_count!\",
-            COUNT(*) FILTER (
-                WHERE status = 'PROMOTED'
-                  AND promoted_at >= now() - interval '24 hours'
-            )::bigint AS \"promoted_24h!\",
-            MIN(created_at) FILTER (WHERE status = 'PENDING') AS oldest_pending_at
-         FROM job_enqueue_intents
-         WHERE ($1::uuid IS NULL OR organization_id = $1)
-           AND ($2::text IS NULL OR job_type = $2)
+        "WITH status_metrics AS (
+            SELECT
+                job_type,
+                COUNT(*)::bigint AS pending_count,
+                COUNT(*) FILTER (WHERE promotion_attempts > 0)::bigint AS retrying_count,
+                MAX(promotion_attempts)::integer AS max_promotion_attempts,
+                0::bigint AS conflicted_count,
+                0::bigint AS promoted_24h,
+                MIN(created_at) AS oldest_pending_at
+            FROM job_enqueue_intents
+            WHERE status = 'PENDING'
+              AND ($1::uuid IS NULL OR organization_id = $1)
+              AND ($2::text IS NULL OR job_type = $2)
+            GROUP BY job_type
+
+            UNION ALL
+
+            SELECT
+                job_type,
+                0::bigint AS pending_count,
+                0::bigint AS retrying_count,
+                0::integer AS max_promotion_attempts,
+                COUNT(*)::bigint AS conflicted_count,
+                0::bigint AS promoted_24h,
+                NULL::timestamptz AS oldest_pending_at
+            FROM job_enqueue_intents
+            WHERE status = 'CONFLICTED'
+              AND ($1::uuid IS NULL OR organization_id = $1)
+              AND ($2::text IS NULL OR job_type = $2)
+            GROUP BY job_type
+
+            UNION ALL
+
+            SELECT
+                job_type,
+                0::bigint AS pending_count,
+                0::bigint AS retrying_count,
+                0::integer AS max_promotion_attempts,
+                0::bigint AS conflicted_count,
+                COUNT(*)::bigint AS promoted_24h,
+                NULL::timestamptz AS oldest_pending_at
+            FROM job_enqueue_intents
+            WHERE status = 'PROMOTED'
+              AND promoted_at >= now() - interval '24 hours'
+              AND ($1::uuid IS NULL OR organization_id = $1)
+              AND ($2::text IS NULL OR job_type = $2)
+            GROUP BY job_type
+         )
+         SELECT
+            job_type AS \"job_type!\",
+            MAX(pending_count)::bigint AS \"pending_count!\",
+            MAX(retrying_count)::bigint AS \"retrying_count!\",
+            MAX(max_promotion_attempts)::integer AS \"max_promotion_attempts!\",
+            MAX(conflicted_count)::bigint AS \"conflicted_count!\",
+            MAX(promoted_24h)::bigint AS \"promoted_24h!\",
+            MIN(oldest_pending_at) AS oldest_pending_at
+         FROM status_metrics
          GROUP BY job_type
          ORDER BY job_type",
         organization_id,
