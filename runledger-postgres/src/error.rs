@@ -30,6 +30,45 @@ pub enum QueryErrorKind {
     WorkflowReleaseConflict,
 }
 
+/// Query-error fields that are safe to emit at application logging boundaries.
+///
+/// This deliberately excludes the internal message and SQLx source because
+/// either may contain payload values, idempotency keys, or database policy
+/// details. Keeping the safe projection as a distinct type makes it harder for
+/// callers to accidentally widen structured logs with raw diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SanitizedQueryErrorDiagnostics<'a> {
+    code: &'a str,
+    sqlstate: Option<&'a str>,
+    constraint: Option<&'a str>,
+}
+
+impl<'a> SanitizedQueryErrorDiagnostics<'a> {
+    #[must_use]
+    pub(crate) const fn from_code(code: &'a str) -> Self {
+        Self {
+            code,
+            sqlstate: None,
+            constraint: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn code(self) -> &'a str {
+        self.code
+    }
+
+    #[must_use]
+    pub(crate) const fn sqlstate(self) -> Option<&'a str> {
+        self.sqlstate
+    }
+
+    #[must_use]
+    pub(crate) const fn constraint(self) -> Option<&'a str> {
+        self.constraint
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameworkConstraintSpec {
     category: QueryErrorCategory,
@@ -230,6 +269,15 @@ impl QueryError {
     #[must_use]
     pub fn constraint(&self) -> Option<&str> {
         self.constraint.as_deref()
+    }
+
+    #[must_use]
+    pub(crate) fn sanitized_diagnostics(&self) -> SanitizedQueryErrorDiagnostics<'_> {
+        SanitizedQueryErrorDiagnostics {
+            code: self.code,
+            sqlstate: self.sqlstate(),
+            constraint: self.constraint(),
+        }
     }
 
     #[must_use]
@@ -586,6 +634,23 @@ mod tests {
         assert!(error.internal_message().contains("secret-idempotency-key"));
         assert!(std::error::Error::source(&error).is_some());
         assert!(error.source_arc().is_some());
+    }
+
+    #[test]
+    fn sanitized_diagnostics_omit_internal_message_and_source() {
+        let error = QueryError::from_sqlx(
+            sqlx::Error::Protocol("database detail includes secret-idempotency-key".into()),
+            Some("sensitive context includes secret-idempotency-key"),
+        );
+
+        let diagnostics = error.sanitized_diagnostics();
+
+        assert_eq!(diagnostics.code(), "db.query_failed");
+        assert_eq!(diagnostics.sqlstate(), None);
+        assert_eq!(diagnostics.constraint(), None);
+        let debug = format!("{diagnostics:?}");
+        assert!(debug.contains("db.query_failed"));
+        assert!(!debug.contains("secret-idempotency-key"));
     }
 
     #[test]

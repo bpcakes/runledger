@@ -23,11 +23,12 @@
 //! untrusted request parameters alone.
 //!
 //! [`QueryError::client_message`] and [`QueryError::code`] are the stable values
-//! intended for public error responses. Detailed internal context remains
-//! available through [`QueryError::internal_message`] for server-side diagnostics.
-//! Public formatting keeps raw SQLx details sanitized. The standard error source
-//! chain and [`QueryError::source_arc`] are available for trusted server-side
-//! diagnostics.
+//! intended for public error responses and application logs. Detailed internal
+//! context remains available through [`QueryError::internal_message`] and the
+//! standard error source chain for targeted debugging, but may contain payload
+//! values, idempotency keys, or database policy details. Do not emit it at
+//! general logging boundaries without explicit redaction. Public formatting
+//! keeps raw SQLx details sanitized.
 //! Runtime lifecycle, workflow mutation, and idempotent enqueue APIs are designed
 //! for PostgreSQL's default `READ COMMITTED` transaction isolation so they can
 //! observe rows committed after lock waits or uniqueness conflicts.

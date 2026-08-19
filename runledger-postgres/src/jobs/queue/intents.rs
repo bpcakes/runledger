@@ -3,6 +3,7 @@ use runledger_core::jobs::{JobStage, JobType, JobTypeName};
 use serde_json::Value;
 use sqlx::types::Uuid;
 
+use crate::error::SanitizedQueryErrorDiagnostics;
 use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 
 use super::super::errors::{validate_page_limit, validate_pagination};
@@ -159,43 +160,6 @@ enum IntentPromotionDisposition {
     Conflicted,
     DefinitionBecameUnavailable,
     RetryDeferred,
-}
-
-struct IntentPromotionErrorDiagnostics<'a> {
-    code: &'a str,
-    sqlstate: Option<&'a str>,
-    constraint: Option<&'a str>,
-    internal_message: &'a str,
-    has_source: bool,
-    source: String,
-}
-
-impl<'a> IntentPromotionErrorDiagnostics<'a> {
-    fn from_query_error(error: &'a QueryError) -> Self {
-        let source = error.source_arc();
-        Self {
-            code: error.code(),
-            sqlstate: error.sqlstate(),
-            constraint: error.constraint(),
-            internal_message: error.internal_message(),
-            has_source: source.is_some(),
-            source: source
-                .as_deref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-        }
-    }
-
-    fn classified(code: &'static str, internal_message: &'static str) -> Self {
-        Self {
-            code,
-            sqlstate: None,
-            constraint: None,
-            internal_message,
-            has_source: false,
-            source: String::new(),
-        }
-    }
 }
 
 impl JobEnqueueIntentPromotionReport {
@@ -849,16 +813,9 @@ async fn promote_prepared_intent_tx(
                 JobEnqueueDisposition::Existing => IntentPromotionDisposition::Existing,
             })
         }
-        IntentEnqueueResolution::DefinitionUnavailable {
-            code,
-            client_message,
-        } => {
-            let diagnostics = IntentPromotionErrorDiagnostics::classified(code, client_message);
-            log_intent_promotion_failure(
-                prepared.id,
-                &diagnostics,
-                "definition_became_unavailable",
-            );
+        IntentEnqueueResolution::DefinitionUnavailable { code } => {
+            let diagnostics = SanitizedQueryErrorDiagnostics::from_code(code);
+            log_intent_promotion_failure(prepared.id, diagnostics, "definition_became_unavailable");
             Ok(IntentPromotionDisposition::DefinitionBecameUnavailable)
         }
         IntentEnqueueResolution::Conflict {
@@ -866,8 +823,8 @@ async fn promote_prepared_intent_tx(
             client_message,
         } => {
             mark_intent_conflicted_tx(tx, prepared.id, code, client_message).await?;
-            let diagnostics = IntentPromotionErrorDiagnostics::classified(code, client_message);
-            log_intent_promotion_failure(prepared.id, &diagnostics, "conflicted");
+            let diagnostics = SanitizedQueryErrorDiagnostics::from_code(code);
+            log_intent_promotion_failure(prepared.id, diagnostics, "conflicted");
             Ok(IntentPromotionDisposition::Conflicted)
         }
     }
@@ -881,23 +838,19 @@ fn log_query_intent_promotion_failure(
     let Error::QueryError(error) = error else {
         return;
     };
-    let diagnostics = IntentPromotionErrorDiagnostics::from_query_error(error);
-    log_intent_promotion_failure(intent_id, &diagnostics, promotion_outcome);
+    log_intent_promotion_failure(intent_id, error.sanitized_diagnostics(), promotion_outcome);
 }
 
 fn log_intent_promotion_failure(
     intent_id: Uuid,
-    diagnostics: &IntentPromotionErrorDiagnostics<'_>,
+    diagnostics: SanitizedQueryErrorDiagnostics<'_>,
     promotion_outcome: &'static str,
 ) {
     tracing::warn!(
         intent_id = %intent_id,
-        error_code = diagnostics.code,
-        error_sqlstate = diagnostics.sqlstate.unwrap_or("none"),
-        error_constraint = diagnostics.constraint.unwrap_or("none"),
-        error_internal_message = diagnostics.internal_message,
-        error_has_source = diagnostics.has_source,
-        error_source = diagnostics.source.as_str(),
+        error_code = diagnostics.code(),
+        error_sqlstate = diagnostics.sqlstate().unwrap_or("none"),
+        error_constraint = diagnostics.constraint().unwrap_or("none"),
         promotion_outcome,
         "durable job enqueue intent promotion did not complete"
     );
@@ -1370,24 +1323,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_failure_diagnostics_preserve_trusted_detail_and_source() {
+    fn query_failure_diagnostics_expose_only_sanitized_fields() {
         let error = QueryError::from_sqlx(
             sqlx::Error::Protocol("test promotion protocol failure".to_owned()),
             Some("promote test intent"),
         );
 
-        let diagnostics = IntentPromotionErrorDiagnostics::from_query_error(&error);
+        let diagnostics = error.sanitized_diagnostics();
 
-        assert_eq!(diagnostics.code, "db.query_failed");
-        assert_eq!(diagnostics.sqlstate, None);
-        assert_eq!(diagnostics.constraint, None);
-        assert!(diagnostics.internal_message.contains("promote test intent"));
-        assert!(diagnostics.has_source);
-        assert!(
-            diagnostics
-                .source
-                .contains("test promotion protocol failure")
-        );
+        assert_eq!(diagnostics.code(), "db.query_failed");
+        assert_eq!(diagnostics.sqlstate(), None);
+        assert_eq!(diagnostics.constraint(), None);
+        let debug = format!("{diagnostics:?}");
+        assert!(!debug.contains("promote test intent"));
+        assert!(!debug.contains("test promotion protocol failure"));
     }
 
     #[test]

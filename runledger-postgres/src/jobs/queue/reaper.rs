@@ -141,7 +141,7 @@ async fn reap_expired_lease_batch(
         {
             Ok(disposition) => disposition,
             Err(error) => {
-                log_trusted_deferred_row_error(&row, &error);
+                log_sanitized_deferred_row_error(&row, &error);
 
                 sqlx::query!("ROLLBACK TO SAVEPOINT reaper_row")
                     .execute(&mut *tx)
@@ -451,39 +451,33 @@ fn failure_transition_for(row: &ReapExpiredLeaseRow) -> ExpiredLeaseTransition<'
     )
 }
 
-fn log_trusted_deferred_row_error(row: &ReapExpiredLeaseRow, error: &Error) {
+fn log_sanitized_deferred_row_error(row: &ReapExpiredLeaseRow, error: &Error) {
     match error {
         Error::QueryError(query_error) => {
-            let source = query_error.source_arc();
-            let source_detail = source
-                .as_deref()
-                .map(ToString::to_string)
-                .unwrap_or_default();
+            let diagnostics = query_error.sanitized_diagnostics();
             tracing::warn!(
                 job_id = %row.job_id,
                 run_number = row.run_number,
                 attempt = row.attempt,
-                error_code = query_error.code(),
-                error_sqlstate = query_error.sqlstate().unwrap_or(""),
-                error_internal_message = query_error.internal_message(),
-                error_has_source = source.is_some(),
-                error_source = source_detail.as_str(),
+                error_code = diagnostics.code(),
+                error_sqlstate = diagnostics.sqlstate().unwrap_or(""),
+                error_constraint = diagnostics.constraint().unwrap_or(""),
                 "reaper deferred expired leased job after row-level query error"
             );
         }
-        Error::ConfigError(_) => log_trusted_deferred_row_non_query_error(
+        Error::ConfigError(_) => log_sanitized_deferred_row_non_query_error(
             row,
             "ConfigError",
             "reaper.config_error",
             "reaper row processing failed with a configuration error",
         ),
-        Error::ConnectionError(_) => log_trusted_deferred_row_non_query_error(
+        Error::ConnectionError(_) => log_sanitized_deferred_row_non_query_error(
             row,
             "ConnectionError",
             "db.connection_failed",
             "reaper row processing failed with a database connection error",
         ),
-        Error::MigrationError(_) => log_trusted_deferred_row_non_query_error(
+        Error::MigrationError(_) => log_sanitized_deferred_row_non_query_error(
             row,
             "MigrationError",
             "db.migration_failed",
@@ -492,7 +486,7 @@ fn log_trusted_deferred_row_error(row: &ReapExpiredLeaseRow, error: &Error) {
     }
 }
 
-fn log_trusted_deferred_row_non_query_error(
+fn log_sanitized_deferred_row_non_query_error(
     row: &ReapExpiredLeaseRow,
     variant: &'static str,
     error_code: &'static str,
@@ -506,7 +500,6 @@ fn log_trusted_deferred_row_non_query_error(
         error_sqlstate = "",
         error_variant = variant,
         error_message = message,
-        error_has_source = false,
         "reaper deferred expired leased job after row-level non-query error"
     );
 }

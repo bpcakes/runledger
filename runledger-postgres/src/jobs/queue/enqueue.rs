@@ -53,7 +53,6 @@ pub(super) enum IntentEnqueueResolution {
     Enqueued(JobEnqueueOutcome),
     DefinitionUnavailable {
         code: &'static str,
-        client_message: &'static str,
     },
     Conflict {
         code: &'static str,
@@ -155,10 +154,7 @@ pub(super) async fn enqueue_job_from_intent_tx(
     {
         Ok(outcome) => Ok(IntentEnqueueResolution::Enqueued(outcome)),
         Err(Error::QueryError(error)) if error.code() == "job.definition_not_found_or_disabled" => {
-            Ok(IntentEnqueueResolution::DefinitionUnavailable {
-                code: error.code(),
-                client_message: error.client_message(),
-            })
+            Ok(IntentEnqueueResolution::DefinitionUnavailable { code: error.code() })
         }
         Err(Error::QueryError(error))
             if matches!(
