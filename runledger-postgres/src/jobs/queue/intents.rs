@@ -616,9 +616,12 @@ pub async fn get_job_enqueue_intent_metrics(
 /// The requested limit must be in `1..=1000` and is then capped at 24 so one
 /// transaction cannot create enough savepoint subtransactions to push
 /// PostgreSQL into subtransaction overflow. Promotion waits at most five
-/// seconds to enter the retention fence while preserving any stricter session
-/// setting; a timeout aborts the owned transaction and is returned to the
-/// caller for retry.
+/// seconds for every lock wait in the owned promotion transaction while
+/// preserving any stricter session setting. Keeping that cap active after the
+/// retention fence is acquired prevents a stalled definition or queue-row lock
+/// from holding the shared fence indefinitely. A fence-acquisition timeout
+/// aborts the owned transaction and is returned to the caller for retry;
+/// row-level promotion failures are deferred through the normal retry path.
 pub async fn promote_job_enqueue_intents_for_types(
     pool: &DbPool,
     allowed_job_types: &[JobType<'_>],
@@ -652,7 +655,7 @@ async fn promote_job_enqueue_intents_read_committed_tx(
     allowed_job_types: &[String],
     limit: i64,
 ) -> Result<JobEnqueueIntentPromotionReport> {
-    lock_job_enqueue_intent_promotion_shared_tx(tx).await?;
+    prepare_job_enqueue_intent_promotion_critical_section_tx(tx).await?;
 
     let rows = sqlx::query_as!(
         SupportedJobEnqueueIntentPromotionRow,
@@ -1145,10 +1148,13 @@ async fn restore_job_enqueue_intent_fence_lock_timeout_tx(
     .await
 }
 
-async fn lock_job_enqueue_intent_promotion_shared_tx(
+async fn prepare_job_enqueue_intent_promotion_critical_section_tx(
     tx: &mut ReadCommittedTx<'_, '_>,
 ) -> Result<()> {
-    let previous_lock_timeout = cap_job_enqueue_intent_fence_lock_timeout_tx(tx.as_tx()).await?;
+    // Promotion owns this transaction, so leave the cap active until commit or
+    // rollback. Restoring it after the advisory lock would let a later row lock
+    // hold the shared retention fence without a bound.
+    cap_job_enqueue_intent_fence_lock_timeout_tx(tx.as_tx()).await?;
     sqlx::query(
         "SELECT pg_advisory_xact_lock_shared($1, $2)
          /* runledger:lock_job_enqueue_intent_promotion */",
@@ -1160,7 +1166,7 @@ async fn lock_job_enqueue_intent_promotion_shared_tx(
     .map_err(|error| {
         Error::from_query_sqlx_with_context("lock job enqueue intent promotion", error)
     })?;
-    restore_job_enqueue_intent_fence_lock_timeout_tx(tx.as_tx(), &previous_lock_timeout).await
+    Ok(())
 }
 
 async fn lock_job_enqueue_intent_retention_exclusive_tx(tx: &mut DbTx<'_>) -> Result<()> {

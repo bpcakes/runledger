@@ -1287,6 +1287,115 @@ async fn promotion_retention_fence_wait_is_bounded() {
 }
 
 #[tokio::test]
+async fn promotion_row_lock_wait_is_bounded_while_holding_retention_fence() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_promotion_row_timeout", 6).await;
+    record_postgres_server_version(&pool, "intent promotion bounded row-lock wait").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "promotion-row-timeout"});
+    let recorded = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "promotion-row-timeout"),
+    )
+    .await
+    .expect("record intent before blocking its existing job");
+    let existing_job_id = enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new(JOB_TYPE),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: Some("promotion-row-timeout"),
+            stage: None,
+        },
+    )
+    .await
+    .expect("enqueue existing job before blocking promotion");
+
+    let mut blocker_tx = pool.begin().await.expect("begin existing-job blocker");
+    sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
+        .bind(existing_job_id)
+        .fetch_one(&mut *blocker_tx)
+        .await
+        .expect("lock existing job before promotion");
+
+    let promotion_pool = pool.clone();
+    let promotion = tokio::spawn(async move {
+        promote_job_enqueue_intents_for_types(&promotion_pool, &[JobType::new(JOB_TYPE)], 1).await
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%FROM job_queue%'
+                      AND query LIKE '%FOR NO KEY UPDATE%'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("inspect promotion existing-job wait");
+            if waiting {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("promotion should wait on the existing job row");
+
+    // Give retention a later five-second deadline than the already-waiting
+    // promoter. The promoter must time out its row lock and release the shared
+    // advisory fence before retention's exclusive fence wait expires.
+    sleep(Duration::from_millis(250)).await;
+    let mut retention_tx = pool.begin().await.expect("begin waiting retention");
+    let started = Instant::now();
+    assert_eq!(
+        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[Uuid::now_v7()],)
+            .await
+            .expect("retention must proceed after bounded promotion row wait"),
+        0
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "retention fence remained blocked too long: {:?}",
+        started.elapsed()
+    );
+    retention_tx
+        .commit()
+        .await
+        .expect("commit retention after promotion timeout");
+
+    let report = timeout(Duration::from_secs(2), promotion)
+        .await
+        .expect("promotion must finish after its row-lock timeout")
+        .expect("promotion task must not panic")
+        .expect("row-lock timeout should defer only the blocked intent");
+    assert_eq!(report.retry_deferred, 1);
+    assert_eq!(report.total_promoted, 0);
+    let pending = get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+        .await
+        .expect("load intent after bounded row-lock wait")
+        .expect("intent remains after bounded row-lock wait");
+    assert_eq!(pending.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(pending.promotion_attempts, 1);
+
+    blocker_tx
+        .rollback()
+        .await
+        .expect("release existing-job blocker");
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn inverse_existing_job_order_is_serialized_with_retention() {
     const PROMOTION_BLOCKER_LOCK: i64 = 0x7275_6e6c_7465_7374;
 
