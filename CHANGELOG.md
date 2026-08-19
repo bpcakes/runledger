@@ -15,6 +15,8 @@ All notable changes to this workspace are documented here.
 
 ### Changed
 
+- Declare Unix-like operating systems as the only supported platform and remove
+  the unused Windows container-reaper implementation.
 - Drain full enqueue-intent promotion batches without an idle poll delay, and
   add independent promoter configuration plus a supervisor opt-out for worker
   processes that do not use enqueue intents.

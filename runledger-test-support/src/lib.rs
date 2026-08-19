@@ -1,3 +1,8 @@
+//! PostgreSQL integration-test support for Runledger on Unix-like systems.
+//!
+//! Runledger does not support Windows. The container lifecycle implementation
+//! relies on Unix process groups and shell semantics.
+
 mod container_lifecycle;
 mod db_lifecycle;
 mod env;

@@ -67,6 +67,7 @@ handlers, process model, and admin surface.
 - [Configuration](#configuration)
 - [Database schema and migrations](#database-schema-and-migrations)
 - [Operational notes](#operational-notes)
+- [Platform support](#platform-support)
 - [PostgreSQL requirements](#postgresql-requirements)
 - [Working in this repository](#working-in-this-repository)
 - [Releasing](#releasing)
@@ -1343,6 +1344,13 @@ errors now box them as `Box<runledger_postgres::Error>` to keep
 `Result<_, CatalogError>` and `Result<_, JobDefinitionCatalogSyncError>` small.
 Downstream code matching those variants should dereference the boxed source
 before matching the inner persistence error.
+
+## Platform support
+
+Runledger supports Unix-like operating systems only. Windows is not supported,
+tested, or accepted as a compatibility target. The workspace and its published
+crates may rely on Unix process and filesystem APIs without conditional Windows
+implementations.
 
 ## PostgreSQL requirements
 

@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -56,11 +57,8 @@ fn shared_container_starts_without_a_docker_cli_for_the_optional_reaper() {
     probe.finish_normally();
 }
 
-#[cfg(unix)]
 #[test]
 fn shared_container_starts_when_optional_reaper_cli_hangs() {
-    use std::os::unix::fs::PermissionsExt;
-
     if docker_lifecycle_assertions_are_unavailable() {
         return;
     }
@@ -127,10 +125,8 @@ fn lifecycle_probe_child() {
     });
 }
 
-#[cfg(unix)]
 struct TemporaryFile(std::path::PathBuf);
 
-#[cfg(unix)]
 impl TemporaryFile {
     fn new(path: std::path::PathBuf) -> Self {
         Self(path)
@@ -141,7 +137,6 @@ impl TemporaryFile {
     }
 }
 
-#[cfg(unix)]
 impl Drop for TemporaryFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);

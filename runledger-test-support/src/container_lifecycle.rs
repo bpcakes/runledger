@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -14,7 +15,6 @@ const TESTCONTAINERS_COMMAND_ENV: &str = "TESTCONTAINERS_COMMAND";
 const REAPER_READY: &str = "runledger-container-reaper-ready";
 const REAPER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[cfg(unix)]
 const REAPER_SCRIPT: &str = r#"
 trap '' HUP INT QUIT TERM
 
@@ -35,36 +35,6 @@ while IFS= read -r _; do
 done
 
 "$1" container rm --force --volumes "$2" >/dev/null 2>&1 || :
-"#;
-
-#[cfg(windows)]
-const REAPER_SCRIPT: &str = r#"
-$ErrorActionPreference = 'Stop'
-$docker = $env:RUNLEDGER_TEST_DOCKER_CLI
-$container = $env:RUNLEDGER_TEST_CONTAINER_ID
-
-if ([string]::IsNullOrWhiteSpace($docker)) {
-    $docker = 'docker'
-}
-
-try {
-    & $docker container inspect $container *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw "docker CLI cannot inspect container $container"
-    }
-} catch {
-    [Console]::Out.WriteLine($_.Exception.Message)
-    exit 1
-}
-
-[Console]::Out.WriteLine('runledger-container-reaper-ready')
-[Console]::Out.Flush()
-
-while ([Console]::In.ReadLine() -ne $null) {}
-
-try {
-    & $docker container rm --force --volumes $container *> $null
-} catch {}
 "#;
 
 pub(crate) struct ProcessContainer {
@@ -178,21 +148,10 @@ fn terminate_reaper(child: &mut Child) -> io::Result<std::process::ExitStatus> {
     child.wait()
 }
 
-#[cfg(unix)]
 fn terminate_reaper_process_tree(child: &Child) {
     let process_group = format!("-{}", child.id());
     let _ = Command::new("kill")
         .args(["-KILL", &process_group])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-#[cfg(windows)]
-fn terminate_reaper_process_tree(child: &Child) {
-    let process_id = child.id().to_string();
-    let _ = Command::new("taskkill.exe")
-        .args(["/F", "/T", "/PID", &process_id])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -227,10 +186,7 @@ impl Drop for ContainerReaper {
     }
 }
 
-#[cfg(unix)]
 fn reaper_command(docker_cli: &OsString, container_id: &str) -> Command {
-    use std::os::unix::process::CommandExt;
-
     let mut command = Command::new("sh");
     command
         .arg("-c")
@@ -239,25 +195,5 @@ fn reaper_command(docker_cli: &OsString, container_id: &str) -> Command {
         .arg(docker_cli)
         .arg(container_id)
         .process_group(0);
-    command
-}
-
-#[cfg(windows)]
-fn reaper_command(docker_cli: &OsString, container_id: &str) -> Command {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let mut command = Command::new("powershell.exe");
-    command
-        .arg("-NoLogo")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(REAPER_SCRIPT)
-        .env(DOCKER_CLI_ENV, docker_cli)
-        .env("RUNLEDGER_TEST_CONTAINER_ID", container_id)
-        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     command
 }
