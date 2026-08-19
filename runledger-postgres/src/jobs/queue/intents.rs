@@ -846,7 +846,16 @@ async fn promote_prepared_intent_tx(
                 JobEnqueueDisposition::Existing => IntentPromotionDisposition::Existing,
             })
         }
-        IntentEnqueueResolution::DefinitionUnavailable => {
+        IntentEnqueueResolution::DefinitionUnavailable {
+            code,
+            client_message,
+        } => {
+            let diagnostics = IntentPromotionErrorDiagnostics::classified(code, client_message);
+            log_intent_promotion_failure(
+                prepared.id,
+                &diagnostics,
+                "definition_became_unavailable",
+            );
             Ok(IntentPromotionDisposition::DefinitionBecameUnavailable)
         }
         IntentEnqueueResolution::Conflict {
