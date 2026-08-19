@@ -1135,6 +1135,52 @@ async fn retention_cleanup_preserves_stricter_caller_lock_timeout() {
 }
 
 #[tokio::test]
+async fn exact_retention_validates_its_domain_batch_limit() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_retention_batch_limit", 2).await;
+    record_postgres_server_version(&pool, "intent retention batch validation").await;
+    let job_ids = (0..=1_000).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+
+    let mut boundary_tx = pool.begin().await.expect("begin boundary retention");
+    assert_eq!(
+        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut boundary_tx, &job_ids[..1_000])
+            .await
+            .expect("one thousand retention IDs must be accepted"),
+        0
+    );
+    boundary_tx
+        .rollback()
+        .await
+        .expect("rollback boundary retention");
+
+    let mut oversized_tx = pool.begin().await.expect("begin oversized retention");
+    let error = delete_promoted_job_enqueue_intents_for_jobs_tx(&mut oversized_tx, &job_ids)
+        .await
+        .expect_err("one thousand and one retention IDs must be rejected");
+    let runledger_postgres::Error::QueryError(query_error) = error else {
+        panic!("expected retention batch validation query error");
+    };
+    assert_eq!(query_error.code(), "job.intent_retention_batch_too_large");
+    assert_eq!(
+        query_error.client_message(),
+        "Job enqueue intent retention batch must contain at most 1,000 job IDs."
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&mut *oversized_tx)
+            .await
+            .expect("local validation must leave caller transaction usable"),
+        1
+    );
+    oversized_tx
+        .rollback()
+        .await
+        .expect("rollback oversized retention");
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn retention_cleanup_serializes_concurrent_promotion() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_retention_promotion_race", 6).await;

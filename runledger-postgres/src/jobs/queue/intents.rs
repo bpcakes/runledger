@@ -41,6 +41,7 @@ const JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT: &str = "5s";
 const JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT_MS: i64 = 5_000;
 const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT: &str = "30s";
 const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS: i64 = 30_000;
+const JOB_ENQUEUE_INTENT_RETENTION_BATCH_LIMIT_MAX: usize = 1_000;
 // A failed row assigns two subtransaction IDs (the row savepoint and the
 // rollback's replacement subtransaction). Capping at 24 leaves 16 IDs of
 // headroom below PostgreSQL's 64 cached-subtransaction threshold. The enqueue
@@ -1061,7 +1062,7 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
     if job_ids.is_empty() {
         return Ok(0);
     }
-    validate_page_limit(i64::try_from(job_ids.len()).unwrap_or(i64::MAX))?;
+    validate_job_enqueue_intent_retention_batch_size(job_ids.len())?;
     lock_job_enqueue_intent_retention_phase_tx(tx, job_ids).await?;
 
     let result = sqlx::query!(
@@ -1079,6 +1080,22 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
         )
     })?;
     Ok(result.rows_affected())
+}
+
+fn validate_job_enqueue_intent_retention_batch_size(batch_size: usize) -> Result<()> {
+    if batch_size <= JOB_ENQUEUE_INTENT_RETENTION_BATCH_LIMIT_MAX {
+        return Ok(());
+    }
+
+    Err(Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Validation,
+        "job.intent_retention_batch_too_large",
+        "Job enqueue intent retention batch must contain at most 1,000 job IDs.",
+        format!(
+            "job enqueue intent retention batch must contain at most \
+             {JOB_ENQUEUE_INTENT_RETENTION_BATCH_LIMIT_MAX} job IDs, got {batch_size}"
+        ),
+    )))
 }
 
 async fn lock_job_enqueue_intent_retention_phase_tx(
