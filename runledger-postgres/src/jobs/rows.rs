@@ -94,7 +94,11 @@ pub(in crate::jobs) struct JobEnqueueIntentOutcomeRow {
     pub(in crate::jobs) enqueue_request_matches: bool,
 }
 
-pub(in crate::jobs) struct JobEnqueueIntentPromotionRow {
+/// Promotion input selected behind the current snapshot-version predicate.
+///
+/// Widening version support requires a separate decoder for each accepted
+/// version before the selection query admits those rows.
+pub(in crate::jobs) struct SupportedJobEnqueueIntentPromotionRow {
     pub(in crate::jobs) id: Uuid,
     pub(in crate::jobs) job_type: String,
     pub(in crate::jobs) organization_id: Option<Uuid>,
@@ -105,7 +109,6 @@ pub(in crate::jobs) struct JobEnqueueIntentPromotionRow {
     pub(in crate::jobs) next_run_at: Option<DateTime<Utc>>,
     pub(in crate::jobs) idempotency_key: String,
     pub(in crate::jobs) stage: String,
-    pub(in crate::jobs) enqueue_request_version: i16,
     pub(in crate::jobs) execution_resource_key: Option<String>,
 }
 

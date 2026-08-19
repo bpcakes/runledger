@@ -8,7 +8,7 @@ use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
 use super::super::errors::{validate_page_limit, validate_pagination};
 use super::super::row_decode::{parse_job_stage, parse_job_type_name};
 use super::super::rows::{
-    JobEnqueueIntentOutcomeRow, JobEnqueueIntentPromotionRow, JobEnqueueIntentRecordRow,
+    JobEnqueueIntentOutcomeRow, JobEnqueueIntentRecordRow, SupportedJobEnqueueIntentPromotionRow,
 };
 use super::super::transaction_isolation::{
     ReadCommittedTx, begin_owned_read_committed_tx, ensure_read_committed_tx,
@@ -91,14 +91,7 @@ struct PreparedIntentPromotion {
 }
 
 impl PreparedIntentPromotion {
-    fn try_from_row(row: JobEnqueueIntentPromotionRow) -> Result<Self> {
-        if row.enqueue_request_version != JOB_ENQUEUE_REQUEST_VERSION {
-            return Err(intent_snapshot_version_error(
-                row.id,
-                row.enqueue_request_version,
-            ));
-        }
-
+    fn try_from_row(row: SupportedJobEnqueueIntentPromotionRow) -> Result<Self> {
         let request = IntentPromotionRequest {
             job_type: parse_job_type_name(row.job_type)?,
             organization_id: row.organization_id,
@@ -134,7 +127,7 @@ enum IntentPromotionCandidate {
 }
 
 impl IntentPromotionCandidate {
-    fn from_row(row: JobEnqueueIntentPromotionRow) -> Self {
+    fn from_row(row: SupportedJobEnqueueIntentPromotionRow) -> Self {
         let id = row.id;
         match PreparedIntentPromotion::try_from_row(row) {
             Ok(prepared) => Self::Ready(prepared),
@@ -688,7 +681,7 @@ async fn promote_job_enqueue_intents_read_committed_tx(
     lock_job_enqueue_intent_promotion_shared_tx(tx).await?;
 
     let rows = sqlx::query_as!(
-        JobEnqueueIntentPromotionRow,
+        SupportedJobEnqueueIntentPromotionRow,
         "SELECT
             intent.id,
             intent.job_type,
@@ -700,7 +693,6 @@ async fn promote_job_enqueue_intents_read_committed_tx(
             intent.next_run_at,
             intent.idempotency_key,
             intent.stage,
-            intent.enqueue_request_version,
             intent.execution_resource_key
          FROM job_enqueue_intents intent
          INNER JOIN job_definitions definition
@@ -914,7 +906,6 @@ fn terminal_intent_failure(error: &Error) -> Option<(&'static str, &'static str)
     matches!(
         error.code(),
         "job.intent_invalid_persisted_row"
-            | "job.intent_snapshot_version_unsupported"
             | "job.invalid_job_type"
             | "job.invalid_execution_resource_key"
             | "job.invalid_stage"
@@ -1333,15 +1324,6 @@ fn intent_snapshot_mismatch_error(intent_id: Uuid) -> Error {
         "job.intent_snapshot_mismatch",
         "Job enqueue intent request snapshot is inconsistent.",
         format!("job enqueue intent {intent_id} does not match its canonical request snapshot"),
-    ))
-}
-
-fn intent_snapshot_version_error(intent_id: Uuid, version: i16) -> Error {
-    Error::QueryError(QueryError::from_classified(
-        QueryErrorCategory::Internal,
-        "job.intent_snapshot_version_unsupported",
-        "Job enqueue intent request snapshot version is unsupported.",
-        format!("job enqueue intent {intent_id} has unsupported snapshot version {version}"),
     ))
 }
 
