@@ -246,10 +246,16 @@ fn parse_env<T>(name: &str, default: T) -> T
 where
     T: FromStr,
 {
+    parse_env_value(name).unwrap_or(default)
+}
+
+fn parse_env_value<T>(name: &str) -> Option<T>
+where
+    T: FromStr,
+{
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<T>().ok())
-        .unwrap_or(default)
 }
 
 #[cfg(test)]
