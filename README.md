@@ -337,12 +337,14 @@ are met, and remediate conflicted rows explicitly rather than deleting them
 automatically. A promoted intent retains its job with `ON DELETE RESTRICT`.
 When purging selected `job_queue` rows, call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for those exact job IDs first
-and delete the jobs in the same transaction. The helper locks the selected jobs
-against concurrent promotion until the transaction finishes. A newly promoted
-intent may link to a much older existing job, so independent time windows cannot
-guarantee the required ordering. Deploy that exact-ID retention path to every
-queue-retention caller before enabling intent writers; workers may be upgraded
-earlier while no intents exist to promote.
+and delete the jobs in the same transaction. Select candidate IDs without row
+locks, then invoke the helper as the transaction's first lock-taking operation.
+It waits for active promotions, fences new promotions, and locks the selected
+jobs until the transaction finishes; keep that transaction short and commit
+promptly. A newly promoted intent may link to a much older existing job, so
+independent time windows cannot guarantee the required ordering. Deploy that
+exact-ID retention path to every queue-retention caller before enabling intent
+writers; workers may be upgraded earlier while no intents exist to promote.
 
 Intent payloads and idempotency keys have the same trust boundary as queue
 payloads and keys. Treat them as sensitive application data and do not log them

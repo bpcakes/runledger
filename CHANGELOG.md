@@ -20,8 +20,10 @@ All notable changes to this workspace are documented here.
   processes that do not use enqueue intents.
 - Promoted enqueue intents now retain linked `job_queue` rows with
   `ON DELETE RESTRICT`. Applications can remove links for exact retained job
-  IDs inside the same caller-owned transaction before deleting queue rows;
-  cutoff-based intent cleanup remains available for independent retention.
+  IDs inside the same caller-owned transaction before deleting queue rows.
+  Promotion and exact-ID retention use a transaction-scoped shared/exclusive
+  fence so their queue-row lock orders cannot deadlock; cutoff-based intent
+  cleanup remains available for independent retention.
 - Keep the shared PostgreSQL 18 test container process-scoped and add optional
   process-liveness cleanup for normal exit, aborts, and forced termination.
   Reaper startup is bounded and degrades without blocking database-backed tests
@@ -34,9 +36,11 @@ All notable changes to this workspace are documented here.
   rows intentionally fence deletion of their linked `job_queue` rows. Queue
   retention must delete exact promoted-intent links with
   `delete_promoted_job_enqueue_intents_for_jobs_tx` in the same transaction
-  before deleting those jobs. Deploy that retention path to every retention
-  caller before enabling intent writers. Deployments that do not record intents
-  have no linked rows and their existing retention behavior is unchanged.
+  before deleting those jobs. Select candidate IDs without row locks and call
+  the helper as the transaction's first lock-taking operation. Deploy that
+  retention path to every retention caller before enabling intent writers.
+  Deployments that do not record intents have no linked rows and their existing
+  retention behavior is unchanged.
 - Intent promotion is enabled by default for every worker-enabled supervisor so
   durable requests self-drain. Each supervisor independently polls even when no
   intents are pending. Capacity plans should include that idle query rate; use

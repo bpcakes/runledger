@@ -1048,16 +1048,21 @@ pub async fn delete_promoted_job_enqueue_intents_before(
 /// Deletes promoted intents linked to an exact set of jobs in a caller-owned
 /// retention transaction.
 ///
-/// Call this before deleting the same `job_queue` rows in that transaction.
-/// The helper locks the existing queue rows in UUID order before inspecting
-/// promoted intent links, preventing a pending intent from concurrently
-/// becoming linked between this cleanup and the caller's queue delete.
+/// After selecting candidate IDs without row locks, call this as the retention
+/// transaction's first lock-taking operation, before locking or deleting the
+/// same `job_queue` rows. The helper takes the exclusive side of the
+/// enqueue-intent promotion fence, then locks existing queue rows in UUID
+/// order. Concurrent promotions finish before those row locks are taken, and
+/// new promotions wait until the retention transaction ends. This prevents a
+/// pending intent from becoming linked between this cleanup and the caller's
+/// queue delete without introducing a promotion/retention lock-order cycle.
 /// Exact IDs are required because an intent may have converged on an older
 /// existing job, so matching retention cutoffs alone cannot reliably order the
 /// two deletes. Pending and conflicted intents are never deleted. At most 1,000
-/// job IDs may be supplied per call; an empty slice is a no-op. Because exact
-/// cleanup cannot skip requested IDs, it may wait for a concurrent transaction
-/// that holds a matching intent row lock.
+/// job IDs may be supplied per call; an empty slice is a no-op. Keep the
+/// transaction short and commit promptly to release the fence. Because exact
+/// cleanup cannot skip requested IDs, it may wait for a concurrent promotion
+/// or for a transaction that holds a matching intent row lock.
 pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
     tx: &mut DbTx<'_>,
     job_ids: &[Uuid],
