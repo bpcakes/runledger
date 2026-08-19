@@ -1283,7 +1283,7 @@ async fn definition_disabled_after_eligibility_leaves_intent_pending() {
         .await
         .expect("promotion task must not panic")
         .expect("promotion should classify disabled definition");
-    assert_eq!(report.definition_unavailable, 1);
+    assert_eq!(report.definition_became_unavailable, 1);
     assert_eq!(report.total_promoted, 0);
     assert_eq!(
         get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)

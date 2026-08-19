@@ -159,7 +159,7 @@ enum IntentPromotionDisposition {
     Inserted,
     Existing,
     Conflicted,
-    DefinitionUnavailable,
+    DefinitionBecameUnavailable,
     RetryDeferred,
 }
 
@@ -175,7 +175,9 @@ impl JobEnqueueIntentPromotionReport {
                 self.total_promoted += 1;
             }
             IntentPromotionDisposition::Conflicted => self.conflicted += 1,
-            IntentPromotionDisposition::DefinitionUnavailable => self.definition_unavailable += 1,
+            IntentPromotionDisposition::DefinitionBecameUnavailable => {
+                self.definition_became_unavailable += 1;
+            }
             IntentPromotionDisposition::RetryDeferred => self.retry_deferred += 1,
         }
     }
@@ -730,14 +732,14 @@ async fn promote_job_enqueue_intents_read_committed_tx(
 
     if report.total_promoted > 0
         || report.conflicted > 0
-        || report.definition_unavailable > 0
+        || report.definition_became_unavailable > 0
         || report.retry_deferred > 0
     {
         tracing::info!(
             inserted_jobs = report.inserted_jobs,
             existing_jobs = report.existing_jobs,
             conflicted = report.conflicted,
-            definition_unavailable = report.definition_unavailable,
+            definition_became_unavailable = report.definition_became_unavailable,
             retry_deferred = report.retry_deferred,
             "processed durable job enqueue intents"
         );
@@ -816,7 +818,7 @@ async fn promote_prepared_intent_tx(
             })
         }
         IntentEnqueueResolution::DefinitionUnavailable => {
-            Ok(IntentPromotionDisposition::DefinitionUnavailable)
+            Ok(IntentPromotionDisposition::DefinitionBecameUnavailable)
         }
         IntentEnqueueResolution::Conflict {
             code,

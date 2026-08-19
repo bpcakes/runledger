@@ -291,11 +291,21 @@ pub struct JobEnqueueIntentMetricsRecord {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct JobEnqueueIntentPromotionReport {
+    /// Intents that created a new queue row.
     pub inserted_jobs: u64,
+    /// Intents that converged on an existing idempotent queue row.
     pub existing_jobs: u64,
+    /// Intents that reached a terminal idempotency conflict.
     pub conflicted: u64,
-    pub definition_unavailable: u64,
+    /// Intents whose enabled definition became unavailable after selection.
+    ///
+    /// Missing, disabled, unsupported-version, and unregistered intent rows are
+    /// not eligible for a promotion pass and therefore are not counted here.
+    /// Monitor pending count and age for those populations.
+    pub definition_became_unavailable: u64,
+    /// Intents deferred after a retryable persistence failure.
     pub retry_deferred: u64,
+    /// Sum of newly inserted and existing jobs linked to promoted intents.
     pub total_promoted: u64,
     batch_was_full: bool,
 }
