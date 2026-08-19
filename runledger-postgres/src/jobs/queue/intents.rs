@@ -1,8 +1,5 @@
-use std::collections::HashSet;
-
 use chrono::{DateTime, Utc};
 use runledger_core::jobs::{JobStage, JobType, JobTypeName};
-use serde::Serialize;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -143,12 +140,6 @@ impl IntentPromotionCandidate {
             Self::Invalid { id, .. } => *id,
         }
     }
-}
-
-#[derive(Serialize)]
-struct IntentSnapshotComparison<'a> {
-    id: Uuid,
-    current_enqueue_request: &'a Value,
 }
 
 struct JobEnqueueIntentMetricsRow {
@@ -689,7 +680,6 @@ async fn promote_job_enqueue_intents_read_committed_tx(
         .into_iter()
         .map(IntentPromotionCandidate::from_row)
         .collect::<Vec<_>>();
-    let mismatched_snapshots = compare_intent_snapshots_tx(tx, &candidates).await?;
 
     let mut report = JobEnqueueIntentPromotionReport::default();
     report.mark_batch_size(candidates.len(), limit);
@@ -705,8 +695,7 @@ async fn promote_job_enqueue_intents_read_committed_tx(
                 Error::from_query_sqlx_with_context("create intent promotion savepoint", error)
             })?;
 
-        let promotion_result =
-            promote_intent_candidate_tx(tx, candidate, &mismatched_snapshots).await;
+        let promotion_result = promote_intent_candidate_tx(tx, candidate).await;
 
         let disposition = match promotion_result {
             Ok(disposition) => disposition,
@@ -756,14 +745,8 @@ async fn promote_job_enqueue_intents_read_committed_tx(
 async fn promote_intent_candidate_tx(
     tx: &mut ReadCommittedTx<'_, '_>,
     candidate: IntentPromotionCandidate,
-    mismatched_snapshots: &HashSet<Uuid>,
 ) -> Result<IntentPromotionDisposition> {
     match candidate {
-        IntentPromotionCandidate::Ready(prepared)
-            if mismatched_snapshots.contains(&prepared.id) =>
-        {
-            Err(intent_snapshot_mismatch_error(prepared.id))
-        }
         IntentPromotionCandidate::Ready(prepared) => {
             promote_prepared_intent_tx(tx, &prepared).await
         }
@@ -771,59 +754,38 @@ async fn promote_intent_candidate_tx(
     }
 }
 
-async fn compare_intent_snapshots_tx(
+async fn ensure_intent_snapshot_matches_tx(
     tx: &mut ReadCommittedTx<'_, '_>,
-    candidates: &[IntentPromotionCandidate],
-) -> Result<HashSet<Uuid>> {
-    let comparisons = candidates
-        .iter()
-        .filter_map(|candidate| match candidate {
-            IntentPromotionCandidate::Ready(prepared) => Some(IntentSnapshotComparison {
-                id: prepared.id,
-                current_enqueue_request: &prepared.current_enqueue_request,
-            }),
-            IntentPromotionCandidate::Invalid { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    if comparisons.is_empty() {
-        return Ok(HashSet::new());
-    }
-
-    let comparisons = serde_json::to_value(comparisons).map_err(|error| {
-        Error::QueryError(QueryError::from_classified(
-            QueryErrorCategory::Internal,
-            "job.intent_snapshot_comparison_failed",
-            "Job enqueue intent request snapshots could not be compared.",
-            format!("failed to serialize job enqueue intent snapshot comparisons: {error}"),
-        ))
-    })?;
-
+    prepared: &PreparedIntentPromotion,
+) -> Result<()> {
     // Compare against the already-locked source rows so the persisted snapshots
     // never leave PostgreSQL. Rust `Value` equality does not model PostgreSQL
     // numeric normalization.
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT comparison.id
-         FROM jsonb_to_recordset($1::jsonb) AS comparison(
-            id uuid,
-            current_enqueue_request jsonb
-         )
-         INNER JOIN job_enqueue_intents intent
-            ON intent.id = comparison.id
-         WHERE comparison.current_enqueue_request <> intent.enqueue_request",
+    let matches = sqlx::query_scalar::<_, bool>(
+        "SELECT enqueue_request = $2::jsonb
+         FROM job_enqueue_intents
+         WHERE id = $1",
     )
-    .bind(comparisons)
-    .fetch_all(&mut **tx.as_tx())
+    .bind(prepared.id)
+    .bind(&prepared.current_enqueue_request)
+    .fetch_one(&mut **tx.as_tx())
     .await
     .map_err(|error| {
-        Error::from_query_sqlx_with_context("compare job enqueue intent snapshots", error)
-    })
-    .map(|ids| ids.into_iter().collect())
+        Error::from_query_sqlx_with_context("compare job enqueue intent snapshot", error)
+    })?;
+
+    if matches {
+        Ok(())
+    } else {
+        Err(intent_snapshot_mismatch_error(prepared.id))
+    }
 }
 
 async fn promote_prepared_intent_tx(
     tx: &mut ReadCommittedTx<'_, '_>,
     prepared: &PreparedIntentPromotion,
 ) -> Result<IntentPromotionDisposition> {
+    ensure_intent_snapshot_matches_tx(tx, prepared).await?;
     let enqueue = prepared.request.as_job_enqueue();
 
     match enqueue_job_from_intent_tx(
