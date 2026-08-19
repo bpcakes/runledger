@@ -30,6 +30,9 @@ All notable changes to this workspace are documented here.
   process-liveness cleanup for normal exit, aborts, and forced termination.
   Reaper startup is bounded and degrades without blocking database-backed tests
   when the Docker CLI is unavailable or unresponsive.
+- Sanitize deferred reaper query-error logs. The structured fields
+  `error_internal_message`, `error_source`, and `error_has_source` are replaced
+  by `error_constraint`; update log-based alerts and dashboards when upgrading.
 
 ### Upgrade notes
 

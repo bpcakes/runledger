@@ -66,10 +66,12 @@ remains available through intent reads/lists. Treat intent payloads and keys as
 sensitive queue data and do not log them. Queue retention must call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for its exact selected job IDs
 before deleting those jobs in the same transaction. The helper preserves
-stricter caller timeouts while capping each lock wait at five seconds and each
-lock-acquisition statement at thirty seconds. Timeout and deadlock errors abort
-the transaction, which must be rolled back and retried in full. Deploy that
-retention path to every queue-retention caller before enabling intent writers.
+stricter caller timeouts. It allows up to thirty seconds to acquire the
+exclusive promotion fence, then caps each job- or intent-row lock wait at five
+seconds; every statement is capped at thirty-five seconds. Timeout and deadlock
+errors abort the transaction, which must be rolled back and retried in full.
+Deploy that retention path to every queue-retention caller before enabling
+intent writers.
 
 ## Workflow DAG Rule
 
