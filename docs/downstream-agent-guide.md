@@ -91,7 +91,10 @@ same intent even after promotion. A changed canonical request returns
 `job.intent_idempotency_conflict`. Concurrent recorders for the same
 `(job_type, organization_id, idempotency_key)` may wait for the transaction
 that first claimed the unique key, so applications must include that wait in
-their transaction lock ordering and timeout budget. Once a compatible worker
+their transaction lock ordering and timeout budget. Record the intent before
+any operation in the same transaction that can lock a `job_queue` row; a
+job-first recorder can create an inverse lock cycle with retention's canonical
+intent-before-job order. Once a compatible worker
 sees an enabled definition, promotion applies current definition defaults
 through ordinary enqueue semantics and links the intent to the resulting job.
 Missing, disabled, and unregistered types remain pending. A dedicated promoter
@@ -145,12 +148,15 @@ Queue retention must remove promoted-intent links first. In the same
 transaction that deletes selected queue rows, call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` with those exact job IDs,
 then delete the jobs. Select candidate IDs without row locks and make the helper
-the transaction's first lock-taking operation. It waits for active promotions,
-fences new promotions, deletes promoted-intent links, then locks existing
-selected jobs until the transaction ends. This intent-before-job order composes
-with duplicate recorders without an inverse lock cycle. Keep the transaction
-short and commit promptly. Each promotion transaction is capped at twenty-five
-seconds. The helper preserves stricter caller timeouts
+the transaction's first lock-taking operation. The transaction must use
+`READ COMMITTED`; stronger isolation returns
+`job.intent_retention_unsupported_isolation` before fence acquisition. The
+helper waits for active promotions, fences new promotions, deletes
+promoted-intent links, then locks existing selected jobs until the transaction
+ends. This intent-before-job order composes with duplicate recorders without an
+inverse lock cycle. Keep the transaction short and commit promptly. Each
+promotion transaction is capped at twenty-five seconds. The helper preserves
+stricter caller timeouts
 while waiting up to thirty seconds for the exclusive fence, then caps each job-
 or intent-row lock wait at five seconds and each statement at thirty-five
 seconds. A timeout or deadlock aborts the transaction; roll it back and retry the

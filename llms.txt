@@ -52,6 +52,9 @@ For transactional handoff before a job definition exists, record a strictly
 idempotent `JobEnqueueIntent` in the application's `READ COMMITTED` transaction.
 Concurrent recorders for the same key may wait for the transaction that first
 claimed it, so include that wait in caller lock ordering and timeout budgets.
+Record the intent before any operation in that transaction that can lock a
+`job_queue` row. A job-first recorder can create an inverse lock cycle with
+retention's canonical intent-before-job order.
 A record outcome reports point-in-time lifecycle state, not a promotion
 guarantee; an existing intent can be promoted or become conflicted concurrently,
 including before a caller-owned transaction ends.
@@ -70,7 +73,10 @@ sensitive queue data and do not log them. Queue retention must call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for its exact selected job IDs
 before deleting those jobs in the same transaction. The helper fences
 promotion, deletes promoted-intent links, then locks the selected jobs in the
-canonical intent-before-job order. It preserves stricter caller timeouts and
+canonical intent-before-job order. The retention transaction must use
+`READ COMMITTED`; stronger isolation returns
+`job.intent_retention_unsupported_isolation` before fence acquisition. The
+helper preserves stricter caller timeouts and
 allows up to thirty seconds to acquire the
 exclusive promotion fence, then caps each job- or intent-row lock wait at five
 seconds; every statement is capped at thirty-five seconds. Timeout and deadlock

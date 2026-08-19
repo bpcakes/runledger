@@ -213,6 +213,12 @@ impl JobEnqueueIntentPromotionReport {
 /// caller must include that wait in its transaction lock ordering and timeout
 /// budget.
 ///
+/// Call this before any operation in the same transaction that can lock a
+/// `job_queue` row. In particular, do not enqueue, recover, or explicitly lock
+/// a job first and then record an intent. Queue retention locks intent rows
+/// before job rows; recording first preserves that canonical order and avoids
+/// an inverse lock cycle with retention.
+///
 /// The returned lifecycle status is a point-in-time observation. A shared key
 /// lock protects an existing intent from deletion for the rest of the caller
 /// transaction without blocking promotion's non-key status update, so the

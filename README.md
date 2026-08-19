@@ -268,7 +268,10 @@ intent, while changing the payload or another enqueue field returns
 Concurrent transactions recording the same `(job_type, organization_id,
 idempotency_key)` may wait for the transaction that first claimed the unique
 key to commit or roll back. Include that wait in the caller-owned transaction's
-lock ordering and timeout budget.
+lock ordering and timeout budget. Record the intent before any operation in the
+same transaction that can lock a `job_queue` row; do not enqueue, recover, or
+explicitly lock a job first. Queue retention uses the canonical intent-before-
+job order, and a job-first recorder can create an inverse lock cycle with it.
 
 ```rust
 let payload = serde_json::json!({"invoice_id": "invoice_123"});
@@ -353,6 +356,9 @@ When purging selected `job_queue` rows, call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for those exact job IDs first
 and delete the jobs in the same transaction. Select candidate IDs without row
 locks, then invoke the helper as the transaction's first lock-taking operation.
+The transaction must use `READ COMMITTED`; stronger isolation levels return
+`job.intent_retention_unsupported_isolation` before the helper acquires the
+promotion fence.
 It waits for active promotions, fences new promotions, deletes promoted-intent
 links, then locks the selected jobs until the transaction finishes. This
 canonical intent-before-job order composes with duplicate recorders without an

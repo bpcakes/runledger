@@ -1203,7 +1203,7 @@ async fn retention_delete_wait_is_bounded_while_holding_fence() {
 }
 
 #[tokio::test]
-async fn duplicate_recorder_and_retention_share_intent_then_job_order() {
+async fn intent_first_recorder_and_retention_share_one_lock_order() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_recorder_retention_deadlock", 6).await;
     record_postgres_server_version(&pool, "intent recorder/retention deadlock characterization")
@@ -1240,7 +1240,7 @@ async fn duplicate_recorder_and_retention_share_intent_then_job_order() {
         let mut retention_tx = retention_pool
             .begin()
             .await
-            .expect("begin inverse-order retention");
+            .expect("begin canonical-order retention");
         match delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[promoted_job_id])
             .await
         {
@@ -1249,7 +1249,7 @@ async fn duplicate_recorder_and_retention_share_intent_then_job_order() {
                 retention_tx
                     .commit()
                     .await
-                    .expect("commit inverse-order retention");
+                    .expect("commit canonical-order retention");
                 Ok(())
             }
             Err(error) => {
@@ -1273,7 +1273,7 @@ async fn duplicate_recorder_and_retention_share_intent_then_job_order() {
             )
             .fetch_one(&pool)
             .await
-            .expect("inspect inverse-order retention wait");
+            .expect("inspect canonical-order retention wait");
             if waiting {
                 break;
             }

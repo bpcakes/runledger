@@ -146,6 +146,9 @@
 //! idempotency_key)` may wait for the transaction that first claimed that unique
 //! key. Include that wait in the caller-owned transaction's lock ordering and
 //! timeout budget.
+//! Call [`jobs::record_job_enqueue_intent_tx`] before any operation in the same
+//! transaction that can lock a `job_queue` row. A job-first recorder can create
+//! an inverse lock cycle with retention's canonical intent-before-job order.
 //!
 //! Intent payloads and idempotency keys cross the same trusted persistence
 //! boundary as ordinary queue inputs. Do not place secrets in them or emit them
@@ -160,7 +163,9 @@
 //! must call [`jobs::delete_promoted_job_enqueue_intents_for_jobs_tx`] with its
 //! exact selected job IDs before deleting those jobs. Select candidate IDs
 //! without row locks, then call the helper as the transaction's first
-//! lock-taking operation. It waits for active promotions, fences new
+//! lock-taking operation. The transaction must use `READ COMMITTED`; stronger
+//! isolation levels return `job.intent_retention_unsupported_isolation` before
+//! fence acquisition. The helper waits for active promotions, fences new
 //! promotions, deletes promoted-intent links, then locks those jobs for the rest
 //! of the transaction. This intent-before-job order composes with duplicate
 //! recorders without an inverse lock cycle. Keep the transaction short and
