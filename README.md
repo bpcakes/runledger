@@ -311,8 +311,8 @@ registry covers every job type that can receive intents.
 Promoted work waits in the ordinary queue, where priority, scheduling, queue
 metrics, and worker concurrency provide the normal backpressure.
 Database-level promotion failures roll back only the affected queue/event
-writes, leave that intent pending with bounded exponential backoff, and allow
-later intents in the batch to continue. Lookup/list records expose
+writes, leave that intent pending with bounded jittered exponential backoff,
+and allow later intents in the batch to continue. Lookup/list records expose
 `promotion_attempts`, `next_promotion_at`, `last_attempted_at`, and the sanitized
 last error. One public promotion pass is capped at 24 rows to keep worst-case
 failed-savepoint headroom

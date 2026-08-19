@@ -95,7 +95,8 @@ deterministic
 collision with a different ordinary enqueue becomes `CONFLICTED`; Runledger
 does not guess whether replacement work is safe.
 Database-level promotion failures roll back only the affected job/event writes,
-leave the intent pending with exponential backoff capped at five minutes, and
+leave the intent pending with jittered exponential backoff capped at five
+minutes, and
 do not starve later eligible intents. Inspect `promotion_attempts`,
 `next_promotion_at`, `last_attempted_at`, and sanitized error fields through the
 intent read APIs. Canonical-snapshot drift is also deferred so an operator can

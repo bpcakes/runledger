@@ -1556,6 +1556,66 @@ async fn snapshot_drift_defers_without_starving_and_promotes_after_repair() {
 }
 
 #[tokio::test]
+async fn deferred_intent_retries_are_jittered_within_the_backoff_cap() {
+    let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_retry_jitter", 4).await;
+    record_postgres_server_version(&pool, "intent retry jitter regression").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "retry-jitter"});
+    let mut intent_ids = Vec::new();
+    for index in 0..8 {
+        let idempotency_key = format!("retry-jitter-{index}");
+        let recorded = record_job_enqueue_intent(
+            &pool,
+            &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, &idempotency_key),
+        )
+        .await
+        .expect("record intent for retry jitter");
+        intent_ids.push(recorded.intent_id);
+    }
+    sqlx::query(
+        "UPDATE job_enqueue_intents
+         SET enqueue_request = '{}'::jsonb
+         WHERE id = ANY($1::uuid[])",
+    )
+    .bind(&intent_ids)
+    .execute(&pool)
+    .await
+    .expect("create retryable snapshot drift for jitter regression");
+
+    let report = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 10)
+        .await
+        .expect("defer jittered retry batch");
+    assert_eq!(report.retry_deferred, intent_ids.len() as u64);
+
+    let mut retry_delays_us = sqlx::query_scalar::<_, i64>(
+        "SELECT (
+            extract(epoch FROM (next_promotion_at - last_attempted_at)) * 1000000
+         )::bigint
+         FROM job_enqueue_intents
+         WHERE id = ANY($1::uuid[])
+         ORDER BY id",
+    )
+    .bind(&intent_ids)
+    .fetch_all(&pool)
+    .await
+    .expect("load jittered retry delays");
+    assert!(
+        retry_delays_us
+            .iter()
+            .all(|delay_us| (1_000_000..=1_250_000).contains(delay_us)),
+        "first retry delays must remain between one and 1.25 seconds: {retry_delays_us:?}"
+    );
+    retry_delays_us.sort_unstable();
+    retry_delays_us.dedup();
+    assert!(
+        retry_delays_us.len() > 1,
+        "retry jitter must spread rows selected in one transaction"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn worker_version_skips_newer_snapshot_versions_without_mutating_them() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_newer_version", 4).await;
     register_test_job_definition(&pool, JOB_TYPE).await;

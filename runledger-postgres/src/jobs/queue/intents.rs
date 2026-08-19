@@ -1007,10 +1007,17 @@ async fn mark_intent_retry_deferred_tx(
         "UPDATE job_enqueue_intents
          SET promotion_attempts = promotion_attempts + 1,
              last_attempted_at = now(),
-             next_promotion_at = now() + LEAST(
-                 interval '5 minutes',
-                 interval '1 second' * power(2.0, LEAST(promotion_attempts, 9)::double precision)
-             ),
+             next_promotion_at = now()
+                 + LEAST(
+                     interval '4 minutes',
+                     interval '1 second'
+                         * power(2.0, LEAST(promotion_attempts, 9)::double precision)
+                 )
+                 + random() * LEAST(
+                     interval '1 minute',
+                     interval '0.25 seconds'
+                         * power(2.0, LEAST(promotion_attempts, 9)::double precision)
+                 ),
              last_error_code = $2,
              last_error_message = $3
          WHERE id = $1

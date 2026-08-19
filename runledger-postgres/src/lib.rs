@@ -146,7 +146,7 @@
 //! retrying count, maximum promotion attempts, and conflicts; Runledger never
 //! automatically deletes conflicted intent evidence.
 //! Database-level promotion failures leave the intent pending with bounded
-//! exponential backoff, and read APIs expose the attempt/error metadata. They
+//! jittered exponential backoff, and read APIs expose the attempt/error metadata. They
 //! retry indefinitely so a prolonged outage cannot silently discard work;
 //! operators must alert on pending age and maximum attempts.
 //! Promoted intents retain their linked jobs. A queue-retention transaction

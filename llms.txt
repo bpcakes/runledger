@@ -58,9 +58,9 @@ passes wait for the configured cadence. Use `IntentPromoterConfig` for
 independent controls. Every worker-enabled supervisor promotes by default and
 polls independently when idle, so capacity plans must include that query rate.
 Disable only redundant or unused promoters, and retain coverage for every type
-that can receive intents. Database
-failures defer only the affected intent with bounded
-backoff and retry indefinitely; inspect promotion attempt/error metadata and
+that can receive intents. Database failures defer only the affected intent with
+bounded jittered backoff and retry indefinitely; inspect promotion attempt/error
+metadata and
 monitor pending age and conflicts. Treat intent payloads and keys as sensitive
 queue data and do not log them. Queue retention must call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for its exact selected job IDs

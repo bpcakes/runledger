@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_enqueue_intents\n         SET promotion_attempts = promotion_attempts + 1,\n             last_attempted_at = now(),\n             next_promotion_at = now()\n                 + LEAST(\n                     interval '4 minutes',\n                     interval '1 second'\n                         * power(2.0, LEAST(promotion_attempts, 9)::double precision)\n                 )\n                 + random() * LEAST(\n                     interval '1 minute',\n                     interval '0.25 seconds'\n                         * power(2.0, LEAST(promotion_attempts, 9)::double precision)\n                 ),\n             last_error_code = $2,\n             last_error_message = $3\n         WHERE id = $1\n           AND status = 'PENDING'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5f3e582b8dac08008e5c94ddb58460d57911320df8a94e6c2386c33abd593bb1"
+}
