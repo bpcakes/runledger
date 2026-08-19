@@ -28,6 +28,21 @@ fn query_error_code(error: &runledger_postgres::Error) -> Option<&str> {
     }
 }
 
+async fn record_postgres_server_version(pool: &sqlx::PgPool, diagnostic: &str) {
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "{diagnostic} PostgreSQL server_version={server_version}, server_version_num={server_version_num}"
+    );
+}
+
 #[tokio::test]
 async fn records_without_definition_and_enforces_strict_transactional_idempotency() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_record", 4).await;
@@ -725,6 +740,135 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
     assert_eq!(
         conflicted.last_error_code.as_deref(),
         Some("job.idempotency_conflict")
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn retention_prelocking_existing_job_defers_without_deadlocking_promotion() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_retention_promotion_race", 6).await;
+    record_postgres_server_version(&pool, "intent retention/promotion lock regression").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+
+    let payload = json!({"event": "retention-promotion-race"});
+    let recorded = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "retention-race-key"),
+    )
+    .await
+    .expect("record intent before retention race");
+    let old_job_id = enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new(JOB_TYPE),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: Some("retention-race-key"),
+            stage: None,
+        },
+    )
+    .await
+    .expect("enqueue existing job before retention race");
+
+    let mut retention_tx = pool.begin().await.expect("begin retention transaction");
+    sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
+        .bind(old_job_id)
+        .fetch_one(&mut *retention_tx)
+        .await
+        .expect("pre-lock retained job");
+
+    let promotion_pool = pool.clone();
+    let promotion = tokio::spawn(async move {
+        promote_job_enqueue_intents_for_types(&promotion_pool, &[JobType::new(JOB_TYPE)], 1).await
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%FROM job_queue%'
+                      AND query LIKE '%FOR NO KEY UPDATE%'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("inspect promotion job-lock wait");
+            if waiting {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("promotion should wait on the pre-locked existing job");
+
+    assert_eq!(
+        timeout(
+            Duration::from_secs(1),
+            delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[old_job_id],)
+        )
+        .await
+        .expect("pending intent cleanup must not wait on the promoter-held row")
+        .expect("clean promoted intents for retained job"),
+        0,
+        "the promoter-held intent is still pending and cannot reference the job"
+    );
+    assert_eq!(
+        sqlx::query("DELETE FROM job_queue WHERE id = $1")
+            .bind(old_job_id)
+            .execute(&mut *retention_tx)
+            .await
+            .expect("delete pre-locked existing job")
+            .rows_affected(),
+        1
+    );
+    retention_tx
+        .commit()
+        .await
+        .expect("commit retention transaction");
+
+    let first_report = timeout(Duration::from_secs(2), promotion)
+        .await
+        .expect("promotion must not deadlock with retention")
+        .expect("promotion task must not panic")
+        .expect("promotion race should remain recoverable");
+    assert_eq!(first_report.retry_deferred, 1);
+    assert_eq!(first_report.total_promoted, 0);
+
+    let deferred = get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+        .await
+        .expect("load deferred retention-race intent")
+        .expect("deferred retention-race intent exists");
+    assert_eq!(deferred.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(deferred.promotion_attempts, 1);
+    sqlx::query("UPDATE job_enqueue_intents SET next_promotion_at = now() WHERE id = $1")
+        .bind(recorded.intent_id)
+        .execute(&pool)
+        .await
+        .expect("make retention-race intent immediately retryable");
+
+    let retry_report = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1)
+        .await
+        .expect("retry intent after retained job deletion");
+    assert_eq!(retry_report.inserted_jobs, 1);
+    let promoted = get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+        .await
+        .expect("load recovered retention-race intent")
+        .expect("recovered retention-race intent exists");
+    assert_eq!(promoted.status, JobEnqueueIntentStatus::Promoted);
+    assert_ne!(
+        promoted.promoted_job_id.expect("replacement job id"),
+        old_job_id
     );
 
     teardown_ephemeral_pool(pool, database).await;
