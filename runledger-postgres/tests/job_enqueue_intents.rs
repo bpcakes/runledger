@@ -1160,6 +1160,55 @@ async fn retention_cleanup_serializes_concurrent_promotion() {
 }
 
 #[tokio::test]
+async fn promotion_retention_fence_wait_is_bounded() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_promotion_fence_timeout", 4).await;
+    record_postgres_server_version(&pool, "intent promotion bounded fence wait").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "promotion-fence-timeout"});
+    let recorded = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "promotion-fence-timeout"),
+    )
+    .await
+    .expect("record intent before holding retention fence");
+
+    let mut retention_tx = pool.begin().await.expect("begin retention fence holder");
+    delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[Uuid::now_v7()])
+        .await
+        .expect("acquire exclusive retention fence");
+
+    let started = Instant::now();
+    let error = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1)
+        .await
+        .expect_err("promotion must stop waiting at the retention fence timeout");
+    assert!(
+        started.elapsed() >= Duration::from_secs(4) && started.elapsed() < Duration::from_secs(7),
+        "promotion fence wait was not bounded near five seconds: {:?}",
+        started.elapsed()
+    );
+    let runledger_postgres::Error::QueryError(query_error) = error else {
+        panic!("expected promotion fence timeout query error");
+    };
+    assert_eq!(query_error.sqlstate(), Some("55P03"));
+
+    retention_tx
+        .rollback()
+        .await
+        .expect("release exclusive retention fence");
+    assert_eq!(
+        get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+            .await
+            .expect("load intent after promotion fence timeout")
+            .expect("intent remains after promotion fence timeout")
+            .status,
+        JobEnqueueIntentStatus::Pending
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn inverse_existing_job_order_is_serialized_with_retention() {
     const PROMOTION_BLOCKER_LOCK: i64 = 0x7275_6e6c_7465_7374;
 
