@@ -6,12 +6,12 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::jobs::{
     JOB_LIST_PAGE_LIMIT_MAX, JobDefinitionListFilter, JobDefinitionUpsert,
-    JobEnqueueIntentMetricsFilter, JobListFilter, JobRuntimeConfigListFilter,
-    WorkflowRunListFilter, count_workflow_step_dependencies, count_workflow_steps,
-    enqueue_workflow_run, get_job_enqueue_intent_metrics, list_job_definitions, list_job_events,
-    list_job_logs, list_job_runtime_configs, list_jobs, list_workflow_runs,
-    list_workflow_step_dependencies_page, list_workflow_steps, list_workflow_steps_page,
-    upsert_job_definition_tx,
+    JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobListFilter,
+    JobRuntimeConfigListFilter, WorkflowRunListFilter, count_workflow_step_dependencies,
+    count_workflow_steps, enqueue_workflow_run, get_job_enqueue_intent_metrics,
+    list_job_definitions, list_job_enqueue_intents, list_job_events, list_job_logs,
+    list_job_runtime_configs, list_jobs, list_workflow_runs, list_workflow_step_dependencies_page,
+    list_workflow_steps, list_workflow_steps_page, upsert_job_definition_tx,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -230,6 +230,19 @@ async fn invalid_pagination_rejects_before_database_access() {
         get_job_enqueue_intent_metrics(&pool, &JobEnqueueIntentMetricsFilter::new(1, -1)).await,
     );
     assert_invalid_pagination(
+        list_job_enqueue_intents(&pool, &JobEnqueueIntentListFilter::new(0, 0)).await,
+    );
+    assert_invalid_pagination(
+        list_job_enqueue_intents(
+            &pool,
+            &JobEnqueueIntentListFilter::new(JOB_LIST_PAGE_LIMIT_MAX + 1, 0),
+        )
+        .await,
+    );
+    assert_invalid_pagination(
+        list_job_enqueue_intents(&pool, &JobEnqueueIntentListFilter::new(1, -1)).await,
+    );
+    assert_invalid_pagination(
         list_job_runtime_configs(
             &pool,
             &JobRuntimeConfigListFilter {
@@ -336,6 +349,11 @@ async fn valid_pagination_limits_still_execute_list_queries() {
     .await
     .expect("list runtime configs with valid pagination");
     assert!(runtime_configs.is_empty());
+
+    let enqueue_intents = list_job_enqueue_intents(&pool, &JobEnqueueIntentListFilter::new(1, 0))
+        .await
+        .expect("list enqueue intents with valid pagination");
+    assert!(enqueue_intents.is_empty());
 
     let workflow_steps = list_workflow_steps_page(&pool, None, job_id, 1, 0)
         .await
