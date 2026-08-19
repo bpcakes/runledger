@@ -1073,6 +1073,229 @@ async fn retention_cleanup_locks_existing_job_and_defers_concurrent_promotion() 
 }
 
 #[tokio::test]
+async fn inverse_existing_job_order_exposes_promotion_retention_deadlock() {
+    const PROMOTION_BLOCKER_LOCK: i64 = 0x7275_6e6c_7465_7374;
+
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_inverse_retention_order", 8).await;
+    record_postgres_server_version(&pool, "inverse intent retention lock characterization").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "inverse-retention-order"});
+
+    let job_a = enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new(JOB_TYPE),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: Some("inverse-order-a"),
+            stage: None,
+        },
+    )
+    .await
+    .expect("enqueue first inverse-order job");
+    let job_b = enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new(JOB_TYPE),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: Some("inverse-order-b"),
+            stage: None,
+        },
+    )
+    .await
+    .expect("enqueue second inverse-order job");
+    let (low_job_id, low_key, high_job_id, high_key) = if job_a < job_b {
+        (job_a, "inverse-order-a", job_b, "inverse-order-b")
+    } else {
+        (job_b, "inverse-order-b", job_a, "inverse-order-a")
+    };
+
+    let high_intent = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, high_key),
+    )
+    .await
+    .expect("record high-job intent first");
+    let low_intent = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, low_key),
+    )
+    .await
+    .expect("record low-job intent second");
+    sqlx::query(
+        "UPDATE job_enqueue_intents
+         SET created_at = CASE
+             WHEN id = $1 THEN now() - interval '2 seconds'
+             ELSE now() - interval '1 second'
+         END
+         WHERE id = ANY($2::uuid[])",
+    )
+    .bind(high_intent.intent_id)
+    .bind(&[high_intent.intent_id, low_intent.intent_id])
+    .execute(&pool)
+    .await
+    .expect("force inverse intent promotion order");
+
+    sqlx::query(
+        "CREATE FUNCTION block_inverse_intent_promotion() RETURNS trigger
+         LANGUAGE plpgsql AS $function$
+         BEGIN
+             IF NEW.status = 'PROMOTED' THEN
+                 PERFORM pg_advisory_xact_lock(8247619704687260532);
+             END IF;
+             RETURN NEW;
+         END
+         $function$",
+    )
+    .execute(&pool)
+    .await
+    .expect("create inverse-order promotion blocker function");
+    sqlx::query(
+        "CREATE TRIGGER trg_block_inverse_intent_promotion
+         BEFORE UPDATE ON job_enqueue_intents
+         FOR EACH ROW
+         EXECUTE FUNCTION block_inverse_intent_promotion()",
+    )
+    .execute(&pool)
+    .await
+    .expect("create inverse-order promotion blocker trigger");
+
+    let mut blocker_tx = pool.begin().await.expect("begin promotion blocker");
+    let blocker_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker_tx)
+        .await
+        .expect("load promotion blocker pid");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(PROMOTION_BLOCKER_LOCK)
+        .execute(&mut *blocker_tx)
+        .await
+        .expect("lock promotion trigger blocker");
+
+    let promotion_pool = pool.clone();
+    let promotion = tokio::spawn(async move {
+        promote_job_enqueue_intents_for_types(&promotion_pool, &[JobType::new(JOB_TYPE)], 2).await
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let blocked = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity activity
+                    WHERE $1 = ANY(pg_blocking_pids(activity.pid))
+                      AND activity.query LIKE '%UPDATE job_enqueue_intents%'
+                 )",
+            )
+            .bind(blocker_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("inspect promotion blocker graph");
+            if blocked {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("promotion must hold the high job while blocked by the trigger");
+
+    let retention_pool = pool.clone();
+    let (retention_pid_tx, retention_pid_rx) = tokio::sync::oneshot::channel();
+    let retention = tokio::spawn(async move {
+        let mut retention_tx = retention_pool
+            .begin()
+            .await
+            .expect("begin inverse-order retention");
+        let retention_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&mut *retention_tx)
+            .await
+            .expect("load inverse-order retention pid");
+        retention_pid_tx
+            .send(retention_pid)
+            .expect("publish inverse-order retention pid");
+
+        delete_promoted_job_enqueue_intents_for_jobs_tx(
+            &mut retention_tx,
+            &[low_job_id, high_job_id],
+        )
+        .await?;
+        sqlx::query("DELETE FROM job_queue WHERE id = ANY($1::uuid[])")
+            .bind(&[low_job_id, high_job_id])
+            .execute(&mut *retention_tx)
+            .await
+            .expect("delete inverse-order retained jobs");
+        retention_tx
+            .commit()
+            .await
+            .expect("commit inverse-order retention");
+        Ok::<(), runledger_postgres::Error>(())
+    });
+    let retention_pid = timeout(Duration::from_secs(2), retention_pid_rx)
+        .await
+        .expect("retention must publish its backend pid")
+        .expect("retention pid sender must remain alive");
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let blocked =
+                sqlx::query_scalar::<_, bool>("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                    .bind(retention_pid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("inspect retention blocker graph");
+            if blocked {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retention must hold the low job while waiting for the high job");
+
+    blocker_tx
+        .rollback()
+        .await
+        .expect("release promotion trigger blocker");
+    let (promotion_result, retention_result) = tokio::join!(
+        timeout(Duration::from_secs(5), promotion),
+        timeout(Duration::from_secs(5), retention),
+    );
+    let promotion_result = promotion_result
+        .expect("promotion must resolve the forced deadlock")
+        .expect("promotion task must not panic");
+    let retention_result = retention_result
+        .expect("retention must resolve the forced deadlock")
+        .expect("retention task must not panic");
+
+    match (promotion_result, retention_result) {
+        (Ok(report), Ok(())) => {
+            assert_eq!(report.existing_jobs, 1);
+            assert_eq!(report.retry_deferred, 1);
+        }
+        (Ok(report), Err(runledger_postgres::Error::QueryError(error))) => {
+            assert_eq!(report.existing_jobs, 2);
+            assert_eq!(report.retry_deferred, 0);
+            assert_eq!(error.sqlstate(), Some("40P01"));
+        }
+        (promotion_result, retention_result) => panic!(
+            "forced inverse-order cycle had unexpected outcomes: promotion={promotion_result:?}, retention={retention_result:?}"
+        ),
+    }
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn concurrent_promoters_create_one_job() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_concurrent", 4).await;
     register_test_job_definition(&pool, JOB_TYPE).await;
