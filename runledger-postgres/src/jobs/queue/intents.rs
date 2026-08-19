@@ -705,17 +705,8 @@ async fn promote_job_enqueue_intents_read_committed_tx(
                 Error::from_query_sqlx_with_context("create intent promotion savepoint", error)
             })?;
 
-        let promotion_result = match candidate {
-            IntentPromotionCandidate::Ready(prepared)
-                if mismatched_snapshots.contains(&prepared.id) =>
-            {
-                Err(intent_snapshot_mismatch_error(prepared.id))
-            }
-            IntentPromotionCandidate::Ready(prepared) => {
-                promote_prepared_intent_tx(tx, &prepared).await
-            }
-            IntentPromotionCandidate::Invalid { error, .. } => Err(error),
-        };
+        let promotion_result =
+            promote_intent_candidate_tx(tx, candidate, &mismatched_snapshots).await;
 
         let disposition = match promotion_result {
             Ok(disposition) => disposition,
@@ -760,6 +751,24 @@ async fn promote_job_enqueue_intents_read_committed_tx(
     }
 
     Ok(report)
+}
+
+async fn promote_intent_candidate_tx(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    candidate: IntentPromotionCandidate,
+    mismatched_snapshots: &HashSet<Uuid>,
+) -> Result<IntentPromotionDisposition> {
+    match candidate {
+        IntentPromotionCandidate::Ready(prepared)
+            if mismatched_snapshots.contains(&prepared.id) =>
+        {
+            Err(intent_snapshot_mismatch_error(prepared.id))
+        }
+        IntentPromotionCandidate::Ready(prepared) => {
+            promote_prepared_intent_tx(tx, &prepared).await
+        }
+        IntentPromotionCandidate::Invalid { error, .. } => Err(error),
+    }
 }
 
 async fn compare_intent_snapshots_tx(
