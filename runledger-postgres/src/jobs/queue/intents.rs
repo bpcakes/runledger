@@ -16,8 +16,8 @@ use super::super::transaction_isolation::{
     finish_owned_transaction,
 };
 use super::super::transaction_settings::{
-    cap_local_lock_timeout_tx, cap_local_statement_timeout_tx, set_local_lock_timeout_tx,
-    set_local_statement_timeout_tx,
+    cap_local_lock_timeout_tx, cap_local_statement_timeout_tx, cap_local_transaction_timeout_tx,
+    set_local_lock_timeout_tx, set_local_statement_timeout_tx,
 };
 use super::super::types::{
     JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentDisposition,
@@ -37,10 +37,30 @@ const PROMOTE_OPERATION: &str = "promote job enqueue intents";
 // collision with embedding-application locks only over-serializes work.
 const RUNLEDGER_ADVISORY_LOCK_NAMESPACE: i32 = 0x7275_6e6c;
 const JOB_ENQUEUE_INTENT_RETENTION_LOCK: i32 = 0x696e_7465;
-const JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT: &str = "5s";
-const JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT_MS: i64 = 5_000;
-const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT: &str = "30s";
-const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS: i64 = 30_000;
+const JOB_ENQUEUE_INTENT_PROMOTION_LOCK_TIMEOUT: &str = "5s";
+const JOB_ENQUEUE_INTENT_PROMOTION_LOCK_TIMEOUT_MS: i64 = 5_000;
+const JOB_ENQUEUE_INTENT_PROMOTION_TRANSACTION_TIMEOUT: &str = "25s";
+const JOB_ENQUEUE_INTENT_PROMOTION_TRANSACTION_TIMEOUT_MS: i64 = 25_000;
+const JOB_ENQUEUE_INTENT_RETENTION_FENCE_LOCK_TIMEOUT: &str = "30s";
+const JOB_ENQUEUE_INTENT_RETENTION_FENCE_LOCK_TIMEOUT_MS: i64 = 30_000;
+const JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT: &str = "5s";
+const JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT_MS: i64 = 5_000;
+const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT: &str = "35s";
+const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS: i64 = 35_000;
+// These ordering constraints are the liveness contract between the shared and
+// exclusive sides of the fence. Keep them compile-time checked when tuning.
+const _: () = assert!(
+    JOB_ENQUEUE_INTENT_PROMOTION_TRANSACTION_TIMEOUT_MS
+        > JOB_ENQUEUE_INTENT_PROMOTION_LOCK_TIMEOUT_MS
+);
+const _: () = assert!(
+    JOB_ENQUEUE_INTENT_RETENTION_FENCE_LOCK_TIMEOUT_MS
+        > JOB_ENQUEUE_INTENT_PROMOTION_TRANSACTION_TIMEOUT_MS
+);
+const _: () = assert!(
+    JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS
+        > JOB_ENQUEUE_INTENT_RETENTION_FENCE_LOCK_TIMEOUT_MS
+);
 const JOB_ENQUEUE_INTENT_RETENTION_BATCH_LIMIT_MAX: usize = 1_000;
 // A failed row assigns two subtransaction IDs (the row savepoint and the
 // rollback's replacement subtransaction). Capping at 24 leaves 16 IDs of
@@ -617,12 +637,14 @@ pub async fn get_job_enqueue_intent_metrics(
 /// The requested limit must be in `1..=1000` and is then capped at 24 so one
 /// transaction cannot create enough savepoint subtransactions to push
 /// PostgreSQL into subtransaction overflow. Promotion waits at most five
-/// seconds for every lock wait in the owned promotion transaction while
-/// preserving any stricter session setting. Keeping that cap active after the
-/// retention fence is acquired prevents a stalled definition or queue-row lock
-/// from holding the shared fence indefinitely. A fence-acquisition timeout
-/// aborts the owned transaction and is returned to the caller for retry;
-/// row-level promotion failures are deferred through the normal retry path.
+/// seconds for every lock wait and at most twenty-five seconds for the complete
+/// owned transaction while preserving any stricter session settings. The total
+/// cap prevents repeated lock waits or non-locking statements from holding the
+/// shared retention fence indefinitely. PostgreSQL terminates the promotion
+/// session if that total cap expires; SQLx discards the disconnected pooled
+/// session and the error is returned for retry. A fence-acquisition timeout
+/// likewise aborts the owned transaction; row-level promotion failures are
+/// deferred through the normal retry path.
 pub async fn promote_job_enqueue_intents_for_types(
     pool: &DbPool,
     allowed_job_types: &[JobType<'_>],
@@ -1052,10 +1074,13 @@ pub async fn delete_promoted_job_enqueue_intents_before(
 /// cleanup cannot skip requested IDs, the helper may wait for a concurrent
 /// promotion, a matching job-row lock, or an intent-row lock held by a duplicate
 /// recorder. Runledger keeps its timeout caps active from fence acquisition
-/// through intent deletion: each lock wait is capped at five seconds and each
-/// statement at thirty seconds while preserving stricter caller settings. A
-/// timeout or deadlock aborts the transaction; callers must roll it back and may
-/// retry the complete retention transaction.
+/// through intent deletion. The exclusive fence may wait up to thirty seconds
+/// for a promotion transaction, whose total lifetime is capped at twenty-five
+/// seconds. After acquiring the fence, each job- or intent-row lock wait is
+/// capped at five seconds. Each statement is capped at thirty-five seconds.
+/// Stricter caller settings are preserved. A timeout or deadlock aborts the
+/// transaction; callers must roll it back and may retry the complete retention
+/// transaction.
 pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
     tx: &mut DbTx<'_>,
     job_ids: &[Uuid],
@@ -1078,9 +1103,12 @@ async fn delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(
         "cap statement timeout for job enqueue intent retention",
     )
     .await?;
-    let previous_lock_timeout = cap_job_enqueue_intent_fence_lock_timeout_tx(tx).await?;
+    let previous_lock_timeout = cap_job_enqueue_intent_retention_fence_lock_timeout_tx(tx).await?;
 
     lock_job_enqueue_intent_retention_exclusive_tx(tx).await?;
+    // Once the exclusive fence is held, no promotion can extend this section.
+    // Restore the shorter per-lock budget before touching caller-selected rows.
+    cap_job_enqueue_intent_retention_lock_timeout_tx(tx).await?;
     lock_retained_jobs_tx(tx, job_ids).await?;
 
     let result = sqlx::query!(
@@ -1098,7 +1126,7 @@ async fn delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(
         )
     })?;
 
-    restore_job_enqueue_intent_fence_lock_timeout_tx(tx, &previous_lock_timeout).await?;
+    restore_job_enqueue_intent_lock_timeout_tx(tx, &previous_lock_timeout).await?;
     set_local_statement_timeout_tx(
         tx,
         &previous_statement_timeout,
@@ -1145,24 +1173,46 @@ async fn lock_retained_jobs_tx(tx: &mut DbTx<'_>, job_ids: &[Uuid]) -> Result<()
     Ok(())
 }
 
-async fn cap_job_enqueue_intent_fence_lock_timeout_tx(tx: &mut DbTx<'_>) -> Result<String> {
+async fn cap_job_enqueue_intent_promotion_lock_timeout_tx(tx: &mut DbTx<'_>) -> Result<String> {
     cap_local_lock_timeout_tx(
         tx,
-        JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT,
-        JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT_MS,
+        JOB_ENQUEUE_INTENT_PROMOTION_LOCK_TIMEOUT,
+        JOB_ENQUEUE_INTENT_PROMOTION_LOCK_TIMEOUT_MS,
+        "cap lock timeout for job enqueue intent promotion",
+    )
+    .await
+}
+
+async fn cap_job_enqueue_intent_retention_fence_lock_timeout_tx(
+    tx: &mut DbTx<'_>,
+) -> Result<String> {
+    cap_local_lock_timeout_tx(
+        tx,
+        JOB_ENQUEUE_INTENT_RETENTION_FENCE_LOCK_TIMEOUT,
+        JOB_ENQUEUE_INTENT_RETENTION_FENCE_LOCK_TIMEOUT_MS,
         "cap lock timeout for job enqueue intent retention fence",
     )
     .await
 }
 
-async fn restore_job_enqueue_intent_fence_lock_timeout_tx(
+async fn cap_job_enqueue_intent_retention_lock_timeout_tx(tx: &mut DbTx<'_>) -> Result<String> {
+    cap_local_lock_timeout_tx(
+        tx,
+        JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT,
+        JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT_MS,
+        "cap lock timeout for job enqueue intent retention critical section",
+    )
+    .await
+}
+
+async fn restore_job_enqueue_intent_lock_timeout_tx(
     tx: &mut DbTx<'_>,
     previous_lock_timeout: &str,
 ) -> Result<()> {
     set_local_lock_timeout_tx(
         tx,
         previous_lock_timeout,
-        "restore lock timeout after job enqueue intent retention fence",
+        "restore lock timeout after job enqueue intent retention critical section",
     )
     .await
 }
@@ -1170,10 +1220,17 @@ async fn restore_job_enqueue_intent_fence_lock_timeout_tx(
 async fn prepare_job_enqueue_intent_promotion_critical_section_tx(
     tx: &mut ReadCommittedTx<'_, '_>,
 ) -> Result<()> {
-    // Promotion owns this transaction, so leave the cap active until commit or
-    // rollback. Restoring it after the advisory lock would let a later row lock
-    // hold the shared retention fence without a bound.
-    cap_job_enqueue_intent_fence_lock_timeout_tx(tx.as_tx()).await?;
+    // Promotion owns this transaction, so leave both caps active until commit
+    // or rollback. The per-lock cap bounds one acquisition; the transaction cap
+    // bounds all work performed while the shared retention fence is held.
+    cap_local_transaction_timeout_tx(
+        tx.as_tx(),
+        JOB_ENQUEUE_INTENT_PROMOTION_TRANSACTION_TIMEOUT,
+        JOB_ENQUEUE_INTENT_PROMOTION_TRANSACTION_TIMEOUT_MS,
+        "cap transaction timeout for job enqueue intent promotion",
+    )
+    .await?;
+    cap_job_enqueue_intent_promotion_lock_timeout_tx(tx.as_tx()).await?;
     sqlx::query(
         "SELECT pg_advisory_xact_lock_shared($1, $2)
          /* runledger:lock_job_enqueue_intent_promotion */",

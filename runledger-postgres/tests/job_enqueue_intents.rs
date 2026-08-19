@@ -1401,6 +1401,128 @@ async fn promotion_retention_fence_wait_is_bounded() {
 }
 
 #[tokio::test]
+async fn retention_fence_budget_covers_total_promotion_critical_section() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_total_promotion_timeout", 6).await;
+    record_postgres_server_version(&pool, "intent total promotion timeout regression").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "total-promotion-timeout"});
+    let recorded = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "total-promotion-timeout"),
+    )
+    .await
+    .expect("record intent before delayed promotion");
+    assert_eq!(recorded.status, JobEnqueueIntentStatus::Pending);
+
+    sqlx::query(
+        "CREATE TABLE intent_promotion_timeout_observations (
+             transaction_timeout text NOT NULL
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("create promotion timeout observation table");
+    sqlx::query(
+        "CREATE FUNCTION observe_and_delay_intent_promotion()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             IF OLD.status = 'PENDING' AND NEW.status = 'PROMOTED' THEN
+                 INSERT INTO intent_promotion_timeout_observations
+                     (transaction_timeout)
+                 VALUES (current_setting('transaction_timeout'));
+                 PERFORM pg_sleep(6);
+             END IF;
+             RETURN NEW;
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("create delayed promotion trigger function");
+    sqlx::query(
+        "CREATE TRIGGER trg_observe_and_delay_intent_promotion
+         BEFORE UPDATE ON job_enqueue_intents
+         FOR EACH ROW
+         EXECUTE FUNCTION observe_and_delay_intent_promotion()",
+    )
+    .execute(&pool)
+    .await
+    .expect("create delayed promotion trigger");
+
+    let promotion_pool = pool.clone();
+    let promotion = tokio::spawn(async move {
+        promote_job_enqueue_intents_for_types(&promotion_pool, &[JobType::new(JOB_TYPE)], 1).await
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let sleeping = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Timeout'
+                      AND wait_event = 'PgSleep'
+                      AND query LIKE '%UPDATE job_enqueue_intents%'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("inspect delayed promotion");
+            if sleeping {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("promotion should sleep while holding the shared retention fence");
+
+    let mut retention_tx = pool.begin().await.expect("begin waiting retention");
+    let started = Instant::now();
+    assert_eq!(
+        timeout(
+            Duration::from_secs(10),
+            delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[Uuid::now_v7()],),
+        )
+        .await
+        .expect("retention fence wait must remain below ten seconds")
+        .expect("retention must outwait a valid promotion critical section"),
+        0
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(5),
+        "retention did not wait beyond its former five-second fence budget: {:?}",
+        started.elapsed()
+    );
+    retention_tx
+        .commit()
+        .await
+        .expect("commit retention after delayed promotion");
+
+    let report = promotion
+        .await
+        .expect("promotion task must not panic")
+        .expect("delayed promotion must complete within its total budget");
+    assert_eq!(report.total_promoted, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT transaction_timeout
+             FROM intent_promotion_timeout_observations",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read observed promotion transaction timeout"),
+        "25s"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn promotion_row_lock_wait_is_bounded_while_holding_retention_fence() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_promotion_row_timeout", 6).await;

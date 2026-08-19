@@ -141,10 +141,12 @@ transaction that deletes selected queue rows, call
 then delete the jobs. Select candidate IDs without row locks and make the helper
 the transaction's first lock-taking operation. It waits for active promotions,
 fences new promotions, and locks existing selected jobs until the transaction
-ends. Keep the transaction short and commit promptly. The helper preserves
-stricter caller timeouts while capping each lock wait at five seconds and each
-lock-acquisition statement at thirty seconds. A timeout or deadlock aborts the
-transaction; roll it back and retry the complete retention operation. Time
+ends. Keep the transaction short and commit promptly. Each promotion transaction
+is capped at twenty-five seconds. The helper preserves stricter caller timeouts
+while waiting up to thirty seconds for the exclusive fence, then caps each job-
+or intent-row lock wait at five seconds and each statement at thirty-five
+seconds. A timeout or deadlock aborts the transaction; roll it back and retry the
+complete retention operation. Time
 cutoffs alone are insufficient because a new intent can converge on a much
 older existing job.
 

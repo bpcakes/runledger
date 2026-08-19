@@ -29,6 +29,24 @@ pub(in crate::jobs) async fn cap_local_statement_timeout_tx(
     .await
 }
 
+/// Caps the transaction-local PostgreSQL `transaction_timeout` while preserving
+/// any stricter caller setting and returns the exact prior value for restoration.
+pub(in crate::jobs) async fn cap_local_transaction_timeout_tx(
+    tx: &mut DbTx<'_>,
+    transaction_timeout: &str,
+    transaction_timeout_ms: i64,
+    context: &'static str,
+) -> Result<String> {
+    cap_local_timeout_tx(
+        tx,
+        "transaction_timeout",
+        transaction_timeout,
+        transaction_timeout_ms,
+        context,
+    )
+    .await
+}
+
 async fn cap_local_timeout_tx(
     tx: &mut DbTx<'_>,
     setting_name: &'static str,
