@@ -12,8 +12,9 @@ use crate::shutdown;
 ///
 /// Promotion is deliberately independent from ordinary queue claiming so a
 /// slow or contended intent pass cannot delay execution of already-queued
-/// jobs. The loop derives its allowlist from `registry`, promotes at most
-/// [`JobsConfig::claim_batch_size`] intents per pass. Full passes continue
+/// jobs. The loop derives its allowlist from `registry` and requests up to
+/// [`JobsConfig::claim_batch_size`] intents per pass; the persistence layer may
+/// enforce a lower per-transaction safety cap. Full storage batches continue
 /// immediately; partial or empty passes wait for either shutdown or
 /// [`JobsConfig::poll_interval`].
 ///
@@ -37,9 +38,11 @@ pub async fn run_intent_promoter_loop(
 
 /// Promotes durable enqueue intents with intent-specific polling controls.
 ///
-/// A full storage batch is followed immediately by another pass so a backlog is
-/// not rate-limited by the idle polling cadence. The loop yields between full
-/// batches and checks shutdown before each pass.
+/// The configured batch size is a requested limit; the persistence layer may
+/// enforce a lower per-transaction safety cap. A full storage batch is followed
+/// immediately by another pass so a backlog is not rate-limited by the idle
+/// polling cadence. The loop yields between full batches and checks shutdown
+/// before each pass.
 pub async fn run_intent_promoter_loop_with_config(
     pool: runledger_postgres::DbPool,
     registry: JobRegistry,
