@@ -106,7 +106,6 @@ pub(in crate::jobs) struct JobEnqueueIntentPromotionRow {
     pub(in crate::jobs) idempotency_key: String,
     pub(in crate::jobs) stage: String,
     pub(in crate::jobs) enqueue_request_version: i16,
-    pub(in crate::jobs) enqueue_request: Value,
     pub(in crate::jobs) execution_resource_key: Option<String>,
 }
 

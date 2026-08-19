@@ -77,7 +77,6 @@ struct PreparedIntentPromotion {
     id: Uuid,
     request: IntentPromotionRequest,
     current_enqueue_request: Value,
-    persisted_enqueue_request: Value,
 }
 
 impl PreparedIntentPromotion {
@@ -114,7 +113,6 @@ impl PreparedIntentPromotion {
             id: row.id,
             request,
             current_enqueue_request,
-            persisted_enqueue_request: row.enqueue_request,
         })
     }
 }
@@ -145,7 +143,6 @@ impl IntentPromotionCandidate {
 struct IntentSnapshotComparison<'a> {
     id: Uuid,
     current_enqueue_request: &'a Value,
-    persisted_enqueue_request: &'a Value,
 }
 
 struct JobEnqueueIntentMetricsRow {
@@ -649,7 +646,6 @@ async fn promote_job_enqueue_intents_read_committed_tx(
             intent.idempotency_key,
             intent.stage,
             intent.enqueue_request_version,
-            intent.enqueue_request,
             intent.execution_resource_key
          FROM job_enqueue_intents intent
          INNER JOIN job_definitions definition
@@ -756,7 +752,6 @@ async fn compare_intent_snapshots_tx(
             IntentPromotionCandidate::Ready(prepared) => Some(IntentSnapshotComparison {
                 id: prepared.id,
                 current_enqueue_request: &prepared.current_enqueue_request,
-                persisted_enqueue_request: &prepared.persisted_enqueue_request,
             }),
             IntentPromotionCandidate::Invalid { .. } => None,
         })
@@ -774,17 +769,18 @@ async fn compare_intent_snapshots_tx(
         ))
     })?;
 
-    // Keep PostgreSQL JSONB equality while comparing the whole claimed batch in
-    // one round trip. Rust `Value` equality does not model PostgreSQL numeric
-    // normalization.
+    // Compare against the already-locked source rows so the persisted snapshots
+    // never leave PostgreSQL. Rust `Value` equality does not model PostgreSQL
+    // numeric normalization.
     sqlx::query_scalar::<_, Uuid>(
         "SELECT comparison.id
          FROM jsonb_to_recordset($1::jsonb) AS comparison(
             id uuid,
-            current_enqueue_request jsonb,
-            persisted_enqueue_request jsonb
+            current_enqueue_request jsonb
          )
-         WHERE comparison.current_enqueue_request <> comparison.persisted_enqueue_request",
+         INNER JOIN job_enqueue_intents intent
+            ON intent.id = comparison.id
+         WHERE comparison.current_enqueue_request <> intent.enqueue_request",
     )
     .bind(comparisons)
     .fetch_all(&mut **tx.as_tx())
