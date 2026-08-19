@@ -1,3 +1,4 @@
+mod container_lifecycle;
 mod db_lifecycle;
 mod env;
 mod postgres_container;

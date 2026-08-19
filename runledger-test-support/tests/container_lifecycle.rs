@@ -1,0 +1,377 @@
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
+
+const PROCESS_OWNER_LABEL: &str = "org.runledger.test-process";
+const PROCESS_OWNER_ENV: &str = "RUNLEDGER_TEST_CONTAINER_OWNER";
+const PROBE_CHILD_ENV: &str = "RUNLEDGER_TEST_CONTAINER_LIFECYCLE_PROBE";
+const DOCKER_CLI_ENV: &str = "RUNLEDGER_TEST_DOCKER_CLI";
+const TEST_ADMIN_DATABASE_URL_ENV: &str = "RUNLEDGER_TEST_ADMIN_DATABASE_URL";
+const TEST_PG_IMAGE_ENV: &str = "RUNLEDGER_TEST_PG_IMAGE";
+const READY_MARKER: &str = "runledger-container-lifecycle-ready";
+const DEFAULT_POSTGRES_IMAGE: &str = "postgres:18";
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
+const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+static PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn shared_container_is_removed_after_normal_process_exit() {
+    if external_postgres_is_configured() {
+        return;
+    }
+
+    let mut probe = ProbeProcess::spawn();
+    let container_id = probe.assert_ready();
+
+    probe.finish_normally();
+    assert_container_removed(&probe.owner, &container_id);
+}
+
+#[test]
+fn shared_container_is_removed_after_forced_process_termination() {
+    if external_postgres_is_configured() {
+        return;
+    }
+
+    let mut probe = ProbeProcess::spawn();
+    let container_id = probe.assert_ready();
+
+    probe.terminate_forcibly();
+    assert_container_removed(&probe.owner, &container_id);
+}
+
+#[test]
+fn shared_container_starts_without_a_docker_cli_for_the_optional_reaper() {
+    if external_postgres_is_configured() {
+        return;
+    }
+
+    let mut probe = ProbeProcess::spawn_with_reaper_cli("runledger-missing-docker-cli");
+    probe.assert_ready();
+    probe.finish_normally();
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_container_starts_when_optional_reaper_cli_hangs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if external_postgres_is_configured() {
+        return;
+    }
+
+    let script = TemporaryFile::new(
+        std::env::temp_dir().join(format!("runledger-hanging-docker-cli-{}", unique_owner())),
+    );
+    std::fs::write(script.path(), "#!/bin/sh\nsleep 60\n").expect("write hanging Docker CLI probe");
+    let mut permissions = std::fs::metadata(script.path())
+        .expect("read hanging Docker CLI metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(script.path(), permissions)
+        .expect("make hanging Docker CLI executable");
+
+    let mut probe = ProbeProcess::spawn_with_reaper_cli(
+        script
+            .path()
+            .to_str()
+            .expect("temporary Docker CLI path must be UTF-8"),
+    );
+    probe.assert_ready();
+    probe.finish_normally();
+}
+
+#[test]
+#[ignore = "helper entrypoint launched explicitly by lifecycle parent tests"]
+fn lifecycle_probe_child() {
+    if std::env::var_os(PROBE_CHILD_ENV).is_none() {
+        return;
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build lifecycle probe runtime");
+
+    runtime.block_on(async {
+        let (pool, database) = setup_ephemeral_pool("container_lifecycle_probe", 2).await;
+        let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+            .fetch_one(&pool)
+            .await
+            .expect("read PostgreSQL server_version");
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+                .fetch_one(&pool)
+                .await
+                .expect("read PostgreSQL server_version_num");
+
+        println!("{READY_MARKER}\t{server_version_num}\t{server_version}");
+        std::io::stdout()
+            .flush()
+            .expect("flush lifecycle readiness marker");
+
+        tokio::task::spawn_blocking(|| {
+            let mut command = String::new();
+            std::io::stdin().read_line(&mut command)
+        })
+        .await
+        .expect("join lifecycle probe stdin task")
+        .expect("read lifecycle probe stdin");
+
+        teardown_ephemeral_pool(pool, database).await;
+    });
+}
+
+#[cfg(unix)]
+struct TemporaryFile(std::path::PathBuf);
+
+#[cfg(unix)]
+impl TemporaryFile {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+struct ProbeProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    owner: String,
+    expected_image: String,
+}
+
+impl ProbeProcess {
+    fn spawn() -> Self {
+        Self::spawn_with_optional_reaper_cli(None)
+    }
+
+    fn spawn_with_reaper_cli(docker_cli: &str) -> Self {
+        Self::spawn_with_optional_reaper_cli(Some(docker_cli))
+    }
+
+    fn spawn_with_optional_reaper_cli(docker_cli: Option<&str>) -> Self {
+        let owner = unique_owner();
+        let expected_image =
+            std::env::var(TEST_PG_IMAGE_ENV).unwrap_or_else(|_| DEFAULT_POSTGRES_IMAGE.to_owned());
+        let mut command =
+            Command::new(std::env::current_exe().expect("resolve lifecycle test binary"));
+        command
+            .arg("--exact")
+            .arg("lifecycle_probe_child")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(PROBE_CHILD_ENV, "1")
+            .env(PROCESS_OWNER_ENV, &owner)
+            .env("TESTCONTAINERS_COMMAND", "remove")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        if let Some(docker_cli) = docker_cli {
+            command.env(DOCKER_CLI_ENV, docker_cli);
+        }
+        let mut child = command.spawn().expect("spawn lifecycle probe child");
+        let stdin = child.stdin.take().expect("pipe lifecycle probe stdin");
+        let stdout = child.stdout.take().expect("pipe lifecycle probe stdout");
+
+        Self {
+            child,
+            stdin: Some(stdin),
+            stdout: BufReader::new(stdout),
+            owner,
+            expected_image,
+        }
+    }
+
+    fn assert_ready(&mut self) -> String {
+        let mut output = String::new();
+        let ready_line = loop {
+            let mut line = String::new();
+            let bytes = self
+                .stdout
+                .read_line(&mut line)
+                .expect("read lifecycle probe output");
+            output.push_str(&line);
+
+            assert!(
+                bytes > 0,
+                "lifecycle probe exited before becoming ready:\n{output}"
+            );
+
+            if let Some(marker_index) = line.find(READY_MARKER) {
+                break line[marker_index..].to_owned();
+            }
+        };
+
+        let mut fields = ready_line.trim().splitn(3, '\t');
+        assert_eq!(fields.next(), Some(READY_MARKER));
+        let server_version_num = fields
+            .next()
+            .expect("read lifecycle server_version_num")
+            .parse::<i32>()
+            .expect("parse lifecycle server_version_num");
+        let server_version = fields.next().expect("read lifecycle server_version");
+        assert!(
+            server_version_num >= 180_000,
+            "lifecycle test requires PostgreSQL 18+, got {server_version} ({server_version_num})"
+        );
+        eprintln!(
+            "lifecycle probe PostgreSQL server_version={server_version}, server_version_num={server_version_num}"
+        );
+
+        let container_ids = owned_container_ids(&self.owner);
+        assert_eq!(
+            container_ids.len(),
+            1,
+            "expected one lifecycle probe container for owner {}, found {container_ids:?}",
+            self.owner
+        );
+        let container_id = container_ids[0].clone();
+        let state = docker_output([
+            "container",
+            "inspect",
+            "--format",
+            "{{.Config.Image}}\t{{.State.Running}}",
+            &container_id,
+        ]);
+        assert_eq!(
+            state.trim(),
+            format!("{}\ttrue", self.expected_image),
+            "lifecycle probe container must use the configured PostgreSQL image and be running"
+        );
+        container_id
+    }
+
+    fn finish_normally(&mut self) {
+        drop(self.stdin.take());
+        let status = self.child.wait().expect("wait for lifecycle probe child");
+        let mut remaining_output = String::new();
+        self.stdout
+            .read_to_string(&mut remaining_output)
+            .expect("read remaining lifecycle probe output");
+        assert!(
+            status.success(),
+            "lifecycle probe did not exit normally ({status}):\n{remaining_output}"
+        );
+    }
+
+    fn terminate_forcibly(&mut self) {
+        self.child
+            .kill()
+            .expect("forcibly terminate lifecycle probe child");
+        let status = self
+            .child
+            .wait()
+            .expect("wait for terminated lifecycle probe child");
+        drop(self.stdin.take());
+        assert!(
+            !status.success(),
+            "forcibly terminated lifecycle probe unexpectedly succeeded"
+        );
+    }
+}
+
+fn external_postgres_is_configured() -> bool {
+    let configured = std::env::var_os(TEST_ADMIN_DATABASE_URL_ENV).is_some();
+    if configured {
+        eprintln!(
+            "skipping Docker-only lifecycle probe because {TEST_ADMIN_DATABASE_URL_ENV} is configured"
+        );
+    }
+    configured
+}
+
+impl Drop for ProbeProcess {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        cleanup_owned_containers(&self.owner);
+    }
+}
+
+fn unique_owner() -> String {
+    let counter = PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must follow Unix epoch")
+        .as_nanos();
+    format!("{}-{timestamp}-{counter}", std::process::id())
+}
+
+fn assert_container_removed(owner: &str, container_id: &str) {
+    let deadline = Instant::now() + CLEANUP_TIMEOUT;
+
+    loop {
+        let container_ids = owned_container_ids(owner);
+        if container_ids.is_empty() {
+            return;
+        }
+
+        if Instant::now() >= deadline {
+            cleanup_owned_containers(owner);
+            panic!(
+                "container {container_id} was not removed within {CLEANUP_TIMEOUT:?}; remaining containers: {container_ids:?}"
+            );
+        }
+
+        std::thread::sleep(CLEANUP_POLL_INTERVAL);
+    }
+}
+
+fn owned_container_ids(owner: &str) -> Vec<String> {
+    let filter = format!("label={PROCESS_OWNER_LABEL}={owner}");
+    docker_output(["container", "ls", "--all", "--quiet", "--filter", &filter])
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn cleanup_owned_containers(owner: &str) {
+    for container_id in owned_container_ids(owner) {
+        let _ = Command::new(docker_cli())
+            .args(["container", "rm", "--force", "--volumes", &container_id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+fn docker_output<const N: usize>(args: [&str; N]) -> String {
+    let output = Command::new(docker_cli())
+        .args(args)
+        .output()
+        .expect("run Docker CLI for lifecycle test");
+    assert!(
+        output.status.success(),
+        "Docker CLI failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("Docker CLI output must be UTF-8")
+}
+
+fn docker_cli() -> std::ffi::OsString {
+    std::env::var_os(DOCKER_CLI_ENV)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "docker".into())
+}

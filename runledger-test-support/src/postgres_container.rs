@@ -6,6 +6,10 @@ use testcontainers::{
     ContainerAsync, GenericImage, ImageExt, core::ContainerPort, runners::AsyncRunner,
 };
 
+use crate::container_lifecycle::{
+    PROCESS_OWNER_LABEL, ProcessContainer, process_owner_label_value,
+};
+
 const DEFAULT_POSTGRES_IMAGE: &str = "postgres:18";
 const POSTGRES_USER: &str = "runledger";
 const POSTGRES_PASSWORD: &str = "runledger";
@@ -14,31 +18,43 @@ const TEST_ADMIN_DATABASE_URL_ENV: &str = "RUNLEDGER_TEST_ADMIN_DATABASE_URL";
 const MAX_POSTGRES_BOOTSTRAP_ATTEMPTS: u8 = 40;
 const MAX_PORT_RESOLVE_ATTEMPTS: u8 = 10;
 
-static SHARED_ADMIN_URL: OnceLock<String> = OnceLock::new();
+static SHARED_POSTGRES: OnceLock<SharedPostgres> = OnceLock::new();
 static SHARED_HARNESS_INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct SharedPostgres {
+    admin_url: String,
+    _container: Option<ProcessContainer>,
+}
 
 pub async fn admin_database_url() -> &'static str {
     shared_admin_database_url().await
 }
 
 async fn shared_admin_database_url() -> &'static str {
-    if let Some(admin_url) = SHARED_ADMIN_URL.get() {
-        return admin_url;
+    if let Some(postgres) = SHARED_POSTGRES.get() {
+        return &postgres.admin_url;
     }
 
     let _init_guard = SHARED_HARNESS_INIT_LOCK.lock().await;
-    if let Some(admin_url) = SHARED_ADMIN_URL.get() {
-        return admin_url;
+    if let Some(postgres) = SHARED_POSTGRES.get() {
+        return &postgres.admin_url;
     }
 
     if let Ok(admin_url) = std::env::var(TEST_ADMIN_DATABASE_URL_ENV) {
         wait_for_postgres(&admin_url).await;
-        SHARED_ADMIN_URL
-            .set(admin_url)
-            .expect("shared postgres admin URL must be set once");
-        return SHARED_ADMIN_URL
+        assert!(
+            SHARED_POSTGRES
+                .set(SharedPostgres {
+                    admin_url,
+                    _container: None,
+                })
+                .is_ok(),
+            "shared postgres owner must be set once"
+        );
+        return &SHARED_POSTGRES
             .get()
-            .expect("shared postgres admin URL must be initialized");
+            .expect("shared postgres owner must be initialized")
+            .admin_url;
     }
 
     let image_ref =
@@ -49,21 +65,29 @@ async fn shared_admin_database_url() -> &'static str {
         .with_exposed_port(ContainerPort::Tcp(5432))
         .with_env_var("POSTGRES_USER", POSTGRES_USER)
         .with_env_var("POSTGRES_PASSWORD", POSTGRES_PASSWORD)
-        .with_env_var("POSTGRES_DB", POSTGRES_DB);
+        .with_env_var("POSTGRES_DB", POSTGRES_DB)
+        .with_label(PROCESS_OWNER_LABEL, process_owner_label_value());
     let container = image.start().await.expect("start postgres container");
+    let process_container = ProcessContainer::new(container).await;
 
-    let port = resolve_host_port(&container, 5432).await;
+    let port = resolve_host_port(process_container.container(), 5432).await;
     let admin_url = postgres_admin_url(port);
 
     wait_for_postgres(&admin_url).await;
-    retain_container_for_process_lifetime(container);
 
-    SHARED_ADMIN_URL
-        .set(admin_url)
-        .expect("shared postgres admin URL must be set once");
-    SHARED_ADMIN_URL
+    assert!(
+        SHARED_POSTGRES
+            .set(SharedPostgres {
+                admin_url,
+                _container: Some(process_container),
+            })
+            .is_ok(),
+        "shared postgres owner must be set once"
+    );
+    &SHARED_POSTGRES
         .get()
-        .expect("shared postgres admin URL must be initialized")
+        .expect("shared postgres owner must be initialized")
+        .admin_url
 }
 
 async fn resolve_host_port(container: &ContainerAsync<GenericImage>, internal_port: u16) -> u16 {
@@ -115,11 +139,6 @@ fn parse_image_ref(image_ref: &str) -> (String, String) {
 
 fn postgres_admin_url(port: u16) -> String {
     format!("postgres://{POSTGRES_USER}:{POSTGRES_PASSWORD}@127.0.0.1:{port}/{POSTGRES_DB}")
-}
-
-fn retain_container_for_process_lifetime(container: ContainerAsync<GenericImage>) {
-    let _leaked_container: &'static mut ContainerAsync<GenericImage> =
-        Box::leak(Box::new(container));
 }
 
 async fn wait_for_postgres(admin_url: &str) {
