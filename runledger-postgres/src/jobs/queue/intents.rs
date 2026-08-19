@@ -160,6 +160,43 @@ enum IntentPromotionDisposition {
     RetryDeferred,
 }
 
+struct IntentPromotionErrorDiagnostics<'a> {
+    code: &'a str,
+    sqlstate: Option<&'a str>,
+    constraint: Option<&'a str>,
+    internal_message: &'a str,
+    has_source: bool,
+    source: String,
+}
+
+impl<'a> IntentPromotionErrorDiagnostics<'a> {
+    fn from_query_error(error: &'a QueryError) -> Self {
+        let source = error.source_arc();
+        Self {
+            code: error.code(),
+            sqlstate: error.sqlstate(),
+            constraint: error.constraint(),
+            internal_message: error.internal_message(),
+            has_source: source.is_some(),
+            source: source
+                .as_deref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        }
+    }
+
+    fn classified(code: &'static str, internal_message: &'static str) -> Self {
+        Self {
+            code,
+            sqlstate: None,
+            constraint: None,
+            internal_message,
+            has_source: false,
+            source: String::new(),
+        }
+    }
+}
+
 impl JobEnqueueIntentPromotionReport {
     fn record(&mut self, disposition: IntentPromotionDisposition) {
         match disposition {
@@ -810,7 +847,8 @@ async fn promote_prepared_intent_tx(
             client_message,
         } => {
             mark_intent_conflicted_tx(tx, prepared.id, code, client_message).await?;
-            log_intent_promotion_failure(prepared.id, code, None, None, "conflicted");
+            let diagnostics = IntentPromotionErrorDiagnostics::classified(code, client_message);
+            log_intent_promotion_failure(prepared.id, &diagnostics, "conflicted");
             Ok(IntentPromotionDisposition::Conflicted)
         }
     }
@@ -824,27 +862,23 @@ fn log_query_intent_promotion_failure(
     let Error::QueryError(error) = error else {
         return;
     };
-    log_intent_promotion_failure(
-        intent_id,
-        error.code(),
-        error.sqlstate(),
-        error.constraint(),
-        promotion_outcome,
-    );
+    let diagnostics = IntentPromotionErrorDiagnostics::from_query_error(error);
+    log_intent_promotion_failure(intent_id, &diagnostics, promotion_outcome);
 }
 
 fn log_intent_promotion_failure(
     intent_id: Uuid,
-    error_code: &'static str,
-    error_sqlstate: Option<&str>,
-    error_constraint: Option<&str>,
+    diagnostics: &IntentPromotionErrorDiagnostics<'_>,
     promotion_outcome: &'static str,
 ) {
     tracing::warn!(
         intent_id = %intent_id,
-        error_code,
-        error_sqlstate = error_sqlstate.unwrap_or("none"),
-        error_constraint = error_constraint.unwrap_or("none"),
+        error_code = diagnostics.code,
+        error_sqlstate = diagnostics.sqlstate.unwrap_or("none"),
+        error_constraint = diagnostics.constraint.unwrap_or("none"),
+        error_internal_message = diagnostics.internal_message,
+        error_has_source = diagnostics.has_source,
+        error_source = diagnostics.source.as_str(),
         promotion_outcome,
         "durable job enqueue intent promotion did not complete"
     );
@@ -1263,6 +1297,27 @@ fn intent_snapshot_version_error(intent_id: Uuid, version: i16) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_failure_diagnostics_preserve_trusted_detail_and_source() {
+        let error = QueryError::from_sqlx(
+            sqlx::Error::Protocol("test promotion protocol failure".to_owned()),
+            Some("promote test intent"),
+        );
+
+        let diagnostics = IntentPromotionErrorDiagnostics::from_query_error(&error);
+
+        assert_eq!(diagnostics.code, "db.query_failed");
+        assert_eq!(diagnostics.sqlstate, None);
+        assert_eq!(diagnostics.constraint, None);
+        assert!(diagnostics.internal_message.contains("promote test intent"));
+        assert!(diagnostics.has_source);
+        assert!(
+            diagnostics
+                .source
+                .contains("test promotion protocol failure")
+        );
+    }
 
     #[test]
     fn disappearing_queue_idempotency_winner_is_deferred_not_terminal() {
