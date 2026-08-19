@@ -290,6 +290,12 @@ if outcome.status == runledger_postgres::jobs::JobEnqueueIntentStatus::Conflicte
 tx.commit().await?;
 ```
 
+The returned status is a point-in-time observation, not a promotion guarantee.
+An existing intent may be promoted or become conflicted concurrently, including
+while a caller-owned record transaction remains open. Treat an observed
+`CONFLICTED` state as terminal, but continue monitoring pending age and
+`conflicted_24h` after accepting a pending handoff.
+
 A standard Runledger supervisor promotes pending intents only for its
 registered handler types once their definitions are enabled. Promotion uses
 ordinary enqueue semantics and creates the normal `ENQUEUED` audit event.
@@ -347,9 +353,11 @@ When purging selected `job_queue` rows, call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for those exact job IDs first
 and delete the jobs in the same transaction. Select candidate IDs without row
 locks, then invoke the helper as the transaction's first lock-taking operation.
-It waits for active promotions, fences new promotions, and locks the selected
-jobs until the transaction finishes; keep that transaction short and commit
-promptly. Each promotion transaction is capped at twenty-five seconds. The
+It waits for active promotions, fences new promotions, deletes promoted-intent
+links, then locks the selected jobs until the transaction finishes. This
+canonical intent-before-job order composes with duplicate recorders without an
+inverse lock cycle. Keep that transaction short and commit promptly. Each
+promotion transaction is capped at twenty-five seconds. The
 retention helper therefore waits up to thirty seconds for the exclusive fence,
 then caps each job- or intent-row lock wait at five seconds and each statement
 at thirty-five seconds. Stricter caller timeouts are preserved. A timeout or

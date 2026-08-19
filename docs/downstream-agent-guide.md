@@ -79,6 +79,12 @@ if outcome.status == JobEnqueueIntentStatus::Conflicted {
 tx.commit().await?;
 ```
 
+The returned status is a point-in-time observation rather than a promotion
+guarantee. An existing intent can be promoted or become conflicted concurrently,
+including while the caller-owned record transaction remains open. Treat an
+observed conflict as terminal, and continue monitoring pending age and
+`conflicted_24h` after accepting a pending handoff.
+
 Recording requires `READ COMMITTED`, does not read or lock `job_definitions`,
 and does not create queue, attempt, or event rows. An exact retry returns the
 same intent even after promotion. A changed canonical request returns
@@ -140,9 +146,11 @@ transaction that deletes selected queue rows, call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` with those exact job IDs,
 then delete the jobs. Select candidate IDs without row locks and make the helper
 the transaction's first lock-taking operation. It waits for active promotions,
-fences new promotions, and locks existing selected jobs until the transaction
-ends. Keep the transaction short and commit promptly. Each promotion transaction
-is capped at twenty-five seconds. The helper preserves stricter caller timeouts
+fences new promotions, deletes promoted-intent links, then locks existing
+selected jobs until the transaction ends. This intent-before-job order composes
+with duplicate recorders without an inverse lock cycle. Keep the transaction
+short and commit promptly. Each promotion transaction is capped at twenty-five
+seconds. The helper preserves stricter caller timeouts
 while waiting up to thirty seconds for the exclusive fence, then caps each job-
 or intent-row lock wait at five seconds and each statement at thirty-five
 seconds. A timeout or deadlock aborts the transaction; roll it back and retry the

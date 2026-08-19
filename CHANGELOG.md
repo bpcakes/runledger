@@ -42,8 +42,10 @@ All notable changes to this workspace are documented here.
   retention must delete exact promoted-intent links with
   `delete_promoted_job_enqueue_intents_for_jobs_tx` in the same transaction
   before deleting those jobs. Select candidate IDs without row locks and call
-  the helper as the transaction's first lock-taking operation. Deploy that
-  retention path to every retention caller before enabling intent writers.
+  the helper as the transaction's first lock-taking operation. The helper
+  deletes promoted-intent links before locking the selected jobs, preserving the
+  canonical intent-before-job order. Deploy that retention path to every
+  retention caller before enabling intent writers.
   Deployments that do not record intents have no linked rows and their existing
   retention behavior is unchanged.
 - Intent promotion is enabled by default for every worker-enabled supervisor so

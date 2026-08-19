@@ -52,6 +52,9 @@ For transactional handoff before a job definition exists, record a strictly
 idempotent `JobEnqueueIntent` in the application's `READ COMMITTED` transaction.
 Concurrent recorders for the same key may wait for the transaction that first
 claimed it, so include that wait in caller lock ordering and timeout budgets.
+A record outcome reports point-in-time lifecycle state, not a promotion
+guarantee; an existing intent can be promoted or become conflicted concurrently,
+including before a caller-owned transaction ends.
 A standard worker later promotes registered, enabled types through the ordinary
 enqueue path. Full promotion batches drain immediately; partial and empty
 passes wait for the configured cadence. Use `IntentPromoterConfig` for
@@ -65,8 +68,10 @@ metadata and monitor pending age and `conflicted_24h`. Full conflicted evidence
 remains available through intent reads/lists. Treat intent payloads and keys as
 sensitive queue data and do not log them. Queue retention must call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for its exact selected job IDs
-before deleting those jobs in the same transaction. The helper preserves
-stricter caller timeouts. It allows up to thirty seconds to acquire the
+before deleting those jobs in the same transaction. The helper fences
+promotion, deletes promoted-intent links, then locks the selected jobs in the
+canonical intent-before-job order. It preserves stricter caller timeouts and
+allows up to thirty seconds to acquire the
 exclusive promotion fence, then caps each job- or intent-row lock wait at five
 seconds; every statement is capped at thirty-five seconds. Timeout and deadlock
 errors abort the transaction, which must be rolled back and retried in full.

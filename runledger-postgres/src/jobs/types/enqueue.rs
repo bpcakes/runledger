@@ -180,9 +180,15 @@ pub enum JobEnqueueIntentDisposition {
     Existing,
 }
 
-/// Stable state returned by an intent record call.
+/// Point-in-time state observed by an intent record call.
+///
+/// An existing intent is protected from deletion while a caller-owned record
+/// transaction remains open, but promotion may still update its non-key
+/// lifecycle fields. `status` can therefore change after it is read, including
+/// before the caller transaction ends. Monitor intent metrics and use the read
+/// APIs when current lifecycle state is required.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[must_use = "callers must inspect whether the intent is pending, promoted, or conflicted"]
+#[must_use = "callers must inspect the observed pending, promoted, or conflicted state"]
 #[non_exhaustive]
 pub struct JobEnqueueIntentOutcome {
     pub intent_id: Uuid,

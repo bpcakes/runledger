@@ -212,6 +212,12 @@ impl JobEnqueueIntentPromotionReport {
 /// transaction that first claimed that unique key to commit or roll back. The
 /// caller must include that wait in its transaction lock ordering and timeout
 /// budget.
+///
+/// The returned lifecycle status is a point-in-time observation. A shared key
+/// lock protects an existing intent from deletion for the rest of the caller
+/// transaction without blocking promotion's non-key status update, so the
+/// status may change before the transaction ends. Use intent reads and metrics
+/// to observe subsequent promotion or conflict.
 pub async fn record_job_enqueue_intent_tx(
     tx: &mut DbTx<'_>,
     intent: &JobEnqueueIntent<'_>,
@@ -228,6 +234,9 @@ pub async fn record_job_enqueue_intent_tx(
 }
 
 /// Records a durable enqueue intent in an owned transaction.
+///
+/// The returned lifecycle status is a point-in-time observation; promotion can
+/// change it after this call returns.
 pub async fn record_job_enqueue_intent(
     pool: &DbPool,
     intent: &JobEnqueueIntent<'_>,

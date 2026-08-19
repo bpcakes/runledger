@@ -136,6 +136,12 @@
 //! # }
 //! ```
 //!
+//! The returned status is a point-in-time observation, not a promotion
+//! guarantee. An existing intent can be promoted or become conflicted
+//! concurrently, including while a caller-owned record transaction remains
+//! open. Continue monitoring pending age and conflicts after accepting a
+//! pending handoff.
+//!
 //! Concurrent calls that record the same `(job_type, organization_id,
 //! idempotency_key)` may wait for the transaction that first claimed that unique
 //! key. Include that wait in the caller-owned transaction's lock ordering and
@@ -155,9 +161,11 @@
 //! exact selected job IDs before deleting those jobs. Select candidate IDs
 //! without row locks, then call the helper as the transaction's first
 //! lock-taking operation. It waits for active promotions, fences new
-//! promotions, and locks those jobs for the rest of the transaction. Keep the
-//! transaction short and commit promptly. Time cutoffs alone are insufficient
-//! because a newly promoted intent may link to an older existing job.
+//! promotions, deletes promoted-intent links, then locks those jobs for the rest
+//! of the transaction. This intent-before-job order composes with duplicate
+//! recorders without an inverse lock cycle. Keep the transaction short and
+//! commit promptly. Time cutoffs alone are insufficient because a newly
+//! promoted intent may link to an older existing job.
 //!
 //! # Create A Scheduled Job Entrypoint
 //!
