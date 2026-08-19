@@ -37,9 +37,13 @@ CREATE TABLE job_enqueue_intents (
     CONSTRAINT chk_job_enqueue_intents_timeout_positive
         CHECK (timeout_seconds IS NULL OR timeout_seconds > 0),
     CONSTRAINT chk_job_enqueue_intents_idempotency_key_not_blank
-        CHECK (length(trim(idempotency_key)) > 0),
+        CHECK (
+            idempotency_key ~ U&'[^[:space:]\00A0\0085\1680\2000-\200A\2028\2029\202F\205F\3000]'
+        ),
     CONSTRAINT chk_job_enqueue_intents_stage_not_blank
-        CHECK (length(trim(stage)) > 0),
+        CHECK (
+            stage ~ U&'[^[:space:]\00A0\0085\1680\2000-\200A\2028\2029\202F\205F\3000]'
+        ),
     CONSTRAINT chk_job_enqueue_intents_enqueue_request_version
         CHECK (enqueue_request_version = 1),
     CONSTRAINT chk_job_enqueue_intents_execution_resource_key

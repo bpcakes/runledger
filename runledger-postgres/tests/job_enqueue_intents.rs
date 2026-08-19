@@ -260,6 +260,54 @@ async fn validates_inputs_and_does_not_wait_on_job_definition_locks() {
 }
 
 #[tokio::test]
+async fn database_rejects_unicode_blank_intent_keys_and_stages() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_blank_constraints", 2).await;
+
+    for (idempotency_key, stage, expected_constraint) in [
+        (
+            "\t",
+            "queued",
+            "chk_job_enqueue_intents_idempotency_key_not_blank",
+        ),
+        (
+            "\u{a0}",
+            "queued",
+            "chk_job_enqueue_intents_idempotency_key_not_blank",
+        ),
+        (
+            "valid-key-tab-stage",
+            "\t",
+            "chk_job_enqueue_intents_stage_not_blank",
+        ),
+        (
+            "valid-key-nbsp-stage",
+            "\u{a0}",
+            "chk_job_enqueue_intents_stage_not_blank",
+        ),
+    ] {
+        let error = sqlx::query(
+            "INSERT INTO job_enqueue_intents (
+                job_type, payload, idempotency_key, stage, enqueue_request
+             )
+             VALUES ($1, '{}'::jsonb, $2, $3, '{}'::jsonb)",
+        )
+        .bind(JOB_TYPE)
+        .bind(idempotency_key)
+        .bind(stage)
+        .execute(&pool)
+        .await
+        .expect_err("database constraint must reject Unicode-blank intent fields");
+        let database_error = error
+            .as_database_error()
+            .expect("constraint failure must be a database error");
+        assert_eq!(database_error.constraint(), Some(expected_constraint));
+    }
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn duplicate_recording_does_not_wait_on_a_promoters_row_lock() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_lock_compatibility", 4).await;
