@@ -40,6 +40,7 @@ jobs:
   test:
     name: Test and smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -58,8 +59,18 @@ jobs:
           done
           echo "Docker did not become ready in time" >&2
           exit 1
-      - name: Run workspace tests
-        run: cargo test --workspace
+      - name: Test runledger-core
+        run: cargo test -p runledger-core
+      - name: Test runledger-postgres
+        run: cargo test -p runledger-postgres
+      - name: Test runledger-runtime
+        run: cargo test -p runledger-runtime
+      - name: Test runledger-test-support library
+        run: cargo test -p runledger-test-support --lib
+      - name: Test PostgreSQL container lifecycle
+        run: cargo test -p runledger-test-support --test container_lifecycle -- --nocapture
+      - name: Test runledger-tui
+        run: cargo test -p runledger-tui
       - name: Run packaged-crate smoke test
         run: ./scripts/run-external-consumer-smoke.sh
 
