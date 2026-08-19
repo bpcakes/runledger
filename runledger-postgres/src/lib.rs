@@ -104,6 +104,52 @@
 //! # }
 //! ```
 //!
+//! # Record A Durable Transactional Handoff
+//!
+//! Use an enqueue intent when application state and a future job request must
+//! commit atomically before the job definition is available. Recording does not
+//! read `job_definitions` or create a queue row. A standard worker later promotes
+//! pending intents for its registered job types through the ordinary enqueue
+//! path.
+//!
+//! ```rust,no_run
+//! # async fn demo(pool: runledger_postgres::DbPool) -> Result<(), Box<dyn std::error::Error>> {
+//! use runledger_core::prelude::*;
+//! use runledger_postgres::prelude::*;
+//!
+//! let payload = serde_json::json!({"invoice_id": "invoice_123"});
+//! let intent = JobEnqueueIntent::new(
+//!     JobType::new("billing.invoice.capture"),
+//!     &payload,
+//!     "invoice:invoice_123:capture",
+//! );
+//!
+//! let mut tx = pool.begin().await?;
+//! // Persist the application's business/audit mutation with this same `tx`.
+//! let outcome = record_job_enqueue_intent_tx(&mut tx, &intent).await?;
+//! if outcome.status == JobEnqueueIntentStatus::Conflicted {
+//!     return Err("the existing durable handoff is conflicted".into());
+//! }
+//! tx.commit().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Intent payloads and idempotency keys cross the same trusted persistence
+//! boundary as ordinary queue inputs. Do not place secrets in them or emit them
+//! in logs. Monitor [`jobs::get_job_enqueue_intent_metrics`] for pending age,
+//! retrying count, maximum promotion attempts, and conflicts; Runledger never
+//! automatically deletes conflicted intent evidence.
+//! Database-level promotion failures leave the intent pending with bounded
+//! exponential backoff, and read APIs expose the attempt/error metadata. They
+//! retry indefinitely so a prolonged outage cannot silently discard work;
+//! operators must alert on pending age and maximum attempts.
+//! Promoted intents retain their linked jobs. A queue-retention transaction
+//! must call [`jobs::delete_promoted_job_enqueue_intents_for_jobs_tx`] with its
+//! exact selected job IDs before deleting those jobs. Time cutoffs alone are
+//! insufficient because a newly promoted intent may link to an older existing
+//! job.
+//!
 //! # Create A Scheduled Job Entrypoint
 //!
 //! Use [`jobs::JobScheduleUpsert`] to create or update the cron row consumed by
@@ -291,11 +337,14 @@ pub mod prelude {
         EnqueueActiveWorkflowOutcome, JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate,
         JobContinuationMetricsRecord, JobContinuationOutcome, JobContinuationUpdate,
         JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,
-        JobEnqueue, JobEnqueueDisposition, JobEnqueueOutcome, JobEventRecord,
-        JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
-        JobLeaseIdentity, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
-        JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, JobProgressUpdate,
-        JobQueueRecord, JobRequeueStatePolicy, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
+        JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentDisposition,
+        JobEnqueueIntentListFilter, JobEnqueueIntentMetricsRecord, JobEnqueueIntentOutcome,
+        JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord, JobEnqueueIntentStatus,
+        JobEnqueueOutcome, JobEventRecord, JobFailureCompletionDisposition,
+        JobFailureCompletionOutcome, JobFailureUpdate, JobLeaseIdentity, JobListFilter,
+        JobLogRecord, JobLogRecordInput, JobMetricsRecord, JobPayloadUuidArrayFieldUpdate,
+        JobPayloadUuidArrayFieldUpdateRejection, JobProgressUpdate, JobQueueRecord,
+        JobRequeueStatePolicy, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
         JobRuntimeConfigUpsert, JobScheduleRecord, JobScheduleUpsert, JobScope,
         JobSuccessCompletionOutcome, NonRequeueableJobStatusError, ReapExpiredLeaseCleanupError,
         ReapExpiredLeaseCleanupOperation, ReapExpiredLeaseDeferredError,
@@ -315,21 +364,25 @@ pub mod prelude {
         complete_job_failure_with_outcome_for_lease, complete_job_success,
         complete_job_success_for_lease, complete_job_success_with_outcome,
         complete_job_success_with_outcome_for_lease, count_workflow_step_dependencies,
-        count_workflow_steps, enqueue_job, enqueue_job_tx, enqueue_job_with_execution_resource,
-        enqueue_job_with_execution_resource_tx, enqueue_job_with_outcome_tx,
-        enqueue_or_get_active_workflow, enqueue_or_get_active_workflow_tx, enqueue_workflow_run,
-        enqueue_workflow_run_handle, enqueue_workflow_run_tx, get_job_by_id,
-        get_job_continuation_metrics, get_job_definition_by_type, get_job_metrics,
-        get_job_payload_by_idempotency_key, get_job_runtime_config_by_type,
+        count_workflow_steps, delete_promoted_job_enqueue_intents_before,
+        delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, enqueue_job_tx,
+        enqueue_job_with_execution_resource, enqueue_job_with_execution_resource_tx,
+        enqueue_job_with_outcome_tx, enqueue_or_get_active_workflow,
+        enqueue_or_get_active_workflow_tx, enqueue_workflow_run, enqueue_workflow_run_handle,
+        enqueue_workflow_run_tx, get_job_by_id, get_job_continuation_metrics,
+        get_job_definition_by_type, get_job_enqueue_intent_by_id, get_job_enqueue_intent_metrics,
+        get_job_metrics, get_job_payload_by_idempotency_key, get_job_runtime_config_by_type,
         get_job_schedule_by_name, get_latest_job_payload_for_run, get_latest_workflow_run_by_type,
         get_required_job_runtime_config_by_type, get_workflow_run_by_id,
         get_workflow_run_by_type_and_idempotency_key, get_workflow_run_id_for_job,
         heartbeat_job_for_lease, insert_job_definition_if_missing_tx, insert_job_log,
-        insert_job_runtime_config_if_missing, list_job_definitions, list_job_events, list_job_logs,
-        list_job_runtime_configs, list_jobs, list_workflow_runs, list_workflow_step_dependencies,
-        list_workflow_step_dependencies_page, list_workflow_steps, list_workflow_steps_page,
-        prepare_schedule_exact_sync_critical_section_tx, reap_expired_leases_with_diagnostics,
-        recover_workflow_run, recover_workflow_run_tx, requeue_job, retrieve_workflow_run_handle,
+        insert_job_runtime_config_if_missing, list_job_definitions, list_job_enqueue_intents,
+        list_job_events, list_job_logs, list_job_runtime_configs, list_jobs, list_workflow_runs,
+        list_workflow_step_dependencies, list_workflow_step_dependencies_page, list_workflow_steps,
+        list_workflow_steps_page, prepare_schedule_exact_sync_critical_section_tx,
+        promote_job_enqueue_intents_for_types, reap_expired_leases_with_diagnostics,
+        record_job_enqueue_intent, record_job_enqueue_intent_tx, recover_workflow_run,
+        recover_workflow_run_tx, requeue_job, retrieve_workflow_run_handle,
         set_job_schedule_active, set_job_schedule_active_tx, set_job_schedule_next_fire_at,
         set_job_schedule_next_fire_at_tx, sync_catalog_job_schedules_tx, update_job_definition,
         update_job_payload_uuid_array_field, update_job_progress_for_lease,

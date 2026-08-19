@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH selected AS (\n            SELECT id\n            FROM job_enqueue_intents\n            WHERE status = 'PROMOTED'\n              AND promoted_at < $1\n            ORDER BY promoted_at, id\n            LIMIT $2\n            FOR UPDATE SKIP LOCKED\n         )\n         DELETE FROM job_enqueue_intents intent\n         USING selected\n         WHERE intent.id = selected.id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b7d17e4c8270012facadf29a8d7f845dd8b52d95346641d9456e9bfb19682b6f"
+}

@@ -9,7 +9,7 @@ use super::row_decode::{
     parse_workflow_run_status, parse_workflow_step_execution_kind, parse_workflow_step_status,
     parse_workflow_type_name,
 };
-use super::types::JobQueueRecord;
+use super::types::{JobEnqueueIntentRecord, JobEnqueueIntentStatus, JobQueueRecord};
 use super::workflow_types::{WorkflowRunDbRecord, WorkflowStepDbRecord};
 
 #[derive(sqlx::FromRow)]
@@ -83,6 +83,97 @@ impl TryFrom<JobQueueRow> for JobQueueRecord {
             last_error_message: row.last_error_message,
             created_at: row.created_at,
             updated_at: row.updated_at,
+        })
+    }
+}
+
+pub(in crate::jobs) struct JobEnqueueIntentOutcomeRow {
+    pub(in crate::jobs) id: Uuid,
+    pub(in crate::jobs) status: String,
+    pub(in crate::jobs) promoted_job_id: Option<Uuid>,
+    pub(in crate::jobs) enqueue_request_matches: bool,
+}
+
+pub(in crate::jobs) struct JobEnqueueIntentPromotionRow {
+    pub(in crate::jobs) id: Uuid,
+    pub(in crate::jobs) job_type: String,
+    pub(in crate::jobs) organization_id: Option<Uuid>,
+    pub(in crate::jobs) payload: Value,
+    pub(in crate::jobs) priority: Option<i32>,
+    pub(in crate::jobs) max_attempts: Option<i32>,
+    pub(in crate::jobs) timeout_seconds: Option<i32>,
+    pub(in crate::jobs) next_run_at: Option<DateTime<Utc>>,
+    pub(in crate::jobs) idempotency_key: String,
+    pub(in crate::jobs) stage: String,
+    pub(in crate::jobs) enqueue_request_version: i16,
+    pub(in crate::jobs) enqueue_request: Value,
+    pub(in crate::jobs) execution_resource_key: Option<String>,
+}
+
+pub(in crate::jobs) struct JobEnqueueIntentRecordRow {
+    pub(in crate::jobs) id: Uuid,
+    pub(in crate::jobs) job_type: String,
+    pub(in crate::jobs) organization_id: Option<Uuid>,
+    pub(in crate::jobs) payload: Value,
+    pub(in crate::jobs) priority: Option<i32>,
+    pub(in crate::jobs) max_attempts: Option<i32>,
+    pub(in crate::jobs) timeout_seconds: Option<i32>,
+    pub(in crate::jobs) next_run_at: Option<DateTime<Utc>>,
+    pub(in crate::jobs) idempotency_key: String,
+    pub(in crate::jobs) stage: String,
+    pub(in crate::jobs) enqueue_request_version: i16,
+    pub(in crate::jobs) execution_resource_key: Option<String>,
+    pub(in crate::jobs) promotion_attempts: i32,
+    pub(in crate::jobs) next_promotion_at: DateTime<Utc>,
+    pub(in crate::jobs) last_attempted_at: Option<DateTime<Utc>>,
+    pub(in crate::jobs) status: String,
+    pub(in crate::jobs) promoted_job_id: Option<Uuid>,
+    pub(in crate::jobs) promoted_at: Option<DateTime<Utc>>,
+    pub(in crate::jobs) conflicted_at: Option<DateTime<Utc>>,
+    pub(in crate::jobs) last_error_code: Option<String>,
+    pub(in crate::jobs) last_error_message: Option<String>,
+    pub(in crate::jobs) created_at: DateTime<Utc>,
+    pub(in crate::jobs) updated_at: DateTime<Utc>,
+}
+
+impl JobEnqueueIntentRecordRow {
+    pub(in crate::jobs) fn into_record(self) -> Result<JobEnqueueIntentRecord> {
+        let status = self
+            .status
+            .parse::<JobEnqueueIntentStatus>()
+            .map_err(|()| {
+                crate::Error::QueryError(crate::QueryError::from_classified(
+                    crate::QueryErrorCategory::Internal,
+                    "job.intent_invalid_status",
+                    "Job enqueue intent status in persisted row is invalid.",
+                    "invalid job enqueue intent status in row",
+                ))
+            })?;
+
+        Ok(JobEnqueueIntentRecord {
+            id: self.id,
+            job_type: parse_job_type_name(self.job_type)?,
+            organization_id: self.organization_id,
+            payload: self.payload,
+            priority: self.priority,
+            max_attempts: self.max_attempts,
+            timeout_seconds: self.timeout_seconds,
+            next_run_at: self.next_run_at,
+            idempotency_key: self.idempotency_key,
+            stage: parse_job_stage(self.stage)?,
+            enqueue_request_version: self.enqueue_request_version,
+            execution_resource_key: self.execution_resource_key,
+            promotion_attempts: self.promotion_attempts,
+            next_promotion_at: self.next_promotion_at,
+            last_attempted_at: self.last_attempted_at,
+            status,
+            promoted_job_id: self.promoted_job_id,
+            promoted_at: self.promoted_at,
+            conflicted_at: self.conflicted_at,
+            last_error_code: self.last_error_code,
+            last_error_message: self.last_error_message,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
         })
     }
 }

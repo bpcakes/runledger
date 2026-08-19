@@ -5,6 +5,7 @@ mod definitions;
 mod enqueue;
 pub(crate) mod events;
 mod failure_transition;
+mod intents;
 mod lifecycle;
 mod reaper;
 mod release;
@@ -22,6 +23,11 @@ pub(in crate::jobs) use self::enqueue::enqueue_replayed_job_with_outcome_tx;
 pub use self::enqueue::{
     enqueue_job, enqueue_job_tx, enqueue_job_with_execution_resource,
     enqueue_job_with_execution_resource_tx, enqueue_job_with_outcome_tx,
+};
+pub use self::intents::{
+    delete_promoted_job_enqueue_intents_before, delete_promoted_job_enqueue_intents_for_jobs_tx,
+    get_job_enqueue_intent_by_id, get_job_enqueue_intent_metrics, list_job_enqueue_intents,
+    promote_job_enqueue_intents_for_types, record_job_enqueue_intent, record_job_enqueue_intent_tx,
 };
 pub use self::lifecycle::{
     complete_job_continuation, complete_job_continuation_for_lease,

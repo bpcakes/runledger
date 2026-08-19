@@ -4,6 +4,36 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add durable job enqueue intents for atomically recording application state
+  and future background work before a job definition exists. Standard workers
+  promote registered types through ordinary enqueue semantics; public APIs
+  expose strict idempotency, status lookup, backlog metrics, and bounded cleanup
+  of old promoted intents. Per-intent savepoints and bounded exponential retry
+  metadata isolate persistent database failures without starving later work.
+
+### Changed
+
+- Promoted enqueue intents now retain linked `job_queue` rows with
+  `ON DELETE RESTRICT`. Applications can remove links for exact retained job
+  IDs inside the same caller-owned transaction before deleting queue rows;
+  cutoff-based intent cleanup remains available for independent retention.
+- Keep the shared PostgreSQL 18 test container process-scoped and add optional
+  process-liveness cleanup for normal exit, aborts, and forced termination.
+  Reaper startup is bounded and degrades without blocking database-backed tests
+  when the Docker CLI is unavailable or unresponsive.
+
+### Upgrade notes
+
+- Apply migration `202608180001_job_enqueue_intents` before deploying workers
+  with intent promotion. Once an application adopts enqueue intents, promoted
+  rows intentionally fence deletion of their linked `job_queue` rows. Queue
+  retention must delete exact promoted-intent links with
+  `delete_promoted_job_enqueue_intents_for_jobs_tx` in the same transaction
+  before deleting those jobs. Deployments that do not record intents have no
+  linked rows and their existing retention behavior is unchanged.
+
 ## [0.9.1] - 2026-08-12
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.9.0...v0.9.1)
 

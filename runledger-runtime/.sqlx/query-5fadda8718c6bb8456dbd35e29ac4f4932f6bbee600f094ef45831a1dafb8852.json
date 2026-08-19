@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM job_enqueue_intents\n         WHERE status = 'PROMOTED'\n           AND promoted_job_id = ANY($1::uuid[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5fadda8718c6bb8456dbd35e29ac4f4932f6bbee600f094ef45831a1dafb8852"
+}

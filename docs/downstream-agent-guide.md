@@ -27,6 +27,7 @@ together.
 | Need | Use |
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
+| Commit application state and a future job request before its definition exists | `JobEnqueueIntent` and `record_job_enqueue_intent_tx` |
 | Multi-step work with dependencies | Workflow DAG APIs |
 | Multi-step work with a durable JSON result | Workflow result-step and handle APIs |
 | Fan-out, fan-in, or ordered stages | Workflow DAG APIs |
@@ -50,6 +51,92 @@ retime the schedule cursor.
 Use `runledger_postgres::jobs::count_workflow_runs` with
 `runledger_postgres::jobs::WorkflowRunCountFilter` for workflow status counters
 instead of fetching pages of runs just to count them.
+
+## Durable Transactional Handoff
+
+Use `record_job_enqueue_intent_tx` when application-owned state and a request
+for background work must commit atomically before Runledger has an enabled job
+definition. The application owns the caller transaction and business payload;
+`runledger-postgres` owns durable intent storage, strict idempotency, metrics,
+promotion, and cleanup. The standard `runledger-runtime` worker owns the
+promotion loop and only promotes types for which that process registered a
+handler.
+
+```rust
+let payload = serde_json::json!({"invoice_id": "invoice_123"});
+let intent = JobEnqueueIntent::new(
+    JobType::new("billing.invoice.capture"),
+    &payload,
+    "invoice:invoice_123:capture",
+);
+
+let mut tx = pool.begin().await?;
+// Write the application business/audit row with the same transaction.
+let outcome = record_job_enqueue_intent_tx(&mut tx, &intent).await?;
+if outcome.status == JobEnqueueIntentStatus::Conflicted {
+    return Err("the existing durable handoff is conflicted".into());
+}
+tx.commit().await?;
+```
+
+Recording requires `READ COMMITTED`, does not read or lock `job_definitions`,
+and does not create queue, attempt, or event rows. An exact retry returns the
+same intent even after promotion. A changed canonical request returns
+`job.intent_idempotency_conflict`. Once a compatible worker sees an enabled
+definition, promotion applies current definition defaults through ordinary
+enqueue semantics and links the intent to the resulting job. Missing, disabled,
+and unregistered types remain pending. Promotion runs on the worker poll cadence
+independently of execution permits; promoted work waits behind the ordinary
+queue's priority, scheduling, and concurrency controls. A deterministic
+collision with a different ordinary enqueue becomes `CONFLICTED`; Runledger
+does not guess whether replacement work is safe.
+Database-level promotion failures roll back only the affected job/event writes,
+leave the intent pending with exponential backoff capped at five minutes, and
+do not starve later eligible intents. Inspect `promotion_attempts`,
+`next_promotion_at`, `last_attempted_at`, and sanitized error fields through the
+intent read APIs. Promotion processes at most 24 intents per transaction,
+leaving headroom even when every row rolls back to its savepoint.
+Standard workers run at most one such pass per `poll_interval`. Database
+failures retry indefinitely so a prolonged outage cannot silently discard work;
+alert on oldest pending age, `retrying_count`, and `max_promotion_attempts` from
+`get_job_enqueue_intent_metrics`, then repair the database policy. Conflicted
+intents remain immutable evidence; safe replacement work requires a deliberately
+new application idempotency key.
+
+The maximum per-worker promotion drain rate is
+`min(claim_batch_size, 24) / poll_interval`. Pending and conflicted rows are
+durable idempotency/audit evidence, so Runledger does not expose a generic
+delete or cancel operation for them. Any application-specific abandonment
+workflow must define its own authorization, audit, and replacement-work policy.
+
+Deploy this capability in order:
+
+1. Apply migration `202608180001_job_enqueue_intents`.
+2. Deploy a compatible worker so promotion is active.
+3. Switch application writers to `record_job_enqueue_intent_tx`.
+4. Alert on oldest pending age and conflicts from
+   `get_job_enqueue_intent_metrics`.
+
+Queue retention must remove promoted-intent links first. In the same
+transaction that deletes selected queue rows, call
+`delete_promoted_job_enqueue_intents_for_jobs_tx` with those exact job IDs,
+then delete the jobs. Time cutoffs alone are insufficient because a new intent
+can converge on a much older existing job.
+
+For rollback, stop new intent writers first, let a compatible worker drain
+pending rows, and only then roll back worker code. Older workers safely ignore
+the additive table but cannot drain it. Do not drop the migration during an
+ordinary code rollback. For independent intent retention, choose a promoted-row
+window that satisfies the application's audit needs and call
+`delete_promoted_job_enqueue_intents_before` in bounded batches. Preserve and
+investigate conflicted rows. For queue retention, use the exact-ID transactional
+cleanup described above; the cutoff API is not a substitute for coordinating
+the two deletes.
+
+Intent payloads and idempotency keys cross the same trusted service and
+persistence boundary as queue payloads and keys. Do not put secrets in these
+fields or emit them in logs; scope lookup/list APIs behind application
+authentication and authorization.
 
 ## Low-Level Lease Lifecycle
 

@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                id,\n                status,\n                promoted_job_id,\n                enqueue_request = $4::jsonb AS \"enqueue_request_matches!\"\n             FROM job_enqueue_intents\n             WHERE job_type = $1\n               AND organization_id = $2\n               AND idempotency_key = $3\n             LIMIT 1\n             FOR KEY SHARE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "promoted_job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "enqueue_request_matches!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "fa4902675570c68961539aa7b4964faa23d60eb98ab203b4e03d57fee2a1c163"
+}

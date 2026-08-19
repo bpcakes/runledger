@@ -25,6 +25,7 @@ const WORKFLOW_ACTIVE_CLAIMS_MIGRATION_VERSION: i64 = 202607280002;
 const HANDLER_RETRY_AUDIT_MIGRATION_VERSION: i64 = 202607280003;
 const JOB_EXECUTION_RESOURCES_MIGRATION_VERSION: i64 = 202607280004;
 const WORKFLOW_RECOVERIES_MIGRATION_VERSION: i64 = 202607280005;
+const JOB_ENQUEUE_INTENTS_MIGRATION_VERSION: i64 = 202608180001;
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,
@@ -41,6 +42,10 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     JOB_EXECUTION_RESOURCES_MIGRATION_VERSION,
     // Adds recovery lineage and snapshots that legacy writers never invoke.
     WORKFLOW_RECOVERIES_MIGRATION_VERSION,
+    // Adds an opt-in intent table that older workers and non-retention writers
+    // ignore. Promoted rows deliberately fence linked-job deletion, so rollout
+    // must order application retention as documented by the public API.
+    JOB_ENQUEUE_INTENTS_MIGRATION_VERSION,
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 
@@ -179,6 +184,143 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
         .fetch_one(&harness.pool)
         .await
         .expect("read execution-resource lease enforcement trigger")
+    );
+
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('job_enqueue_intents')::text")
+            .fetch_one(&harness.pool)
+            .await
+            .expect("query job enqueue intents table"),
+        Some("job_enqueue_intents".to_owned())
+    );
+    let pending_intent_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_pending'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read pending intent index");
+    assert!(pending_intent_index.contains("(next_promotion_at, created_at, id)"));
+    assert!(pending_intent_index.contains("INCLUDE (job_type, enqueue_request_version)"));
+    assert!(pending_intent_index.contains("WHERE (status = 'PENDING'::text)"));
+    let pending_intent_type_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_pending_type'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read pending intent type index");
+    assert!(pending_intent_type_index.contains(
+        "(job_type, next_promotion_at, created_at, id) INCLUDE (enqueue_request_version)"
+    ));
+    assert!(pending_intent_type_index.contains("WHERE (status = 'PENDING'::text)"));
+    let promoted_job_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_promoted_job'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read promoted intent job index");
+    assert!(promoted_job_index.contains("(promoted_job_id)"));
+    assert!(promoted_job_index.contains("WHERE (promoted_job_id IS NOT NULL)"));
+    let intent_metrics_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_metrics'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read intent metrics index");
+    assert!(intent_metrics_index.contains("(job_type, status, created_at)"));
+    assert!(intent_metrics_index.contains("INCLUDE (promoted_at, promotion_attempts)"));
+    for index_name in [
+        "uq_job_enqueue_intents_type_idempotency_org",
+        "uq_job_enqueue_intents_type_idempotency_global",
+        "idx_job_enqueue_intents_org_created",
+        "idx_job_enqueue_intents_org_metrics",
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
+                .bind(index_name)
+                .fetch_one(&harness.pool)
+                .await
+                .expect("query enqueue intent index"),
+            Some(index_name.to_owned())
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT data_type
+             FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'job_enqueue_intents'
+               AND column_name = 'enqueue_request_version'",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read enqueue request version type"),
+        "smallint"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'job_enqueue_intents'
+               AND (
+                    (column_name = 'promotion_attempts' AND data_type = 'integer')
+                 OR (column_name = 'next_promotion_at' AND data_type = 'timestamp with time zone')
+                 OR (column_name = 'last_attempted_at' AND data_type = 'timestamp with time zone')
+               )",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read enqueue intent retry metadata columns"),
+        3
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conname = 'chk_job_enqueue_intents_promotion_attempts'
+                  AND conrelid = 'job_enqueue_intents'::regclass
+             )",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read enqueue intent promotion-attempt constraint")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT confdeltype::text
+             FROM pg_constraint
+             WHERE conname = 'fk_job_enqueue_intents_promoted_job'
+               AND conrelid = 'job_enqueue_intents'::regclass",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read promoted-job foreign-key delete action"),
+        "r"
+    );
+    let resource_constraint = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_constraintdef(oid)
+         FROM pg_constraint
+         WHERE conname = 'chk_job_enqueue_intents_execution_resource_key'
+           AND conrelid = 'job_enqueue_intents'::regclass",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read enqueue intent execution-resource constraint");
+    assert!(resource_constraint.contains("octet_length(execution_resource_key) <= 512"));
+    assert!(resource_constraint.contains("~"));
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conname = 'chk_job_enqueue_intents_state_fields'
+                  AND conrelid = 'job_enqueue_intents'::regclass
+             )",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read enqueue intent state constraint")
     );
 
     harness.teardown().await;

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_enqueue_intents\n         SET status = 'PROMOTED',\n             promotion_attempts = promotion_attempts + 1,\n             last_attempted_at = now(),\n             promoted_job_id = $2,\n             promoted_at = now(),\n             conflicted_at = NULL,\n             last_error_code = NULL,\n             last_error_message = NULL\n         WHERE id = $1\n           AND status = 'PENDING'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cba0ef53c9de6889c4322f07e5e7dabe940019dd144cd02a778f3d2b1e429e9f"
+}

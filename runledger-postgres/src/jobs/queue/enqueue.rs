@@ -1,4 +1,5 @@
 use chrono::SecondsFormat;
+use runledger_core::jobs::JobStage;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::types::Uuid;
@@ -9,6 +10,11 @@ use super::super::row_decode::parse_job_status;
 use super::super::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
 use super::super::types::{JobEnqueue, JobEnqueueDisposition, JobEnqueueOutcome};
 use super::events::{EnqueuedEventPayload, EnqueuedJobEvent, insert_enqueued_event_tx};
+
+// Snapshot upgrades are a multi-version consumer migration, not a constant
+// replacement: promoters must retain decoding/promotion paths for every version
+// that can remain pending until that version's backlog has drained.
+pub(super) const JOB_ENQUEUE_REQUEST_VERSION: i16 = 1;
 
 #[derive(sqlx::FromRow)]
 struct EnqueuedJobRow {
@@ -41,6 +47,15 @@ struct CanonicalJobEnqueueRequest<'a> {
 enum ExistingJobLock {
     KeyShare,
     MutationReady,
+}
+
+pub(super) enum IntentEnqueueResolution {
+    Enqueued(JobEnqueueOutcome),
+    DefinitionUnavailable,
+    Conflict {
+        code: &'static str,
+        client_message: &'static str,
+    },
 }
 
 /// Enqueues a job and returns the existing job id for an identical keyed retry.
@@ -118,6 +133,42 @@ pub(in crate::jobs) async fn enqueue_replayed_job_with_outcome_tx(
     .await
 }
 
+pub(super) async fn enqueue_job_from_intent_tx(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    payload: &JobEnqueue<'_>,
+    execution_resource_key: Option<&str>,
+) -> Result<IntentEnqueueResolution> {
+    debug_assert!(payload.idempotency_key.is_some());
+    let stage = payload.stage.unwrap_or(JobStage::Queued).as_db_value();
+    match enqueue_idempotent_job_with_existing_lock_read_committed_tx(
+        tx,
+        payload,
+        execution_resource_key,
+        ExistingJobLock::MutationReady,
+        EnqueuedEventPayload::Ordinary,
+        stage,
+    )
+    .await
+    {
+        Ok(outcome) => Ok(IntentEnqueueResolution::Enqueued(outcome)),
+        Err(Error::QueryError(error)) if error.code() == "job.definition_not_found_or_disabled" => {
+            Ok(IntentEnqueueResolution::DefinitionUnavailable)
+        }
+        Err(Error::QueryError(error))
+            if matches!(
+                error.code(),
+                "job.idempotency_conflict" | "job.legacy_idempotency_snapshot_missing"
+            ) =>
+        {
+            Ok(IntentEnqueueResolution::Conflict {
+                code: error.code(),
+                client_message: error.client_message(),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn enqueue_job_with_existing_lock_tx(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
@@ -193,7 +244,7 @@ async fn enqueue_job_with_existing_lock_tx_inner(
 ) -> Result<JobEnqueueOutcome> {
     let enqueue_request = payload
         .idempotency_key
-        .map(|_| canonical_job_enqueue_request(payload, stage, execution_resource_key))
+        .map(|_| canonical_job_enqueue_request_v1(payload, stage, execution_resource_key))
         .transpose()?;
     // The conflict clause is selected from static literals only; all request
     // data remains bound below. This dynamic SQL is not SQLx macro-checked, so
@@ -510,7 +561,7 @@ fn validate_existing_idempotent_job(
     }
 }
 
-fn canonical_job_enqueue_request(
+pub(super) fn canonical_job_enqueue_request_v1(
     payload: &JobEnqueue<'_>,
     stage: &'static str,
     execution_resource_key: Option<&str>,
@@ -538,7 +589,7 @@ fn canonical_job_enqueue_request(
     })
 }
 
-fn validate_execution_resource_key(execution_resource_key: &str) -> Result<()> {
+pub(super) fn validate_execution_resource_key(execution_resource_key: &str) -> Result<()> {
     if execution_resource_key.trim().is_empty() || execution_resource_key.len() > 512 {
         return Err(Error::QueryError(QueryError::from_classified(
             QueryErrorCategory::Validation,
@@ -629,10 +680,10 @@ mod idempotency_tests {
     use runledger_core::jobs::{JobStage, JobType};
     use serde_json::json;
 
-    use super::{JobEnqueue, canonical_job_enqueue_request};
+    use super::{JobEnqueue, canonical_job_enqueue_request_v1};
 
     #[test]
-    fn canonical_job_enqueue_request_matches_golden_snapshot() {
+    fn canonical_job_enqueue_request_v1_matches_golden_snapshot() {
         let payload = json!({"kind": "golden"});
         let enqueue = JobEnqueue {
             job_type: JobType::new("jobs.test.golden"),
@@ -651,7 +702,7 @@ mod idempotency_tests {
         };
 
         let canonical =
-            canonical_job_enqueue_request(&enqueue, JobStage::Scheduled.as_db_value(), None)
+            canonical_job_enqueue_request_v1(&enqueue, JobStage::Scheduled.as_db_value(), None)
                 .expect("canonicalize job enqueue");
 
         assert_eq!(

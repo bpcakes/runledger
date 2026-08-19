@@ -26,6 +26,7 @@ can be imported together.
 | Need | Use |
 | --- | --- |
 | One independent retried unit of work | `enqueue_job` with `JobEnqueue` |
+| Commit application state and future work before its definition exists | `JobEnqueueIntent` + `record_job_enqueue_intent_tx` |
 | Multi-step work with dependencies | `WorkflowDagBuilder` (simple) or workflow run/step builders (advanced) |
 | Multi-step work with a durable JSON result | Declare a result step and use workflow handle APIs |
 | Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal` |
@@ -46,6 +47,16 @@ Use `set_job_schedule_active` to pause/resume schedules and
 `set_job_schedule_next_fire_at` to retime a schedule cursor.
 Use `runledger_postgres::jobs::count_workflow_runs` with
 `runledger_postgres::jobs::WorkflowRunCountFilter` for workflow counters.
+
+For transactional handoff before a job definition exists, record a strictly
+idempotent `JobEnqueueIntent` in the application's `READ COMMITTED` transaction.
+A standard worker later promotes registered, enabled types through the ordinary
+enqueue path. Database failures defer only the affected intent with bounded
+backoff and retry indefinitely; inspect promotion attempt/error metadata and
+monitor pending age and conflicts. Treat intent payloads and keys as sensitive
+queue data and do not log them. Queue retention must call
+`delete_promoted_job_enqueue_intents_for_jobs_tx` for its exact selected job IDs
+before deleting those jobs in the same transaction.
 
 ## Workflow DAG Rule
 

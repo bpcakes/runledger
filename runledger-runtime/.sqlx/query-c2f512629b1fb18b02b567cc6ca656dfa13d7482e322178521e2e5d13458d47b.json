@@ -1,0 +1,96 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            intent.id,\n            intent.job_type,\n            intent.organization_id,\n            intent.payload,\n            intent.priority,\n            intent.max_attempts,\n            intent.timeout_seconds,\n            intent.next_run_at,\n            intent.idempotency_key,\n            intent.stage,\n            intent.enqueue_request_version,\n            intent.enqueue_request,\n            intent.execution_resource_key\n         FROM job_enqueue_intents intent\n         INNER JOIN job_definitions definition\n            ON definition.job_type = intent.job_type\n           AND definition.is_enabled = true\n         WHERE intent.status = 'PENDING'\n           AND intent.enqueue_request_version = $3\n           AND intent.next_promotion_at <= now()\n           AND intent.job_type = ANY($1::text[])\n         ORDER BY intent.next_promotion_at, intent.created_at, intent.id\n         LIMIT $2\n         FOR NO KEY UPDATE OF intent SKIP LOCKED",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "next_run_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "idempotency_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "enqueue_request_version",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 11,
+        "name": "enqueue_request",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 12,
+        "name": "execution_resource_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int8",
+        "Int2"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c2f512629b1fb18b02b567cc6ca656dfa13d7482e322178521e2e5d13458d47b"
+}

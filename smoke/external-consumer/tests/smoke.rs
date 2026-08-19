@@ -12,10 +12,11 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::{
     self, CompareAndReplaySucceededJob, CompareAndReplaySucceededJobOutcome, CompareAndRequeueJob,
     CompareAndRequeueJobOutcome, JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition,
-    JobListFilter, JobQueueRecord, JobRequeueStatePolicy, JobScope,
-    compare_and_replay_succeeded_job, compare_and_replay_succeeded_job_tx, compare_and_requeue_job,
-    compare_and_requeue_job_tx, enqueue_job_with_outcome_tx, get_job_by_id,
-    get_job_continuation_metrics, upsert_job_definition_tx,
+    JobEnqueueIntent, JobEnqueueIntentStatus, JobListFilter, JobQueueRecord, JobRequeueStatePolicy,
+    JobScope, compare_and_replay_succeeded_job, compare_and_replay_succeeded_job_tx,
+    compare_and_requeue_job, compare_and_requeue_job_tx, enqueue_job_with_outcome_tx,
+    get_job_by_id, get_job_continuation_metrics, get_job_enqueue_intent_by_id,
+    record_job_enqueue_intent_tx, upsert_job_definition_tx,
 };
 use runledger_postgres::prelude::{
     DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord, list_job_events,
@@ -58,6 +59,40 @@ async fn packaged_crates_support_external_consumer_embedding() {
     create_consumer_audit_table(&harness.pool)
         .await
         .expect("create consumer-owned audit table");
+
+    let intent_payload = json!({"kind": "success", "source": "transactional-intent"});
+    let intent_request = JobEnqueueIntent::new(
+        JobType::new(SMOKE_JOB_TYPE),
+        &intent_payload,
+        "external-smoke-transactional-intent",
+    );
+    let mut intent_tx = harness
+        .pool
+        .begin()
+        .await
+        .expect("begin consumer-owned intent transaction");
+    let recorded_intent = record_job_enqueue_intent_tx(&mut intent_tx, &intent_request)
+        .await
+        .expect("record intent before job definition");
+    record_consumer_audit_tx(
+        &mut intent_tx,
+        "transactional-enqueue-intent",
+        recorded_intent.intent_id,
+        recorded_intent.intent_id,
+    )
+    .await
+    .expect("record consumer audit beside enqueue intent");
+    intent_tx
+        .commit()
+        .await
+        .expect("commit consumer audit and enqueue intent atomically");
+    assert_consumer_audit(
+        &harness.pool,
+        "transactional-enqueue-intent",
+        recorded_intent.intent_id,
+        recorded_intent.intent_id,
+    )
+    .await;
 
     let hang_release = Arc::new(Notify::new());
     let dead_letters = Arc::new(Mutex::new(Vec::new()));
@@ -257,6 +292,9 @@ async fn packaged_crates_support_external_consumer_embedding() {
     ));
 
     let success_job_id = enqueue_kind(&harness.pool, "success").await;
+    let intent_job_id = wait_for_promoted_intent(&harness.pool, recorded_intent.intent_id).await;
+    let intent_job = wait_for_status(&harness.pool, intent_job_id, JobStatus::Succeeded).await;
+    assert_eq!(intent_job.payload, intent_payload);
     let continuation_job_id = enqueue_payload(
         &harness.pool,
         &json!({
@@ -1020,6 +1058,30 @@ async fn expire_job_lease(pool: &DbPool, job_id: sqlx::types::Uuid) -> Result<()
     .await?;
 
     Ok(())
+}
+
+async fn wait_for_promoted_intent(
+    pool: &DbPool,
+    intent_id: sqlx::types::Uuid,
+) -> sqlx::types::Uuid {
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        let intent = get_job_enqueue_intent_by_id(pool, None, intent_id)
+            .await
+            .expect("load enqueue intent")
+            .expect("enqueue intent should exist");
+        if intent.status == JobEnqueueIntentStatus::Promoted {
+            return intent.promoted_job_id.expect("promoted intent has job id");
+        }
+
+        assert_eq!(intent.status, JobEnqueueIntentStatus::Pending);
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for enqueue intent {intent_id} to be promoted"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn wait_for_status(

@@ -42,6 +42,254 @@ pub struct JobEnqueueOutcome {
     pub disposition: JobEnqueueDisposition,
 }
 
+/// A durable request to enqueue a job after its definition becomes available.
+///
+/// Recording an intent does not read `job_definitions` and does not create a
+/// queue row. Every intent is strictly idempotent; retries must preserve every
+/// requested enqueue field.
+#[derive(Clone, Debug)]
+pub struct JobEnqueueIntent<'a> {
+    job_type: JobType<'a>,
+    organization_id: Option<Uuid>,
+    payload: &'a Value,
+    priority: Option<i32>,
+    max_attempts: Option<i32>,
+    timeout_seconds: Option<i32>,
+    next_run_at: Option<DateTime<Utc>>,
+    idempotency_key: &'a str,
+    stage: Option<JobStage>,
+    execution_resource_key: Option<&'a str>,
+}
+
+impl<'a> JobEnqueueIntent<'a> {
+    #[must_use]
+    pub fn new(job_type: JobType<'a>, payload: &'a Value, idempotency_key: &'a str) -> Self {
+        Self {
+            job_type,
+            organization_id: None,
+            payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key,
+            stage: None,
+            execution_resource_key: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_organization_id(mut self, organization_id: Uuid) -> Self {
+        self.organization_id = Some(organization_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_attempts(mut self, max_attempts: i32) -> Self {
+        self.max_attempts = Some(max_attempts);
+        self
+    }
+
+    #[must_use]
+    pub fn with_timeout_seconds(mut self, timeout_seconds: i32) -> Self {
+        self.timeout_seconds = Some(timeout_seconds);
+        self
+    }
+
+    #[must_use]
+    pub fn with_next_run_at(mut self, next_run_at: DateTime<Utc>) -> Self {
+        self.next_run_at = Some(next_run_at);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stage(mut self, stage: JobStage) -> Self {
+        self.stage = Some(stage);
+        self
+    }
+
+    #[must_use]
+    pub fn with_execution_resource(mut self, execution_resource_key: &'a str) -> Self {
+        self.execution_resource_key = Some(execution_resource_key);
+        self
+    }
+
+    pub(crate) fn as_job_enqueue(&self) -> JobEnqueue<'a> {
+        JobEnqueue {
+            job_type: self.job_type,
+            organization_id: self.organization_id,
+            payload: self.payload,
+            priority: self.priority,
+            max_attempts: self.max_attempts,
+            timeout_seconds: self.timeout_seconds,
+            next_run_at: self.next_run_at,
+            idempotency_key: Some(self.idempotency_key),
+            stage: self.stage,
+        }
+    }
+
+    pub(crate) fn execution_resource_key(&self) -> Option<&'a str> {
+        self.execution_resource_key
+    }
+}
+
+/// Durable lifecycle state of a job enqueue intent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum JobEnqueueIntentStatus {
+    Pending,
+    Promoted,
+    Conflicted,
+}
+
+impl JobEnqueueIntentStatus {
+    #[must_use]
+    pub const fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::Promoted => "PROMOTED",
+            Self::Conflicted => "CONFLICTED",
+        }
+    }
+}
+
+impl std::str::FromStr for JobEnqueueIntentStatus {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "PENDING" => Ok(Self::Pending),
+            "PROMOTED" => Ok(Self::Promoted),
+            "CONFLICTED" => Ok(Self::Conflicted),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Whether an intent record call inserted a row or resolved an existing retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum JobEnqueueIntentDisposition {
+    Inserted,
+    Existing,
+}
+
+/// Stable state returned by an intent record call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[must_use = "callers must inspect whether the intent is pending, promoted, or conflicted"]
+#[non_exhaustive]
+pub struct JobEnqueueIntentOutcome {
+    pub intent_id: Uuid,
+    pub status: JobEnqueueIntentStatus,
+    pub promoted_job_id: Option<Uuid>,
+    pub disposition: JobEnqueueIntentDisposition,
+}
+
+/// Persisted enqueue intent returned by lookup and list APIs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct JobEnqueueIntentRecord {
+    pub id: Uuid,
+    pub job_type: JobTypeName,
+    pub organization_id: Option<Uuid>,
+    pub payload: Value,
+    pub priority: Option<i32>,
+    pub max_attempts: Option<i32>,
+    pub timeout_seconds: Option<i32>,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub idempotency_key: String,
+    pub stage: JobStage,
+    pub enqueue_request_version: i16,
+    pub execution_resource_key: Option<String>,
+    pub promotion_attempts: i32,
+    pub next_promotion_at: DateTime<Utc>,
+    pub last_attempted_at: Option<DateTime<Utc>>,
+    pub status: JobEnqueueIntentStatus,
+    pub promoted_job_id: Option<Uuid>,
+    pub promoted_at: Option<DateTime<Utc>>,
+    pub conflicted_at: Option<DateTime<Utc>>,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Bounded filters for listing durable enqueue intents.
+#[derive(Clone, Debug)]
+pub struct JobEnqueueIntentListFilter<'a> {
+    pub(crate) organization_id: Option<Uuid>,
+    pub(crate) status: Option<JobEnqueueIntentStatus>,
+    pub(crate) job_type_query: Option<&'a str>,
+    pub(crate) limit: i64,
+    pub(crate) offset: i64,
+}
+
+impl<'a> JobEnqueueIntentListFilter<'a> {
+    #[must_use]
+    pub const fn new(limit: i64, offset: i64) -> Self {
+        Self {
+            organization_id: None,
+            status: None,
+            job_type_query: None,
+            limit,
+            offset,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_organization_id(mut self, organization_id: Uuid) -> Self {
+        self.organization_id = Some(organization_id);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_status(mut self, status: JobEnqueueIntentStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Filters by a case-insensitive job-type substring.
+    ///
+    /// PostgreSQL `ILIKE` metacharacters in `job_type_query` retain their
+    /// normal wildcard meaning, matching the crate's other admin filters.
+    #[must_use]
+    pub const fn with_job_type_query(mut self, job_type_query: &'a str) -> Self {
+        self.job_type_query = Some(job_type_query);
+        self
+    }
+}
+
+/// Operational backlog signals for one intent job type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct JobEnqueueIntentMetricsRecord {
+    pub job_type: JobTypeName,
+    pub pending_count: i64,
+    pub retrying_count: i64,
+    pub max_promotion_attempts: i32,
+    pub conflicted_count: i64,
+    pub promoted_24h: i64,
+    pub oldest_pending_at: Option<DateTime<Utc>>,
+}
+
+/// Results from one bounded intent promotion pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct JobEnqueueIntentPromotionReport {
+    pub inserted_jobs: u64,
+    pub existing_jobs: u64,
+    pub conflicted: u64,
+    pub definition_unavailable: u64,
+    pub retry_deferred: u64,
+    pub total_promoted: u64,
+}
+
 /// Exact tenant scope for a job mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobScope {

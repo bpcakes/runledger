@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobStatus, JobType};
 use runledger_postgres::jobs::{
-    JobDefinitionUpsert, JobEnqueue, enqueue_job, get_job_by_id, upsert_job_definition_tx,
+    JobDefinitionUpsert, JobEnqueue, JobEnqueueIntent, JobEnqueueIntentStatus, enqueue_job,
+    get_job_by_id, get_job_enqueue_intent_by_id, record_job_enqueue_intent,
+    upsert_job_definition_tx,
 };
 use runledger_runtime::RuntimeLoopExit;
 use runledger_runtime::config::JobsConfig;
@@ -126,7 +128,200 @@ async fn fail_stage_changed_inserts_for_job(pool: &sqlx::PgPool, job_id: uuid::U
 }
 
 #[tokio::test]
-async fn worker_shutdown_interrupts_poll_wait_when_no_permits_available() {
+async fn worker_promotes_registered_intents_and_leaves_unregistered_types_pending() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_enqueue_intents", 8).await;
+    let registered_type = JobType::new("jobs.test.intent_registered");
+    let unregistered_type = JobType::new("jobs.test.intent_unregistered");
+    let registered_payload = json!({"kind": "registered-intent"});
+    let unregistered_payload = json!({"kind": "unregistered-intent"});
+
+    let registered_intent = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(registered_type, &registered_payload, "registered-intent"),
+    )
+    .await
+    .expect("record registered intent before definition");
+    let unregistered_intent = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(
+            unregistered_type,
+            &unregistered_payload,
+            "unregistered-intent",
+        ),
+    )
+    .await
+    .expect("record unregistered intent before definition");
+
+    let mut tx = pool.begin().await.expect("begin definition transaction");
+    for job_type in [registered_type, unregistered_type] {
+        upsert_job_definition_tx(
+            &mut tx,
+            &JobDefinitionUpsert {
+                job_type,
+                version: 1,
+                max_attempts: 3,
+                default_timeout_seconds: 30,
+                default_priority: 100,
+                is_enabled: true,
+            },
+        )
+        .await
+        .expect("upsert intent job definition");
+    }
+    tx.commit().await.expect("commit definitions");
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = JobRegistry::new();
+    registry.register(CountingHandler {
+        job_type: registered_type,
+        runs: Arc::clone(&runs),
+    });
+    let config = JobsConfig {
+        worker_id: "intent-promotion-worker".to_owned(),
+        poll_interval: Duration::from_millis(25),
+        claim_batch_size: 2,
+        lease_ttl_seconds: 30,
+        max_global_concurrency: 2,
+        reaper_interval: Duration::from_secs(30),
+        schedule_poll_interval: Duration::from_secs(30),
+        reaper_retry_delay_ms: 1_000,
+    };
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let worker_task = tokio::spawn(run_worker_loop(pool.clone(), registry, config, shutdown_rx));
+
+    timeout(Duration::from_secs(5), async {
+        while runs.load(Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("registered intent should be promoted and executed");
+
+    shutdown_tx.send(true).expect("send worker shutdown");
+    assert_eq!(
+        timeout(Duration::from_secs(5), worker_task)
+            .await
+            .expect("worker shutdown timeout")
+            .expect("worker task must not panic"),
+        RuntimeLoopExit::Shutdown
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    let registered = get_job_enqueue_intent_by_id(&pool, None, registered_intent.intent_id)
+        .await
+        .expect("load registered intent")
+        .expect("registered intent exists");
+    assert_eq!(registered.status, JobEnqueueIntentStatus::Promoted);
+    let job = get_job_by_id(
+        &pool,
+        None,
+        registered.promoted_job_id.expect("promoted job id"),
+    )
+    .await
+    .expect("load promoted job")
+    .expect("promoted job exists");
+    assert_eq!(job.status, JobStatus::Succeeded);
+
+    let unregistered = get_job_enqueue_intent_by_id(&pool, None, unregistered_intent.intent_id)
+        .await
+        .expect("load unregistered intent")
+        .expect("unregistered intent exists");
+    assert_eq!(unregistered.status, JobEnqueueIntentStatus::Pending);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn worker_claims_existing_jobs_when_intent_promotion_fails() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_intent_promotion_failure", 8).await;
+    let job_type = JobType::new("jobs.test.intent_promotion_failure");
+
+    let mut tx = pool.begin().await.expect("begin definition transaction");
+    upsert_job_definition_tx(
+        &mut tx,
+        &JobDefinitionUpsert {
+            job_type,
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 30,
+            default_priority: 100,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert job definition");
+    tx.commit().await.expect("commit definition");
+
+    let payload = json!({"kind": "survives-promotion-failure"});
+    let job_id = enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type,
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: Some("survives-promotion-failure"),
+            stage: None,
+        },
+    )
+    .await
+    .expect("enqueue existing job");
+
+    sqlx::query("DROP TABLE job_enqueue_intents")
+        .execute(&pool)
+        .await
+        .expect("make intent promotion fail");
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = JobRegistry::new();
+    registry.register(CountingHandler {
+        job_type,
+        runs: Arc::clone(&runs),
+    });
+    let config = JobsConfig {
+        worker_id: "intent-promotion-failure-worker".to_owned(),
+        poll_interval: Duration::from_millis(25),
+        claim_batch_size: 1,
+        lease_ttl_seconds: 30,
+        max_global_concurrency: 1,
+        reaper_interval: Duration::from_secs(30),
+        schedule_poll_interval: Duration::from_secs(30),
+        reaper_retry_delay_ms: 1_000,
+    };
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let worker_task = tokio::spawn(run_worker_loop(pool.clone(), registry, config, shutdown_rx));
+
+    timeout(Duration::from_secs(5), async {
+        while runs.load(Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("existing queue work should run despite promotion failure");
+
+    shutdown_tx.send(true).expect("send worker shutdown");
+    assert_eq!(
+        timeout(Duration::from_secs(5), worker_task)
+            .await
+            .expect("worker shutdown timeout")
+            .expect("worker task must not panic"),
+        RuntimeLoopExit::Shutdown
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let job = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job")
+        .expect("job exists");
+    assert_eq!(job.status, JobStatus::Succeeded);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn worker_promotes_intents_while_saturated_and_shutdown_interrupts_wait() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_shutdown_wait", 8).await;
 
     let mut tx = pool.begin().await.expect("begin tx");
@@ -193,7 +388,40 @@ async fn worker_shutdown_interrupts_poll_wait_when_no_permits_available() {
         sleep(Duration::from_millis(25)).await;
     }
 
+    let saturated_intent_payload = json!({"kind": "queues-while-saturated"});
+    let saturated_intent = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(
+            JobType::new("jobs.test.shutdown_wait"),
+            &saturated_intent_payload,
+            "queues-while-saturated",
+        ),
+    )
+    .await
+    .expect("record intent while worker is saturated");
+
     sleep(poll_interval + Duration::from_millis(300)).await;
+
+    let saturated_intent = get_job_enqueue_intent_by_id(&pool, None, saturated_intent.intent_id)
+        .await
+        .expect("load saturated intent")
+        .expect("saturated intent exists");
+    assert_eq!(saturated_intent.status, JobEnqueueIntentStatus::Promoted);
+    assert_eq!(
+        get_job_by_id(
+            &pool,
+            None,
+            saturated_intent
+                .promoted_job_id
+                .expect("promoted intent links its queued job"),
+        )
+        .await
+        .expect("load job queued while saturated")
+        .expect("job queued while saturated exists")
+        .status,
+        JobStatus::Pending,
+        "the ordinary queue, not execution permits, provides promotion backpressure"
+    );
 
     let shutdown_sent_at = Instant::now();
     let _ = shutdown_tx.send(true);

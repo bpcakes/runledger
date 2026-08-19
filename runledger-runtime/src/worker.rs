@@ -5,6 +5,7 @@ use runledger_core::jobs::JobType;
 use runledger_postgres::jobs;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tracing::{error, info, warn};
 
 mod completion;
@@ -59,6 +60,7 @@ struct WorkerLoop {
     terminal_observer_tasks: TerminalObserverTasks,
     join_set: JoinSet<()>,
     semaphore: Arc<Semaphore>,
+    intent_promotion_cadence: IntentPromotionCadence,
     claimable_job_types: Vec<JobType<'static>>,
     registry: Arc<JobRegistry>,
     observers: JobLifecycleObservers,
@@ -77,6 +79,26 @@ enum SpawnClaimedJobsOutcome {
     SemaphoreClosed,
 }
 
+struct IntentPromotionCadence {
+    next_at: Instant,
+}
+
+impl IntentPromotionCadence {
+    fn new(now: Instant) -> Self {
+        Self { next_at: now }
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        now >= self.next_at
+    }
+
+    fn schedule_after(&mut self, completed_at: Instant, interval: std::time::Duration) {
+        // Schedule from completion time so a slow pass neither accumulates
+        // missed intervals nor triggers an immediate catch-up pass.
+        self.next_at = completed_at.checked_add(interval).unwrap_or(completed_at);
+    }
+}
+
 impl WorkerLoop {
     fn new(
         pool: runledger_postgres::DbPool,
@@ -90,11 +112,13 @@ impl WorkerLoop {
         let semaphore = Arc::new(Semaphore::new(config.max_global_concurrency));
         let join_set = JoinSet::new();
         let terminal_observer_tasks = TerminalObserverTasks::owned();
+        let intent_promotion_cadence = IntentPromotionCadence::new(Instant::now());
 
         Self {
             terminal_observer_tasks,
             join_set,
             semaphore,
+            intent_promotion_cadence,
             claimable_job_types,
             registry,
             observers,
@@ -126,6 +150,12 @@ impl WorkerLoop {
                 return WorkerLoopControl::Drain(RuntimeLoopExit::Shutdown);
             }
             return WorkerLoopControl::Continue;
+        }
+
+        if self.intent_promotion_cadence.is_due(Instant::now()) {
+            self.promote_intents(self.config.claim_batch_size).await;
+            self.intent_promotion_cadence
+                .schedule_after(Instant::now(), self.config.poll_interval);
         }
 
         let available = self.semaphore.available_permits();
@@ -182,6 +212,22 @@ impl WorkerLoop {
                 warn!(%error, "worker claim failed");
                 Vec::new()
             }
+        }
+    }
+
+    async fn promote_intents(&self, limit: i64) {
+        if let Err(error) = jobs::promote_job_enqueue_intents_for_types(
+            &self.pool,
+            &self.claimable_job_types,
+            limit,
+        )
+        .await
+        {
+            warn!(
+                worker_id = %self.config.worker_id,
+                %error,
+                "worker job enqueue intent promotion failed"
+            );
         }
     }
 

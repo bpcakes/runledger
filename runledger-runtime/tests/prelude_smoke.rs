@@ -39,6 +39,12 @@ async fn all_preludes_can_be_glob_imported_together() {
         idempotency_key: Some("prelude:smoke"),
         stage: Some(JobStage::Queued),
     };
+    let _intent = JobEnqueueIntent::new(
+        JobType::new("jobs.prelude.smoke"),
+        &payload,
+        "prelude:intent",
+    )
+    .with_stage(JobStage::Queued);
 
     let metadata = json!({ "source": "prelude_smoke" });
     let first = WorkflowStepEnqueueBuilder::new(

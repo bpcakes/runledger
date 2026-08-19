@@ -237,6 +237,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | Need | Prefer |
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
+| Commit application state and a future job request before its definition exists | `JobEnqueueIntent` and `record_job_enqueue_intent_tx` |
 | Multi-step work with dependencies | `WorkflowDagBuilder` (simple DAGs), or `WorkflowRunEnqueueBuilder` / `WorkflowStepEnqueueBuilder` (advanced), then `enqueue_workflow_run` |
 | Multi-step work with a durable JSON result | Declare a result step, enqueue with `enqueue_workflow_run_handle`, then call `WorkflowRunHandle::get_result` |
 | Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal` (or lower-level `depends_on_success` / `depends_on_terminal`) |
@@ -251,6 +252,78 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | Recover a terminal workflow without rewriting history | `recover_workflow_run` |
 | Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
 | Admin/status views | `runledger_postgres::jobs` read/list/count APIs, including `count_workflow_runs` |
+
+### Durable transactional handoff
+
+Use `record_job_enqueue_intent_tx` when an application mutation and its request
+for background work must commit in the same PostgreSQL transaction, but the job
+definition may not exist yet. Recording an intent does not read or lock
+`job_definitions` and does not create a `job_queue` row. Every intent requires an
+idempotency key; retrying with the same canonical request returns the existing
+intent, while changing the payload or another enqueue field returns
+`job.intent_idempotency_conflict`.
+
+```rust
+let payload = serde_json::json!({"invoice_id": "invoice_123"});
+let intent = runledger_postgres::jobs::JobEnqueueIntent::new(
+    runledger_core::jobs::JobType::new("billing.invoice.capture"),
+    &payload,
+    "invoice:invoice_123:capture",
+);
+
+let mut tx = pool.begin().await?;
+// Persist the application's business or audit mutation with this same `tx`.
+let outcome = runledger_postgres::jobs::record_job_enqueue_intent_tx(
+    &mut tx,
+    &intent,
+).await?;
+if outcome.status == runledger_postgres::jobs::JobEnqueueIntentStatus::Conflicted {
+    return Err("the existing durable handoff is conflicted".into());
+}
+tx.commit().await?;
+```
+
+A standard Runledger worker promotes pending intents only for its registered
+handler types once their definitions are enabled. Promotion uses ordinary
+enqueue semantics and creates the normal `ENQUEUED` audit event. Missing,
+disabled, and unregistered types remain pending without consuming attempts.
+Promotion runs one database pass on the worker poll cadence independently of
+execution permits, including when no intents exist.
+Promoted work waits in the ordinary queue, where priority, scheduling, queue
+metrics, and worker concurrency provide the normal backpressure.
+Database-level promotion failures roll back only the affected queue/event
+writes, leave that intent pending with bounded exponential backoff, and allow
+later intents in the batch to continue. Lookup/list records expose
+`promotion_attempts`, `next_promotion_at`, `last_attempted_at`, and the sanitized
+last error. One public promotion pass is capped at 24 rows to keep worst-case
+failed-savepoint headroom
+below PostgreSQL's cached-subtransaction threshold.
+The maximum per-worker drain rate is therefore
+`min(claim_batch_size, 24) / poll_interval`; size pending-age alerts and rollout
+drain expectations accordingly.
+Database failures remain pending and retry indefinitely: Runledger must not
+turn a long outage into silently lost work. Alert on pending age and
+`promotion_attempts`; repair the rejecting database policy. Runledger keeps
+conflicted intents as immutable evidence; if replacement work is safe, the
+application must submit it deliberately under a new idempotency key.
+Query `get_job_enqueue_intent_metrics` to alert on oldest pending age,
+`retrying_count`, `max_promotion_attempts`, and increases in conflict count.
+Pending and conflicted rows remain idempotency/audit evidence and have no
+generic delete or cancel API: correcting or abandoning unexecuted application
+work requires an application-owned authorization and audit policy rather than
+a library-wide data-loss operation. Retention is
+application policy: use the bounded cutoff cleanup API after audit requirements
+are met, and remediate conflicted rows explicitly rather than deleting them
+automatically. A promoted intent retains its job with `ON DELETE RESTRICT`.
+When purging selected `job_queue` rows, call
+`delete_promoted_job_enqueue_intents_for_jobs_tx` for those exact job IDs first
+and delete the jobs in the same transaction. A newly promoted intent may link
+to a much older existing job, so independent time windows cannot guarantee the
+required ordering.
+
+Intent payloads and idempotency keys have the same trust boundary as queue
+payloads and keys. Treat them as sensitive application data and do not log them
+casually.
 
 For ordinary dependent work, **do not** poll `get_job_by_id` in a loop, enqueue
 dependent jobs from parent handlers, encode dependency state in payload JSON, or
@@ -941,7 +1014,8 @@ loops can return `RuntimeLoopExit::InvalidConfig`.
 
 The schema is limited to Runledger-owned objects:
 
-- **Queue and lifecycle:** `job_definitions`, `job_queue`, `job_attempts`,
+- **Queue and lifecycle:** `job_definitions`, `job_queue`,
+  `job_enqueue_intents`, `job_attempts`,
   `job_events`, `job_dead_letters`, `job_schedules`,
   `job_execution_resource_claims`
 - **Workflow orchestration:** `workflow_runs`, `workflow_steps`,
@@ -1010,10 +1084,14 @@ forward migrations:
   and database triggers that enforce and release exact ownership.
 - `202607280005_workflow_recoveries` — identifies append mutation records and
   adds immutable workflow-recovery lineage plus request idempotency.
+- `202608180001_job_enqueue_intents` — adds durable, strictly idempotent
+  transactional handoff records, promotion/conflict state, backlog indexes,
+  and promoted-row retention support. It is additive and intentionally remains
+  outside the custom compatibility fence during the expand-first rollout.
 
 Every forward migration from
 `202607190001_job_replays_and_continuation_metrics` through
-`202607280005_workflow_recoveries` is recorded and checksum-validated in
+`202608180001_job_enqueue_intents` is recorded and checksum-validated in
 `_sqlx_migrations` but deliberately omitted from the custom
 `runledger_migration_history` compatibility fence. This lets released filtered
 startup helpers coexist during the documented expand-first windows; it does
@@ -1242,9 +1320,20 @@ cargo check -p runledger-tui
 Tests fall into two categories:
 
 - **Pure Rust unit tests** — no PostgreSQL required.
-- **DB-backed tests** — use `runledger-test-support` and `testcontainers`. They
-  start a shared PostgreSQL container, create an isolated ephemeral database per
-  test, and apply the local Runledger migrations.
+- **DB-backed tests** — use `runledger-test-support` and `testcontainers`. Each
+  Rust test process starts one shared PostgreSQL container, creates an isolated
+  ephemeral database per test, and applies the local Runledger migrations.
+
+When a compatible Docker CLI is available, the shared-container harness starts
+a separate process-liveness reaper and removes the container and its anonymous
+volumes after normal process exit or abrupt test process termination. Set
+`RUNLEDGER_TEST_DOCKER_CLI` to an alternate CLI path when `docker` is not on
+`PATH`. If the optional CLI is unavailable, DB-backed tests still run through
+the configured Testcontainers daemon and emit a warning that the additional
+process-liveness cleanup is disabled. `TESTCONTAINERS_COMMAND=keep`
+deliberately disables cleanup for debugging. Supplying
+`RUNLEDGER_TEST_ADMIN_DATABASE_URL` uses that external PostgreSQL instance and
+does not start a container or reaper.
 
 The packaged external-consumer smoke test packages `runledger-core`,
 `runledger-test-support`, `runledger-postgres`, and `runledger-runtime`,
