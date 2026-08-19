@@ -994,10 +994,11 @@ async fn mark_intent_retry_deferred_tx(
 ///
 /// Pending and conflicted rows are never selected. Runledger does not schedule
 /// this cleanup automatically; the embedding application owns its retention
-/// window. This cutoff cleanup does not make linked jobs independently eligible
-/// for deletion: queue retention must call
-/// [`delete_promoted_job_enqueue_intents_for_jobs_tx`] for its exact selected
-/// job IDs before deleting those jobs in the same transaction.
+/// window. This cutoff cleanup removes the retention fence from every linked
+/// job whose intent it deletes, but it is not coordinated with job retention.
+/// Queue retention that needs atomic fence removal must instead call
+/// [`delete_promoted_job_enqueue_intents_for_jobs_tx`] for its exact selected job
+/// IDs before deleting those jobs in the same transaction.
 pub async fn delete_promoted_job_enqueue_intents_before(
     pool: &DbPool,
     cutoff: DateTime<Utc>,
