@@ -85,16 +85,19 @@ same intent even after promotion. A changed canonical request returns
 `job.intent_idempotency_conflict`. Once a compatible worker sees an enabled
 definition, promotion applies current definition defaults through ordinary
 enqueue semantics and links the intent to the resulting job. Missing, disabled,
-and unregistered types remain pending. Promotion runs on the worker poll cadence
-independently of execution permits; promoted work waits behind the ordinary
-queue's priority, scheduling, and concurrency controls. A deterministic
+and unregistered types remain pending. A dedicated promoter loop runs on the
+worker poll cadence independently of queue claiming and execution permits;
+promoted work waits behind the ordinary queue's priority, scheduling, and
+concurrency controls. A deterministic
 collision with a different ordinary enqueue becomes `CONFLICTED`; Runledger
 does not guess whether replacement work is safe.
 Database-level promotion failures roll back only the affected job/event writes,
 leave the intent pending with exponential backoff capped at five minutes, and
 do not starve later eligible intents. Inspect `promotion_attempts`,
 `next_promotion_at`, `last_attempted_at`, and sanitized error fields through the
-intent read APIs. Promotion processes at most 24 intents per transaction,
+intent read APIs. Canonical-snapshot drift is also deferred so an operator can
+restore consistency and retry the same durable request. Promotion processes at
+most 24 intents per transaction,
 leaving headroom even when every row rolls back to its savepoint.
 Standard workers run at most one such pass per `poll_interval`. Database
 failures retry indefinitely so a prolonged outage cannot silently discard work;

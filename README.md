@@ -306,7 +306,10 @@ The maximum per-worker drain rate is therefore
 drain expectations accordingly.
 Database failures remain pending and retry indefinitely: Runledger must not
 turn a long outage into silently lost work. Alert on pending age and
-`promotion_attempts`; repair the rejecting database policy. Runledger keeps
+`promotion_attempts`; repair the rejecting database policy. A mismatch between
+an intent's canonical snapshot and its redundant enqueue columns is likewise
+deferred, so an operator can restore consistency and retry without replacing
+the durable request. Runledger keeps
 conflicted intents as immutable evidence; if replacement work is safe, the
 application must submit it deliberately under a new idempotency key.
 Query `get_job_enqueue_intent_metrics` to alert on oldest pending age,

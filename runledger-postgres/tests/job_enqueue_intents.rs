@@ -709,7 +709,7 @@ async fn concurrent_promoters_create_one_job() {
 }
 
 #[tokio::test]
-async fn deterministic_poison_row_conflicts_without_starving_later_intents() {
+async fn snapshot_drift_defers_without_starving_and_promotes_after_repair() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_poison_row", 4).await;
     register_test_job_definition(&pool, JOB_TYPE).await;
     let poison_payload = json!({"event": "poison"});
@@ -726,6 +726,13 @@ async fn deterministic_poison_row_conflicts_without_starving_later_intents() {
     )
     .await
     .expect("record healthy intent");
+    let original_snapshot = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT enqueue_request FROM job_enqueue_intents WHERE id = $1",
+    )
+    .bind(poison.intent_id)
+    .fetch_one(&pool)
+    .await
+    .expect("load canonical snapshot before simulating drift");
     sqlx::query("UPDATE job_enqueue_intents SET enqueue_request = '{}'::jsonb WHERE id = $1")
         .bind(poison.intent_id)
         .execute(&pool)
@@ -735,7 +742,8 @@ async fn deterministic_poison_row_conflicts_without_starving_later_intents() {
     let report = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 10)
         .await
         .expect("process poison and healthy intents");
-    assert_eq!(report.conflicted, 1);
+    assert_eq!(report.retry_deferred, 1);
+    assert_eq!(report.conflicted, 0);
     assert_eq!(report.inserted_jobs, 1);
     assert_eq!(report.total_promoted, 1);
 
@@ -743,7 +751,7 @@ async fn deterministic_poison_row_conflicts_without_starving_later_intents() {
         .await
         .expect("load poison intent")
         .expect("poison intent exists");
-    assert_eq!(poison.status, JobEnqueueIntentStatus::Conflicted);
+    assert_eq!(poison.status, JobEnqueueIntentStatus::Pending);
     assert_eq!(poison.promotion_attempts, 1);
     assert!(poison.last_attempted_at.is_some());
     assert_eq!(
@@ -755,22 +763,31 @@ async fn deterministic_poison_row_conflicts_without_starving_later_intents() {
         .expect("load healthy intent")
         .expect("healthy intent exists");
     assert_eq!(healthy.status, JobEnqueueIntentStatus::Promoted);
-    assert_eq!(
-        delete_promoted_job_enqueue_intents_before(
-            &pool,
-            Utc::now() - ChronoDuration::seconds(1),
-            10,
-        )
+    assert!(poison.next_promotion_at > poison.last_attempted_at.expect("attempt timestamp"));
+
+    sqlx::query(
+        "UPDATE job_enqueue_intents
+         SET enqueue_request = $2,
+             next_promotion_at = now()
+         WHERE id = $1",
+    )
+    .bind(poison.id)
+    .bind(original_snapshot)
+    .execute(&pool)
+    .await
+    .expect("repair canonical snapshot and make intent eligible");
+
+    let recovered = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 10)
         .await
-        .expect("cleanup must leave current terminal evidence"),
-        0
-    );
-    assert!(
-        get_job_enqueue_intent_by_id(&pool, None, poison.id)
-            .await
-            .expect("reload conflicted intent")
-            .is_some()
-    );
+        .expect("promote repaired snapshot");
+    assert_eq!(recovered.inserted_jobs, 1);
+    let poison = get_job_enqueue_intent_by_id(&pool, None, poison.id)
+        .await
+        .expect("reload repaired intent")
+        .expect("repaired intent exists");
+    assert_eq!(poison.status, JobEnqueueIntentStatus::Promoted);
+    assert_eq!(poison.promotion_attempts, 2);
+    assert!(poison.last_error_code.is_none());
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -850,23 +867,26 @@ async fn promotion_keeps_savepoint_headroom_below_postgres_subtransaction_cache(
     sqlx::query("UPDATE job_enqueue_intents SET enqueue_request = '{}'::jsonb")
         .execute(&pool)
         .await
-        .expect("corrupt snapshots so every row rolls back to its savepoint");
+        .expect("drift snapshots so every row rolls back to its savepoint");
 
     let first = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1_000)
         .await
         .expect("process capped batch of failing rows");
-    assert_eq!(first.conflicted, 24);
+    assert_eq!(first.retry_deferred, 24);
+    assert_eq!(first.conflicted, 0);
     assert_eq!(first.total_promoted, 0);
     let metrics = get_job_enqueue_intent_metrics(&pool, None, Some(JobType::new(JOB_TYPE)))
         .await
         .expect("read state after capped batch");
-    assert_eq!(metrics[0].pending_count, 1);
-    assert_eq!(metrics[0].conflicted_count, 24);
+    assert_eq!(metrics[0].pending_count, 25);
+    assert_eq!(metrics[0].retrying_count, 24);
+    assert_eq!(metrics[0].conflicted_count, 0);
 
     let second = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1_000)
         .await
         .expect("process final failing row");
-    assert_eq!(second.conflicted, 1);
+    assert_eq!(second.retry_deferred, 1);
+    assert_eq!(second.conflicted, 0);
     assert_eq!(second.total_promoted, 0);
 
     teardown_ephemeral_pool(pool, database).await;

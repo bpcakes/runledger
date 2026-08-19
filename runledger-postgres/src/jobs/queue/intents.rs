@@ -836,14 +836,14 @@ fn terminal_intent_failure(error: &Error) -> Option<(&'static str, &'static str)
     let Error::QueryError(error) = error else {
         return None;
     };
-    // Maintenance invariant: any new validation that can reject a snapshot
-    // accepted by `prepare_intent` must either be prevented at record time or
-    // added here. Unknown query failures intentionally remain retryable so a
-    // database outage or repairable application policy cannot discard work.
+    // Maintenance invariant: only intrinsically invalid persisted requests are
+    // terminal. Drift between redundant columns and the canonical snapshot is
+    // repairable, so it follows the deferred path below. Unknown query failures
+    // also remain retryable so an outage or repairable application policy
+    // cannot discard work.
     matches!(
         error.code(),
         "job.intent_invalid_persisted_row"
-            | "job.intent_snapshot_mismatch"
             | "job.intent_snapshot_version_unsupported"
             | "job.invalid_execution_resource_key"
             | "job.invalid_stage"
@@ -1195,6 +1195,20 @@ mod tests {
             Some((
                 "job.future_row_error",
                 "Job enqueue intent could not be promoted."
+            ))
+        );
+    }
+
+    #[test]
+    fn repairable_snapshot_mismatch_is_deferred_not_terminal() {
+        let error = intent_snapshot_mismatch_error(Uuid::now_v7());
+
+        assert_eq!(terminal_intent_failure(&error), None);
+        assert_eq!(
+            deferred_intent_failure(&error),
+            Some((
+                "job.intent_snapshot_mismatch",
+                "Job enqueue intent request snapshot is inconsistent."
             ))
         );
     }
