@@ -465,7 +465,7 @@ async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
     assert_eq!(metrics[0].pending_count, 1);
     assert_eq!(metrics[0].retrying_count, 0);
     assert_eq!(metrics[0].max_promotion_attempts, 0);
-    assert_eq!(metrics[0].conflicted_count, 0);
+    assert_eq!(metrics[0].conflicted_24h, 0);
     assert!(metrics[0].oldest_pending_at.is_some());
 
     register_test_job_definition(&pool, JOB_TYPE).await;
@@ -705,6 +705,84 @@ async fn intent_metrics_are_bounded_and_page_in_stable_job_type_order() {
     .expect("read exact-type metrics page");
     assert_eq!(exact_type.len(), 1);
     assert_eq!(exact_type[0].job_type.as_str(), job_types[1]);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn intent_metrics_bound_conflicts_to_the_recent_operational_window() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_recent_conflict_metrics", 4).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let intent_payload = json!({"event": "intent-conflict-version"});
+    let recorded = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(
+            JobType::new(JOB_TYPE),
+            &intent_payload,
+            "recent-conflict-metrics",
+        ),
+    )
+    .await
+    .expect("record intent for recent conflict metrics");
+    let direct_payload = json!({"event": "direct-conflict-version"});
+    enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new(JOB_TYPE),
+            organization_id: None,
+            payload: &direct_payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: Some("recent-conflict-metrics"),
+            stage: None,
+        },
+    )
+    .await
+    .expect("enqueue conflicting direct request");
+
+    let report = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1)
+        .await
+        .expect("promote intent into conflicted evidence");
+    assert_eq!(report.conflicted, 1);
+    let recent = get_job_enqueue_intent_metrics(
+        &pool,
+        &JobEnqueueIntentMetricsFilter::new(10, 0).with_job_type(JobType::new(JOB_TYPE)),
+    )
+    .await
+    .expect("read recent conflict metrics");
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].conflicted_24h, 1);
+
+    sqlx::query(
+        "UPDATE job_enqueue_intents
+         SET conflicted_at = now() - interval '25 hours'
+         WHERE id = $1",
+    )
+    .bind(recorded.intent_id)
+    .execute(&pool)
+    .await
+    .expect("age conflicted evidence beyond the operational window");
+
+    assert!(
+        get_job_enqueue_intent_metrics(
+            &pool,
+            &JobEnqueueIntentMetricsFilter::new(10, 0).with_job_type(JobType::new(JOB_TYPE)),
+        )
+        .await
+        .expect("read metrics after conflict window elapsed")
+        .is_empty()
+    );
+    assert_eq!(
+        get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+            .await
+            .expect("load aged conflicted evidence")
+            .expect("aged conflicted evidence remains available")
+            .status,
+        JobEnqueueIntentStatus::Conflicted
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -1708,7 +1786,7 @@ async fn promotion_caps_savepoint_batch_below_postgres_subtransaction_cache() {
     assert_eq!(metrics[0].pending_count, 25);
     assert_eq!(metrics[0].retrying_count, 24);
     assert_eq!(metrics[0].max_promotion_attempts, 1);
-    assert_eq!(metrics[0].conflicted_count, 0);
+    assert_eq!(metrics[0].conflicted_24h, 0);
 
     teardown_ephemeral_pool(pool, database).await;
 }

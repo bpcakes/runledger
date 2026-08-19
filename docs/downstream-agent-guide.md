@@ -115,9 +115,9 @@ alert on oldest pending age, pending-only `retrying_count`, and pending-only
 `get_job_enqueue_intent_metrics`, then repair the database policy. Conflicted
 intents remain immutable evidence; safe replacement work requires a deliberately
 new application idempotency key. Metrics aggregate pending, conflicted, and
-recently promoted populations through separate selective predicates; promoted
-history older than the reported 24-hour window is not scanned to produce empty
-signals.
+recently promoted populations through separate selective predicates;
+`conflicted_24h` and `promoted_24h` bound terminal metrics to a rolling window.
+Full conflicted evidence remains available through the intent read/list APIs.
 
 Pending and conflicted rows are durable idempotency/audit evidence, so Runledger
 does not expose a generic delete or cancel operation for them. Any
@@ -132,7 +132,7 @@ Deploy this capability in order:
    before deleting the selected queue rows in the same transaction.
 3. Switch application writers to `record_job_enqueue_intent_tx` only after the
    retention prerequisite is complete.
-4. Alert on oldest pending age and conflicts from
+4. Alert on oldest pending age and `conflicted_24h` from
    `get_job_enqueue_intent_metrics`.
 
 Queue retention must remove promoted-intent links first. In the same

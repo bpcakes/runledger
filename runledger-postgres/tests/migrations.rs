@@ -235,8 +235,16 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     .fetch_one(&harness.pool)
     .await
     .expect("read conflicted intent metrics index");
-    assert!(conflicted_metrics_index.contains("(job_type)"));
+    assert!(conflicted_metrics_index.contains("(conflicted_at, job_type)"));
     assert!(conflicted_metrics_index.contains("WHERE (status = 'CONFLICTED'::text)"));
+    let org_conflicted_metrics_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_org_conflicted_metrics'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read organization conflicted intent metrics index");
+    assert!(org_conflicted_metrics_index.contains("(organization_id, conflicted_at, job_type)"));
+    assert!(org_conflicted_metrics_index.contains("WHERE ((status = 'CONFLICTED'::text)"));
     let promoted_cleanup_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_promoted_cleanup'::regclass)",
     )
@@ -259,7 +267,6 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
         "uq_job_enqueue_intents_type_idempotency_global",
         "idx_job_enqueue_intents_org_created",
         "idx_job_enqueue_intents_org_pending_metrics",
-        "idx_job_enqueue_intents_org_conflicted_metrics",
     ] {
         assert_eq!(
             sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")

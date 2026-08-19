@@ -1,0 +1,61 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH status_metrics AS (\n            SELECT\n                job_type,\n                COUNT(*)::bigint AS pending_count,\n                COUNT(*) FILTER (WHERE promotion_attempts > 0)::bigint AS retrying_count,\n                MAX(promotion_attempts)::integer AS max_promotion_attempts,\n                0::bigint AS conflicted_24h,\n                0::bigint AS promoted_24h,\n                MIN(created_at) AS oldest_pending_at\n            FROM job_enqueue_intents\n            WHERE status = 'PENDING'\n              AND ($1::uuid IS NULL OR organization_id = $1)\n              AND ($2::text IS NULL OR job_type = $2)\n            GROUP BY job_type\n\n            UNION ALL\n\n            SELECT\n                job_type,\n                0::bigint AS pending_count,\n                0::bigint AS retrying_count,\n                0::integer AS max_promotion_attempts,\n                COUNT(*)::bigint AS conflicted_24h,\n                0::bigint AS promoted_24h,\n                NULL::timestamptz AS oldest_pending_at\n            FROM job_enqueue_intents\n            WHERE status = 'CONFLICTED'\n              AND conflicted_at >= now() - interval '24 hours'\n              AND ($1::uuid IS NULL OR organization_id = $1)\n              AND ($2::text IS NULL OR job_type = $2)\n            GROUP BY job_type\n\n            UNION ALL\n\n            SELECT\n                job_type,\n                0::bigint AS pending_count,\n                0::bigint AS retrying_count,\n                0::integer AS max_promotion_attempts,\n                0::bigint AS conflicted_24h,\n                COUNT(*)::bigint AS promoted_24h,\n                NULL::timestamptz AS oldest_pending_at\n            FROM job_enqueue_intents\n            WHERE status = 'PROMOTED'\n              AND promoted_at >= now() - interval '24 hours'\n              AND ($1::uuid IS NULL OR organization_id = $1)\n              AND ($2::text IS NULL OR job_type = $2)\n            GROUP BY job_type\n         )\n         SELECT\n            job_type AS \"job_type!\",\n            MAX(pending_count)::bigint AS \"pending_count!\",\n            MAX(retrying_count)::bigint AS \"retrying_count!\",\n            MAX(max_promotion_attempts)::integer AS \"max_promotion_attempts!\",\n            MAX(conflicted_24h)::bigint AS \"conflicted_24h!\",\n            MAX(promoted_24h)::bigint AS \"promoted_24h!\",\n            MIN(oldest_pending_at) AS oldest_pending_at\n         FROM status_metrics\n         GROUP BY job_type\n         ORDER BY job_type\n         LIMIT $3\n         OFFSET $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "pending_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "retrying_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "max_promotion_attempts!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "conflicted_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "promoted_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "oldest_pending_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "90841ab00a885ed00fd2c3a6b49c90b549a262963d281b863f4283af861ea5e5"
+}

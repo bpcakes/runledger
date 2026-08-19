@@ -143,8 +143,8 @@
 //! Intent payloads and idempotency keys cross the same trusted persistence
 //! boundary as ordinary queue inputs. Do not place secrets in them or emit them
 //! in logs. Monitor [`jobs::get_job_enqueue_intent_metrics`] for pending age,
-//! retrying count, maximum promotion attempts, and conflicts; Runledger never
-//! automatically deletes conflicted intent evidence.
+//! retrying count, maximum promotion attempts, and conflicts during the preceding
+//! 24 hours; Runledger never automatically deletes conflicted intent evidence.
 //! Database-level promotion failures leave the intent pending with bounded
 //! jittered exponential backoff, and read APIs expose the attempt/error metadata. They
 //! retry indefinitely so a prolonged outage cannot silently discard work;

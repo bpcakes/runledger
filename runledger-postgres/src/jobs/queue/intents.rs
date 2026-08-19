@@ -148,7 +148,7 @@ struct JobEnqueueIntentMetricsRow {
     pending_count: i64,
     retrying_count: i64,
     max_promotion_attempts: i32,
-    conflicted_count: i64,
+    conflicted_24h: i64,
     promoted_24h: i64,
     oldest_pending_at: Option<DateTime<Utc>>,
 }
@@ -545,10 +545,12 @@ pub async fn list_job_enqueue_intents(
 /// `pending_count`, `retrying_count`, `max_promotion_attempts`, and
 /// `oldest_pending_at` describe only intents that are currently pending;
 /// attempts made by terminal promoted or conflicted intents are not backlog.
-/// Job types represented only by promoted intents older than 24 hours are
-/// omitted because every returned signal for them would be zero. Results use
-/// stable job-type ordering and the requested page must be in the shared
-/// `1..=1000` limit range with a non-negative offset.
+/// `conflicted_24h` and `promoted_24h` are rolling operational signals; full
+/// terminal evidence remains available through the intent read/list APIs. Job
+/// types represented only by terminal intents older than 24 hours are omitted
+/// because every returned signal for them would be zero. Results use stable
+/// job-type ordering and the requested page must be in the shared `1..=1000`
+/// limit range with a non-negative offset.
 pub async fn get_job_enqueue_intent_metrics(
     pool: &DbPool,
     filter: &JobEnqueueIntentMetricsFilter<'_>,
@@ -563,7 +565,7 @@ pub async fn get_job_enqueue_intent_metrics(
                 COUNT(*)::bigint AS pending_count,
                 COUNT(*) FILTER (WHERE promotion_attempts > 0)::bigint AS retrying_count,
                 MAX(promotion_attempts)::integer AS max_promotion_attempts,
-                0::bigint AS conflicted_count,
+                0::bigint AS conflicted_24h,
                 0::bigint AS promoted_24h,
                 MIN(created_at) AS oldest_pending_at
             FROM job_enqueue_intents
@@ -579,11 +581,12 @@ pub async fn get_job_enqueue_intent_metrics(
                 0::bigint AS pending_count,
                 0::bigint AS retrying_count,
                 0::integer AS max_promotion_attempts,
-                COUNT(*)::bigint AS conflicted_count,
+                COUNT(*)::bigint AS conflicted_24h,
                 0::bigint AS promoted_24h,
                 NULL::timestamptz AS oldest_pending_at
             FROM job_enqueue_intents
             WHERE status = 'CONFLICTED'
+              AND conflicted_at >= now() - interval '24 hours'
               AND ($1::uuid IS NULL OR organization_id = $1)
               AND ($2::text IS NULL OR job_type = $2)
             GROUP BY job_type
@@ -595,7 +598,7 @@ pub async fn get_job_enqueue_intent_metrics(
                 0::bigint AS pending_count,
                 0::bigint AS retrying_count,
                 0::integer AS max_promotion_attempts,
-                0::bigint AS conflicted_count,
+                0::bigint AS conflicted_24h,
                 COUNT(*)::bigint AS promoted_24h,
                 NULL::timestamptz AS oldest_pending_at
             FROM job_enqueue_intents
@@ -610,7 +613,7 @@ pub async fn get_job_enqueue_intent_metrics(
             MAX(pending_count)::bigint AS \"pending_count!\",
             MAX(retrying_count)::bigint AS \"retrying_count!\",
             MAX(max_promotion_attempts)::integer AS \"max_promotion_attempts!\",
-            MAX(conflicted_count)::bigint AS \"conflicted_count!\",
+            MAX(conflicted_24h)::bigint AS \"conflicted_24h!\",
             MAX(promoted_24h)::bigint AS \"promoted_24h!\",
             MIN(oldest_pending_at) AS oldest_pending_at
          FROM status_metrics
@@ -636,7 +639,7 @@ pub async fn get_job_enqueue_intent_metrics(
                 pending_count: row.pending_count,
                 retrying_count: row.retrying_count,
                 max_promotion_attempts: row.max_promotion_attempts,
-                conflicted_count: row.conflicted_count,
+                conflicted_24h: row.conflicted_24h,
                 promoted_24h: row.promoted_24h,
                 oldest_pending_at: row.oldest_pending_at,
             })

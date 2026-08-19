@@ -145,11 +145,11 @@ CREATE INDEX idx_job_enqueue_intents_org_pending_metrics
       AND organization_id IS NOT NULL;
 
 CREATE INDEX idx_job_enqueue_intents_conflicted_metrics
-    ON job_enqueue_intents (job_type)
+    ON job_enqueue_intents (conflicted_at, job_type)
     WHERE status = 'CONFLICTED';
 
 CREATE INDEX idx_job_enqueue_intents_org_conflicted_metrics
-    ON job_enqueue_intents (organization_id, job_type)
+    ON job_enqueue_intents (organization_id, conflicted_at, job_type)
     WHERE status = 'CONFLICTED'
       AND organization_id IS NOT NULL;
 

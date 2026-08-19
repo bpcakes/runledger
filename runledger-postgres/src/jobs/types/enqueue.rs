@@ -312,8 +312,9 @@ pub struct JobEnqueueIntentMetricsRecord {
     ///
     /// This is zero when the returned job type has no pending intents.
     pub max_promotion_attempts: i32,
-    /// Number of intents retained in the terminal conflicted state.
-    pub conflicted_count: i64,
+    /// Number of intents that entered the terminal conflicted state during the
+    /// preceding 24 hours.
+    pub conflicted_24h: i64,
     /// Number of retained intents promoted during the preceding 24 hours.
     pub promoted_24h: i64,
     /// Creation time of the oldest pending intent, if one exists.

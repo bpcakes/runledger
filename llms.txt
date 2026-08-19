@@ -60,9 +60,9 @@ polls independently when idle, so capacity plans must include that query rate.
 Disable only redundant or unused promoters, and retain coverage for every type
 that can receive intents. Database failures defer only the affected intent with
 bounded jittered backoff and retry indefinitely; inspect promotion attempt/error
-metadata and
-monitor pending age and conflicts. Treat intent payloads and keys as sensitive
-queue data and do not log them. Queue retention must call
+metadata and monitor pending age and `conflicted_24h`. Full conflicted evidence
+remains available through intent reads/lists. Treat intent payloads and keys as
+sensitive queue data and do not log them. Queue retention must call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for its exact selected job IDs
 before deleting those jobs in the same transaction. The helper preserves
 stricter caller timeouts while capping each lock wait at five seconds and each
