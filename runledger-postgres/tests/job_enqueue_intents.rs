@@ -28,13 +28,6 @@ fn query_error_code(error: &runledger_postgres::Error) -> Option<&str> {
     }
 }
 
-fn query_error_sqlstate(error: &runledger_postgres::Error) -> Option<&str> {
-    match error {
-        runledger_postgres::Error::QueryError(error) => error.sqlstate(),
-        _ => None,
-    }
-}
-
 async fn record_postgres_server_version(pool: &sqlx::PgPool, diagnostic: &str) {
     let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
         .fetch_one(pool)
@@ -1210,7 +1203,7 @@ async fn retention_delete_wait_is_bounded_while_holding_fence() {
 }
 
 #[tokio::test]
-async fn duplicate_recorder_and_retention_expose_inverse_job_intent_order() {
+async fn duplicate_recorder_and_retention_share_intent_then_job_order() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_recorder_retention_deadlock", 6).await;
     record_postgres_server_version(&pool, "intent recorder/retention deadlock characterization")
@@ -1288,35 +1281,27 @@ async fn duplicate_recorder_and_retention_expose_inverse_job_intent_order() {
         }
     })
     .await
-    .expect("retention must wait on the duplicate recorder after locking the job");
+    .expect("retention must wait on the duplicate recorder before locking the job");
 
-    let recorder_job_lock = timeout(
+    timeout(
         Duration::from_secs(3),
         sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
             .bind(promoted_job_id)
             .fetch_one(&mut *recorder_tx),
     )
     .await
-    .expect("PostgreSQL must resolve the inverse-order cycle");
-    let recorder_deadlocked = recorder_job_lock.as_ref().is_err_and(|error| {
-        error
-            .as_database_error()
-            .and_then(|error| error.code())
-            .is_some_and(|code| code == "40P01")
-    });
-    let _ = recorder_tx.rollback().await;
-
-    let retention_result = timeout(Duration::from_secs(3), retention)
+    .expect("recorder job lock must not deadlock with retention")
+    .expect("recorder must lock the promoted job before retention");
+    recorder_tx
+        .rollback()
         .await
-        .expect("retention must finish after deadlock resolution")
-        .expect("retention task must not panic");
-    let retention_deadlocked = retention_result
-        .as_ref()
-        .is_err_and(|error| query_error_sqlstate(error) == Some("40P01"));
-    assert_ne!(
-        recorder_deadlocked, retention_deadlocked,
-        "exactly one side of the inverse-order cycle must be chosen as the deadlock victim"
-    );
+        .expect("release recorder intent and job locks");
+
+    timeout(Duration::from_secs(3), retention)
+        .await
+        .expect("retention must finish after the recorder releases its locks")
+        .expect("retention task must not panic")
+        .expect("retention must commit without a deadlock victim");
 
     teardown_ephemeral_pool(pool, database).await;
 }

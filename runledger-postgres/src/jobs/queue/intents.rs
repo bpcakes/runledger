@@ -1097,11 +1097,13 @@ pub async fn delete_promoted_job_enqueue_intents_before(
 /// After selecting candidate IDs without row locks, call this as the retention
 /// transaction's first lock-taking operation, before locking or deleting the
 /// same `job_queue` rows. The helper takes the exclusive side of the
-/// enqueue-intent promotion fence, then locks existing queue rows in UUID
-/// order. Concurrent promotions finish before those row locks are taken, and
-/// new promotions wait until the retention transaction ends. This prevents a
-/// pending intent from becoming linked between this cleanup and the caller's
-/// queue delete without introducing a promotion/retention lock-order cycle.
+/// enqueue-intent promotion fence, deletes existing promoted intent links, then
+/// locks existing queue rows in UUID order. Concurrent promotions finish before
+/// those intent or job row locks are taken, and new promotions wait until the
+/// retention transaction ends. Taking intent locks before job locks matches the
+/// duplicate-recorder order and prevents a recorder/retention lock-order cycle.
+/// The fence prevents a pending intent from becoming linked between the intent
+/// cleanup and the caller's queue delete.
 /// Exact IDs are required because an intent may have converged on an older
 /// existing job, so matching retention cutoffs alone cannot reliably order the
 /// two deletes. Pending and conflicted intents are never deleted. At most 1,000
@@ -1143,9 +1145,8 @@ async fn delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(
 
     lock_job_enqueue_intent_retention_exclusive_tx(tx).await?;
     // Once the exclusive fence is held, no promotion can extend this section.
-    // Restore the shorter per-lock budget before touching caller-selected rows.
+    // Restore the shorter per-lock budget before touching intent or job rows.
     cap_job_enqueue_intent_retention_lock_timeout_tx(tx).await?;
-    lock_retained_jobs_tx(tx, job_ids).await?;
 
     let result = sqlx::query!(
         "DELETE FROM job_enqueue_intents
@@ -1161,6 +1162,11 @@ async fn delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(
             error,
         )
     })?;
+
+    // Intent rows precede job rows in every critical section that can hold both.
+    // Keeping that order here lets a duplicate recorder lock its promoted job
+    // without cycling against retention.
+    lock_retained_jobs_tx(tx, job_ids).await?;
 
     restore_job_enqueue_intent_lock_timeout_tx(tx, &previous_lock_timeout).await?;
     set_local_statement_timeout_tx(
