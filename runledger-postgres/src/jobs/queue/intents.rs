@@ -222,7 +222,11 @@ impl JobEnqueueIntentPromotionReport {
 ///
 /// This operation never reads or locks `job_definitions`. It requires
 /// PostgreSQL `READ COMMITTED` isolation because an idempotency conflict is
-/// resolved by reading the row that won the unique-key race.
+/// resolved by reading the row that won the unique-key race. Concurrent calls
+/// for the same `(job_type, organization_id, idempotency_key)` may wait for the
+/// transaction that first claimed that unique key to commit or roll back. The
+/// caller must include that wait in its transaction lock ordering and timeout
+/// budget.
 pub async fn record_job_enqueue_intent_tx(
     tx: &mut DbTx<'_>,
     intent: &JobEnqueueIntent<'_>,

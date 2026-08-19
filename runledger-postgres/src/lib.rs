@@ -135,6 +135,11 @@
 //! # }
 //! ```
 //!
+//! Concurrent calls that record the same `(job_type, organization_id,
+//! idempotency_key)` may wait for the transaction that first claimed that unique
+//! key. Include that wait in the caller-owned transaction's lock ordering and
+//! timeout budget.
+//!
 //! Intent payloads and idempotency keys cross the same trusted persistence
 //! boundary as ordinary queue inputs. Do not place secrets in them or emit them
 //! in logs. Monitor [`jobs::get_job_enqueue_intent_metrics`] for pending age,

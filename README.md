@@ -265,6 +265,11 @@ idempotency key; retrying with the same canonical request returns the existing
 intent, while changing the payload or another enqueue field returns
 `job.intent_idempotency_conflict`.
 
+Concurrent transactions recording the same `(job_type, organization_id,
+idempotency_key)` may wait for the transaction that first claimed the unique
+key to commit or roll back. Include that wait in the caller-owned transaction's
+lock ordering and timeout budget.
+
 ```rust
 let payload = serde_json::json!({"invoice_id": "invoice_123"});
 let intent = runledger_postgres::jobs::JobEnqueueIntent::new(

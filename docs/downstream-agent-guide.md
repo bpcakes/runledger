@@ -82,11 +82,14 @@ tx.commit().await?;
 Recording requires `READ COMMITTED`, does not read or lock `job_definitions`,
 and does not create queue, attempt, or event rows. An exact retry returns the
 same intent even after promotion. A changed canonical request returns
-`job.intent_idempotency_conflict`. Once a compatible worker sees an enabled
-definition, promotion applies current definition defaults through ordinary
-enqueue semantics and links the intent to the resulting job. Missing, disabled,
-and unregistered types remain pending. A dedicated promoter loop runs
-independently of queue claiming and execution permits; promoted work waits
+`job.intent_idempotency_conflict`. Concurrent recorders for the same
+`(job_type, organization_id, idempotency_key)` may wait for the transaction
+that first claimed the unique key, so applications must include that wait in
+their transaction lock ordering and timeout budget. Once a compatible worker
+sees an enabled definition, promotion applies current definition defaults
+through ordinary enqueue semantics and links the intent to the resulting job.
+Missing, disabled, and unregistered types remain pending. A dedicated promoter
+loop runs independently of queue claiming and execution permits; promoted work waits
 behind the ordinary queue's priority, scheduling, and concurrency controls. A
 deterministic
 collision with a different ordinary enqueue becomes `CONFLICTED`; Runledger
