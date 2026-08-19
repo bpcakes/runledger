@@ -45,9 +45,11 @@ All notable changes to this workspace are documented here.
   retention behavior is unchanged.
 - Intent promotion is enabled by default for every worker-enabled supervisor so
   durable requests self-drain. Each supervisor independently polls even when no
-  intents are pending. Capacity plans should include that idle query rate; use
-  the intent-specific polling configuration or disable redundant promoters,
-  while retaining promoter coverage for every type that can receive intents.
+  intents are pending. Idle passes use one non-locking eligibility query and do
+  not open a transaction or acquire the retention fence. Capacity plans should
+  include that query rate; use the intent-specific polling configuration or
+  disable redundant promoters, while retaining promoter coverage for every type
+  that can receive intents.
 
 ## [0.9.1] - 2026-08-12
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.9.0...v0.9.1)

@@ -644,7 +644,10 @@ pub async fn get_job_enqueue_intent_metrics(
 /// session if that total cap expires; SQLx discards the disconnected pooled
 /// session and the error is returned for retry. A fence-acquisition timeout
 /// likewise aborts the owned transaction; row-level promotion failures are
-/// deferred through the normal retry path.
+/// deferred through the normal retry path. An idle pass performs one
+/// non-locking eligibility query and returns without opening a transaction or
+/// acquiring the retention fence. Work committed after that query is picked up
+/// on the next configured pass.
 pub async fn promote_job_enqueue_intents_for_types(
     pool: &DbPool,
     allowed_job_types: &[JobType<'_>],
@@ -660,6 +663,10 @@ pub async fn promote_job_enqueue_intents_for_types(
         .iter()
         .map(|job_type| job_type.as_str().to_owned())
         .collect::<Vec<_>>();
+    if !has_eligible_job_enqueue_intents(pool, &allowed_job_types).await? {
+        return Ok(JobEnqueueIntentPromotionReport::default());
+    }
+
     let mut tx = begin_owned_read_committed_tx(pool, PROMOTE_OPERATION).await?;
     let operation_result = {
         let mut read_committed_tx = tx.as_read_committed_tx();
@@ -671,6 +678,35 @@ pub async fn promote_job_enqueue_intents_for_types(
         .await
     };
     finish_owned_transaction(tx, PROMOTE_OPERATION, operation_result).await
+}
+
+async fn has_eligible_job_enqueue_intents(
+    pool: &DbPool,
+    allowed_job_types: &[String],
+) -> Result<bool> {
+    // Keep this non-locking eligibility predicate aligned with the claiming
+    // query below. A false negative delays work until the next pass; a false
+    // positive only takes the transactional path unnecessarily.
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM job_enqueue_intents intent
+            INNER JOIN job_definitions definition
+               ON definition.job_type = intent.job_type
+              AND definition.is_enabled = true
+            WHERE intent.status = 'PENDING'
+              AND intent.enqueue_request_version = $2
+              AND intent.next_promotion_at <= now()
+              AND intent.job_type = ANY($1::text[])
+         )",
+    )
+    .bind(allowed_job_types)
+    .bind(JOB_ENQUEUE_REQUEST_VERSION)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("check eligible job enqueue intents", error)
+    })
 }
 
 async fn promote_job_enqueue_intents_read_committed_tx(

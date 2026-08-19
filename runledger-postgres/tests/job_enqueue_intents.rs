@@ -1401,6 +1401,36 @@ async fn promotion_retention_fence_wait_is_bounded() {
 }
 
 #[tokio::test]
+async fn idle_promotion_skips_the_retention_fence() {
+    let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_idle_fence_skip", 4).await;
+    record_postgres_server_version(&pool, "idle intent promotion fence skip").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+
+    let mut retention_tx = pool.begin().await.expect("begin retention fence holder");
+    assert_eq!(
+        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[Uuid::now_v7()],)
+            .await
+            .expect("acquire exclusive retention fence"),
+        0
+    );
+
+    let report = timeout(
+        Duration::from_secs(1),
+        promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1),
+    )
+    .await
+    .expect("idle promotion must not wait on the retention fence")
+    .expect("idle eligibility query must succeed");
+    assert_eq!(report, Default::default());
+
+    retention_tx
+        .rollback()
+        .await
+        .expect("release exclusive retention fence");
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn retention_fence_budget_covers_total_promotion_critical_section() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_total_promotion_timeout", 6).await;

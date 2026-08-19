@@ -1059,11 +1059,13 @@ intent promotion unless either intent-specific variable is set:
 | `JOBS_INTENT_PROMOTER_BATCH_SIZE` | Intents requested per promotion transaction; storage caps each pass at 24 |
 
 Intent promotion is enabled by default on every worker-enabled supervisor, so
-an idle deployment runs approximately one promotion query per supervisor per
-configured promoter interval. Tune the intent-specific interval or call
-`disable_intent_promoter` on redundant instances to fit the database query
-budget. Do not disable every compatible promoter while applications can record
-intents; that would leave accepted work pending indefinitely.
+an idle deployment runs one non-locking eligibility query per supervisor per
+configured promoter interval; it does not open a transaction or acquire the
+retention fence unless eligible work is visible. Tune the intent-specific
+interval or call `disable_intent_promoter` on redundant instances to fit the
+database query budget. Do not disable every compatible promoter while
+applications can record intents; that would leave accepted work pending
+indefinitely.
 
 Code that already owns a `JobsConfig` should continue to use
 `Supervisor::builder`; it deliberately derives promoter settings from that
