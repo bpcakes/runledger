@@ -1,5 +1,7 @@
 use crate::{DbTx, Error, Result};
 
+use super::super::transaction_settings::{cap_local_lock_timeout_tx, set_local_lock_timeout_tx};
+
 const SCHEDULE_EXACT_SYNC_LOCK_TIMEOUT: &str = "5s";
 const SCHEDULE_EXACT_SYNC_LOCK_TIMEOUT_MS: i64 = 5_000;
 const SCHEDULE_EXACT_SYNC_STATEMENT_TIMEOUT: &str = "30s";
@@ -104,41 +106,6 @@ pub(super) async fn lock_job_schedules_for_due_schedule_claim_tx(tx: &mut DbTx<'
     }
 }
 
-async fn cap_local_lock_timeout_tx(
-    tx: &mut DbTx<'_>,
-    lock_timeout: &str,
-    lock_timeout_ms: i64,
-    context: &'static str,
-) -> Result<String> {
-    sqlx::query_scalar::<_, String>(
-        "WITH previous AS MATERIALIZED (
-             SELECT
-                current_setting('lock_timeout') AS lock_timeout,
-                setting::bigint AS lock_timeout_ms
-             FROM pg_settings
-             WHERE name = 'lock_timeout'
-         )
-         SELECT previous.lock_timeout
-         FROM previous,
-              LATERAL (
-                SELECT set_config(
-                    'lock_timeout',
-                    CASE
-                        WHEN previous.lock_timeout_ms = 0 THEN $1
-                        WHEN previous.lock_timeout_ms <= $2 THEN previous.lock_timeout
-                        ELSE $1
-                    END,
-                    true
-                )
-              ) AS applied",
-    )
-    .bind(lock_timeout)
-    .bind(lock_timeout_ms)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context(context, error))
-}
-
 async fn cap_local_statement_timeout_tx(
     tx: &mut DbTx<'_>,
     statement_timeout: &str,
@@ -172,20 +139,6 @@ async fn cap_local_statement_timeout_tx(
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context(context, error))?;
-
-    Ok(())
-}
-
-async fn set_local_lock_timeout_tx(
-    tx: &mut DbTx<'_>,
-    lock_timeout: &str,
-    context: &'static str,
-) -> Result<()> {
-    sqlx::query_scalar::<_, String>("SELECT set_config('lock_timeout', $1, true)")
-        .bind(lock_timeout)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|error| Error::from_query_sqlx_with_context(context, error))?;
 
     Ok(())
 }

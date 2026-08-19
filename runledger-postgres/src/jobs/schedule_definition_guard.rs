@@ -3,6 +3,7 @@ use runledger_core::jobs::JobTypeName;
 use crate::{DbTx, Error, QueryError, QueryErrorCategory, Result};
 
 use super::row_decode::parse_job_type_name;
+use super::transaction_settings::{cap_local_lock_timeout_tx, set_local_lock_timeout_tx};
 use super::types::JobScheduleJobTypeReference;
 
 // All cross-table guards acquire job_schedules before job_definitions. Keep new
@@ -311,41 +312,6 @@ pub(in crate::jobs) fn active_schedule_for_disabled_definition_error(
     ))
 }
 
-async fn cap_local_lock_timeout_tx(
-    tx: &mut DbTx<'_>,
-    lock_timeout: &str,
-    lock_timeout_ms: i64,
-    context: &'static str,
-) -> Result<String> {
-    sqlx::query_scalar::<_, String>(
-        "WITH previous AS MATERIALIZED (
-             SELECT
-                current_setting('lock_timeout') AS lock_timeout,
-                setting::bigint AS lock_timeout_ms
-             FROM pg_settings
-             WHERE name = 'lock_timeout'
-         )
-         SELECT previous.lock_timeout
-         FROM previous,
-              LATERAL (
-                SELECT set_config(
-                    'lock_timeout',
-                    CASE
-                        WHEN previous.lock_timeout_ms = 0 THEN $1
-                        WHEN previous.lock_timeout_ms <= $2 THEN previous.lock_timeout
-                        ELSE $1
-                    END,
-                    true
-                )
-              ) AS applied",
-    )
-    .bind(lock_timeout)
-    .bind(lock_timeout_ms)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context(context, error))
-}
-
 async fn cap_local_statement_timeout_tx(
     tx: &mut DbTx<'_>,
     statement_timeout: &str,
@@ -379,20 +345,6 @@ async fn cap_local_statement_timeout_tx(
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context(context, error))
-}
-
-async fn set_local_lock_timeout_tx(
-    tx: &mut DbTx<'_>,
-    lock_timeout: &str,
-    context: &'static str,
-) -> Result<()> {
-    sqlx::query_scalar::<_, String>("SELECT set_config('lock_timeout', $1, true)")
-        .bind(lock_timeout)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|error| Error::from_query_sqlx_with_context(context, error))?;
-
-    Ok(())
 }
 
 fn job_type_strings(job_types: &[JobTypeName]) -> Vec<String> {
