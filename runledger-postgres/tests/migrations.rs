@@ -246,6 +246,14 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     assert!(promoted_cleanup_index.contains("(promoted_at, id)"));
     assert!(promoted_cleanup_index.contains("INCLUDE (job_type, organization_id)"));
     assert!(promoted_cleanup_index.contains("WHERE (status = 'PROMOTED'::text)"));
+    let global_created_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_created'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read global intent listing index");
+    assert!(global_created_index.contains("(created_at DESC, id DESC)"));
+    assert!(global_created_index.contains("INCLUDE (status, job_type, organization_id)"));
     for index_name in [
         "uq_job_enqueue_intents_type_idempotency_org",
         "uq_job_enqueue_intents_type_idempotency_global",

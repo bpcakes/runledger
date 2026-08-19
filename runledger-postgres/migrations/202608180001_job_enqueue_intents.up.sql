@@ -147,6 +147,10 @@ CREATE INDEX idx_job_enqueue_intents_org_conflicted_metrics
     WHERE status = 'CONFLICTED'
       AND organization_id IS NOT NULL;
 
+CREATE INDEX idx_job_enqueue_intents_created
+    ON job_enqueue_intents (created_at DESC, id DESC)
+    INCLUDE (status, job_type, organization_id);
+
 CREATE INDEX idx_job_enqueue_intents_org_created
     ON job_enqueue_intents (organization_id, created_at DESC, id DESC)
     INCLUDE (status, job_type);
