@@ -69,6 +69,11 @@ impl TestHarness {
 #[tokio::test]
 async fn migrate_applies_bundled_schema_to_fresh_database() {
     let harness = TestHarness::fresh("runledger_pg_migrate").await;
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read exact PostgreSQL version for bundled schema regression");
+    eprintln!("bundled schema regression PostgreSQL server_version={server_version}");
 
     migrate_after_idempotency_cutover(&harness.pool)
         .await
@@ -200,7 +205,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     .await
     .expect("read pending intent index");
     assert!(pending_intent_index.contains("(next_promotion_at, created_at, id)"));
-    assert!(pending_intent_index.contains("INCLUDE (job_type, enqueue_request_version)"));
+    assert!(!pending_intent_index.contains("INCLUDE"));
     assert!(pending_intent_index.contains("WHERE (status = 'PENDING'::text)"));
     let pending_intent_type_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_pending_type'::regclass)",
@@ -208,9 +213,8 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     .fetch_one(&harness.pool)
     .await
     .expect("read pending intent type index");
-    assert!(pending_intent_type_index.contains(
-        "(job_type, next_promotion_at, created_at, id) INCLUDE (enqueue_request_version)"
-    ));
+    assert!(pending_intent_type_index.contains("(job_type, next_promotion_at, created_at, id)"));
+    assert!(!pending_intent_type_index.contains("INCLUDE"));
     assert!(pending_intent_type_index.contains("WHERE (status = 'PENDING'::text)"));
     let promoted_job_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_promoted_job'::regclass)",
@@ -269,11 +273,18 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     .await
     .expect("read global intent listing index");
     assert!(global_created_index.contains("(created_at DESC, id DESC)"));
-    assert!(global_created_index.contains("INCLUDE (status, job_type, organization_id)"));
+    assert!(!global_created_index.contains("INCLUDE"));
+    let organization_created_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_org_created'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read organization intent listing index");
+    assert!(organization_created_index.contains("(organization_id, created_at DESC, id DESC)"));
+    assert!(!organization_created_index.contains("INCLUDE"));
     for index_name in [
         "uq_job_enqueue_intents_type_idempotency_org",
         "uq_job_enqueue_intents_type_idempotency_global",
-        "idx_job_enqueue_intents_org_created",
         "idx_job_enqueue_intents_org_pending_metrics",
     ] {
         assert_eq!(

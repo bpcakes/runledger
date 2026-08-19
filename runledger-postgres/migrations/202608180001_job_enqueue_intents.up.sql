@@ -120,9 +120,10 @@ CREATE UNIQUE INDEX uq_job_enqueue_intents_type_idempotency_global
     ON job_enqueue_intents (job_type, idempotency_key)
     WHERE organization_id IS NULL;
 
+-- Promotion fetches full intent rows, so heap access is unavoidable. Keep the
+-- ordering indexes lean instead of storing non-key columns as inert payload.
 CREATE INDEX idx_job_enqueue_intents_pending
     ON job_enqueue_intents (next_promotion_at, created_at, id)
-    INCLUDE (job_type, enqueue_request_version)
     WHERE status = 'PENDING';
 
 -- Complements the global-order index above when stale or misspelled job types
@@ -130,7 +131,6 @@ CREATE INDEX idx_job_enqueue_intents_pending
 -- a worker's registered-type allowlist before ordering eligible rows.
 CREATE INDEX idx_job_enqueue_intents_pending_type
     ON job_enqueue_intents (job_type, next_promotion_at, created_at, id)
-    INCLUDE (enqueue_request_version)
     WHERE status = 'PENDING';
 
 CREATE INDEX idx_job_enqueue_intents_pending_metrics
@@ -158,13 +158,13 @@ CREATE INDEX idx_job_enqueue_intents_org_promoted_metrics
     WHERE status = 'PROMOTED'
       AND organization_id IS NOT NULL;
 
+-- Listing also returns full intent rows and must visit the heap; widening these
+-- ordering indexes would only increase write and storage cost.
 CREATE INDEX idx_job_enqueue_intents_created
-    ON job_enqueue_intents (created_at DESC, id DESC)
-    INCLUDE (status, job_type, organization_id);
+    ON job_enqueue_intents (created_at DESC, id DESC);
 
 CREATE INDEX idx_job_enqueue_intents_org_created
-    ON job_enqueue_intents (organization_id, created_at DESC, id DESC)
-    INCLUDE (status, job_type);
+    ON job_enqueue_intents (organization_id, created_at DESC, id DESC);
 
 CREATE INDEX idx_job_enqueue_intents_promoted_cleanup
     ON job_enqueue_intents (promoted_at, id)
