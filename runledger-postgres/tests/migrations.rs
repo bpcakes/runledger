@@ -245,6 +245,14 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     .expect("read organization conflicted intent metrics index");
     assert!(org_conflicted_metrics_index.contains("(organization_id, conflicted_at, job_type)"));
     assert!(org_conflicted_metrics_index.contains("WHERE ((status = 'CONFLICTED'::text)"));
+    let org_promoted_metrics_index = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_enqueue_intents_org_promoted_metrics'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read organization promoted intent metrics index");
+    assert!(org_promoted_metrics_index.contains("(organization_id, promoted_at, job_type)"));
+    assert!(org_promoted_metrics_index.contains("WHERE ((status = 'PROMOTED'::text)"));
     let promoted_cleanup_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_promoted_cleanup'::regclass)",
     )
