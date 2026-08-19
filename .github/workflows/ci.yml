@@ -67,8 +67,30 @@ jobs:
         run: cargo test -p runledger-runtime
       - name: Test runledger-test-support library
         run: cargo test -p runledger-test-support --lib
-      - name: Test PostgreSQL container lifecycle
-        run: cargo test -p runledger-test-support --test container_lifecycle -- --nocapture
+      - name: Test container cleanup after normal exit
+        run: >-
+          timeout --signal=TERM --kill-after=30s 3m
+          cargo test -p runledger-test-support --test container_lifecycle --
+          --exact shared_container_is_removed_after_normal_process_exit
+          --nocapture --test-threads=1
+      - name: Test container cleanup after forced termination
+        run: >-
+          timeout --signal=TERM --kill-after=30s 3m
+          cargo test -p runledger-test-support --test container_lifecycle --
+          --exact shared_container_is_removed_after_forced_process_termination
+          --nocapture --test-threads=1
+      - name: Test container startup without reaper CLI
+        run: >-
+          timeout --signal=TERM --kill-after=30s 3m
+          cargo test -p runledger-test-support --test container_lifecycle --
+          --exact shared_container_starts_without_a_docker_cli_for_the_optional_reaper
+          --nocapture --test-threads=1
+      - name: Test container startup with stalled reaper CLI
+        run: >-
+          timeout --signal=TERM --kill-after=30s 3m
+          cargo test -p runledger-test-support --test container_lifecycle --
+          --exact shared_container_starts_when_optional_reaper_cli_hangs
+          --nocapture --test-threads=1
       - name: Test runledger-tui
         run: cargo test -p runledger-tui
       - name: Run packaged-crate smoke test
