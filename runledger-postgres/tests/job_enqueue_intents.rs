@@ -141,6 +141,14 @@ async fn validates_inputs_and_does_not_wait_on_job_definition_locks() {
 
     for (intent, expected_code) in [
         (
+            JobEnqueueIntent::new(JobType::new("\t"), &payload, "invalid-job-type-tab"),
+            "job.invalid_job_type",
+        ),
+        (
+            JobEnqueueIntent::new(JobType::new("\u{a0}"), &payload, "invalid-job-type-nbsp"),
+            "job.invalid_job_type",
+        ),
+        (
             JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "   "),
             "job.intent_invalid_idempotency_key",
         ),
@@ -164,6 +172,34 @@ async fn validates_inputs_and_does_not_wait_on_job_definition_locks() {
             .await
             .expect_err("invalid intent must be rejected");
         assert_eq!(query_error_code(&error), Some(expected_code));
+    }
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_enqueue_intents")
+            .fetch_one(&pool)
+            .await
+            .expect("count intents after input validation"),
+        0
+    );
+
+    for invalid_job_type in ["\t", "\u{a0}"] {
+        let error = sqlx::query(
+            "INSERT INTO job_enqueue_intents (
+                job_type, payload, idempotency_key, enqueue_request
+             )
+             VALUES ($1, '{}'::jsonb, 'direct-invalid-job-type', '{}'::jsonb)",
+        )
+        .bind(invalid_job_type)
+        .execute(&pool)
+        .await
+        .expect_err("database constraint must reject Unicode-blank job types");
+        let database_error = error
+            .as_database_error()
+            .expect("constraint failure must be a database error");
+        assert_eq!(
+            database_error.constraint(),
+            Some("chk_job_enqueue_intents_job_type_not_blank")
+        );
     }
 
     let mut isolation_tx = pool.begin().await.expect("begin isolation transaction");

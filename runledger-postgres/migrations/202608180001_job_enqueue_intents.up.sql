@@ -29,7 +29,9 @@ CREATE TABLE job_enqueue_intents (
         -- retention removes the exact link in its job-deletion transaction.
         REFERENCES job_queue (id) ON DELETE RESTRICT,
     CONSTRAINT chk_job_enqueue_intents_job_type_not_blank
-        CHECK (length(trim(job_type)) > 0),
+        CHECK (
+            job_type ~ U&'[^[:space:]\00A0\0085\1680\2000-\200A\2028\2029\202F\205F\3000]'
+        ),
     CONSTRAINT chk_job_enqueue_intents_max_attempts_positive
         CHECK (max_attempts IS NULL OR max_attempts > 0),
     CONSTRAINT chk_job_enqueue_intents_timeout_positive

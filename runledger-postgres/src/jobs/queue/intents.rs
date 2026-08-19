@@ -886,6 +886,7 @@ fn terminal_intent_failure(error: &Error) -> Option<(&'static str, &'static str)
         error.code(),
         "job.intent_invalid_persisted_row"
             | "job.intent_snapshot_version_unsupported"
+            | "job.invalid_job_type"
             | "job.invalid_execution_resource_key"
             | "job.invalid_stage"
     )
@@ -1066,6 +1067,7 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
 
 fn prepare_intent<'a>(intent: &JobEnqueueIntent<'a>) -> Result<PreparedIntent<'a>> {
     let enqueue = intent.as_job_enqueue();
+    JobType::try_new(enqueue.job_type.as_str()).map_err(|_| invalid_intent_job_type_error())?;
     let Some(idempotency_key) = enqueue.idempotency_key else {
         return Err(intent_idempotency_key_error());
     };
@@ -1091,6 +1093,15 @@ fn prepare_intent<'a>(intent: &JobEnqueueIntent<'a>) -> Result<PreparedIntent<'a
         stage,
         enqueue_request,
     })
+}
+
+fn invalid_intent_job_type_error() -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Validation,
+        "job.invalid_job_type",
+        "Job type must not be blank.",
+        "job enqueue intent job_type was blank",
+    ))
 }
 
 fn validate_execution_resource_key_if_present(execution_resource_key: Option<&str>) -> Result<()> {
@@ -1250,6 +1261,24 @@ mod tests {
             Some((
                 "job.intent_snapshot_mismatch",
                 "Job enqueue intent request snapshot is inconsistent."
+            ))
+        );
+    }
+
+    #[test]
+    fn invalid_persisted_job_type_is_terminal() {
+        let error = Error::QueryError(QueryError::from_classified(
+            QueryErrorCategory::Internal,
+            "job.invalid_job_type",
+            "Job type in persisted row is invalid.",
+            "test invalid persisted job type",
+        ));
+
+        assert_eq!(
+            terminal_intent_failure(&error),
+            Some((
+                "job.invalid_job_type",
+                "Job type in persisted row is invalid."
             ))
         );
     }
