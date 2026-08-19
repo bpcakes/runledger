@@ -428,16 +428,32 @@ async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_promote", 4).await;
     let payload = json!({"event": "analytics.capture", "account_id": "acct_1"});
     let organization_id = Uuid::from_u128(42);
+    let requested_next_run_at =
+        chrono::DateTime::parse_from_rfc3339("2035-04-03T02:01:00.123456789Z")
+            .expect("valid nanosecond timestamp")
+            .with_timezone(&Utc);
+    let persisted_next_run_at = chrono::DateTime::parse_from_rfc3339("2035-04-03T02:01:00.123456Z")
+        .expect("valid microsecond timestamp")
+        .with_timezone(&Utc);
     let intent = JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "analytics:acct_1")
         .with_organization_id(organization_id)
         .with_priority(250)
         .with_max_attempts(5)
         .with_timeout_seconds(45)
+        .with_next_run_at(requested_next_run_at)
         .with_stage(JobStage::Scheduled)
         .with_execution_resource("analytics:account:acct_1");
     let recorded = record_job_enqueue_intent(&pool, &intent)
         .await
         .expect("record intent");
+    assert_eq!(
+        get_job_enqueue_intent_by_id(&pool, Some(organization_id), recorded.intent_id)
+            .await
+            .expect("load scheduled intent")
+            .expect("scheduled intent exists")
+            .next_run_at,
+        Some(persisted_next_run_at)
+    );
 
     let metrics = get_job_enqueue_intent_metrics(
         &pool,
@@ -477,6 +493,7 @@ async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
     assert_eq!(job.priority, 250);
     assert_eq!(job.max_attempts, 5);
     assert_eq!(job.timeout_seconds, 45);
+    assert_eq!(job.next_run_at, persisted_next_run_at);
     assert_eq!(job.stage, JobStage::Scheduled);
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>(
