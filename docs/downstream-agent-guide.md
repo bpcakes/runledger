@@ -1003,8 +1003,10 @@ fire.
 ## Worker Runtime Rule
 
 Use `runledger_runtime::Supervisor::run_until_shutdown` for ordinary worker
-processes. The lower-level worker, scheduler, and reaper loops are escape
-hatches for custom process orchestration.
+processes. The lower-level worker, intent promoter, scheduler, and reaper loops
+are escape hatches for custom process orchestration. A custom process that uses
+durable enqueue intents must run both `run_worker_loop` and
+`run_intent_promoter_loop`; the supervisor does this automatically.
 
 Prefer `JobsConfig::from_env()` for runtime configuration. If code constructs
 `JobsConfig` directly, validate it before startup; supervisors return

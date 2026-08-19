@@ -11,6 +11,7 @@ use runledger_postgres::jobs::{
 };
 use runledger_runtime::RuntimeLoopExit;
 use runledger_runtime::config::JobsConfig;
+use runledger_runtime::intent_promoter::run_intent_promoter_loop;
 use runledger_runtime::observer::{
     JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent, JobSucceededEvent,
 };
@@ -187,6 +188,12 @@ async fn worker_promotes_registered_intents_and_leaves_unregistered_types_pendin
         reaper_retry_delay_ms: 1_000,
     };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let promoter_task = tokio::spawn(run_intent_promoter_loop(
+        pool.clone(),
+        registry.clone(),
+        config.clone(),
+        shutdown_rx.clone(),
+    ));
     let worker_task = tokio::spawn(run_worker_loop(pool.clone(), registry, config, shutdown_rx));
 
     timeout(Duration::from_secs(5), async {
@@ -203,6 +210,13 @@ async fn worker_promotes_registered_intents_and_leaves_unregistered_types_pendin
             .await
             .expect("worker shutdown timeout")
             .expect("worker task must not panic"),
+        RuntimeLoopExit::Shutdown
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(5), promoter_task)
+            .await
+            .expect("intent promoter shutdown timeout")
+            .expect("intent promoter task must not panic"),
         RuntimeLoopExit::Shutdown
     );
     assert_eq!(runs.load(Ordering::SeqCst), 1);
@@ -232,9 +246,9 @@ async fn worker_promotes_registered_intents_and_leaves_unregistered_types_pendin
 }
 
 #[tokio::test]
-async fn worker_claims_existing_jobs_when_intent_promotion_fails() {
-    let (pool, database) = setup_ephemeral_pool("jobs_worker_intent_promotion_failure", 8).await;
-    let job_type = JobType::new("jobs.test.intent_promotion_failure");
+async fn contended_intent_promotion_does_not_delay_existing_job_claims() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_intent_promotion_contention", 8).await;
+    let job_type = JobType::new("jobs.test.intent_promotion_contention");
 
     let mut tx = pool.begin().await.expect("begin definition transaction");
     upsert_job_definition_tx(
@@ -252,7 +266,7 @@ async fn worker_claims_existing_jobs_when_intent_promotion_fails() {
     .expect("upsert job definition");
     tx.commit().await.expect("commit definition");
 
-    let payload = json!({"kind": "survives-promotion-failure"});
+    let payload = json!({"kind": "survives-promotion-contention"});
     let job_id = enqueue_job(
         &pool,
         &JobEnqueue {
@@ -263,17 +277,30 @@ async fn worker_claims_existing_jobs_when_intent_promotion_fails() {
             max_attempts: None,
             timeout_seconds: None,
             next_run_at: None,
-            idempotency_key: Some("survives-promotion-failure"),
+            idempotency_key: Some("survives-promotion-contention"),
             stage: None,
         },
     )
     .await
     .expect("enqueue existing job");
 
-    sqlx::query("DROP TABLE job_enqueue_intents")
-        .execute(&pool)
+    let blocked_intent = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(
+            job_type,
+            &json!({"kind": "blocked-intent"}),
+            "blocked-intent",
+        ),
+    )
+    .await
+    .expect("record intent for contended promotion");
+    assert_eq!(blocked_intent.status, JobEnqueueIntentStatus::Pending);
+
+    let mut lock_tx = pool.begin().await.expect("begin intent table lock");
+    sqlx::query("LOCK TABLE job_enqueue_intents IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock_tx)
         .await
-        .expect("make intent promotion fail");
+        .expect("lock intent table against promotion");
 
     let runs = Arc::new(AtomicUsize::new(0));
     let mut registry = JobRegistry::new();
@@ -282,7 +309,7 @@ async fn worker_claims_existing_jobs_when_intent_promotion_fails() {
         runs: Arc::clone(&runs),
     });
     let config = JobsConfig {
-        worker_id: "intent-promotion-failure-worker".to_owned(),
+        worker_id: "intent-promotion-contention-worker".to_owned(),
         poll_interval: Duration::from_millis(25),
         claim_batch_size: 1,
         lease_ttl_seconds: 30,
@@ -292,6 +319,12 @@ async fn worker_claims_existing_jobs_when_intent_promotion_fails() {
         reaper_retry_delay_ms: 1_000,
     };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let promoter_task = tokio::spawn(run_intent_promoter_loop(
+        pool.clone(),
+        registry.clone(),
+        config.clone(),
+        shutdown_rx.clone(),
+    ));
     let worker_task = tokio::spawn(run_worker_loop(pool.clone(), registry, config, shutdown_rx));
 
     timeout(Duration::from_secs(5), async {
@@ -300,14 +333,22 @@ async fn worker_claims_existing_jobs_when_intent_promotion_fails() {
         }
     })
     .await
-    .expect("existing queue work should run despite promotion failure");
+    .expect("existing queue work should run while promotion is blocked");
 
+    lock_tx.rollback().await.expect("release intent table lock");
     shutdown_tx.send(true).expect("send worker shutdown");
     assert_eq!(
         timeout(Duration::from_secs(5), worker_task)
             .await
             .expect("worker shutdown timeout")
             .expect("worker task must not panic"),
+        RuntimeLoopExit::Shutdown
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(5), promoter_task)
+            .await
+            .expect("intent promoter shutdown timeout")
+            .expect("intent promoter task must not panic"),
         RuntimeLoopExit::Shutdown
     );
     assert_eq!(runs.load(Ordering::SeqCst), 1);
@@ -321,7 +362,7 @@ async fn worker_claims_existing_jobs_when_intent_promotion_fails() {
 }
 
 #[tokio::test]
-async fn worker_promotes_intents_while_saturated_and_shutdown_interrupts_wait() {
+async fn intent_promoter_runs_while_worker_is_saturated_and_shutdown_interrupts_wait() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_shutdown_wait", 8).await;
 
     let mut tx = pool.begin().await.expect("begin tx");
@@ -377,6 +418,12 @@ async fn worker_promotes_intents_while_saturated_and_shutdown_interrupts_wait() 
         reaper_retry_delay_ms: 1_000,
     };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let promoter_task = tokio::spawn(run_intent_promoter_loop(
+        pool.clone(),
+        registry.clone(),
+        config.clone(),
+        shutdown_rx.clone(),
+    ));
     let worker_task = tokio::spawn(run_worker_loop(pool.clone(), registry, config, shutdown_rx));
 
     let start_deadline = Instant::now() + Duration::from_secs(5);
@@ -433,6 +480,10 @@ async fn worker_promotes_intents_while_saturated_and_shutdown_interrupts_wait() 
         .await
         .expect("worker should exit promptly once shutdown is signaled while saturated")
         .expect("worker join should succeed");
+    timeout(prompt_shutdown_window, promoter_task)
+        .await
+        .expect("intent promoter should exit promptly once shutdown is signaled")
+        .expect("intent promoter join should succeed");
 
     assert!(
         shutdown_sent_at.elapsed() < prompt_shutdown_window,

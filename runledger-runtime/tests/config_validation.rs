@@ -2,6 +2,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use runledger_runtime::config::{JOBS_CLAIM_BATCH_SIZE_MAX, JobsConfig, JobsConfigValidationError};
+use runledger_runtime::intent_promoter::run_intent_promoter_loop;
 use runledger_runtime::reaper::run_reaper_loop;
 use runledger_runtime::registry::JobRegistry;
 use runledger_runtime::scheduler::run_scheduler_loop;
@@ -183,6 +184,39 @@ async fn worker_loop_rejects_nonpositive_lease_ttl() {
 }
 
 #[tokio::test]
+async fn intent_promoter_rejects_zero_poll_interval() {
+    let mut config = test_config();
+    config.poll_interval = Duration::ZERO;
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    assert_invalid_config_quickly(
+        run_intent_promoter_loop(lazy_pool(), JobRegistry::new(), config, shutdown_rx),
+        JobsConfigValidationError::ZeroPollInterval,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn intent_promoter_does_not_reject_execution_or_other_loop_fields() {
+    let mut config = test_config();
+    config.worker_id = "  ".to_string();
+    config.lease_ttl_seconds = 0;
+    config.max_global_concurrency = 0;
+    config.reaper_interval = Duration::ZERO;
+    config.schedule_poll_interval = Duration::ZERO;
+    config.reaper_retry_delay_ms = 0;
+    let (_shutdown_tx, shutdown_rx) = watch::channel(true);
+
+    assert_shutdown_quickly(run_intent_promoter_loop(
+        lazy_pool(),
+        JobRegistry::new(),
+        config,
+        shutdown_rx,
+    ))
+    .await;
+}
+
+#[tokio::test]
 async fn scheduler_loop_rejects_zero_claim_batch_size() {
     let mut config = test_config();
     config.claim_batch_size = 0;
@@ -206,6 +240,13 @@ async fn runtime_loops_reject_oversized_claim_batch_size() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     assert_invalid_config_quickly(
         run_worker_loop(lazy_pool(), JobRegistry::new(), config.clone(), shutdown_rx),
+        expected,
+    )
+    .await;
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    assert_invalid_config_quickly(
+        run_intent_promoter_loop(lazy_pool(), JobRegistry::new(), config.clone(), shutdown_rx),
         expected,
     )
     .await;

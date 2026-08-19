@@ -16,15 +16,16 @@ use crate::task_group::TaskGroup;
 use crate::{Result, RuntimeError};
 
 const WORKER_TASK: &str = "worker";
+const INTENT_PROMOTER_TASK: &str = "intent_promoter";
 const SCHEDULER_TASK: &str = "scheduler";
 const REAPER_TASK: &str = "reaper";
 
 /// Supervises the Runledger runtime loops spawned for a worker process.
 ///
-/// A supervisor owns the worker, scheduler, and reaper task handles selected by
-/// [`SupervisorBuilder`]. Use [`Self::run_until_shutdown`] for a typical worker
-/// process that should exit on either an external shutdown signal or an internal
-/// runtime task failure.
+/// A supervisor owns the worker, intent promoter, scheduler, and reaper task
+/// handles selected by [`SupervisorBuilder`]. Use
+/// [`Self::run_until_shutdown`] for a typical worker process that should exit on
+/// either an external shutdown signal or an internal runtime task failure.
 ///
 /// Dropping a supervisor requests shutdown and detaches the task handles. Call
 /// [`Self::shutdown`] or [`Self::join`] when the owning process needs to observe
@@ -37,9 +38,10 @@ pub struct Supervisor {
 
 /// Builds a [`Supervisor`] with configurable runtime loops.
 ///
-/// Worker, scheduler, and reaper loops are enabled by default. Call
-/// [`Self::with_registry`] or [`Self::with_catalog`] before [`Self::build`] when
-/// worker or reaper loops remain enabled.
+/// Worker execution, durable intent promotion, scheduler, and reaper loops are
+/// enabled by default. Intent promotion follows the worker enablement setting.
+/// Call [`Self::with_registry`] or [`Self::with_catalog`] before [`Self::build`]
+/// when worker or reaper loops remain enabled.
 #[must_use]
 pub struct SupervisorBuilder<'a> {
     pool: &'a runledger_postgres::DbPool,
@@ -242,7 +244,8 @@ impl<'a> SupervisorBuilder<'a> {
         self
     }
 
-    /// Disables worker job claiming and execution for this supervisor.
+    /// Disables worker job claiming, execution, and durable intent promotion
+    /// for this supervisor.
     #[must_use = "builder methods return an updated builder value"]
     pub fn disable_worker(mut self) -> Self {
         self.worker_enabled = false;
@@ -318,6 +321,22 @@ impl<'a> SupervisorBuilder<'a> {
         let observers = JobLifecycleObservers::from_arc_observers(observers);
 
         if worker_enabled {
+            tasks.spawn_on(&runtime, INTENT_PROMOTER_TASK, {
+                let pool = pool.clone();
+                let registry = registry.clone();
+                let config = config.clone();
+                let shutdown_rx = shutdown_rx.clone();
+                async move {
+                    crate::intent_promoter::run_intent_promoter_loop(
+                        pool,
+                        registry,
+                        config,
+                        shutdown_rx,
+                    )
+                    .await
+                }
+            });
+
             tasks.spawn_on(&runtime, WORKER_TASK, {
                 let pool = pool.clone();
                 let registry = registry.clone();
@@ -626,7 +645,10 @@ mod tests {
             .disable_reaper()
             .build()
             .expect("worker-only supervisor should build with registry");
-        assert_eq!(task_names(&worker_only), vec![WORKER_TASK]);
+        assert_eq!(
+            task_names(&worker_only),
+            vec![INTENT_PROMOTER_TASK, WORKER_TASK]
+        );
         abort_supervisor_tasks(worker_only).await;
 
         let reaper_only = empty_builder(&pool)
@@ -644,7 +666,12 @@ mod tests {
             .expect("all-enabled supervisor should build with registry");
         assert_eq!(
             task_names(&all_enabled),
-            vec![WORKER_TASK, SCHEDULER_TASK, REAPER_TASK]
+            vec![
+                INTENT_PROMOTER_TASK,
+                WORKER_TASK,
+                SCHEDULER_TASK,
+                REAPER_TASK
+            ]
         );
         abort_supervisor_tasks(all_enabled).await;
     }

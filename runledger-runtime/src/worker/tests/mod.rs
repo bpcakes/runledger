@@ -34,8 +34,8 @@ use super::observers::{
     TerminalObserverTasks,
 };
 use super::{
-    IntentPromotionCadence, process_claimed_job, process_claimed_job_with_observer,
-    run_worker_loop, run_worker_loop_with_observer,
+    process_claimed_job, process_claimed_job_with_observer, run_worker_loop,
+    run_worker_loop_with_observer,
 };
 use crate::RuntimeLoopExit;
 use crate::config::JobsConfig;
@@ -55,19 +55,6 @@ mod terminal_hooks;
 
 struct CountingHandler {
     runs: Arc<AtomicUsize>,
-}
-
-#[test]
-fn intent_promotion_cadence_allows_one_pass_per_poll_interval() {
-    let start = Instant::now();
-    let interval = Duration::from_secs(2);
-    let mut cadence = IntentPromotionCadence::new(start);
-
-    assert!(cadence.is_due(start));
-    let completed_at = start + Duration::from_secs(1);
-    cadence.schedule_after(completed_at, interval);
-    assert!(!cadence.is_due(completed_at + Duration::from_secs(1)));
-    assert!(cadence.is_due(completed_at + interval));
 }
 
 async fn await_spawned_task<T>(

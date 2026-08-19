@@ -3,8 +3,8 @@
 //!
 //! Use this crate to wire the operational pieces around `runledger-core`
 //! handlers and `runledger-postgres` storage:
-//! - [`Supervisor`] starts and joins the worker, scheduler, and reaper loops
-//!   for a typical worker process
+//! - [`Supervisor`] starts and joins the worker, intent promoter, scheduler,
+//!   and reaper loops for a typical worker process
 //! - [`catalog::JobCatalog`] is the preferred startup API for handler
 //!   registration, definition sync, and catalog-validated enqueue helpers
 //! - [`registry::JobRegistry`] stores concrete handlers directly for advanced
@@ -22,9 +22,12 @@
 //! [`Supervisor::shutdown`] when the caller already has an external shutdown
 //! budget or knows all loops will exit promptly.
 //!
-//! The lower-level [`worker::run_worker_loop`], [`scheduler::run_scheduler_loop`],
-//! and [`reaper::run_reaper_loop`] functions remain public for custom process
-//! orchestration, but [`Supervisor`] is the preferred runtime facade.
+//! The lower-level [`worker::run_worker_loop`],
+//! [`intent_promoter::run_intent_promoter_loop`],
+//! [`scheduler::run_scheduler_loop`], and [`reaper::run_reaper_loop`] functions
+//! remain public for custom process orchestration, but [`Supervisor`] is the
+//! preferred runtime facade. Custom orchestration that uses durable enqueue
+//! intents must run both the worker and intent promoter loops.
 //!
 //! # Copy-Paste Examples
 //!
@@ -88,6 +91,7 @@
 pub mod catalog;
 pub mod config;
 pub mod error;
+pub mod intent_promoter;
 pub mod observer;
 pub mod reaper;
 pub mod registry;

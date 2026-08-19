@@ -11,7 +11,8 @@ const DEFAULT_REAPER_INTERVAL_SECONDS: u64 = 15;
 const DEFAULT_SCHEDULE_POLL_INTERVAL_SECONDS: u64 = 30;
 const DEFAULT_REAPER_RETRY_DELAY_MS: i32 = 30_000;
 
-/// Maximum batch size accepted by runtime worker, scheduler, and reaper loops.
+/// Maximum batch size accepted by runtime worker, intent promoter, scheduler,
+/// and reaper loops.
 pub const JOBS_CLAIM_BATCH_SIZE_MAX: i64 = 1_000;
 
 #[derive(Debug, Clone)]
@@ -138,6 +139,13 @@ impl JobsConfig {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn validate_intent_promoter_loop(&self) -> Result<(), JobsConfigValidationError> {
+        if self.poll_interval.is_zero() {
+            return Err(JobsConfigValidationError::ZeroPollInterval);
+        }
+        validate_claim_batch_size(self.claim_batch_size)
     }
 
     pub(crate) fn validate_scheduler_loop(&self) -> Result<(), JobsConfigValidationError> {

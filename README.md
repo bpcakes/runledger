@@ -16,8 +16,9 @@ handlers, process model, and admin surface.
 - **Durable Postgres-backed queue** — enqueue, claim, heartbeat, retry with
   provider-directed timing, succeed, cancel, dead-letter, and requeue jobs.
   Survives restarts; no separate broker.
-- **Worker runtime** — a `Supervisor` that runs worker, scheduler, and reaper
-  loops with lease-based ownership, lease expiry recovery, and graceful shutdown.
+- **Worker runtime** — a `Supervisor` that runs worker, durable intent
+  promoter, scheduler, and reaper loops with lease-based ownership, lease
+  expiry recovery, and graceful shutdown.
 - **Workflow DAGs** — model dependent work declaratively. The engine validates
   the graph, enqueues root steps, releases dependents as prerequisites finish,
   and keeps run status coherent across cancellation and external gates.
@@ -78,7 +79,7 @@ handlers, process model, and admin surface.
 | --- | --- |
 | [`runledger-core`](runledger-core) | Storage-agnostic contracts: handler traits, runtime types, statuses, identifiers, and workflow enqueue/DAG validation. No persistence or async loops. |
 | [`runledger-postgres`](runledger-postgres) | SQLx-backed PostgreSQL persistence: queue and job lifecycle, schedules, the workflow DAG state machine, runtime configs, logs, and admin reads/mutations. |
-| [`runledger-runtime`](runledger-runtime) | The async runtime: `Supervisor`, worker/scheduler/reaper loops, the job catalog, the handler registry, and runtime configuration. |
+| [`runledger-runtime`](runledger-runtime) | The async runtime: `Supervisor`, worker/intent-promoter/scheduler/reaper loops, the job catalog, the handler registry, and runtime configuration. |
 | [`runledger-tui`](runledger-tui) | Read-only terminal UI for monitoring queue metrics, jobs, workflows, and definitions. |
 | [`runledger-test-support`](runledger-test-support) | Published test utilities for ephemeral PostgreSQL databases and scoped environment overrides. |
 
@@ -283,12 +284,14 @@ if outcome.status == runledger_postgres::jobs::JobEnqueueIntentStatus::Conflicte
 tx.commit().await?;
 ```
 
-A standard Runledger worker promotes pending intents only for its registered
-handler types once their definitions are enabled. Promotion uses ordinary
-enqueue semantics and creates the normal `ENQUEUED` audit event. Missing,
-disabled, and unregistered types remain pending without consuming attempts.
-Promotion runs one database pass on the worker poll cadence independently of
-execution permits, including when no intents exist.
+A standard Runledger supervisor promotes pending intents only for its
+registered handler types once their definitions are enabled. Promotion uses
+ordinary enqueue semantics and creates the normal `ENQUEUED` audit event.
+Missing, disabled, and unregistered types remain pending without consuming
+attempts. A dedicated promoter loop runs one database pass on the worker poll
+cadence, independently of queue claiming and execution permits. Custom runtime
+orchestration that calls `run_worker_loop` directly must also run
+`run_intent_promoter_loop` when it uses durable enqueue intents.
 Promoted work waits in the ordinary queue, where priority, scheduling, queue
 metrics, and worker concurrency provide the normal backpressure.
 Database-level promotion failures roll back only the affected queue/event
