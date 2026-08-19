@@ -1035,6 +1035,9 @@ pub async fn delete_promoted_job_enqueue_intents_before(
 /// retention transaction.
 ///
 /// Call this before deleting the same `job_queue` rows in that transaction.
+/// The helper locks the existing queue rows in UUID order before inspecting
+/// promoted intent links, preventing a pending intent from concurrently
+/// becoming linked between this cleanup and the caller's queue delete.
 /// Exact IDs are required because an intent may have converged on an older
 /// existing job, so matching retention cutoffs alone cannot reliably order the
 /// two deletes. Pending and conflicted intents are never deleted. At most 1,000
@@ -1049,6 +1052,23 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
         return Ok(0);
     }
     validate_page_limit(i64::try_from(job_ids.len()).unwrap_or(i64::MAX))?;
+
+    sqlx::query(
+        "SELECT id
+         FROM job_queue
+         WHERE id = ANY($1::uuid[])
+         ORDER BY id
+         FOR UPDATE",
+    )
+    .bind(job_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context(
+            "lock retained jobs before promoted intent cleanup",
+            error,
+        )
+    })?;
 
     let result = sqlx::query!(
         "DELETE FROM job_enqueue_intents

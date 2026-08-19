@@ -146,9 +146,10 @@
 //! operators must alert on pending age and maximum attempts.
 //! Promoted intents retain their linked jobs. A queue-retention transaction
 //! must call [`jobs::delete_promoted_job_enqueue_intents_for_jobs_tx`] with its
-//! exact selected job IDs before deleting those jobs. Time cutoffs alone are
-//! insufficient because a newly promoted intent may link to an older existing
-//! job.
+//! exact selected job IDs before deleting those jobs. The helper locks those
+//! jobs against concurrent promotion for the rest of the transaction. Time
+//! cutoffs alone are insufficient because a newly promoted intent may link to
+//! an older existing job.
 //!
 //! # Create A Scheduled Job Entrypoint
 //!

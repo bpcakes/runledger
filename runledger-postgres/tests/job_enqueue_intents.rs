@@ -870,7 +870,7 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
 }
 
 #[tokio::test]
-async fn retention_prelocking_existing_job_defers_without_deadlocking_promotion() {
+async fn retention_cleanup_locks_existing_job_and_defers_concurrent_promotion() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_retention_promotion_race", 6).await;
     record_postgres_server_version(&pool, "intent retention/promotion lock regression").await;
@@ -901,11 +901,12 @@ async fn retention_prelocking_existing_job_defers_without_deadlocking_promotion(
     .expect("enqueue existing job before retention race");
 
     let mut retention_tx = pool.begin().await.expect("begin retention transaction");
-    sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
-        .bind(old_job_id)
-        .fetch_one(&mut *retention_tx)
-        .await
-        .expect("pre-lock retained job");
+    assert_eq!(
+        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[old_job_id])
+            .await
+            .expect("clean promoted intents and lock retained job"),
+        0
+    );
 
     let promotion_pool = pool.clone();
     let promotion = tokio::spawn(async move {
@@ -936,17 +937,6 @@ async fn retention_prelocking_existing_job_defers_without_deadlocking_promotion(
     .await
     .expect("promotion should wait on the pre-locked existing job");
 
-    assert_eq!(
-        timeout(
-            Duration::from_secs(1),
-            delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[old_job_id],)
-        )
-        .await
-        .expect("pending intent cleanup must not wait on the promoter-held row")
-        .expect("clean promoted intents for retained job"),
-        0,
-        "the promoter-held intent is still pending and cannot reference the job"
-    );
     assert_eq!(
         sqlx::query("DELETE FROM job_queue WHERE id = $1")
             .bind(old_job_id)

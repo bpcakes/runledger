@@ -130,8 +130,9 @@ Deploy this capability in order:
 Queue retention must remove promoted-intent links first. In the same
 transaction that deletes selected queue rows, call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` with those exact job IDs,
-then delete the jobs. Time cutoffs alone are insufficient because a new intent
-can converge on a much older existing job.
+then delete the jobs. The helper locks existing selected jobs against concurrent
+promotion until the transaction ends. Time cutoffs alone are insufficient
+because a new intent can converge on a much older existing job.
 
 For rollback, stop new intent writers first, let a compatible worker drain
 pending rows, and only then roll back worker code. Older workers safely ignore
