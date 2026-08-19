@@ -119,8 +119,11 @@ audit, and replacement-work policy.
 Deploy this capability in order:
 
 1. Apply migration `202608180001_job_enqueue_intents`.
-2. Deploy a compatible worker so promotion is active.
-3. Switch application writers to `record_job_enqueue_intent_tx`.
+2. Deploy compatible workers and every queue-retention caller while intent
+   writers remain disabled. Retention must remove exact promoted-intent links
+   before deleting the selected queue rows in the same transaction.
+3. Switch application writers to `record_job_enqueue_intent_tx` only after the
+   retention prerequisite is complete.
 4. Alert on oldest pending age and conflicts from
    `get_job_enqueue_intent_metrics`.
 
@@ -132,9 +135,11 @@ can converge on a much older existing job.
 
 For rollback, stop new intent writers first, let a compatible worker drain
 pending rows, and only then roll back worker code. Older workers safely ignore
-the additive table but cannot drain it. Do not drop the migration during an
-ordinary code rollback. For independent intent retention, choose a promoted-row
-window that satisfies the application's audit needs and call
+the additive table but cannot drain it. Older retention callers are not safe
+while promoted links remain because the foreign key deliberately rejects their
+uncoordinated queue deletes. Do not drop the migration during an ordinary code
+rollback. For independent intent retention, choose a promoted-row window that
+satisfies the application's audit needs and call
 `delete_promoted_job_enqueue_intents_before` in bounded batches. Preserve and
 investigate conflicted rows. For queue retention, use the exact-ID transactional
 cleanup described above; the cutoff API is not a substitute for coordinating

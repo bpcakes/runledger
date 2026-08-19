@@ -59,7 +59,8 @@ backoff and retry indefinitely; inspect promotion attempt/error metadata and
 monitor pending age and conflicts. Treat intent payloads and keys as sensitive
 queue data and do not log them. Queue retention must call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for its exact selected job IDs
-before deleting those jobs in the same transaction.
+before deleting those jobs in the same transaction. Deploy that retention path
+to every queue-retention caller before enabling intent writers.
 
 ## Workflow DAG Rule
 
@@ -279,7 +280,7 @@ successful-replay or continuation-metrics callers; it creates `job_replays` and
 `job_continuation_metrics_rollup`. Apply
 `202607250001_harden_continuation_metrics_payload_validation` for corrected
 continuation metrics. Every migration from `202607190001` through
-`202607280005` is SQLx-history-only and intentionally does not advance the
+`202608180001` is SQLx-history-only and intentionally does not advance the
 custom compatibility fence, so Runledger's filtered older startup and schema
 guards can coexist during expand-first rollout. For code rollback, choose one
 strategy:
@@ -289,12 +290,13 @@ strategy:
    `ensure_schema_compatible_after_idempotency_cutover`; these Runledger paths
    filter SQLx history to the migrations embedded in the release. Patch startup
    first if the rollback binary calls raw `MIGRATOR.run(...)`.
-2. A raw 0.7 `MIGRATOR.run(...)` rejects `202607250001` and the five
-   `20260728000*` rows. SQLx 0.8 can leave its session advisory lock held on
-   that error; close the disposable connection or pool. If startup cannot be
-   patched, use the 0.8 artifact to revert those six migrations in reverse
-   order. This erases workflow-recovery lineage/idempotency, active claims,
-   resource keys/claims, retry audit fields, and workflow continuation opt-ins
+2. A raw 0.7 `MIGRATOR.run(...)` rejects `202607250001`, the five
+   `20260728000*` rows, and `202608180001`. SQLx 0.8 can leave its session
+   advisory lock held on that error; close the disposable connection or pool.
+   If startup cannot be patched, use the current artifact to revert those seven
+   migrations in reverse order. This erases workflow-recovery
+   lineage/idempotency, active claims, resource keys/claims, retry audit fields,
+   workflow continuation opt-ins, and enqueue-intent audit/idempotency state
    while retaining the underlying workflow/job rows. A rollback to pre-0.7 raw
    code also reverts `202607190001`, deleting relational replay lineage and
    replay-request idempotency while leaving replay-created queue rows and their

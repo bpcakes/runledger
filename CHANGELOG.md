@@ -34,8 +34,9 @@ All notable changes to this workspace are documented here.
   rows intentionally fence deletion of their linked `job_queue` rows. Queue
   retention must delete exact promoted-intent links with
   `delete_promoted_job_enqueue_intents_for_jobs_tx` in the same transaction
-  before deleting those jobs. Deployments that do not record intents have no
-  linked rows and their existing retention behavior is unchanged.
+  before deleting those jobs. Deploy that retention path to every retention
+  caller before enabling intent writers. Deployments that do not record intents
+  have no linked rows and their existing retention behavior is unchanged.
 
 ## [0.9.1] - 2026-08-12
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.9.0...v0.9.1)

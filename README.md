@@ -333,7 +333,9 @@ When purging selected `job_queue` rows, call
 `delete_promoted_job_enqueue_intents_for_jobs_tx` for those exact job IDs first
 and delete the jobs in the same transaction. A newly promoted intent may link
 to a much older existing job, so independent time windows cannot guarantee the
-required ordering.
+required ordering. Deploy that exact-ID retention path to every queue-retention
+caller before enabling intent writers; workers may be upgraded earlier while no
+intents exist to promote.
 
 Intent payloads and idempotency keys have the same trust boundary as queue
 payloads and keys. Treat them as sensitive application data and do not log them
