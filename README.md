@@ -57,7 +57,7 @@ handlers, process model, and admin surface.
   - [Active workflow keys](#active-workflow-keys)
   - [Durable execution resources](#durable-execution-resources)
   - [Workflow recovery](#workflow-recovery)
-  - [Upgrade map for releases 0.6 through 0.9](#upgrade-map-for-releases-06-through-09)
+  - [Upgrade map for releases 0.6 through 0.10](#upgrade-map-for-releases-06-through-010)
   - [0.7 to 0.8 activation and rollback](#07-to-08-activation-and-rollback)
   - [Schedules](#schedules)
   - [Job definition catalog](#job-definition-catalog)
@@ -764,10 +764,10 @@ the function neither commits nor rolls back it. A source must be terminal.
 Recovery of an active-key workflow can remain blocked until its old claim is
 quiescent, or while another run owns that key.
 
-### Upgrade map for releases 0.6 through 0.9
+### Upgrade map for releases 0.6 through 0.10
 
-The `0.9` release line includes the contracts introduced in the preceding
-three releases. When skipping versions, preserve each release's schema and
+The `0.10` release line includes the contracts introduced in the preceding
+four releases. When skipping versions, preserve each release's schema and
 runtime fence:
 
 | Release | Schema requirement | Activation requirement |
@@ -776,6 +776,7 @@ runtime fence:
 | `0.7` | Apply `202607190001_job_replays_and_continuation_metrics` before replay or metrics callers. | Successful replay and continuation metrics are additive. Use Runledger's filtered migration/schema helpers for expand-first deployment and code rollback. |
 | `0.8` | Apply `202607250001_harden_continuation_metrics_payload_validation` and `202607280001` through `202607280005` before any 0.8 runtime loop or persistence API runs. | Deploy every 0.8 writer with new paths unused, quiesce all older processes and leases, then canary workflow continuation, active keys, resources, retry hints, and workflow recovery. |
 | `0.9` | No migration after 0.8.0. | Custom runtimes may adopt `JobLeaseIdentity` and its `_for_lease` lifecycle APIs without a coordinated schema or source migration; the positional functions remain available. |
+| `0.10` | Apply `202608180001_job_enqueue_intents` before any process records or promotes enqueue intents. | Deploy exact-ID retention cleanup to every queue-retention caller before enabling intent writers. Keep at least one promoter for every intent type, and budget for each enabled supervisor's independent idle polling. |
 
 For 0.8 source upgrades, construct `WorkflowDagStepValidationInput` with
 `WorkflowDagStepValidationInput::new(...)` and its option setters; it is now
@@ -1479,7 +1480,7 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.9.1
+./scripts/prepare-release.sh 0.10.0
 ```
 
 The preparation script starts from a clean working tree or resumes an existing
@@ -1496,7 +1497,7 @@ crate archive contains the repository license. If publishing manually, run
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.9.1
+./scripts/publish-release.sh 0.10.0
 ```
 
 Before publishing any crate, the publish script confirms that the release tag
@@ -1504,20 +1505,23 @@ is absent locally and remotely, requires the same-named remote branch to point
 at the exact local commit, and verifies that commit's completed GitHub Actions
 `CI` run and every job succeeded. It then dry-runs the branch and tag push,
 publishes crates in dependency order, dry-runs each once its workspace
-dependencies are indexed, creates a `v0.9.1` tag, and atomically pushes the
+dependencies are indexed, creates a `v0.10.0` tag, and atomically pushes the
 current branch and tag. The publication preflight requires an authenticated
 GitHub CLI. Set `PUBLISH_REMOTE` to override the git remote for the final push.
 
 Observable contract changes to call out in release notes for this line:
 
-- `WorkflowStepEnqueue::execution()` provides a typed view of existing
-  job-backed and external workflow-step execution settings.
-- Existing workflow builders and individual execution-setting getters remain
-  source compatible, and persisted workflow snapshots retain their existing
-  shape.
-- The release adds no migrations beyond the schema required by 0.8.0; the
-  remaining changes are internal module, validation, transaction-phase, TUI,
-  test, packaging, and release-tooling improvements.
+- Migration `202608180001_job_enqueue_intents` adds durable, strictly
+  idempotent transactional handoff before a job definition exists.
+- Intent promotion is enabled by default for worker-enabled supervisors and
+  has independent polling controls; retain promoter coverage for every intent
+  type while accounting for each enabled supervisor's idle query rate.
+- Queue retention must remove exact promoted-intent links in the same
+  `READ COMMITTED` transaction before deleting linked jobs. Deploy that path to
+  every retention caller before enabling intent writers.
+- Unix-like operating systems are now the only supported platforms. Deferred
+  reaper query-error logs also replace the previous internal/source fields with
+  the sanitized `error_constraint` field.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

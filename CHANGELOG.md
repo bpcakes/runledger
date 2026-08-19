@@ -4,6 +4,9 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-19
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.9.1...v0.10.0)
+
 ### Added
 
 - Add durable job enqueue intents for atomically recording application state
