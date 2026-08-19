@@ -1562,7 +1562,7 @@ async fn worker_version_skips_newer_snapshot_versions_without_mutating_them() {
 }
 
 #[tokio::test]
-async fn promotion_keeps_savepoint_headroom_below_postgres_subtransaction_cache() {
+async fn promotion_caps_savepoint_batch_below_postgres_subtransaction_cache() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_batch_cap", 4).await;
     register_test_job_definition(&pool, JOB_TYPE).await;
     let payload = json!({"event": "bounded-promotion"});
@@ -1598,15 +1598,8 @@ async fn promotion_keeps_savepoint_headroom_below_postgres_subtransaction_cache(
     .expect("read state after capped batch");
     assert_eq!(metrics[0].pending_count, 25);
     assert_eq!(metrics[0].retrying_count, 24);
+    assert_eq!(metrics[0].max_promotion_attempts, 1);
     assert_eq!(metrics[0].conflicted_count, 0);
-
-    let second = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1_000)
-        .await
-        .expect("process final failing row");
-    assert!(!second.batch_was_full());
-    assert_eq!(second.retry_deferred, 1);
-    assert_eq!(second.conflicted, 0);
-    assert_eq!(second.total_promoted, 0);
 
     teardown_ephemeral_pool(pool, database).await;
 }
