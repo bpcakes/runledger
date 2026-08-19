@@ -102,7 +102,8 @@ back to its savepoint. Full batches continue immediately after a shutdown check
 and cooperative yield; partial and empty batches wait for the configured
 polling interval. Database
 failures retry indefinitely so a prolonged outage cannot silently discard work;
-alert on oldest pending age, `retrying_count`, and `max_promotion_attempts` from
+alert on oldest pending age, pending-only `retrying_count`, and pending-only
+`max_promotion_attempts` from
 `get_job_enqueue_intent_metrics`, then repair the database policy. Conflicted
 intents remain immutable evidence; safe replacement work requires a deliberately
 new application idempotency key. Metrics aggregate pending, conflicted, and

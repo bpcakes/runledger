@@ -501,6 +501,9 @@ pub async fn list_job_enqueue_intents(
 /// Returns durable intent backlog and promotion signals grouped by job type.
 ///
 /// Each lifecycle population is aggregated behind its own selective predicate.
+/// `pending_count`, `retrying_count`, `max_promotion_attempts`, and
+/// `oldest_pending_at` describe only intents that are currently pending;
+/// attempts made by terminal promoted or conflicted intents are not backlog.
 /// Job types represented only by promoted intents older than 24 hours are
 /// omitted because every returned signal for them would be zero.
 pub async fn get_job_enqueue_intent_metrics(

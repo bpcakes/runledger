@@ -269,12 +269,21 @@ impl<'a> JobEnqueueIntentListFilter<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct JobEnqueueIntentMetricsRecord {
+    /// Canonical job type shared by every population in this record.
     pub job_type: JobTypeName,
+    /// Number of intents currently awaiting promotion.
     pub pending_count: i64,
+    /// Number of pending intents whose promotion has already been attempted.
     pub retrying_count: i64,
+    /// Highest promotion-attempt count among pending intents.
+    ///
+    /// This is zero when the returned job type has no pending intents.
     pub max_promotion_attempts: i32,
+    /// Number of intents retained in the terminal conflicted state.
     pub conflicted_count: i64,
+    /// Number of retained intents promoted during the preceding 24 hours.
     pub promoted_24h: i64,
+    /// Creation time of the oldest pending intent, if one exists.
     pub oldest_pending_at: Option<DateTime<Utc>>,
 }
 

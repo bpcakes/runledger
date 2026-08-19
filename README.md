@@ -317,6 +317,9 @@ conflicted intents as immutable evidence; if replacement work is safe, the
 application must submit it deliberately under a new idempotency key.
 Query `get_job_enqueue_intent_metrics` to alert on oldest pending age,
 `retrying_count`, `max_promotion_attempts`, and increases in conflict count.
+The retry count and maximum attempt count describe only intents that are still
+pending, so resolved promoted or conflicted history cannot inflate the active
+backlog signal.
 Its promoted population is limited to the reported 24-hour window, so retained
 promoted history older than that window is not scanned merely to emit zeroes.
 Pending and conflicted rows remain idempotency/audit evidence and have no
