@@ -1523,6 +1523,105 @@ async fn retention_fence_budget_covers_total_promotion_critical_section() {
 }
 
 #[tokio::test]
+#[ignore = "slow PostgreSQL 18 transaction-timeout regression (~25 seconds)"]
+async fn promotion_transaction_timeout_terminates_and_rolls_back_the_session() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_transaction_timeout_fires", 1).await;
+    record_postgres_server_version(&pool, "intent promotion transaction timeout firing").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "promotion-transaction-timeout-fires"});
+    let recorded = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(
+            JobType::new(JOB_TYPE),
+            &payload,
+            "promotion-transaction-timeout-fires",
+        ),
+    )
+    .await
+    .expect("record intent before transaction-timeout regression");
+
+    // A transaction_timeout configured before BEGIN is already armed when the
+    // promotion helper applies its stricter local cap. This reproduces the
+    // PostgreSQL assignment-hook behavior that a current_setting-only assertion
+    // cannot detect.
+    sqlx::query("SET SESSION transaction_timeout = '1min'")
+        .execute(&pool)
+        .await
+        .expect("set looser active transaction timeout before promotion");
+
+    sqlx::query(
+        "CREATE FUNCTION delay_intent_promotion_past_transaction_timeout()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             IF OLD.status = 'PENDING' AND NEW.status = 'PROMOTED' THEN
+                 PERFORM pg_sleep(30);
+             END IF;
+             RETURN NEW;
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("create transaction-timeout trigger function");
+    sqlx::query(
+        "CREATE TRIGGER trg_delay_intent_promotion_past_transaction_timeout
+         BEFORE UPDATE ON job_enqueue_intents
+         FOR EACH ROW
+         EXECUTE FUNCTION delay_intent_promotion_past_transaction_timeout()",
+    )
+    .execute(&pool)
+    .await
+    .expect("create transaction-timeout trigger");
+
+    let started = Instant::now();
+    let error = timeout(
+        Duration::from_secs(35),
+        promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1),
+    )
+    .await
+    .expect("promotion must stop at its transaction timeout")
+    .expect_err("PostgreSQL must terminate the over-budget promotion session");
+    assert!(
+        started.elapsed() >= Duration::from_secs(24),
+        "promotion transaction timeout fired too early: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(32),
+        "promotion transaction timeout fired too late: {:?}",
+        started.elapsed()
+    );
+    let runledger_postgres::Error::QueryError(query_error) = error else {
+        panic!("expected transaction-timeout query error");
+    };
+    assert!(
+        query_error.source_arc().is_some(),
+        "transaction-timeout query error must preserve its SQLx source"
+    );
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_queue")
+            .fetch_one(&pool)
+            .await
+            .expect("count queue rows after transaction timeout"),
+        0
+    );
+    assert_eq!(
+        get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+            .await
+            .expect("load intent after transaction timeout")
+            .expect("intent remains after transaction timeout")
+            .status,
+        JobEnqueueIntentStatus::Pending
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn promotion_row_lock_wait_is_bounded_while_holding_retention_fence() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_promotion_row_timeout", 6).await;
