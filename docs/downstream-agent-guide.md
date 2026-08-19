@@ -85,10 +85,10 @@ same intent even after promotion. A changed canonical request returns
 `job.intent_idempotency_conflict`. Once a compatible worker sees an enabled
 definition, promotion applies current definition defaults through ordinary
 enqueue semantics and links the intent to the resulting job. Missing, disabled,
-and unregistered types remain pending. A dedicated promoter loop runs on the
-worker poll cadence independently of queue claiming and execution permits;
-promoted work waits behind the ordinary queue's priority, scheduling, and
-concurrency controls. A deterministic
+and unregistered types remain pending. A dedicated promoter loop runs
+independently of queue claiming and execution permits; promoted work waits
+behind the ordinary queue's priority, scheduling, and concurrency controls. A
+deterministic
 collision with a different ordinary enqueue becomes `CONFLICTED`; Runledger
 does not guess whether replacement work is safe.
 Database-level promotion failures roll back only the affected job/event writes,
@@ -97,9 +97,10 @@ do not starve later eligible intents. Inspect `promotion_attempts`,
 `next_promotion_at`, `last_attempted_at`, and sanitized error fields through the
 intent read APIs. Canonical-snapshot drift is also deferred so an operator can
 restore consistency and retry the same durable request. Promotion processes at
-most 24 intents per transaction,
-leaving headroom even when every row rolls back to its savepoint.
-Standard workers run at most one such pass per `poll_interval`. Database
+most 24 intents per transaction, leaving headroom even when every row rolls
+back to its savepoint. Full batches continue immediately after a shutdown check
+and cooperative yield; partial and empty batches wait for the configured
+polling interval. Database
 failures retry indefinitely so a prolonged outage cannot silently discard work;
 alert on oldest pending age, `retrying_count`, and `max_promotion_attempts` from
 `get_job_enqueue_intent_metrics`, then repair the database policy. Conflicted
@@ -109,11 +110,10 @@ recently promoted populations through separate selective predicates; promoted
 history older than the reported 24-hour window is not scanned to produce empty
 signals.
 
-The maximum per-worker promotion drain rate is
-`min(claim_batch_size, 24) / poll_interval`. Pending and conflicted rows are
-durable idempotency/audit evidence, so Runledger does not expose a generic
-delete or cancel operation for them. Any application-specific abandonment
-workflow must define its own authorization, audit, and replacement-work policy.
+Pending and conflicted rows are durable idempotency/audit evidence, so Runledger
+does not expose a generic delete or cancel operation for them. Any
+application-specific abandonment workflow must define its own authorization,
+audit, and replacement-work policy.
 
 Deploy this capability in order:
 
@@ -1012,7 +1012,11 @@ Use `runledger_runtime::Supervisor::run_until_shutdown` for ordinary worker
 processes. The lower-level worker, intent promoter, scheduler, and reaper loops
 are escape hatches for custom process orchestration. A custom process that uses
 durable enqueue intents must run both `run_worker_loop` and
-`run_intent_promoter_loop`; the supervisor does this automatically.
+`run_intent_promoter_loop`; the supervisor does this automatically unless
+`disable_intent_promoter` is selected. Use `IntentPromoterConfig` and
+`run_intent_promoter_loop_with_config` when promotion needs polling and batch
+controls independent from ordinary worker claiming. Full promotion batches are
+drained immediately; partial and empty passes wait for the configured cadence.
 
 Prefer `JobsConfig::from_env()` for runtime configuration. If code constructs
 `JobsConfig` directly, validate it before startup; supervisors return

@@ -5,6 +5,8 @@ use thiserror::Error;
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 500;
 const DEFAULT_CLAIM_BATCH_SIZE: i64 = 16;
+const DEFAULT_INTENT_PROMOTER_POLL_INTERVAL_MS: u64 = 500;
+const DEFAULT_INTENT_PROMOTER_BATCH_SIZE: i64 = 16;
 const DEFAULT_LEASE_TTL_SECONDS: i32 = 60;
 const DEFAULT_MAX_GLOBAL_CONCURRENCY: usize = 32;
 const DEFAULT_REAPER_INTERVAL_SECONDS: u64 = 15;
@@ -25,6 +27,71 @@ pub struct JobsConfig {
     pub reaper_interval: Duration,
     pub schedule_poll_interval: Duration,
     pub reaper_retry_delay_ms: i32,
+}
+
+/// Polling and batch controls for durable enqueue-intent promotion.
+///
+/// [`crate::Supervisor`] derives these values from [`JobsConfig`] by default so
+/// existing deployments keep their current behavior. Use this type when intent
+/// traffic needs a cadence independent from ordinary queue claiming.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct IntentPromoterConfig {
+    poll_interval: Duration,
+    batch_size: i64,
+}
+
+impl IntentPromoterConfig {
+    #[must_use]
+    pub const fn new(poll_interval: Duration, batch_size: i64) -> Self {
+        Self {
+            poll_interval,
+            batch_size,
+        }
+    }
+
+    /// Reads intent-specific settings from the environment.
+    ///
+    /// `JOBS_INTENT_PROMOTER_POLL_INTERVAL_MS` defaults to 500 milliseconds and
+    /// `JOBS_INTENT_PROMOTER_BATCH_SIZE` defaults to 16.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            poll_interval: Duration::from_millis(
+                parse_env(
+                    "JOBS_INTENT_PROMOTER_POLL_INTERVAL_MS",
+                    DEFAULT_INTENT_PROMOTER_POLL_INTERVAL_MS,
+                )
+                .max(1),
+            ),
+            batch_size: parse_env(
+                "JOBS_INTENT_PROMOTER_BATCH_SIZE",
+                DEFAULT_INTENT_PROMOTER_BATCH_SIZE,
+            )
+            .clamp(1, JOBS_CLAIM_BATCH_SIZE_MAX),
+        }
+    }
+
+    #[must_use]
+    pub const fn from_jobs_config(config: &JobsConfig) -> Self {
+        Self::new(config.poll_interval, config.claim_batch_size)
+    }
+
+    pub fn validate(&self) -> Result<(), JobsConfigValidationError> {
+        if self.poll_interval.is_zero() {
+            return Err(JobsConfigValidationError::ZeroPollInterval);
+        }
+        validate_claim_batch_size(self.batch_size)
+    }
+
+    #[must_use]
+    pub const fn poll_interval(&self) -> Duration {
+        self.poll_interval
+    }
+
+    #[must_use]
+    pub const fn batch_size(&self) -> i64 {
+        self.batch_size
+    }
 }
 
 #[non_exhaustive]
@@ -139,13 +206,6 @@ impl JobsConfig {
         }
 
         Ok(())
-    }
-
-    pub(crate) fn validate_intent_promoter_loop(&self) -> Result<(), JobsConfigValidationError> {
-        if self.poll_interval.is_zero() {
-            return Err(JobsConfigValidationError::ZeroPollInterval);
-        }
-        validate_claim_batch_size(self.claim_batch_size)
     }
 
     pub(crate) fn validate_scheduler_loop(&self) -> Result<(), JobsConfigValidationError> {
@@ -278,6 +338,23 @@ mod tests {
     }
 
     #[test]
+    fn intent_promoter_config_validates_independently() {
+        let jobs_config = test_config();
+        assert_eq!(
+            IntentPromoterConfig::from_jobs_config(&jobs_config),
+            IntentPromoterConfig::new(jobs_config.poll_interval, jobs_config.claim_batch_size)
+        );
+        assert_eq!(
+            IntentPromoterConfig::new(Duration::ZERO, 1).validate(),
+            Err(JobsConfigValidationError::ZeroPollInterval)
+        );
+        assert_eq!(
+            IntentPromoterConfig::new(Duration::from_millis(1), 0).validate(),
+            Err(JobsConfigValidationError::InvalidClaimBatchSize { actual: 0 })
+        );
+    }
+
+    #[test]
     fn validate_rejects_invalid_direct_config_values() {
         let cases = [
             {
@@ -361,6 +438,18 @@ mod tests {
         assert_eq!(config.poll_interval, Duration::from_millis(1));
         assert_eq!(config.reaper_interval, Duration::from_secs(1));
         assert_eq!(config.schedule_poll_interval, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn intent_promoter_from_env_uses_independent_controls() {
+        let _env = ScopedEnv::set(&[
+            ("JOBS_INTENT_PROMOTER_POLL_INTERVAL_MS", Some("37")),
+            ("JOBS_INTENT_PROMOTER_BATCH_SIZE", Some("9")),
+        ]);
+
+        let config = IntentPromoterConfig::from_env();
+        assert_eq!(config.poll_interval(), Duration::from_millis(37));
+        assert_eq!(config.batch_size(), 9);
     }
 
     #[test]

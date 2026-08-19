@@ -288,10 +288,14 @@ A standard Runledger supervisor promotes pending intents only for its
 registered handler types once their definitions are enabled. Promotion uses
 ordinary enqueue semantics and creates the normal `ENQUEUED` audit event.
 Missing, disabled, and unregistered types remain pending without consuming
-attempts. A dedicated promoter loop runs one database pass on the worker poll
-cadence, independently of queue claiming and execution permits. Custom runtime
-orchestration that calls `run_worker_loop` directly must also run
-`run_intent_promoter_loop` when it uses durable enqueue intents.
+attempts. A dedicated promoter loop runs independently of queue claiming and
+execution permits. It waits on its polling cadence after a partial or empty
+pass, but immediately continues after a full batch so backlog draining is not
+artificially rate-limited. Custom runtime orchestration that calls
+`run_worker_loop` directly must also run `run_intent_promoter_loop` when it uses
+durable enqueue intents. Use `IntentPromoterConfig` with
+`run_intent_promoter_loop_with_config` for an independent cadence, or configure
+and disable the supervisor promoter through `SupervisorBuilder`.
 Promoted work waits in the ordinary queue, where priority, scheduling, queue
 metrics, and worker concurrency provide the normal backpressure.
 Database-level promotion failures roll back only the affected queue/event
@@ -301,9 +305,8 @@ later intents in the batch to continue. Lookup/list records expose
 last error. One public promotion pass is capped at 24 rows to keep worst-case
 failed-savepoint headroom
 below PostgreSQL's cached-subtransaction threshold.
-The maximum per-worker drain rate is therefore
-`min(claim_batch_size, 24) / poll_interval`; size pending-age alerts and rollout
-drain expectations accordingly.
+Each transaction remains capped at 24 rows; full transactions continue after a
+shutdown check and cooperative task yield.
 Database failures remain pending and retry indefinitely: Runledger must not
 turn a long outage into silently lost work. Alert on pending age and
 `promotion_attempts`; repair the rejecting database policy. A mismatch between
@@ -1017,6 +1020,14 @@ Interval and concurrency values are clamped to safe minimums.
 directly, call `validate()` before starting runtime loops. Supervisor builders
 reject invalid configs with `RuntimeError::InvalidJobsConfig`, and low-level
 loops can return `RuntimeLoopExit::InvalidConfig`.
+
+`IntentPromoterConfig::from_env()` reads independent promoter controls when a
+process should not inherit ordinary worker polling settings:
+
+| Variable | Purpose |
+| --- | --- |
+| `JOBS_INTENT_PROMOTER_POLL_INTERVAL_MS` | Delay after partial or empty promotion passes |
+| `JOBS_INTENT_PROMOTER_BATCH_SIZE` | Intents requested per promotion transaction; storage caps each pass at 24 |
 
 ## Database schema and migrations
 

@@ -7,7 +7,7 @@ use tokio::runtime::Handle;
 use tracing::warn;
 
 use crate::catalog::JobCatalog;
-use crate::config::JobsConfig;
+use crate::config::{IntentPromoterConfig, JobsConfig};
 use crate::observer::{JobLifecycleObserver, JobLifecycleObservers};
 use crate::registry::JobRegistry;
 use crate::scheduler::run_scheduler_loop;
@@ -39,9 +39,11 @@ pub struct Supervisor {
 /// Builds a [`Supervisor`] with configurable runtime loops.
 ///
 /// Worker execution, durable intent promotion, scheduler, and reaper loops are
-/// enabled by default. Intent promotion follows the worker enablement setting.
-/// Call [`Self::with_registry`] or [`Self::with_catalog`] before [`Self::build`]
-/// when worker or reaper loops remain enabled.
+/// enabled by default. Disabling the worker also disables intent promotion;
+/// [`SupervisorBuilder::disable_intent_promoter`] can disable only promotion.
+/// Call [`SupervisorBuilder::with_registry`] or
+/// [`SupervisorBuilder::with_catalog`] before [`SupervisorBuilder::build`] when
+/// worker or reaper loops remain enabled.
 #[must_use]
 pub struct SupervisorBuilder<'a> {
     pool: &'a runledger_postgres::DbPool,
@@ -52,6 +54,8 @@ pub struct SupervisorBuilder<'a> {
     config: JobsConfig,
     observers: Vec<Arc<dyn JobLifecycleObserver>>,
     worker_enabled: bool,
+    intent_promoter_enabled: bool,
+    intent_promoter_config: Option<IntentPromoterConfig>,
     scheduler_enabled: bool,
     reaper_enabled: bool,
 }
@@ -90,6 +94,8 @@ impl Supervisor {
             config,
             observers: Vec::new(),
             worker_enabled: true,
+            intent_promoter_enabled: true,
+            intent_promoter_config: None,
             scheduler_enabled: true,
             reaper_enabled: true,
         })
@@ -249,6 +255,25 @@ impl<'a> SupervisorBuilder<'a> {
     #[must_use = "builder methods return an updated builder value"]
     pub fn disable_worker(mut self) -> Self {
         self.worker_enabled = false;
+        self.intent_promoter_enabled = false;
+        self
+    }
+
+    /// Disables durable enqueue-intent promotion while leaving ordinary worker
+    /// claiming and execution enabled.
+    #[must_use = "builder methods return an updated builder value"]
+    pub fn disable_intent_promoter(mut self) -> Self {
+        self.intent_promoter_enabled = false;
+        self
+    }
+
+    /// Overrides the intent promoter's polling and batch controls.
+    ///
+    /// This does not enable a promoter disabled by [`Self::disable_worker`] or
+    /// [`Self::disable_intent_promoter`].
+    #[must_use = "builder methods return an updated builder value"]
+    pub fn with_intent_promoter_config(mut self, config: IntentPromoterConfig) -> Self {
+        self.intent_promoter_config = Some(config);
         self
     }
 
@@ -293,6 +318,8 @@ impl<'a> SupervisorBuilder<'a> {
             config,
             observers,
             worker_enabled,
+            intent_promoter_enabled,
+            intent_promoter_config,
             scheduler_enabled,
             reaper_enabled,
         } = self;
@@ -300,6 +327,13 @@ impl<'a> SupervisorBuilder<'a> {
         config
             .validate()
             .map_err(|source| RuntimeError::InvalidJobsConfig { source })?;
+        let intent_promoter_config = intent_promoter_config
+            .unwrap_or_else(|| IntentPromoterConfig::from_jobs_config(&config));
+        if intent_promoter_enabled {
+            intent_promoter_config
+                .validate()
+                .map_err(|source| RuntimeError::InvalidJobsConfig { source })?;
+        }
 
         if mixed_registry_sources {
             return Err(RuntimeError::MixedRegistrySources);
@@ -320,23 +354,24 @@ impl<'a> SupervisorBuilder<'a> {
         let mut tasks = TaskGroup::new();
         let observers = JobLifecycleObservers::from_arc_observers(observers);
 
-        if worker_enabled {
+        if intent_promoter_enabled {
             tasks.spawn_on(&runtime, INTENT_PROMOTER_TASK, {
                 let pool = pool.clone();
                 let registry = registry.clone();
-                let config = config.clone();
                 let shutdown_rx = shutdown_rx.clone();
                 async move {
-                    crate::intent_promoter::run_intent_promoter_loop(
+                    crate::intent_promoter::run_intent_promoter_loop_with_config(
                         pool,
                         registry,
-                        config,
+                        intent_promoter_config,
                         shutdown_rx,
                     )
                     .await
                 }
             });
+        }
 
+        if worker_enabled {
             tasks.spawn_on(&runtime, WORKER_TASK, {
                 let pool = pool.clone();
                 let registry = registry.clone();
@@ -461,6 +496,8 @@ mod tests {
         let builder = empty_builder(&pool);
 
         assert!(builder.worker_enabled);
+        assert!(builder.intent_promoter_enabled);
+        assert_eq!(builder.intent_promoter_config, None);
         assert!(builder.scheduler_enabled);
         assert!(builder.reaper_enabled);
         assert!(builder.registry.is_none());
@@ -614,8 +651,17 @@ mod tests {
             .disable_reaper();
 
         assert!(!builder.worker_enabled);
+        assert!(!builder.intent_promoter_enabled);
         assert!(!builder.scheduler_enabled);
         assert!(!builder.reaper_enabled);
+
+        let worker_without_promoter = empty_builder(&pool).disable_intent_promoter();
+        assert!(worker_without_promoter.worker_enabled);
+        assert!(!worker_without_promoter.intent_promoter_enabled);
+
+        let promoter_config = IntentPromoterConfig::new(Duration::from_secs(2), 7);
+        let customized = empty_builder(&pool).with_intent_promoter_config(promoter_config);
+        assert_eq!(customized.intent_promoter_config, Some(promoter_config));
     }
 
     #[tokio::test]
@@ -650,6 +696,16 @@ mod tests {
             vec![INTENT_PROMOTER_TASK, WORKER_TASK]
         );
         abort_supervisor_tasks(worker_only).await;
+
+        let worker_without_promoter = empty_builder(&pool)
+            .with_registry(JobRegistry::new())
+            .disable_intent_promoter()
+            .disable_scheduler()
+            .disable_reaper()
+            .build()
+            .expect("worker should run without intent promotion");
+        assert_eq!(task_names(&worker_without_promoter), vec![WORKER_TASK]);
+        abort_supervisor_tasks(worker_without_promoter).await;
 
         let reaper_only = empty_builder(&pool)
             .with_registry(JobRegistry::new())

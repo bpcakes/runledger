@@ -15,6 +15,9 @@ All notable changes to this workspace are documented here.
 
 ### Changed
 
+- Drain full enqueue-intent promotion batches without an idle poll delay, and
+  add independent promoter configuration plus a supervisor opt-out for worker
+  processes that do not use enqueue intents.
 - Promoted enqueue intents now retain linked `job_queue` rows with
   `ON DELETE RESTRICT`. Applications can remove links for exact retained job
   IDs inside the same caller-owned transaction before deleting queue rows;

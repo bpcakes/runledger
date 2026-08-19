@@ -10,8 +10,10 @@ use runledger_postgres::jobs::{
     upsert_job_definition_tx,
 };
 use runledger_runtime::RuntimeLoopExit;
-use runledger_runtime::config::JobsConfig;
-use runledger_runtime::intent_promoter::run_intent_promoter_loop;
+use runledger_runtime::config::{IntentPromoterConfig, JobsConfig};
+use runledger_runtime::intent_promoter::{
+    run_intent_promoter_loop, run_intent_promoter_loop_with_config,
+};
 use runledger_runtime::observer::{
     JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent, JobSucceededEvent,
 };
@@ -241,6 +243,80 @@ async fn worker_promotes_registered_intents_and_leaves_unregistered_types_pendin
         .expect("load unregistered intent")
         .expect("unregistered intent exists");
     assert_eq!(unregistered.status, JobEnqueueIntentStatus::Pending);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn full_intent_batches_drain_without_poll_interval_delay() {
+    let (pool, database) = setup_ephemeral_pool("jobs_intent_promoter_full_batch", 8).await;
+    let job_type = JobType::new("jobs.test.intent_full_batch");
+    let mut tx = pool.begin().await.expect("begin definition transaction");
+    upsert_job_definition_tx(
+        &mut tx,
+        &JobDefinitionUpsert {
+            job_type,
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 30,
+            default_priority: 100,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert intent definition");
+    tx.commit().await.expect("commit intent definition");
+
+    let payload = json!({"kind": "full-batch"});
+    for index in 0..25 {
+        let idempotency_key = format!("full-batch-{index}");
+        let outcome = record_job_enqueue_intent(
+            &pool,
+            &JobEnqueueIntent::new(job_type, &payload, &idempotency_key),
+        )
+        .await
+        .expect("record full-batch intent");
+        assert_eq!(outcome.status, JobEnqueueIntentStatus::Pending);
+    }
+
+    let mut registry = JobRegistry::new();
+    registry.register(CountingHandler {
+        job_type,
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let promoter_task = tokio::spawn(run_intent_promoter_loop_with_config(
+        pool.clone(),
+        registry,
+        IntentPromoterConfig::new(Duration::from_secs(3), 1_000),
+        shutdown_rx,
+    ));
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let promoted = sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM job_enqueue_intents WHERE status = 'PROMOTED'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("count promoted intents");
+            if promoted == 25 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a full batch must trigger an immediate follow-up pass");
+
+    shutdown_tx.send(true).expect("send promoter shutdown");
+    assert_eq!(
+        timeout(Duration::from_secs(2), promoter_task)
+            .await
+            .expect("intent promoter shutdown timeout")
+            .expect("intent promoter task must not panic"),
+        RuntimeLoopExit::Shutdown
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }

@@ -121,7 +121,7 @@ pub mod prelude {
         JobCatalogExactSyncReport, JobCatalogScheduleSyncReport, JobCatalogScheduleSyncScope,
         JobCatalogSyncReport, JobCatalogSyncScope,
     };
-    pub use crate::config::JobsConfig;
+    pub use crate::config::{IntentPromoterConfig, JobsConfig};
     pub use crate::error::{ReaperError, RuntimeError, SchedulerError, WorkerError};
     pub use crate::observer::{
         JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobContinuedEvent,
@@ -139,7 +139,7 @@ pub mod prelude {
 pub enum RuntimeLoopExit {
     /// The loop observed a shutdown request or a closed shutdown channel.
     Shutdown,
-    /// The loop rejected an invalid [`config::JobsConfig`] before polling.
+    /// The loop rejected invalid runtime-loop configuration before polling.
     InvalidConfig(config::JobsConfigValidationError),
     /// The loop completed without observing shutdown. Supervisors treat this as
     /// an unexpected task exit.

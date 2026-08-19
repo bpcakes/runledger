@@ -75,6 +75,9 @@ async fn all_preludes_can_be_glob_imported_together() {
         .await
         .expect_err("zero lease duration must be rejected before using the lazy pool");
     let catalog = JobCatalog::new().job("jobs.prelude.smoke", PreludeHandler);
+    let promoter_config = IntentPromoterConfig::new(Duration::from_millis(10), 1);
+    assert_eq!(promoter_config.poll_interval(), Duration::from_millis(10));
+    assert_eq!(promoter_config.batch_size(), 1);
 
     let supervisor = Supervisor::builder(
         &pool,

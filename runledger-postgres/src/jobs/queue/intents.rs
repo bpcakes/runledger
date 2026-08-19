@@ -673,6 +673,7 @@ async fn promote_job_enqueue_intents_read_committed_tx(
     let mismatched_snapshots = compare_intent_snapshots_tx(tx, &candidates).await?;
 
     let mut report = JobEnqueueIntentPromotionReport::default();
+    report.mark_batch_size(candidates.len(), limit);
     for candidate in candidates {
         let intent_id = candidate.id();
         // Keep these control statements dynamic: compiling three fixed

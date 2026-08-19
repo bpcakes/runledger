@@ -1,8 +1,12 @@
 use std::future::Future;
 use std::time::Duration;
 
-use runledger_runtime::config::{JOBS_CLAIM_BATCH_SIZE_MAX, JobsConfig, JobsConfigValidationError};
-use runledger_runtime::intent_promoter::run_intent_promoter_loop;
+use runledger_runtime::config::{
+    IntentPromoterConfig, JOBS_CLAIM_BATCH_SIZE_MAX, JobsConfig, JobsConfigValidationError,
+};
+use runledger_runtime::intent_promoter::{
+    run_intent_promoter_loop, run_intent_promoter_loop_with_config,
+};
 use runledger_runtime::reaper::run_reaper_loop;
 use runledger_runtime::registry::JobRegistry;
 use runledger_runtime::scheduler::run_scheduler_loop;
@@ -194,6 +198,42 @@ async fn intent_promoter_rejects_zero_poll_interval() {
         JobsConfigValidationError::ZeroPollInterval,
     )
     .await;
+}
+
+#[tokio::test]
+async fn independently_configured_intent_promoter_rejects_invalid_values() {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    assert_invalid_config_quickly(
+        run_intent_promoter_loop_with_config(
+            lazy_pool(),
+            JobRegistry::new(),
+            IntentPromoterConfig::new(Duration::from_millis(1), 0),
+            shutdown_rx,
+        ),
+        JobsConfigValidationError::InvalidClaimBatchSize { actual: 0 },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn supervisor_rejects_invalid_independent_intent_promoter_config() {
+    let pool = lazy_pool();
+    let result = Supervisor::builder(&pool, test_config())
+        .expect("supervisor builder has runtime")
+        .with_registry(JobRegistry::new())
+        .with_intent_promoter_config(IntentPromoterConfig::new(Duration::ZERO, 1))
+        .disable_scheduler()
+        .disable_reaper()
+        .build();
+
+    match result {
+        Err(RuntimeError::InvalidJobsConfig { source }) => {
+            assert_eq!(source, JobsConfigValidationError::ZeroPollInterval);
+        }
+        Err(other) => panic!("expected invalid config error, got {other:?}"),
+        Ok(_) => panic!("invalid intent promoter config should prevent supervisor build"),
+    }
 }
 
 #[tokio::test]

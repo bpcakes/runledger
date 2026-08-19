@@ -288,6 +288,20 @@ pub struct JobEnqueueIntentPromotionReport {
     pub definition_unavailable: u64,
     pub retry_deferred: u64,
     pub total_promoted: u64,
+    batch_was_full: bool,
+}
+
+impl JobEnqueueIntentPromotionReport {
+    /// Returns whether the storage layer claimed its effective per-transaction
+    /// limit, indicating that immediately eligible work may remain.
+    #[must_use]
+    pub const fn batch_was_full(&self) -> bool {
+        self.batch_was_full
+    }
+
+    pub(in crate::jobs) fn mark_batch_size(&mut self, claimed: usize, limit: i64) {
+        self.batch_was_full = usize::try_from(limit).is_ok_and(|limit| claimed == limit);
+    }
 }
 
 /// Exact tenant scope for a job mutation.

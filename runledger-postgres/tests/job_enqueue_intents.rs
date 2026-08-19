@@ -925,6 +925,7 @@ async fn promotion_keeps_savepoint_headroom_below_postgres_subtransaction_cache(
     let first = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1_000)
         .await
         .expect("process capped batch of failing rows");
+    assert!(first.batch_was_full());
     assert_eq!(first.retry_deferred, 24);
     assert_eq!(first.conflicted, 0);
     assert_eq!(first.total_promoted, 0);
@@ -938,6 +939,7 @@ async fn promotion_keeps_savepoint_headroom_below_postgres_subtransaction_cache(
     let second = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1_000)
         .await
         .expect("process final failing row");
+    assert!(!second.batch_was_full());
     assert_eq!(second.retry_deferred, 1);
     assert_eq!(second.conflicted, 0);
     assert_eq!(second.total_promoted, 0);

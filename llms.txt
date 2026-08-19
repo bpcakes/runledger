@@ -51,7 +51,10 @@ Use `runledger_postgres::jobs::count_workflow_runs` with
 For transactional handoff before a job definition exists, record a strictly
 idempotent `JobEnqueueIntent` in the application's `READ COMMITTED` transaction.
 A standard worker later promotes registered, enabled types through the ordinary
-enqueue path. Database failures defer only the affected intent with bounded
+enqueue path. Full promotion batches drain immediately; partial and empty
+passes wait for the configured cadence. Use `IntentPromoterConfig` for
+independent controls or disable the supervisor promoter when unused. Database
+failures defer only the affected intent with bounded
 backoff and retry indefinitely; inspect promotion attempt/error metadata and
 monitor pending age and conflicts. Treat intent payloads and keys as sensitive
 queue data and do not log them. Queue retention must call
