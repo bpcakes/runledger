@@ -37,6 +37,11 @@ All notable changes to this workspace are documented here.
   before deleting those jobs. Deploy that retention path to every retention
   caller before enabling intent writers. Deployments that do not record intents
   have no linked rows and their existing retention behavior is unchanged.
+- Intent promotion is enabled by default for every worker-enabled supervisor so
+  durable requests self-drain. Each supervisor independently polls even when no
+  intents are pending. Capacity plans should include that idle query rate; use
+  the intent-specific polling configuration or disable redundant promoters,
+  while retaining promoter coverage for every type that can receive intents.
 
 ## [0.9.1] - 2026-08-12
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.9.0...v0.9.1)

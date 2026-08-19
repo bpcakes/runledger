@@ -41,6 +41,10 @@ pub struct Supervisor {
 /// Worker execution, durable intent promotion, scheduler, and reaper loops are
 /// enabled by default. Disabling the worker also disables intent promotion;
 /// [`SupervisorBuilder::disable_intent_promoter`] can disable only promotion.
+/// Every enabled supervisor polls independently, including when no intents are
+/// pending. Deployments may tune [`IntentPromoterConfig`] or disable redundant
+/// promoters, but must retain promoter coverage for every registered type that
+/// can receive durable intents.
 /// Call [`SupervisorBuilder::with_registry`] or
 /// [`SupervisorBuilder::with_catalog`] before [`SupervisorBuilder::build`] when
 /// worker or reaper loops remain enabled.
@@ -277,6 +281,11 @@ impl<'a> SupervisorBuilder<'a> {
 
     /// Disables durable enqueue-intent promotion while leaving ordinary worker
     /// claiming and execution enabled.
+    ///
+    /// Use this only when another compatible promoter covers every job type
+    /// that can receive intents, or when the application never records intents.
+    /// Disabling all applicable promoters leaves accepted intents pending
+    /// indefinitely.
     #[must_use = "builder methods return an updated builder value"]
     pub fn disable_intent_promoter(mut self) -> Self {
         self.intent_promoter_enabled = false;

@@ -100,7 +100,11 @@ restore consistency and retry the same durable request. Promotion processes at
 most 24 intents per transaction, leaving headroom even when every row rolls
 back to its savepoint. Full batches continue immediately after a shutdown check
 and cooperative yield; partial and empty batches wait for the configured
-polling interval. Database
+polling interval. Promotion is enabled by default for every worker-enabled
+supervisor, and each instance polls independently even when the backlog is
+empty. Include that aggregate idle query rate in database capacity planning;
+tune the independent interval or disable redundant promoter instances, but
+retain coverage for every job type that can receive intents. Database
 failures retry indefinitely so a prolonged outage cannot silently discard work;
 alert on oldest pending age, pending-only `retrying_count`, and pending-only
 `max_promotion_attempts` from

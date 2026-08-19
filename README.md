@@ -295,7 +295,13 @@ artificially rate-limited. Custom runtime orchestration that calls
 `run_worker_loop` directly must also run `run_intent_promoter_loop` when it uses
 durable enqueue intents. Use `IntentPromoterConfig` with
 `run_intent_promoter_loop_with_config` for an independent cadence, or configure
-and disable the supervisor promoter through `SupervisorBuilder`.
+and disable the supervisor promoter through `SupervisorBuilder`. Promotion is
+enabled by default so recorded intents cannot silently strand after a worker
+upgrade: every enabled supervisor issues its own promotion query after each
+partial or empty polling interval. Capacity plans should include that aggregate
+idle query rate. Increase the independent promoter interval or disable
+redundant promoter instances when needed, but keep at least one promoter whose
+registry covers every job type that can receive intents.
 Promoted work waits in the ordinary queue, where priority, scheduling, queue
 metrics, and worker concurrency provide the normal backpressure.
 Database-level promotion failures roll back only the affected queue/event
@@ -1035,6 +1041,13 @@ intent promotion unless either intent-specific variable is set:
 | --- | --- |
 | `JOBS_INTENT_PROMOTER_POLL_INTERVAL_MS` | Delay after partial or empty promotion passes |
 | `JOBS_INTENT_PROMOTER_BATCH_SIZE` | Intents requested per promotion transaction; storage caps each pass at 24 |
+
+Intent promotion is enabled by default on every worker-enabled supervisor, so
+an idle deployment runs approximately one promotion query per supervisor per
+configured promoter interval. Tune the intent-specific interval or call
+`disable_intent_promoter` on redundant instances to fit the database query
+budget. Do not disable every compatible promoter while applications can record
+intents; that would leave accepted work pending indefinitely.
 
 Code that already owns a `JobsConfig` should continue to use
 `Supervisor::builder`; it deliberately derives promoter settings from that
