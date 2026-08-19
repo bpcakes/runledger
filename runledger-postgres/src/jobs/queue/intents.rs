@@ -36,8 +36,8 @@ const PROMOTE_OPERATION: &str = "promote job enqueue intents";
 // collision with embedding-application locks only over-serializes work.
 const RUNLEDGER_ADVISORY_LOCK_NAMESPACE: i32 = 0x7275_6e6c;
 const JOB_ENQUEUE_INTENT_RETENTION_LOCK: i32 = 0x696e_7465;
-const JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT: &str = "5s";
-const JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT_MS: i64 = 5_000;
+const JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT: &str = "5s";
+const JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT_MS: i64 = 5_000;
 const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT: &str = "30s";
 const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS: i64 = 30_000;
 // A failed row assigns two subtransaction IDs (the row savepoint and the
@@ -1109,23 +1109,12 @@ async fn lock_job_enqueue_intent_retention_phase_tx(
         "cap statement timeout for job enqueue intent retention",
     )
     .await?;
-    let previous_lock_timeout = cap_local_lock_timeout_tx(
-        tx,
-        JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT,
-        JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT_MS,
-        "cap lock timeout for job enqueue intent retention",
-    )
-    .await?;
+    let previous_lock_timeout = cap_job_enqueue_intent_fence_lock_timeout_tx(tx).await?;
 
     lock_job_enqueue_intent_retention_exclusive_tx(tx).await?;
     lock_retained_jobs_tx(tx, job_ids).await?;
 
-    set_local_lock_timeout_tx(
-        tx,
-        &previous_lock_timeout,
-        "restore lock timeout after job enqueue intent retention locking",
-    )
-    .await?;
+    restore_job_enqueue_intent_fence_lock_timeout_tx(tx, &previous_lock_timeout).await?;
     set_local_statement_timeout_tx(
         tx,
         &previous_statement_timeout,
@@ -1152,6 +1141,28 @@ async fn lock_retained_jobs_tx(tx: &mut DbTx<'_>, job_ids: &[Uuid]) -> Result<()
         )
     })?;
     Ok(())
+}
+
+async fn cap_job_enqueue_intent_fence_lock_timeout_tx(tx: &mut DbTx<'_>) -> Result<String> {
+    cap_local_lock_timeout_tx(
+        tx,
+        JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT,
+        JOB_ENQUEUE_INTENT_FENCE_LOCK_TIMEOUT_MS,
+        "cap lock timeout for job enqueue intent retention fence",
+    )
+    .await
+}
+
+async fn restore_job_enqueue_intent_fence_lock_timeout_tx(
+    tx: &mut DbTx<'_>,
+    previous_lock_timeout: &str,
+) -> Result<()> {
+    set_local_lock_timeout_tx(
+        tx,
+        previous_lock_timeout,
+        "restore lock timeout after job enqueue intent retention fence",
+    )
+    .await
 }
 
 async fn lock_job_enqueue_intent_promotion_shared_tx(
