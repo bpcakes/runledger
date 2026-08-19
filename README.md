@@ -341,8 +341,12 @@ and delete the jobs in the same transaction. Select candidate IDs without row
 locks, then invoke the helper as the transaction's first lock-taking operation.
 It waits for active promotions, fences new promotions, and locks the selected
 jobs until the transaction finishes; keep that transaction short and commit
-promptly. A newly promoted intent may link to a much older existing job, so
-independent time windows cannot guarantee the required ordering. Deploy that
+promptly. Lock acquisition preserves stricter caller timeouts while capping
+each lock wait at five seconds and each acquisition statement at thirty
+seconds. A timeout or deadlock aborts the transaction; roll back and retry the
+complete retention transaction. A newly promoted intent may link to a much
+older existing job, so independent time windows cannot guarantee the required
+ordering. Deploy that
 exact-ID retention path to every queue-retention caller before enabling intent
 writers; workers may be upgraded earlier while no intents exist to promote.
 

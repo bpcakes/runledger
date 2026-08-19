@@ -14,6 +14,10 @@ use super::super::transaction_isolation::{
     ReadCommittedTx, begin_owned_read_committed_tx, ensure_read_committed_tx,
     finish_owned_transaction,
 };
+use super::super::transaction_settings::{
+    cap_local_lock_timeout_tx, cap_local_statement_timeout_tx, set_local_lock_timeout_tx,
+    set_local_statement_timeout_tx,
+};
 use super::super::types::{
     JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentDisposition,
     JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentMetricsRecord,
@@ -32,6 +36,10 @@ const PROMOTE_OPERATION: &str = "promote job enqueue intents";
 // collision with embedding-application locks only over-serializes work.
 const RUNLEDGER_ADVISORY_LOCK_NAMESPACE: i32 = 0x7275_6e6c;
 const JOB_ENQUEUE_INTENT_RETENTION_LOCK: i32 = 0x696e_7465;
+const JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT: &str = "5s";
+const JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT_MS: i64 = 5_000;
+const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT: &str = "30s";
+const JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS: i64 = 30_000;
 // A failed row assigns two subtransaction IDs (the row savepoint and the
 // rollback's replacement subtransaction). Capping at 24 leaves 16 IDs of
 // headroom below PostgreSQL's 64 cached-subtransaction threshold. The enqueue
@@ -1066,8 +1074,12 @@ pub async fn delete_promoted_job_enqueue_intents_before(
 /// two deletes. Pending and conflicted intents are never deleted. At most 1,000
 /// job IDs may be supplied per call; an empty slice is a no-op. Keep the
 /// transaction short and commit promptly to release the fence. Because exact
-/// cleanup cannot skip requested IDs, it may wait for a concurrent promotion
-/// or for a transaction that holds a matching intent row lock.
+/// cleanup cannot skip requested IDs, lock acquisition may wait for a
+/// concurrent promotion or a transaction that holds a matching job row lock.
+/// Runledger caps each lock wait at five seconds and each lock-acquisition
+/// statement at thirty seconds while preserving stricter caller settings. A
+/// timeout or deadlock aborts the transaction; callers must roll it back and
+/// may retry the complete retention transaction.
 pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
     tx: &mut DbTx<'_>,
     job_ids: &[Uuid],
@@ -1076,24 +1088,7 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
         return Ok(0);
     }
     validate_page_limit(i64::try_from(job_ids.len()).unwrap_or(i64::MAX))?;
-    lock_job_enqueue_intent_retention_exclusive_tx(tx).await?;
-
-    sqlx::query(
-        "SELECT id
-         FROM job_queue
-         WHERE id = ANY($1::uuid[])
-         ORDER BY id
-         FOR UPDATE",
-    )
-    .bind(job_ids)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context(
-            "lock retained jobs before promoted intent cleanup",
-            error,
-        )
-    })?;
+    lock_job_enqueue_intent_retention_phase_tx(tx, job_ids).await?;
 
     let result = sqlx::query!(
         "DELETE FROM job_enqueue_intents
@@ -1110,6 +1105,62 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
         )
     })?;
     Ok(result.rows_affected())
+}
+
+async fn lock_job_enqueue_intent_retention_phase_tx(
+    tx: &mut DbTx<'_>,
+    job_ids: &[Uuid],
+) -> Result<()> {
+    let previous_statement_timeout = cap_local_statement_timeout_tx(
+        tx,
+        JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT,
+        JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS,
+        "cap statement timeout for job enqueue intent retention",
+    )
+    .await?;
+    let previous_lock_timeout = cap_local_lock_timeout_tx(
+        tx,
+        JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT,
+        JOB_ENQUEUE_INTENT_RETENTION_LOCK_TIMEOUT_MS,
+        "cap lock timeout for job enqueue intent retention",
+    )
+    .await?;
+
+    lock_job_enqueue_intent_retention_exclusive_tx(tx).await?;
+    lock_retained_jobs_tx(tx, job_ids).await?;
+
+    set_local_lock_timeout_tx(
+        tx,
+        &previous_lock_timeout,
+        "restore lock timeout after job enqueue intent retention locking",
+    )
+    .await?;
+    set_local_statement_timeout_tx(
+        tx,
+        &previous_statement_timeout,
+        "restore statement timeout after job enqueue intent retention locking",
+    )
+    .await
+}
+
+async fn lock_retained_jobs_tx(tx: &mut DbTx<'_>, job_ids: &[Uuid]) -> Result<()> {
+    sqlx::query(
+        "SELECT id
+         FROM job_queue
+         WHERE id = ANY($1::uuid[])
+         ORDER BY id
+         FOR UPDATE",
+    )
+    .bind(job_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context(
+            "lock retained jobs before promoted intent cleanup",
+            error,
+        )
+    })?;
+    Ok(())
 }
 
 async fn lock_job_enqueue_intent_promotion_shared_tx(

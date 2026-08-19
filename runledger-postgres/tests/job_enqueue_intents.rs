@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{JobStage, JobStatus, JobType};
@@ -914,12 +914,33 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
             .expect("empty exact retention cleanup"),
         0
     );
+    sqlx::query("SET LOCAL lock_timeout = '11s'")
+        .execute(&mut *retention_tx)
+        .await
+        .expect("set caller retention lock timeout");
+    sqlx::query("SET LOCAL statement_timeout = '41s'")
+        .execute(&mut *retention_tx)
+        .await
+        .expect("set caller retention statement timeout");
+    let timeouts_before = sqlx::query_as::<_, (String, String)>(
+        "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
+    )
+    .fetch_one(&mut *retention_tx)
+    .await
+    .expect("read caller retention timeouts");
     assert_eq!(
         delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[existing_job_id],)
             .await
             .expect("delete intent linked to existing job"),
         1
     );
+    let timeouts_after = sqlx::query_as::<_, (String, String)>(
+        "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
+    )
+    .fetch_one(&mut *retention_tx)
+    .await
+    .expect("read restored retention timeouts");
+    assert_eq!(timeouts_after, timeouts_before);
     assert_eq!(
         sqlx::query("DELETE FROM job_queue WHERE id = $1")
             .bind(existing_job_id)
@@ -950,6 +971,71 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
         Some("job.idempotency_conflict")
     );
 
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn retention_cleanup_preserves_stricter_caller_lock_timeout() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_retention_lock_timeout", 4).await;
+    record_postgres_server_version(&pool, "intent retention bounded lock wait").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "retention-lock-timeout"});
+    let job_id = enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new(JOB_TYPE),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: Some("retention-lock-timeout"),
+            stage: None,
+        },
+    )
+    .await
+    .expect("enqueue retention lock-timeout job");
+
+    let mut blocker_tx = pool.begin().await.expect("begin retention row blocker");
+    sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
+        .bind(job_id)
+        .fetch_one(&mut *blocker_tx)
+        .await
+        .expect("lock retained job from blocker transaction");
+
+    let mut retention_tx = pool.begin().await.expect("begin bounded retention");
+    sqlx::query("SET LOCAL lock_timeout = '100ms'")
+        .execute(&mut *retention_tx)
+        .await
+        .expect("set stricter caller lock timeout");
+    let started = Instant::now();
+    let error = delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[job_id])
+        .await
+        .expect_err("retention must stop waiting at the caller lock timeout");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "retention exceeded its bounded lock wait: {:?}",
+        started.elapsed()
+    );
+    let runledger_postgres::Error::QueryError(query_error) = error else {
+        panic!("expected retention lock timeout query error");
+    };
+    assert_eq!(query_error.sqlstate(), Some("55P03"));
+    assert!(
+        query_error.source_arc().is_some(),
+        "retention lock timeout must preserve its sqlx source"
+    );
+
+    retention_tx
+        .rollback()
+        .await
+        .expect("rollback timed-out retention");
+    blocker_tx
+        .rollback()
+        .await
+        .expect("release retention row blocker");
     teardown_ephemeral_pool(pool, database).await;
 }
 

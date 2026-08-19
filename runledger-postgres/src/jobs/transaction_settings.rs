@@ -81,6 +81,16 @@ pub(in crate::jobs) async fn set_local_lock_timeout_tx(
     set_local_timeout_tx(tx, "lock_timeout", lock_timeout, context).await
 }
 
+/// Restores a transaction-local PostgreSQL `statement_timeout` value returned
+/// by [`cap_local_statement_timeout_tx`].
+pub(in crate::jobs) async fn set_local_statement_timeout_tx(
+    tx: &mut DbTx<'_>,
+    statement_timeout: &str,
+    context: &'static str,
+) -> Result<()> {
+    set_local_timeout_tx(tx, "statement_timeout", statement_timeout, context).await
+}
+
 async fn set_local_timeout_tx(
     tx: &mut DbTx<'_>,
     setting_name: &'static str,
