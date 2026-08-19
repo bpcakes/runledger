@@ -1,6 +1,6 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -18,7 +18,9 @@ const DEFAULT_POSTGRES_IMAGE: &str = "postgres:18";
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
 const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DOCKER_CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const DOCKER_CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const PROBE_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const PROBE_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 static PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
 // Each parent test starts its own PostgreSQL container. Keep those probes from
@@ -280,7 +282,14 @@ impl ProbeProcess {
 
     fn finish_normally(&mut self) {
         drop(self.stdin.take());
-        let status = self.child.wait().expect("wait for lifecycle probe child");
+        let status = wait_for_child(&mut self.child, PROBE_EXIT_TIMEOUT)
+            .expect("wait for lifecycle probe child")
+            .unwrap_or_else(|| {
+                panic!(
+                    "lifecycle probe did not exit within {PROBE_EXIT_TIMEOUT:?}:\n{}",
+                    self.captured_output
+                )
+            });
         self.capture_remaining_output();
         assert!(
             status.success(),
@@ -293,10 +302,9 @@ impl ProbeProcess {
         self.child
             .kill()
             .expect("forcibly terminate lifecycle probe child");
-        let status = self
-            .child
-            .wait()
-            .expect("wait for terminated lifecycle probe child");
+        let status = wait_for_child(&mut self.child, PROBE_EXIT_TIMEOUT)
+            .expect("wait for terminated lifecycle probe child")
+            .expect("terminated lifecycle probe must exit within the bounded wait");
         drop(self.stdin.take());
         assert!(
             !status.success(),
@@ -376,31 +384,11 @@ fn docker_lifecycle_assertions_are_unavailable() -> bool {
 }
 
 fn docker_cli_is_available() -> bool {
-    let mut child = match Command::new(docker_cli())
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return false,
-    };
-    let deadline = Instant::now() + DOCKER_CLI_PROBE_TIMEOUT;
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-        }
-    }
+    try_docker_output_with_timeout(
+        ["version", "--format", "{{.Server.Version}}"],
+        DOCKER_CLI_PROBE_TIMEOUT,
+    )
+    .is_ok()
 }
 
 impl Drop for ProbeProcess {
@@ -408,7 +396,7 @@ impl Drop for ProbeProcess {
         drop(self.stdin.take());
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
-            let _ = self.child.wait();
+            let _ = wait_for_child(&mut self.child, PROBE_EXIT_TIMEOUT);
         }
         cleanup_owned_containers(&self.owner);
     }
@@ -464,11 +452,7 @@ fn cleanup_owned_containers(owner: &str) {
         return;
     };
     for container_id in container_ids {
-        let _ = Command::new(docker_cli())
-            .args(["container", "rm", "--force", "--volumes", &container_id])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = try_docker_output(["container", "rm", "--force", "--volumes", &container_id]);
     }
 }
 
@@ -477,18 +461,62 @@ fn docker_output<const N: usize>(args: [&str; N]) -> String {
 }
 
 fn try_docker_output<const N: usize>(args: [&str; N]) -> Result<String, String> {
-    let output = Command::new(docker_cli())
+    try_docker_output_with_timeout(args, DOCKER_CLI_COMMAND_TIMEOUT)
+}
+
+fn try_docker_output_with_timeout<const N: usize>(
+    args: [&str; N],
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut child = Command::new(docker_cli())
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| error.to_string())?;
-    if !output.status.success() {
+    let status = wait_for_child(&mut child, timeout)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            let _ = child.kill();
+            let _ = wait_for_child(&mut child, DOCKER_CLI_PROBE_TIMEOUT);
+            format!("Docker CLI did not exit within {timeout:?}")
+        })?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    child
+        .stdout
+        .take()
+        .expect("Docker CLI stdout must be piped")
+        .read_to_end(&mut stdout)
+        .map_err(|error| error.to_string())?;
+    child
+        .stderr
+        .take()
+        .expect("Docker CLI stderr must be piped")
+        .read_to_end(&mut stderr)
+        .map_err(|error| error.to_string())?;
+    if !status.success() {
         return Err(format!(
             "Docker CLI failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
+            status,
+            String::from_utf8_lossy(&stderr)
         ));
     }
-    String::from_utf8(output.stdout).map_err(|error| error.to_string())
+    String::from_utf8(stdout).map_err(|error| error.to_string())
+}
+
+fn wait_for_child(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(Some(status)),
+            None if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            None => return Ok(None),
+        }
+    }
 }
 
 fn docker_cli() -> std::ffi::OsString {
