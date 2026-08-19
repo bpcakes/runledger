@@ -3,7 +3,7 @@ use std::io::{self, BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use testcontainers::{ContainerAsync, GenericImage};
 
@@ -14,6 +14,7 @@ const DOCKER_CLI_ENV: &str = "RUNLEDGER_TEST_DOCKER_CLI";
 const TESTCONTAINERS_COMMAND_ENV: &str = "TESTCONTAINERS_COMMAND";
 const REAPER_READY: &str = "runledger-container-reaper-ready";
 const REAPER_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const REAPER_EXIT_GRACE_TIMEOUT: Duration = Duration::from_millis(250);
 
 const REAPER_SCRIPT: &str = r#"
 trap '' HUP INT QUIT TERM
@@ -143,6 +144,17 @@ impl ContainerReaper {
 }
 
 fn terminate_reaper(child: &mut Child) -> io::Result<std::process::ExitStatus> {
+    let deadline = Instant::now() + REAPER_EXIT_GRACE_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
     terminate_reaper_process_tree(child);
     let _ = child.kill();
     child.wait()
@@ -151,7 +163,7 @@ fn terminate_reaper(child: &mut Child) -> io::Result<std::process::ExitStatus> {
 fn terminate_reaper_process_tree(child: &Child) {
     let process_group = format!("-{}", child.id());
     let _ = Command::new("kill")
-        .args(["-KILL", &process_group])
+        .args(["-KILL", "--", &process_group])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();

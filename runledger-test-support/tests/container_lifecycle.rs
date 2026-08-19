@@ -119,10 +119,16 @@ fn lifecycle_probe_child() {
                 .await
                 .expect("read PostgreSQL server_version_num");
 
-        println!("{READY_MARKER}\t{server_version_num}\t{server_version}");
-        std::io::stdout()
-            .flush()
-            .expect("flush lifecycle readiness marker");
+        // Write directly to the inherited pipe. `println!` can remain in
+        // libtest's capture buffer until this long-lived helper test exits.
+        let mut stdout = std::io::stdout().lock();
+        writeln!(
+            stdout,
+            "{READY_MARKER}\t{server_version_num}\t{server_version}"
+        )
+        .expect("write lifecycle readiness marker");
+        stdout.flush().expect("flush lifecycle readiness marker");
+        drop(stdout);
 
         tokio::task::spawn_blocking(|| {
             let mut command = String::new();
