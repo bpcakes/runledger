@@ -259,6 +259,15 @@ pub(super) fn job_replay_idempotency_conflict_error() -> Error {
     ))
 }
 
+pub(super) fn job_replay_missing_existing_error() -> Error {
+    Error::QueryError(QueryError::from_classified(
+        QueryErrorCategory::Internal,
+        "job.replay_idempotency_conflict_missing_existing",
+        "Job replay retry could not be resolved.",
+        "job replay lineage referenced an existing replay job that could not be loaded",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::ensure_rejection_rollback_succeeded;

@@ -4,8 +4,8 @@ use sqlx::types::Uuid;
 use crate::{DbPool, DbTx, Error, Result};
 
 use super::errors::{
-    job_replay_idempotency_conflict_error, validate_job_replay_request,
-    workflow_requeue_not_supported_error,
+    job_replay_idempotency_conflict_error, job_replay_missing_existing_error,
+    validate_job_replay_request, workflow_requeue_not_supported_error,
 };
 use super::queue::advance::JOB_QUEUE_COLUMNS_SQL;
 use super::queue::enqueue_replayed_job_with_outcome_tx;
@@ -74,28 +74,37 @@ struct ReplayCandidate {
 #[derive(sqlx::FromRow)]
 struct ExistingReplayRow {
     replay_job_id: Uuid,
-    replay_status: String,
-    replay_run_number: i32,
+    replay_status: Option<String>,
+    replay_run_number: Option<i32>,
+    replay_reason: String,
 }
 
-async fn load_matching_existing_replay_tx(
+async fn load_existing_replay_tx(
     tx: &mut DbTx<'_>,
     request: &CompareAndReplaySucceededJob<'_>,
 ) -> Result<Option<ExistingReplayRow>> {
+    // Classify the key and conditionally lock a matching replay in one READ
+    // COMMITTED snapshot. A reason conflict still returns the lineage row, but
+    // the lateral branch stays empty so the replay job is not locked.
     sqlx::query_as::<_, ExistingReplayRow>(
         "SELECT
-            replay.id AS replay_job_id,
+            jr.replay_job_id,
             replay.status::text AS replay_status,
-            replay.run_number AS replay_run_number
+            replay.run_number AS replay_run_number,
+            jr.reason AS replay_reason
          FROM job_replays jr
          JOIN job_queue source ON source.id = jr.source_job_id
-         JOIN job_queue replay ON replay.id = jr.replay_job_id
+         LEFT JOIN LATERAL (
+             SELECT replay.status, replay.run_number
+             FROM job_queue replay
+             WHERE replay.id = jr.replay_job_id
+               AND jr.reason = $5
+             FOR NO KEY UPDATE OF replay
+         ) replay ON TRUE
          WHERE jr.source_job_id = $1
            AND jr.source_run_number = $2
            AND jr.replay_request_key = $3
-           AND source.organization_id IS NOT DISTINCT FROM $4::uuid
-           AND jr.reason = $5
-         FOR NO KEY UPDATE OF replay",
+           AND source.organization_id IS NOT DISTINCT FROM $4::uuid",
     )
     .bind(request.source_job_id)
     .bind(request.expected_run_number)
@@ -107,43 +116,23 @@ async fn load_matching_existing_replay_tx(
     .map_err(|error| Error::from_query_sqlx_with_context("load existing job replay", error))
 }
 
-async fn conflicting_replay_request_exists_tx(
-    tx: &mut DbTx<'_>,
-    request: &CompareAndReplaySucceededJob<'_>,
-) -> Result<bool> {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM job_replays jr
-            JOIN job_queue source ON source.id = jr.source_job_id
-            WHERE jr.source_job_id = $1
-              AND jr.source_run_number = $2
-              AND jr.replay_request_key = $3
-              AND source.organization_id IS NOT DISTINCT FROM $4::uuid
-         )",
-    )
-    .bind(request.source_job_id)
-    .bind(request.expected_run_number)
-    .bind(request.replay_request_key)
-    .bind(request.scope.organization_id())
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("classify existing job replay request", error)
-    })
-}
-
 fn existing_replay_outcome(
     request: &CompareAndReplaySucceededJob<'_>,
     existing: ExistingReplayRow,
 ) -> Result<CompareAndReplaySucceededJobOutcome> {
+    let replay_status = existing
+        .replay_status
+        .ok_or_else(job_replay_missing_existing_error)?;
+    let replay_run_number = existing
+        .replay_run_number
+        .ok_or_else(job_replay_missing_existing_error)?;
     Ok(CompareAndReplaySucceededJobOutcome::Replayed {
         source_job_id: request.source_job_id,
         source_run_number: request.expected_run_number,
         replay: JobEnqueueOutcome {
             job_id: existing.replay_job_id,
-            status: parse_job_status(existing.replay_status)?,
-            run_number: existing.replay_run_number,
+            status: parse_job_status(replay_status)?,
+            run_number: replay_run_number,
             disposition: JobEnqueueDisposition::Existing,
         },
     })
@@ -153,13 +142,13 @@ async fn load_or_classify_existing_replay_tx(
     tx: &mut DbTx<'_>,
     request: &CompareAndReplaySucceededJob<'_>,
 ) -> Result<Option<CompareAndReplaySucceededJobOutcome>> {
-    if let Some(existing) = load_matching_existing_replay_tx(tx, request).await? {
-        return existing_replay_outcome(request, existing).map(Some);
-    }
-    if conflicting_replay_request_exists_tx(tx, request).await? {
+    let Some(existing) = load_existing_replay_tx(tx, request).await? else {
+        return Ok(None);
+    };
+    if existing.replay_reason != request.reason {
         return Err(job_replay_idempotency_conflict_error());
     }
-    Ok(None)
+    existing_replay_outcome(request, existing).map(Some)
 }
 
 fn replay_candidate_from_row(row: ReplayCandidateRow) -> Result<ReplayCandidate> {
