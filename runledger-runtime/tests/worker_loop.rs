@@ -27,6 +27,21 @@ use runledger_test_support::{
     setup_ephemeral_pool_with_untracked_migrations as setup_ephemeral_pool, teardown_ephemeral_pool,
 };
 
+async fn record_postgres_server_version(pool: &sqlx::PgPool, diagnostic: &str) {
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "{diagnostic} PostgreSQL server_version={server_version}, server_version_num={server_version_num}"
+    );
+}
+
 struct BlockingHandler {
     runs: Arc<AtomicUsize>,
     release: Arc<Notify>,
@@ -433,6 +448,106 @@ async fn contended_intent_promotion_does_not_delay_existing_job_claims() {
         .expect("load job")
         .expect("job exists");
     assert_eq!(job.status, JobStatus::Succeeded);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn shutdown_cancels_a_lock_blocked_intent_promotion_pass() {
+    let (pool, database) = setup_ephemeral_pool("jobs_intent_promoter_blocked_shutdown", 6).await;
+    record_postgres_server_version(&pool, "intent promoter blocked-shutdown regression").await;
+    let job_type = JobType::new("jobs.test.intent_blocked_shutdown");
+
+    let mut definition_tx = pool.begin().await.expect("begin definition transaction");
+    upsert_job_definition_tx(
+        &mut definition_tx,
+        &JobDefinitionUpsert {
+            job_type,
+            version: 1,
+            max_attempts: 3,
+            default_timeout_seconds: 30,
+            default_priority: 100,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert intent definition");
+    definition_tx
+        .commit()
+        .await
+        .expect("commit intent definition");
+
+    let recorded = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(
+            job_type,
+            &json!({"kind": "blocked-shutdown"}),
+            "blocked-shutdown",
+        ),
+    )
+    .await
+    .expect("record intent before blocking promotion");
+
+    let mut lock_tx = pool.begin().await.expect("begin intent table lock");
+    sqlx::query("LOCK TABLE job_enqueue_intents IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock_tx)
+        .await
+        .expect("lock intent table against promotion");
+
+    let mut registry = JobRegistry::new();
+    registry.register(CountingHandler {
+        job_type,
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let promoter_task = tokio::spawn(run_intent_promoter_loop_with_config(
+        pool.clone(),
+        registry,
+        IntentPromoterConfig::new(Duration::from_secs(30), 1),
+        shutdown_rx,
+    ));
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%FROM job_enqueue_intents%'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("inspect blocked promotion query");
+            if waiting {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("promotion should block on the intent table lock");
+
+    shutdown_tx.send(true).expect("send promoter shutdown");
+    assert_eq!(
+        timeout(Duration::from_secs(1), promoter_task)
+            .await
+            .expect("lock-blocked promoter must honor shutdown")
+            .expect("intent promoter task must not panic"),
+        RuntimeLoopExit::Shutdown
+    );
+
+    lock_tx.rollback().await.expect("release intent table lock");
+    assert_eq!(
+        get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+            .await
+            .expect("load intent after canceled promotion")
+            .expect("intent must remain durable")
+            .status,
+        JobEnqueueIntentStatus::Pending
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }

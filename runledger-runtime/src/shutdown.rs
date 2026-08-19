@@ -62,6 +62,14 @@ pub(crate) fn is_requested_or_closed(shutdown: &watch::Receiver<bool>) -> bool {
     *shutdown.borrow() || shutdown.has_changed().is_err()
 }
 
+pub(crate) async fn wait_for_request(shutdown: &mut watch::Receiver<bool>) {
+    while !is_requested_or_closed(shutdown) {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 pub(crate) async fn wait_for_request_or_timeout(
     shutdown: &mut watch::Receiver<bool>,
     timeout: Duration,
@@ -131,5 +139,24 @@ mod tests {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         drop(shutdown_tx);
         assert!(wait_for_request_or_timeout(&mut shutdown_rx, Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test]
+    async fn wait_for_request_ignores_false_updates() {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let waiter = tokio::spawn(async move {
+            wait_for_request(&mut shutdown_rx).await;
+        });
+
+        shutdown_tx
+            .send(false)
+            .expect("receiver should remain active");
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        shutdown_tx
+            .send(true)
+            .expect("receiver should remain active");
+        waiter.await.expect("request waiter must not panic");
     }
 }

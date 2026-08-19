@@ -42,7 +42,9 @@ pub async fn run_intent_promoter_loop(
 /// enforce a lower per-transaction safety cap. A full storage batch is followed
 /// immediately by another pass so a backlog is not rate-limited by the idle
 /// polling cadence. The loop yields between full batches and checks shutdown
-/// before each pass.
+/// before each pass. A shutdown request also cancels an in-flight storage pass;
+/// the persistence operation owns its transaction, so cancellation rolls it
+/// back instead of leaving partial promotion state.
 pub async fn run_intent_promoter_loop_with_config(
     pool: runledger_postgres::DbPool,
     registry: JobRegistry,
@@ -61,7 +63,19 @@ pub async fn run_intent_promoter_loop_with_config(
             return intent_promoter_shutdown_complete();
         }
 
-        if promotion_pass_should_wait(&pool, &promotable_job_types, config.batch_size()).await {
+        let should_wait = tokio::select! {
+            biased;
+            () = shutdown::wait_for_request(&mut shutdown) => {
+                return intent_promoter_shutdown_complete();
+            }
+            should_wait = promotion_pass_should_wait(
+                &pool,
+                &promotable_job_types,
+                config.batch_size(),
+            ) => should_wait,
+        };
+
+        if should_wait {
             if shutdown::wait_for_request_or_timeout(&mut shutdown, config.poll_interval()).await {
                 return intent_promoter_shutdown_complete();
             }
