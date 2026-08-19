@@ -1103,6 +1103,11 @@ pub async fn delete_promoted_job_enqueue_intents_before(
 /// Deletes promoted intents linked to an exact set of jobs in a caller-owned
 /// retention transaction.
 ///
+/// This operation requires PostgreSQL `READ COMMITTED` isolation so intent
+/// deletion observes promotions that commit before the exclusive retention
+/// fence is acquired. Stronger isolation levels retain an older transaction
+/// snapshot and are rejected before any retention lock is taken.
+///
 /// After selecting candidate IDs without row locks, call this as the retention
 /// transaction's first lock-taking operation, before locking or deleting the
 /// same `job_queue` rows. The helper takes the exclusive side of the
@@ -1136,26 +1141,34 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
         return Ok(0);
     }
     validate_job_enqueue_intent_retention_batch_size(job_ids.len())?;
-    delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(tx, job_ids).await
+    let mut tx = ensure_read_committed_tx(
+        tx,
+        "job enqueue intent retention",
+        "job.intent_retention_unsupported_isolation",
+        "Job enqueue intent retention requires READ COMMITTED transaction isolation.",
+    )
+    .await?;
+    delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(&mut tx, job_ids).await
 }
 
 async fn delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(
-    tx: &mut DbTx<'_>,
+    tx: &mut ReadCommittedTx<'_, '_>,
     job_ids: &[Uuid],
 ) -> Result<u64> {
     let previous_statement_timeout = cap_local_statement_timeout_tx(
-        tx,
+        tx.as_tx(),
         JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT,
         JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS,
         "cap statement timeout for job enqueue intent retention",
     )
     .await?;
-    let previous_lock_timeout = cap_job_enqueue_intent_retention_fence_lock_timeout_tx(tx).await?;
+    let previous_lock_timeout =
+        cap_job_enqueue_intent_retention_fence_lock_timeout_tx(tx.as_tx()).await?;
 
-    lock_job_enqueue_intent_retention_exclusive_tx(tx).await?;
+    lock_job_enqueue_intent_retention_exclusive_tx(tx.as_tx()).await?;
     // Once the exclusive fence is held, no promotion can extend this section.
     // Restore the shorter per-lock budget before touching intent or job rows.
-    cap_job_enqueue_intent_retention_lock_timeout_tx(tx).await?;
+    cap_job_enqueue_intent_retention_lock_timeout_tx(tx.as_tx()).await?;
 
     let result = sqlx::query!(
         "DELETE FROM job_enqueue_intents
@@ -1163,7 +1176,7 @@ async fn delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(
            AND promoted_job_id = ANY($1::uuid[])",
         job_ids,
     )
-    .execute(&mut **tx)
+    .execute(&mut **tx.as_tx())
     .await
     .map_err(|error| {
         Error::from_query_sqlx_with_context(
@@ -1175,11 +1188,11 @@ async fn delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(
     // Intent rows precede job rows in every critical section that can hold both.
     // Keeping that order here lets a duplicate recorder lock its promoted job
     // without cycling against retention.
-    lock_retained_jobs_tx(tx, job_ids).await?;
+    lock_retained_jobs_tx(tx.as_tx(), job_ids).await?;
 
-    restore_job_enqueue_intent_lock_timeout_tx(tx, &previous_lock_timeout).await?;
+    restore_job_enqueue_intent_lock_timeout_tx(tx.as_tx(), &previous_lock_timeout).await?;
     set_local_statement_timeout_tx(
-        tx,
+        tx.as_tx(),
         &previous_statement_timeout,
         "restore statement timeout after job enqueue intent retention",
     )

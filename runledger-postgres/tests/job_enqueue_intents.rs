@@ -1307,6 +1307,48 @@ async fn duplicate_recorder_and_retention_share_intent_then_job_order() {
 }
 
 #[tokio::test]
+async fn exact_retention_rejects_stale_transaction_snapshots_before_locking() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_retention_isolation", 2).await;
+    record_postgres_server_version(&pool, "intent retention isolation regression").await;
+
+    let mut retention_tx = pool.begin().await.expect("begin exact retention");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *retention_tx)
+        .await
+        .expect("set stale-snapshot isolation");
+
+    let error =
+        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[Uuid::now_v7()])
+            .await
+            .expect_err("exact retention must reject stale transaction snapshots");
+    let runledger_postgres::Error::QueryError(query_error) = error else {
+        panic!("expected exact retention isolation query error");
+    };
+    assert_eq!(
+        query_error.code(),
+        "job.intent_retention_unsupported_isolation"
+    );
+    assert_eq!(
+        query_error.client_message(),
+        "Job enqueue intent retention requires READ COMMITTED transaction isolation."
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&mut *retention_tx)
+            .await
+            .expect("isolation rejection must leave the caller transaction usable"),
+        1
+    );
+
+    retention_tx
+        .rollback()
+        .await
+        .expect("rollback rejected exact retention");
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn exact_retention_validates_its_domain_batch_limit() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_retention_batch_limit", 2).await;
