@@ -315,7 +315,7 @@ at most one stale fire, then advances the cursor to the first future fire.
 Use `Supervisor::run_until_shutdown` for ordinary worker binaries:
 
 ```rust
-let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
+let supervisor = Supervisor::builder_from_env(&pool)?
     .with_registry(registry)
     .build()?;
 

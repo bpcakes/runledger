@@ -72,7 +72,7 @@
 //!
 //! let catalog = JobCatalog::new().job("jobs.example", MyHandler);
 //! catalog.sync_definitions(&pool).await?;
-//! let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
+//! let supervisor = Supervisor::builder_from_env(&pool)?
 //!     .with_catalog(&catalog)
 //!     .build()?;
 //!

@@ -73,6 +73,22 @@ enum RegistrySource {
 }
 
 impl Supervisor {
+    /// Returns a supervisor builder configured from the process environment.
+    ///
+    /// Worker settings come from [`JobsConfig::from_env`]. Intent-promotion
+    /// settings inherit the worker polling interval and batch size unless the
+    /// corresponding `JOBS_INTENT_PROMOTER_*` variable is set.
+    pub fn builder_from_env(
+        pool: &runledger_postgres::DbPool,
+    ) -> std::result::Result<SupervisorBuilder<'_>, RuntimeError> {
+        let config = JobsConfig::from_env();
+        let intent_promoter_config =
+            IntentPromoterConfig::from_env_with_jobs_config_defaults(&config);
+
+        Self::builder(pool, config)
+            .map(|builder| builder.with_intent_promoter_config(intent_promoter_config))
+    }
+
     /// Returns a builder for a supervisor over a shared pool and runtime
     /// configuration.
     ///
@@ -503,6 +519,14 @@ mod tests {
         assert!(builder.registry.is_none());
         assert_eq!(builder.registry_source, None);
         assert!(!builder.mixed_registry_sources);
+    }
+
+    #[tokio::test]
+    async fn environment_builder_explicitly_configures_intent_promoter() {
+        let pool = lazy_pool();
+        let builder = Supervisor::builder_from_env(&pool).expect("build supervisor from env");
+
+        assert!(builder.intent_promoter_config.is_some());
     }
 
     #[tokio::test]

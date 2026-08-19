@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // For additive schedule sync, use:
     // catalog.sync_schedules(&pool).await?;
 
-    let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
+    let supervisor = Supervisor::builder_from_env(&pool)?
         .with_catalog(&catalog)
         .build()?;
     let shutdown_result = supervisor

@@ -1018,8 +1018,11 @@ durable enqueue intents must run both `run_worker_loop` and
 controls independent from ordinary worker claiming. Full promotion batches are
 drained immediately; partial and empty passes wait for the configured cadence.
 
-Prefer `JobsConfig::from_env()` for runtime configuration. If code constructs
-`JobsConfig` directly, validate it before startup; supervisors return
+Prefer `Supervisor::builder_from_env()` for standard environment-based runtime
+configuration. Intent-promoter variables override the inherited worker cadence
+independently when present. If code constructs `JobsConfig` directly, use
+`Supervisor::builder`, which deliberately avoids ambient environment reads, and
+validate the config before startup; supervisors return
 `RuntimeError::InvalidJobsConfig` and low-level loops can return
 `RuntimeLoopExit::InvalidConfig` for invalid values.
 

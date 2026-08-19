@@ -71,6 +71,25 @@ impl IntentPromoterConfig {
         }
     }
 
+    /// Reads intent-specific settings from the environment, inheriting worker
+    /// settings for variables that are absent or invalid.
+    ///
+    /// This is the environment-composition policy used by
+    /// [`crate::Supervisor::builder_from_env`]. It preserves the default
+    /// coupling between worker claiming and intent promotion while allowing
+    /// either promoter control to be overridden independently.
+    #[must_use]
+    pub fn from_env_with_jobs_config_defaults(config: &JobsConfig) -> Self {
+        let poll_interval = parse_env_value::<u64>("JOBS_INTENT_PROMOTER_POLL_INTERVAL_MS")
+            .map(|milliseconds| Duration::from_millis(milliseconds.max(1)))
+            .unwrap_or(config.poll_interval);
+        let batch_size = parse_env_value::<i64>("JOBS_INTENT_PROMOTER_BATCH_SIZE")
+            .map(|batch_size| batch_size.clamp(1, JOBS_CLAIM_BATCH_SIZE_MAX))
+            .unwrap_or(config.claim_batch_size);
+
+        Self::new(poll_interval, batch_size)
+    }
+
     #[must_use]
     pub const fn from_jobs_config(config: &JobsConfig) -> Self {
         Self::new(config.poll_interval, config.claim_batch_size)
@@ -456,6 +475,21 @@ mod tests {
         let config = IntentPromoterConfig::from_env();
         assert_eq!(config.poll_interval(), Duration::from_millis(37));
         assert_eq!(config.batch_size(), 9);
+    }
+
+    #[test]
+    fn intent_promoter_env_overrides_fall_back_to_jobs_config_independently() {
+        let _env = ScopedEnv::set(&[
+            ("JOBS_INTENT_PROMOTER_POLL_INTERVAL_MS", Some("37")),
+            ("JOBS_INTENT_PROMOTER_BATCH_SIZE", None),
+        ]);
+        let mut jobs_config = test_config();
+        jobs_config.poll_interval = Duration::from_millis(83);
+        jobs_config.claim_batch_size = 7;
+
+        let config = IntentPromoterConfig::from_env_with_jobs_config_defaults(&jobs_config);
+        assert_eq!(config.poll_interval(), Duration::from_millis(37));
+        assert_eq!(config.batch_size(), 7);
     }
 
     #[test]

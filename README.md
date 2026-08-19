@@ -158,7 +158,7 @@ async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
     catalog.sync_definitions(&pool).await?;
 
     // Run the supervisor until Ctrl-C, with a 30s shutdown drain deadline.
-    let supervisor = Supervisor::builder(&pool, JobsConfig::from_env())?
+    let supervisor = Supervisor::builder_from_env(&pool)?
         .with_catalog(&catalog)
         .build()?;
     let shutdown_result = supervisor
@@ -1000,7 +1000,8 @@ palette · `r`/`.` refresh · `o` edits org scope · `?` help · `q` quit.
 
 ## Configuration
 
-`runledger-runtime` reads worker settings from the environment via
+`Supervisor::builder_from_env()` reads the complete standard runtime
+configuration from the environment. Worker settings come from
 `JobsConfig::from_env()` (see
 [`runledger-runtime/src/config.rs`](runledger-runtime/src/config.rs)):
 
@@ -1021,13 +1022,19 @@ directly, call `validate()` before starting runtime loops. Supervisor builders
 reject invalid configs with `RuntimeError::InvalidJobsConfig`, and low-level
 loops can return `RuntimeLoopExit::InvalidConfig`.
 
-`IntentPromoterConfig::from_env()` reads independent promoter controls when a
-process should not inherit ordinary worker polling settings:
+The environment-aware supervisor inherits ordinary worker polling settings for
+intent promotion unless either intent-specific variable is set:
 
 | Variable | Purpose |
 | --- | --- |
 | `JOBS_INTENT_PROMOTER_POLL_INTERVAL_MS` | Delay after partial or empty promotion passes |
 | `JOBS_INTENT_PROMOTER_BATCH_SIZE` | Intents requested per promotion transaction; storage caps each pass at 24 |
+
+Code that already owns a `JobsConfig` should continue to use
+`Supervisor::builder`; it deliberately derives promoter settings from that
+explicit config and does not inspect the environment. For custom composition,
+pass `IntentPromoterConfig::from_env()` to
+`SupervisorBuilder::with_intent_promoter_config`.
 
 ## Database schema and migrations
 
