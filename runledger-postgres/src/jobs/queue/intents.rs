@@ -30,6 +30,11 @@ use super::enqueue::{
 
 const RECORD_OPERATION: &str = "record job enqueue intent";
 const PROMOTE_OPERATION: &str = "promote job enqueue intents";
+// The two-int advisory key space is distinct from the bigint key space used by
+// workflow release locks. Advisory locks remain database-global, so a rare key
+// collision with embedding-application locks only over-serializes work.
+const RUNLEDGER_ADVISORY_LOCK_NAMESPACE: i32 = 0x7275_6e6c;
+const JOB_ENQUEUE_INTENT_RETENTION_LOCK: i32 = 0x696e_7465;
 // A failed row assigns two subtransaction IDs (the row savepoint and the
 // rollback's replacement subtransaction). Capping at 24 leaves 16 IDs of
 // headroom below PostgreSQL's 64 cached-subtransaction threshold. The enqueue
@@ -644,6 +649,8 @@ async fn promote_job_enqueue_intents_read_committed_tx(
     allowed_job_types: &[String],
     limit: i64,
 ) -> Result<JobEnqueueIntentPromotionReport> {
+    lock_job_enqueue_intent_promotion_shared_tx(tx).await?;
+
     let rows = sqlx::query_as!(
         JobEnqueueIntentPromotionRow,
         "SELECT
@@ -1059,6 +1066,7 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
         return Ok(0);
     }
     validate_page_limit(i64::try_from(job_ids.len()).unwrap_or(i64::MAX))?;
+    lock_job_enqueue_intent_retention_exclusive_tx(tx).await?;
 
     sqlx::query(
         "SELECT id
@@ -1092,6 +1100,38 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
         )
     })?;
     Ok(result.rows_affected())
+}
+
+async fn lock_job_enqueue_intent_promotion_shared_tx(
+    tx: &mut ReadCommittedTx<'_, '_>,
+) -> Result<()> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock_shared($1, $2)
+         /* runledger:lock_job_enqueue_intent_promotion */",
+    )
+    .bind(RUNLEDGER_ADVISORY_LOCK_NAMESPACE)
+    .bind(JOB_ENQUEUE_INTENT_RETENTION_LOCK)
+    .execute(&mut **tx.as_tx())
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("lock job enqueue intent promotion", error)
+    })?;
+    Ok(())
+}
+
+async fn lock_job_enqueue_intent_retention_exclusive_tx(tx: &mut DbTx<'_>) -> Result<()> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock($1, $2)
+         /* runledger:lock_job_enqueue_intent_retention */",
+    )
+    .bind(RUNLEDGER_ADVISORY_LOCK_NAMESPACE)
+    .bind(JOB_ENQUEUE_INTENT_RETENTION_LOCK)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("lock job enqueue intent retention", error)
+    })?;
+    Ok(())
 }
 
 fn prepare_intent<'a>(intent: &JobEnqueueIntent<'a>) -> Result<PreparedIntent<'a>> {

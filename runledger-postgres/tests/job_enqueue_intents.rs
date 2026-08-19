@@ -954,7 +954,7 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
 }
 
 #[tokio::test]
-async fn retention_cleanup_locks_existing_job_and_defers_concurrent_promotion() {
+async fn retention_cleanup_serializes_concurrent_promotion() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_retention_promotion_race", 6).await;
     record_postgres_server_version(&pool, "intent retention/promotion lock regression").await;
@@ -1005,8 +1005,7 @@ async fn retention_cleanup_locks_existing_job_and_defers_concurrent_promotion() 
                     FROM pg_stat_activity
                     WHERE datname = current_database()
                       AND wait_event_type = 'Lock'
-                      AND query LIKE '%FROM job_queue%'
-                      AND query LIKE '%FOR NO KEY UPDATE%'
+                      AND query LIKE '%runledger:lock_job_enqueue_intent_promotion%'
                  )",
             )
             .fetch_one(&pool)
@@ -1019,7 +1018,7 @@ async fn retention_cleanup_locks_existing_job_and_defers_concurrent_promotion() 
         }
     })
     .await
-    .expect("promotion should wait on the pre-locked existing job");
+    .expect("promotion should wait on the retention fence");
 
     assert_eq!(
         sqlx::query("DELETE FROM job_queue WHERE id = $1")
@@ -1035,34 +1034,19 @@ async fn retention_cleanup_locks_existing_job_and_defers_concurrent_promotion() 
         .await
         .expect("commit retention transaction");
 
-    let first_report = timeout(Duration::from_secs(2), promotion)
+    let report = timeout(Duration::from_secs(2), promotion)
         .await
         .expect("promotion must not deadlock with retention")
         .expect("promotion task must not panic")
-        .expect("promotion race should remain recoverable");
-    assert_eq!(first_report.retry_deferred, 1);
-    assert_eq!(first_report.total_promoted, 0);
+        .expect("promotion should resume after retention");
+    assert_eq!(report.inserted_jobs, 1);
+    assert_eq!(report.retry_deferred, 0);
+    assert_eq!(report.total_promoted, 1);
 
-    let deferred = get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
-        .await
-        .expect("load deferred retention-race intent")
-        .expect("deferred retention-race intent exists");
-    assert_eq!(deferred.status, JobEnqueueIntentStatus::Pending);
-    assert_eq!(deferred.promotion_attempts, 1);
-    sqlx::query("UPDATE job_enqueue_intents SET next_promotion_at = now() WHERE id = $1")
-        .bind(recorded.intent_id)
-        .execute(&pool)
-        .await
-        .expect("make retention-race intent immediately retryable");
-
-    let retry_report = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1)
-        .await
-        .expect("retry intent after retained job deletion");
-    assert_eq!(retry_report.inserted_jobs, 1);
     let promoted = get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
         .await
-        .expect("load recovered retention-race intent")
-        .expect("recovered retention-race intent exists");
+        .expect("load serialized retention-race intent")
+        .expect("serialized retention-race intent exists");
     assert_eq!(promoted.status, JobEnqueueIntentStatus::Promoted);
     assert_ne!(
         promoted.promoted_job_id.expect("replacement job id"),
@@ -1073,7 +1057,7 @@ async fn retention_cleanup_locks_existing_job_and_defers_concurrent_promotion() 
 }
 
 #[tokio::test]
-async fn inverse_existing_job_order_exposes_promotion_retention_deadlock() {
+async fn inverse_existing_job_order_is_serialized_with_retention() {
     const PROMOTION_BLOCKER_LOCK: i64 = 0x7275_6e6c_7465_7374;
 
     let (pool, database) =
@@ -1141,7 +1125,7 @@ async fn inverse_existing_job_order_exposes_promotion_retention_deadlock() {
          WHERE id = ANY($2::uuid[])",
     )
     .bind(high_intent.intent_id)
-    .bind(&[high_intent.intent_id, low_intent.intent_id])
+    .bind([high_intent.intent_id, low_intent.intent_id])
     .execute(&pool)
     .await
     .expect("force inverse intent promotion order");
@@ -1230,7 +1214,7 @@ async fn inverse_existing_job_order_exposes_promotion_retention_deadlock() {
         )
         .await?;
         sqlx::query("DELETE FROM job_queue WHERE id = ANY($1::uuid[])")
-            .bind(&[low_job_id, high_job_id])
+            .bind([low_job_id, high_job_id])
             .execute(&mut *retention_tx)
             .await
             .expect("delete inverse-order retained jobs");
@@ -1247,12 +1231,19 @@ async fn inverse_existing_job_order_exposes_promotion_retention_deadlock() {
 
     timeout(Duration::from_secs(2), async {
         loop {
-            let blocked =
-                sqlx::query_scalar::<_, bool>("SELECT cardinality(pg_blocking_pids($1)) > 0")
-                    .bind(retention_pid)
-                    .fetch_one(&pool)
-                    .await
-                    .expect("inspect retention blocker graph");
+            let blocked = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE pid = $1
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%runledger:lock_job_enqueue_intent_retention%'
+                 )",
+            )
+            .bind(retention_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("inspect retention fence wait");
             if blocked {
                 break;
             }
@@ -1260,7 +1251,7 @@ async fn inverse_existing_job_order_exposes_promotion_retention_deadlock() {
         }
     })
     .await
-    .expect("retention must hold the low job while waiting for the high job");
+    .expect("retention must wait on promotion before locking either job");
 
     blocker_tx
         .rollback()
@@ -1271,26 +1262,15 @@ async fn inverse_existing_job_order_exposes_promotion_retention_deadlock() {
         timeout(Duration::from_secs(5), retention),
     );
     let promotion_result = promotion_result
-        .expect("promotion must resolve the forced deadlock")
+        .expect("promotion must finish after the trigger blocker is released")
         .expect("promotion task must not panic");
     let retention_result = retention_result
-        .expect("retention must resolve the forced deadlock")
+        .expect("retention must finish after promotion")
         .expect("retention task must not panic");
-
-    match (promotion_result, retention_result) {
-        (Ok(report), Ok(())) => {
-            assert_eq!(report.existing_jobs, 1);
-            assert_eq!(report.retry_deferred, 1);
-        }
-        (Ok(report), Err(runledger_postgres::Error::QueryError(error))) => {
-            assert_eq!(report.existing_jobs, 2);
-            assert_eq!(report.retry_deferred, 0);
-            assert_eq!(error.sqlstate(), Some("40P01"));
-        }
-        (promotion_result, retention_result) => panic!(
-            "forced inverse-order cycle had unexpected outcomes: promotion={promotion_result:?}, retention={retention_result:?}"
-        ),
-    }
+    let report = promotion_result.expect("inverse-order promotion should commit");
+    retention_result.expect("inverse-order retention should commit");
+    assert_eq!(report.existing_jobs, 2);
+    assert_eq!(report.retry_deferred, 0);
 
     teardown_ephemeral_pool(pool, database).await;
 }
