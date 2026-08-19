@@ -300,6 +300,82 @@ async fn duplicate_recording_does_not_wait_on_a_promoters_row_lock() {
 }
 
 #[tokio::test]
+async fn concurrent_uncommitted_recorders_converge_after_unique_key_wait() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_concurrent_recorders", 5).await;
+    record_postgres_server_version(&pool, "concurrent intent recorder regression").await;
+    let payload = json!({"event": "concurrent-recorder"});
+    let intent = JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "concurrent-recorder-key");
+
+    let mut first_tx = pool.begin().await.expect("begin first recorder");
+    let first = record_job_enqueue_intent_tx(&mut first_tx, &intent)
+        .await
+        .expect("record uncommitted winning intent");
+    assert_eq!(first.disposition, JobEnqueueIntentDisposition::Inserted);
+
+    let second_pool = pool.clone();
+    let second_recorder = tokio::spawn(async move {
+        let payload = json!({"event": "concurrent-recorder"});
+        let intent =
+            JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "concurrent-recorder-key");
+        let mut tx = second_pool.begin().await.expect("begin second recorder");
+        let outcome = record_job_enqueue_intent_tx(&mut tx, &intent).await;
+        if outcome.is_ok() {
+            tx.commit().await.expect("commit second recorder");
+        }
+        outcome
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%INSERT INTO job_enqueue_intents%'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("inspect recorder unique-key wait");
+            if waiting {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("second recorder should wait for the uncommitted unique-key winner");
+
+    first_tx.commit().await.expect("commit first recorder");
+    let second = timeout(Duration::from_secs(2), second_recorder)
+        .await
+        .expect("second recorder should converge after the winner commits")
+        .expect("second recorder task must not panic")
+        .expect("record the existing intent");
+    assert_eq!(second.intent_id, first.intent_id);
+    assert_eq!(second.disposition, JobEnqueueIntentDisposition::Existing);
+    assert_eq!(second.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM job_enqueue_intents
+             WHERE job_type = $1
+               AND organization_id IS NULL
+               AND idempotency_key = 'concurrent-recorder-key'",
+        )
+        .bind(JOB_TYPE)
+        .fetch_one(&pool)
+        .await
+        .expect("count converged intent rows"),
+        1
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_promote", 4).await;
     let payload = json!({"event": "analytics.capture", "account_id": "acct_1"});
