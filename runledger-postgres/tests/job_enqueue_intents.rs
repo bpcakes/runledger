@@ -657,6 +657,19 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
         .expect("equivalent intent exists");
     assert_eq!(equivalent.status, JobEnqueueIntentStatus::Promoted);
     assert_eq!(equivalent.promoted_job_id, Some(existing_job_id));
+    let delete_error = sqlx::query("DELETE FROM job_queue WHERE id = $1")
+        .bind(existing_job_id)
+        .execute(&pool)
+        .await
+        .expect_err("promoted intent must retain its linked job");
+    let database_error = delete_error
+        .as_database_error()
+        .expect("retention fence must be a database error");
+    assert_eq!(database_error.code().as_deref(), Some("23001"));
+    assert_eq!(
+        database_error.constraint(),
+        Some("fk_job_enqueue_intents_promoted_job")
+    );
     assert_eq!(
         delete_promoted_job_enqueue_intents_before(
             &pool,
