@@ -28,6 +28,13 @@ fn query_error_code(error: &runledger_postgres::Error) -> Option<&str> {
     }
 }
 
+fn query_error_sqlstate(error: &runledger_postgres::Error) -> Option<&str> {
+    match error {
+        runledger_postgres::Error::QueryError(error) => error.sqlstate(),
+        _ => None,
+    }
+}
+
 async fn record_postgres_server_version(pool: &sqlx::PgPool, diagnostic: &str) {
     let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
         .fetch_one(pool)
@@ -1197,6 +1204,118 @@ async fn retention_delete_wait_is_bounded_while_holding_fence() {
             .expect("intent remains after bounded retention delete")
             .status,
         JobEnqueueIntentStatus::Promoted
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn duplicate_recorder_and_retention_expose_inverse_job_intent_order() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_recorder_retention_deadlock", 6).await;
+    record_postgres_server_version(&pool, "intent recorder/retention deadlock characterization")
+        .await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "recorder-retention-deadlock"});
+    let intent = JobEnqueueIntent::new(
+        JobType::new(JOB_TYPE),
+        &payload,
+        "recorder-retention-deadlock",
+    );
+    let recorded = record_job_enqueue_intent(&pool, &intent)
+        .await
+        .expect("record intent before deadlock characterization");
+    let report = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1)
+        .await
+        .expect("promote intent before deadlock characterization");
+    assert_eq!(report.total_promoted, 1);
+    let promoted_job_id = get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+        .await
+        .expect("load promoted intent for deadlock characterization")
+        .expect("promoted intent exists for deadlock characterization")
+        .promoted_job_id
+        .expect("promoted intent has a job id");
+
+    let mut recorder_tx = pool.begin().await.expect("begin duplicate recorder");
+    let duplicate = record_job_enqueue_intent_tx(&mut recorder_tx, &intent)
+        .await
+        .expect("duplicate recorder holds the promoted intent row");
+    assert_eq!(duplicate.status, JobEnqueueIntentStatus::Promoted);
+
+    let retention_pool = pool.clone();
+    let retention = tokio::spawn(async move {
+        let mut retention_tx = retention_pool
+            .begin()
+            .await
+            .expect("begin inverse-order retention");
+        match delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[promoted_job_id])
+            .await
+        {
+            Ok(deleted) => {
+                assert_eq!(deleted, 1);
+                retention_tx
+                    .commit()
+                    .await
+                    .expect("commit inverse-order retention");
+                Ok(())
+            }
+            Err(error) => {
+                let _ = retention_tx.rollback().await;
+                Err(error)
+            }
+        }
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%DELETE FROM job_enqueue_intents%'
+                      AND query LIKE '%promoted_job_id = ANY%'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("inspect inverse-order retention wait");
+            if waiting {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retention must wait on the duplicate recorder after locking the job");
+
+    let recorder_job_lock = timeout(
+        Duration::from_secs(3),
+        sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
+            .bind(promoted_job_id)
+            .fetch_one(&mut *recorder_tx),
+    )
+    .await
+    .expect("PostgreSQL must resolve the inverse-order cycle");
+    let recorder_deadlocked = recorder_job_lock.as_ref().is_err_and(|error| {
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| code == "40P01")
+    });
+    let _ = recorder_tx.rollback().await;
+
+    let retention_result = timeout(Duration::from_secs(3), retention)
+        .await
+        .expect("retention must finish after deadlock resolution")
+        .expect("retention task must not panic");
+    let retention_deadlocked = retention_result
+        .as_ref()
+        .is_err_and(|error| query_error_sqlstate(error) == Some("40P01"));
+    assert_ne!(
+        recorder_deadlocked, retention_deadlocked,
+        "exactly one side of the inverse-order cycle must be chosen as the deadlock victim"
     );
 
     teardown_ephemeral_pool(pool, database).await;
