@@ -1049,12 +1049,13 @@ pub async fn delete_promoted_job_enqueue_intents_before(
 /// two deletes. Pending and conflicted intents are never deleted. At most 1,000
 /// job IDs may be supplied per call; an empty slice is a no-op. Keep the
 /// transaction short and commit promptly to release the fence. Because exact
-/// cleanup cannot skip requested IDs, lock acquisition may wait for a
-/// concurrent promotion or a transaction that holds a matching job row lock.
-/// Runledger caps each lock wait at five seconds and each lock-acquisition
+/// cleanup cannot skip requested IDs, the helper may wait for a concurrent
+/// promotion, a matching job-row lock, or an intent-row lock held by a duplicate
+/// recorder. Runledger keeps its timeout caps active from fence acquisition
+/// through intent deletion: each lock wait is capped at five seconds and each
 /// statement at thirty seconds while preserving stricter caller settings. A
-/// timeout or deadlock aborts the transaction; callers must roll it back and
-/// may retry the complete retention transaction.
+/// timeout or deadlock aborts the transaction; callers must roll it back and may
+/// retry the complete retention transaction.
 pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
     tx: &mut DbTx<'_>,
     job_ids: &[Uuid],
@@ -1063,7 +1064,24 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
         return Ok(0);
     }
     validate_job_enqueue_intent_retention_batch_size(job_ids.len())?;
-    lock_job_enqueue_intent_retention_phase_tx(tx, job_ids).await?;
+    delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(tx, job_ids).await
+}
+
+async fn delete_promoted_job_enqueue_intents_in_retention_critical_section_tx(
+    tx: &mut DbTx<'_>,
+    job_ids: &[Uuid],
+) -> Result<u64> {
+    let previous_statement_timeout = cap_local_statement_timeout_tx(
+        tx,
+        JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT,
+        JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS,
+        "cap statement timeout for job enqueue intent retention",
+    )
+    .await?;
+    let previous_lock_timeout = cap_job_enqueue_intent_fence_lock_timeout_tx(tx).await?;
+
+    lock_job_enqueue_intent_retention_exclusive_tx(tx).await?;
+    lock_retained_jobs_tx(tx, job_ids).await?;
 
     let result = sqlx::query!(
         "DELETE FROM job_enqueue_intents
@@ -1079,6 +1097,15 @@ pub async fn delete_promoted_job_enqueue_intents_for_jobs_tx(
             error,
         )
     })?;
+
+    restore_job_enqueue_intent_fence_lock_timeout_tx(tx, &previous_lock_timeout).await?;
+    set_local_statement_timeout_tx(
+        tx,
+        &previous_statement_timeout,
+        "restore statement timeout after job enqueue intent retention",
+    )
+    .await?;
+
     Ok(result.rows_affected())
 }
 
@@ -1096,31 +1123,6 @@ fn validate_job_enqueue_intent_retention_batch_size(batch_size: usize) -> Result
              {JOB_ENQUEUE_INTENT_RETENTION_BATCH_LIMIT_MAX} job IDs, got {batch_size}"
         ),
     )))
-}
-
-async fn lock_job_enqueue_intent_retention_phase_tx(
-    tx: &mut DbTx<'_>,
-    job_ids: &[Uuid],
-) -> Result<()> {
-    let previous_statement_timeout = cap_local_statement_timeout_tx(
-        tx,
-        JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT,
-        JOB_ENQUEUE_INTENT_RETENTION_STATEMENT_TIMEOUT_MS,
-        "cap statement timeout for job enqueue intent retention",
-    )
-    .await?;
-    let previous_lock_timeout = cap_job_enqueue_intent_fence_lock_timeout_tx(tx).await?;
-
-    lock_job_enqueue_intent_retention_exclusive_tx(tx).await?;
-    lock_retained_jobs_tx(tx, job_ids).await?;
-
-    restore_job_enqueue_intent_fence_lock_timeout_tx(tx, &previous_lock_timeout).await?;
-    set_local_statement_timeout_tx(
-        tx,
-        &previous_statement_timeout,
-        "restore statement timeout after job enqueue intent retention locking",
-    )
-    .await
 }
 
 async fn lock_retained_jobs_tx(tx: &mut DbTx<'_>, job_ids: &[Uuid]) -> Result<()> {

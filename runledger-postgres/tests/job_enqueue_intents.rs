@@ -1135,6 +1135,74 @@ async fn retention_cleanup_preserves_stricter_caller_lock_timeout() {
 }
 
 #[tokio::test]
+async fn retention_delete_wait_is_bounded_while_holding_fence() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_retention_delete_timeout", 6).await;
+    record_postgres_server_version(&pool, "intent retention bounded delete wait").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "retention-delete-timeout"});
+    let intent =
+        JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "retention-delete-timeout");
+    let recorded = record_job_enqueue_intent(&pool, &intent)
+        .await
+        .expect("record intent before promotion");
+    let report = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 1)
+        .await
+        .expect("promote intent before retention");
+    assert_eq!(report.total_promoted, 1);
+    let promoted = get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+        .await
+        .expect("load promoted intent")
+        .expect("promoted intent exists");
+    let promoted_job_id = promoted.promoted_job_id.expect("promoted intent job id");
+
+    let mut recorder_tx = pool.begin().await.expect("begin duplicate recorder");
+    let duplicate = record_job_enqueue_intent_tx(&mut recorder_tx, &intent)
+        .await
+        .expect("record duplicate while retaining its intent row lock");
+    assert_eq!(duplicate.disposition, JobEnqueueIntentDisposition::Existing);
+    assert_eq!(duplicate.status, JobEnqueueIntentStatus::Promoted);
+
+    let mut retention_tx = pool.begin().await.expect("begin bounded retention delete");
+    let started = Instant::now();
+    let error = timeout(
+        Duration::from_secs(7),
+        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[promoted_job_id]),
+    )
+    .await
+    .expect("retention delete must honor its five-second lock timeout")
+    .expect_err("retention delete must time out behind the duplicate recorder");
+    assert!(
+        started.elapsed() >= Duration::from_secs(4) && started.elapsed() < Duration::from_secs(7),
+        "retention delete wait was not bounded near five seconds: {:?}",
+        started.elapsed()
+    );
+    let runledger_postgres::Error::QueryError(query_error) = error else {
+        panic!("expected retention delete lock-timeout query error");
+    };
+    assert_eq!(query_error.sqlstate(), Some("55P03"));
+
+    retention_tx
+        .rollback()
+        .await
+        .expect("rollback timed-out retention delete");
+    recorder_tx
+        .rollback()
+        .await
+        .expect("release duplicate recorder intent lock");
+    assert_eq!(
+        get_job_enqueue_intent_by_id(&pool, None, recorded.intent_id)
+            .await
+            .expect("load intent after bounded retention delete")
+            .expect("intent remains after bounded retention delete")
+            .status,
+        JobEnqueueIntentStatus::Promoted
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn exact_retention_validates_its_domain_batch_limit() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_enqueue_intent_retention_batch_limit", 2).await;
