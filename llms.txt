@@ -1,7 +1,7 @@
 # Runledger LLM Integration Summary
 
 Runledger is a Rust workspace for durable jobs, workflow orchestration, and
-worker runtime loops on PostgreSQL. This summary describes release 0.10.0,
+worker runtime loops on PostgreSQL. This summary describes release 0.10.1,
 including the 0.6 through 0.9 continuation, recovery, replay, metrics, event,
 coordination, lease-identity, and durable enqueue-intent contracts. The minimum
 supported versions are Rust 1.88 and PostgreSQL 18.

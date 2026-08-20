@@ -1480,7 +1480,7 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.10.0
+./scripts/prepare-release.sh 0.10.1
 ```
 
 The preparation script starts from a clean working tree or resumes an existing
@@ -1497,7 +1497,7 @@ crate archive contains the repository license. If publishing manually, run
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.10.0
+./scripts/publish-release.sh 0.10.1
 ```
 
 Before publishing any crate, the publish script confirms that the release tag
@@ -1505,7 +1505,7 @@ is absent locally and remotely, requires the same-named remote branch to point
 at the exact local commit, and verifies that commit's completed GitHub Actions
 `CI` run and every job succeeded. It then dry-runs the branch and tag push,
 publishes crates in dependency order, dry-runs each once its workspace
-dependencies are indexed, creates a `v0.10.0` tag, and atomically pushes the
+dependencies are indexed, creates a `v0.10.1` tag, and atomically pushes the
 current branch and tag. The publication preflight requires an authenticated
 GitHub CLI. Set `PUBLISH_REMOTE` to override the git remote for the final push.
 

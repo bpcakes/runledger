@@ -4,6 +4,15 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-20
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)
+
+### Changed
+
+- Refresh supported Rust dependencies while retaining SQLx 0.8.6. Test
+  infrastructure now uses Testcontainers 0.28, and the TUI uses Ratatui 0.30.2
+  with Crossterm 0.29, removing the duplicate Crossterm 0.28 dependency branch.
+
 ## [0.10.0] - 2026-08-19
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.9.1...v0.10.0)
 
