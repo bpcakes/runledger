@@ -1,0 +1,89 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH base_metrics AS (\n            SELECT\n                jmr.job_type,\n                SUM(jmr.pending_count)::bigint AS pending_count,\n                SUM(jmr.leased_count)::bigint AS leased_count,\n                SUM(jmr.stale_leases)::bigint AS stale_leases,\n                SUM(jmr.succeeded_24h)::bigint AS succeeded_24h,\n                SUM(jmr.retryable_24h)::bigint AS retryable_24h,\n                SUM(jmr.terminal_24h)::bigint AS terminal_24h,\n                SUM(jmr.panicked_24h)::bigint AS panicked_24h,\n                SUM(jmr.timeout_24h)::bigint AS timeout_24h,\n                SUM(jmr.dead_lettered_24h)::bigint AS dead_lettered_24h\n            FROM job_metrics_rollup jmr\n            WHERE ($1::uuid IS NULL OR jmr.organization_id = $1)\n              AND ($2::text IS NULL OR jmr.job_type = $2)\n            GROUP BY jmr.job_type\n         ), duration_metrics AS (\n            SELECT\n                queue.job_type,\n                percentile_cont(0.50) WITHIN GROUP (\n                    ORDER BY extract(epoch FROM (attempt.finished_at - attempt.started_at))::float8\n                        * 1000.0\n                ) AS p50_duration_ms_24h,\n                percentile_cont(0.95) WITHIN GROUP (\n                    ORDER BY extract(epoch FROM (attempt.finished_at - attempt.started_at))::float8\n                        * 1000.0\n                ) AS p95_duration_ms_24h\n            FROM job_attempts attempt\n            JOIN job_queue queue ON queue.id = attempt.job_id\n            WHERE attempt.created_at >= now() - interval '24 hours'\n              AND attempt.finished_at IS NOT NULL\n              AND ($1::uuid IS NULL OR queue.organization_id = $1)\n              AND ($2::text IS NULL OR queue.job_type = $2)\n            GROUP BY queue.job_type\n         )\n         SELECT\n            jd.job_type AS \"job_type!\",\n            COALESCE(base.pending_count, 0)::bigint AS \"pending_count!\",\n            COALESCE(base.leased_count, 0)::bigint AS \"leased_count!\",\n            COALESCE(base.stale_leases, 0)::bigint AS \"stale_leases!\",\n            COALESCE(base.succeeded_24h, 0)::bigint AS \"succeeded_24h!\",\n            COALESCE(base.retryable_24h, 0)::bigint AS \"retryable_24h!\",\n            COALESCE(base.terminal_24h, 0)::bigint AS \"terminal_24h!\",\n            COALESCE(base.panicked_24h, 0)::bigint AS \"panicked_24h!\",\n            COALESCE(base.timeout_24h, 0)::bigint AS \"timeout_24h!\",\n            COALESCE(base.dead_lettered_24h, 0)::bigint AS \"dead_lettered_24h!\",\n            duration.p50_duration_ms_24h,\n            duration.p95_duration_ms_24h\n         FROM job_definitions jd\n         LEFT JOIN base_metrics base USING (job_type)\n         LEFT JOIN duration_metrics duration USING (job_type)\n         WHERE ($2::text IS NULL OR jd.job_type = $2)\n         ORDER BY jd.job_type ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "pending_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "leased_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "stale_leases!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "succeeded_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "retryable_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "terminal_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "panicked_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "timeout_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "dead_lettered_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "p50_duration_ms_24h",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 11,
+        "name": "p95_duration_ms_24h",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "cd094062ee12537225d2951ef5509d49b263360cb3f4aacc66b92c444a992f11"
+}

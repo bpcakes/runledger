@@ -77,6 +77,37 @@ async fn insert_log(pool: &DbPool, job_id: Uuid, message: &str) {
     .expect("insert job log");
 }
 
+async fn insert_finished_attempt(pool: &DbPool, job_id: Uuid, attempt: i32, duration_ms: i64) {
+    sqlx::query(
+        "INSERT INTO job_attempts (
+            job_id,
+            run_number,
+            attempt,
+            worker_id,
+            leased_at,
+            started_at,
+            finished_at,
+            outcome
+         )
+         VALUES (
+            $1,
+            1,
+            $2,
+            'admin-metrics-test',
+            now() - interval '1 hour',
+            now() - interval '1 hour',
+            now() - interval '1 hour' + $3::float8 * interval '1 millisecond',
+            'TERMINAL'
+         )",
+    )
+    .bind(job_id)
+    .bind(attempt)
+    .bind(duration_ms as f64)
+    .execute(pool)
+    .await
+    .expect("insert finished metrics attempt");
+}
+
 async fn request_json(
     app: &Router,
     method: Method,
@@ -177,6 +208,10 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     .await;
     insert_log(&pool, organization_a_job, "newer log").await;
     insert_log(&pool, organization_a_job, "newest log").await;
+    insert_finished_attempt(&pool, organization_a_job, 1, 10).await;
+    insert_finished_attempt(&pool, organization_b_job, 1, 1_000).await;
+    insert_finished_attempt(&pool, organization_b_job, 2, 2_000).await;
+    insert_finished_attempt(&pool, organization_b_job, 3, 3_000).await;
 
     let workflow_payload = json!({"customer_email": "workflow-private@example.test"});
     let workflow_metadata = json!({"source": "admin-contract", "secret": true});
@@ -401,6 +436,20 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     assert_eq!(body["page"]["limit"], 50);
     assert_eq!(body["page"]["offset"], 0);
     assert_eq!(body["page"]["max_offset"], runledger_admin::MAX_PAGE_OFFSET);
+    let organization_metric = body["items"]
+        .as_array()
+        .expect("metric items")
+        .iter()
+        .find(|item| item["job_type"] == JOB_TYPE)
+        .expect("organization metric");
+    assert_eq!(
+        organization_metric["p50_duration_ms_24h"].as_f64(),
+        Some(10.0)
+    );
+    assert_eq!(
+        organization_metric["p95_duration_ms_24h"].as_f64(),
+        Some(10.0)
+    );
 
     let (status, _, body) = get_json(
         &app,
@@ -420,6 +469,20 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
             .iter()
             .any(|item| item["job_type"] == UNUSED_JOB_TYPE)
     );
+    let service_metric = body["items"]
+        .as_array()
+        .expect("service-wide metric items")
+        .iter()
+        .find(|item| item["job_type"] == JOB_TYPE)
+        .expect("service-wide job metric");
+    assert_eq!(
+        service_metric["p50_duration_ms_24h"].as_f64(),
+        Some(1_500.0)
+    );
+    let service_p95 = service_metric["p95_duration_ms_24h"]
+        .as_f64()
+        .expect("service-wide p95 duration");
+    assert!((service_p95 - 2_850.0).abs() < f64::EPSILON * 2_850.0);
 
     let (status, _, first_metrics_page) =
         get_json(&app, "/metrics?limit=1", Some(all_access)).await;

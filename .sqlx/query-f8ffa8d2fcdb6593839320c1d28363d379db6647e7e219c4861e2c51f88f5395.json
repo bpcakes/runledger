@@ -1,0 +1,109 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH page_metrics AS MATERIALIZED (\n                SELECT rollup.*\n                FROM job_metrics_rollup rollup\n                WHERE rollup.organization_id = $1\n                  AND ($2::text IS NULL OR rollup.job_type = $2)\n                ORDER BY rollup.job_type ASC\n                LIMIT $3 OFFSET $4\n             ), continuation_metrics AS (\n                SELECT\n                    rollup.job_type,\n                    SUM(rollup.continued_24h)::bigint AS continued_24h,\n                    SUM(rollup.active_continued_count)::bigint AS active_continued_count,\n                    MAX(rollup.max_active_run_number)::int4 AS max_active_run_number\n                FROM job_continuation_metrics_rollup rollup\n                JOIN page_metrics page USING (job_type)\n                WHERE rollup.organization_id = $1\n                GROUP BY rollup.job_type\n             )\n             SELECT\n                page.job_type AS \"job_type!\",\n                page.pending_count AS \"pending_count!\",\n                page.leased_count AS \"leased_count!\",\n                page.stale_leases AS \"stale_leases!\",\n                page.succeeded_24h AS \"succeeded_24h!\",\n                page.retryable_24h AS \"retryable_24h!\",\n                page.terminal_24h AS \"terminal_24h!\",\n                page.panicked_24h AS \"panicked_24h!\",\n                page.timeout_24h AS \"timeout_24h!\",\n                page.dead_lettered_24h AS \"dead_lettered_24h!\",\n                page.p50_duration_ms_24h,\n                page.p95_duration_ms_24h,\n                COALESCE(continuation.continued_24h, 0)::bigint AS \"continued_24h!\",\n                COALESCE(continuation.active_continued_count, 0)::bigint\n                    AS \"active_continued_count!\",\n                COALESCE(continuation.max_active_run_number, 0)::int4\n                    AS \"max_active_run_number!\"\n             FROM page_metrics page\n             LEFT JOIN continuation_metrics continuation USING (job_type)\n             ORDER BY page.job_type ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "pending_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "leased_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "stale_leases!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "succeeded_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "retryable_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "terminal_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "panicked_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "timeout_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "dead_lettered_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "p50_duration_ms_24h",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 11,
+        "name": "p95_duration_ms_24h",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 12,
+        "name": "continued_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 13,
+        "name": "active_continued_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 14,
+        "name": "max_active_run_number!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f8ffa8d2fcdb6593839320c1d28363d379db6647e7e219c4861e2c51f88f5395"
+}
