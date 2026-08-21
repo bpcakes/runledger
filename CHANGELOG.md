@@ -44,6 +44,8 @@ All notable changes to this workspace are documented here.
 - Represent unbounded admin metrics and progress `bigint` values as exact
   decimal strings so JavaScript consumers never silently lose integer
   precision.
+- Render empty admin list pages as `Rows 0–0` instead of deriving a phantom
+  range from the requested offset.
 
 ## [0.10.1] - 2026-08-20
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)

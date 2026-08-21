@@ -121,6 +121,25 @@ describe("RunledgerAdminPanel", () => {
     expect((next as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("renders an empty out-of-range page without a phantom row range", async () => {
+    render(
+      <RunledgerAdminPanel
+        client={{
+          ...client,
+          jobs: async () => ({
+            items: [],
+            page: { ...jobs.page, offset: 50 },
+          }),
+        }}
+        onRouteChange={() => undefined}
+        pollIntervalMs={0}
+        route={{ name: "jobs", offset: 50 }}
+      />,
+    );
+
+    expect(await screen.findByText("Rows 0–0")).toBeTruthy();
+  });
+
   it("navigates from a workflow step to its job without a router dependency", async () => {
     render(<Harness />);
     fireEvent.click(await screen.findByRole("button", { name: "Workflows" }));

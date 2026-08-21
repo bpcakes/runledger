@@ -462,7 +462,7 @@ function Pagination({
   readonly onOffset: (offset: number) => void;
 }) {
   const firstRow = itemCount === 0 ? 0 : page.offset + 1;
-  const lastRow = page.offset + itemCount;
+  const lastRow = itemCount === 0 ? 0 : page.offset + itemCount;
   return (
     <nav aria-label={label} className="rla-pagination">
       <button
