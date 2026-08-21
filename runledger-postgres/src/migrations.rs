@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migrator};
+use sqlx::Row;
+use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
 
 use crate::DbPool;
 
@@ -42,7 +43,15 @@ struct RecoverableConcurrentIndex {
     migration_version: i64,
     index_name: &'static str,
     table_name: &'static str,
+    key_columns: &'static [&'static str],
+    key_options: &'static [i16],
     drop_sql: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConcurrentIndexRecovery {
+    ApplyMigration,
+    RecordExistingIndex,
 }
 
 const RECOVERABLE_CONCURRENT_INDEXES: &[RecoverableConcurrentIndex] = &[
@@ -50,36 +59,48 @@ const RECOVERABLE_CONCURRENT_INDEXES: &[RecoverableConcurrentIndex] = &[
         migration_version: 202608210001,
         index_name: "idx_job_events_job_id_newest",
         table_name: "job_events",
+        key_columns: &["job_id", "id"],
+        key_options: &[0, 3],
         drop_sql: "DROP INDEX CONCURRENTLY idx_job_events_job_id_newest",
     },
     RecoverableConcurrentIndex {
         migration_version: 202608210002,
         index_name: "idx_job_logs_job_id_newest",
         table_name: "job_logs",
+        key_columns: &["job_id", "id"],
+        key_options: &[0, 3],
         drop_sql: "DROP INDEX CONCURRENTLY idx_job_logs_job_id_newest",
     },
     RecoverableConcurrentIndex {
         migration_version: 202608210003,
         index_name: "idx_job_queue_admin_created",
         table_name: "job_queue",
+        key_columns: &["created_at", "id"],
+        key_options: &[3, 3],
         drop_sql: "DROP INDEX CONCURRENTLY idx_job_queue_admin_created",
     },
     RecoverableConcurrentIndex {
         migration_version: 202608210004,
         index_name: "idx_job_queue_admin_org_created",
         table_name: "job_queue",
+        key_columns: &["organization_id", "created_at", "id"],
+        key_options: &[0, 3, 3],
         drop_sql: "DROP INDEX CONCURRENTLY idx_job_queue_admin_org_created",
     },
     RecoverableConcurrentIndex {
         migration_version: 202608210005,
         index_name: "idx_workflow_runs_admin_created",
         table_name: "workflow_runs",
+        key_columns: &["created_at", "id"],
+        key_options: &[3, 3],
         drop_sql: "DROP INDEX CONCURRENTLY idx_workflow_runs_admin_created",
     },
     RecoverableConcurrentIndex {
         migration_version: 202608210006,
         index_name: "idx_workflow_runs_admin_org_created",
         table_name: "workflow_runs",
+        key_columns: &["organization_id", "created_at", "id"],
+        key_options: &[0, 3, 3],
         drop_sql: "DROP INDEX CONCURRENTLY idx_workflow_runs_admin_org_created",
     },
 ];
@@ -626,48 +647,149 @@ async fn run_migrations_with_filtered_history(
             Some(applied_migration) => {
                 validate_checksum(migration.version, applied_migration, migration)?
             }
-            None => {
-                recover_invalid_concurrent_index(conn, migration.version).await?;
-                (**conn).apply(migration).await?;
-            }
+            None => match recover_pending_concurrent_index(conn, migration.version).await? {
+                ConcurrentIndexRecovery::ApplyMigration => {
+                    (**conn).apply(migration).await?;
+                }
+                ConcurrentIndexRecovery::RecordExistingIndex => {
+                    record_existing_migration(conn, migration).await?;
+                }
+            },
         }
     }
 
     Ok(())
 }
 
-async fn recover_invalid_concurrent_index(
+async fn recover_pending_concurrent_index(
     conn: &mut PgPoolConnection,
     migration_version: i64,
-) -> Result<(), MigrateError> {
+) -> Result<ConcurrentIndexRecovery, MigrateError> {
     let Some(index) = RECOVERABLE_CONCURRENT_INDEXES
         .iter()
         .find(|index| index.migration_version == migration_version)
     else {
-        return Ok(());
+        return Ok(ConcurrentIndexRecovery::ApplyMigration);
     };
 
     // PostgreSQL deliberately leaves an invalid index relation behind when a
-    // concurrent build fails. A later CREATE with the same name cannot make
-    // progress until that relation is removed. Only repair the exact pending
-    // migration target on its expected table; a valid or same-named unrelated
-    // index remains a hard schema error rather than being silently replaced.
-    let expected_invalid_index_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM pg_index index_state
-            WHERE index_state.indexrelid = to_regclass($1)
-              AND index_state.indrelid = to_regclass($2)
-              AND NOT index_state.indisvalid
-         )",
+    // concurrent build fails. SQLx then records no-transaction migrations in a
+    // separate statement, so a process can also disappear after PostgreSQL has
+    // made the index valid but before `_sqlx_migrations` is updated. Model both
+    // states explicitly: invalid expected-table indexes are discarded, while a
+    // valid index is adopted only when its complete simple-B-tree shape matches
+    // the pending migration. Same-named relations with any other shape remain a
+    // hard error instead of being silently blessed by migration bookkeeping.
+    let state = sqlx::query(
+        "WITH named_relation AS (
+            SELECT to_regclass($1) AS relation_id
+         )
+         SELECT
+            named_relation.relation_id IS NOT NULL AS relation_exists,
+            index_state.indisvalid AS is_valid,
+            index_state.indisunique AS is_unique,
+            index_state.indnkeyatts = index_state.indnatts AS has_only_key_columns,
+            index_state.indpred IS NULL AS has_no_predicate,
+            NOT EXISTS (
+                SELECT 1
+                FROM unnest(index_state.indclass::oid[]) operator_class_id
+                JOIN pg_opclass operator_class
+                  ON operator_class.oid = operator_class_id
+                WHERE NOT operator_class.opcdefault
+            ) AS has_only_default_operator_classes,
+            NOT EXISTS (
+                SELECT 1
+                FROM unnest(index_state.indcollation::oid[]) collation_id
+                WHERE collation_id <> 0
+            ) AS has_no_collations,
+            access_method.amname AS access_method,
+            CASE WHEN index_state.indexrelid IS NULL THEN NULL ELSE ARRAY(
+                SELECT key_option
+                FROM unnest(index_state.indoption::smallint[]) key_option
+            ) END AS key_options,
+            CASE WHEN index_state.indexrelid IS NULL THEN NULL ELSE ARRAY(
+                SELECT pg_get_indexdef(
+                    index_state.indexrelid,
+                    key_position,
+                    false
+                )
+                FROM generate_series(1, index_state.indnkeyatts::int) key_position
+            ) END AS key_columns
+         FROM named_relation
+         LEFT JOIN pg_index index_state
+           ON index_state.indexrelid = named_relation.relation_id
+          AND index_state.indrelid = to_regclass($2)
+         LEFT JOIN pg_class index_relation
+           ON index_relation.oid = index_state.indexrelid
+         LEFT JOIN pg_am access_method
+           ON access_method.oid = index_relation.relam",
     )
     .bind(index.index_name)
     .bind(index.table_name)
     .fetch_one(&mut **conn)
     .await?;
 
-    if !expected_invalid_index_exists {
-        return Ok(());
+    if !state.try_get::<bool, _>("relation_exists")? {
+        return Ok(ConcurrentIndexRecovery::ApplyMigration);
+    }
+
+    let Some(is_valid) = state.try_get::<Option<bool>, _>("is_valid")? else {
+        return Err(concurrent_index_conflict(
+            index,
+            "the name belongs to another relation",
+        ));
+    };
+
+    if is_valid {
+        let actual_key_columns = state.try_get::<Option<Vec<String>>, _>("key_columns")?;
+        let actual_key_options = state.try_get::<Option<Vec<i16>>, _>("key_options")?;
+        let expected_key_columns = index
+            .key_columns
+            .iter()
+            .map(|column| (*column).to_owned())
+            .collect::<Vec<_>>();
+        let matches_expected_shape = !state
+            .try_get::<Option<bool>, _>("is_unique")?
+            .unwrap_or(true)
+            && state
+                .try_get::<Option<bool>, _>("has_only_key_columns")?
+                .unwrap_or(false)
+            && state
+                .try_get::<Option<bool>, _>("has_no_predicate")?
+                .unwrap_or(false)
+            && state
+                .try_get::<Option<bool>, _>("has_only_default_operator_classes")?
+                .unwrap_or(false)
+            && state
+                .try_get::<Option<bool>, _>("has_no_collations")?
+                .unwrap_or(false)
+            && state
+                .try_get::<Option<String>, _>("access_method")?
+                .as_deref()
+                == Some("btree")
+            && actual_key_columns.as_deref() == Some(expected_key_columns.as_slice())
+            && actual_key_options.as_deref() == Some(index.key_options);
+        if matches_expected_shape {
+            tracing::warn!(
+                migration_version,
+                index_name = index.index_name,
+                "recording valid index left by interrupted migration bookkeeping"
+            );
+            return Ok(ConcurrentIndexRecovery::RecordExistingIndex);
+        }
+
+        return Err(concurrent_index_conflict(
+            index,
+            &format!(
+                "the valid index does not match the pending migration (unique={:?}, only_key_columns={:?}, no_predicate={:?}, default_operator_classes={:?}, no_collations={:?}, access_method={:?}, key_columns={actual_key_columns:?}, key_options={actual_key_options:?})",
+                state.try_get::<Option<bool>, _>("is_unique")?,
+                state.try_get::<Option<bool>, _>("has_only_key_columns")?,
+                state.try_get::<Option<bool>, _>("has_no_predicate")?,
+                state.try_get::<Option<bool>, _>("has_only_default_operator_classes")?,
+                state.try_get::<Option<bool>, _>("has_no_collations")?,
+                state.try_get::<Option<String>, _>("access_method")?,
+            ),
+        ));
     }
 
     tracing::warn!(
@@ -676,6 +798,39 @@ async fn recover_invalid_concurrent_index(
         "removing invalid index left by a failed concurrent migration"
     );
     sqlx::query(index.drop_sql).execute(&mut **conn).await?;
+
+    Ok(ConcurrentIndexRecovery::ApplyMigration)
+}
+
+fn concurrent_index_conflict(index: &RecoverableConcurrentIndex, detail: &str) -> MigrateError {
+    MigrateError::ExecuteMigration(
+        sqlx::Error::Protocol(format!(
+            "cannot recover concurrent index {} on {}: {detail}",
+            index.index_name, index.table_name
+        )),
+        index.migration_version,
+    )
+}
+
+async fn record_existing_migration(
+    conn: &mut PgPoolConnection,
+    migration: &Migration,
+) -> Result<(), MigrateError> {
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (
+            version,
+            description,
+            success,
+            checksum,
+            execution_time
+         )
+         VALUES ($1, $2, TRUE, $3, 0)",
+    )
+    .bind(migration.version)
+    .bind(migration.description.as_ref())
+    .bind(migration.checksum.as_ref())
+    .execute(&mut **conn)
+    .await?;
 
     Ok(())
 }

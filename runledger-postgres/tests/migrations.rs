@@ -32,6 +32,44 @@ const ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210003;
 const ADMIN_JOBS_ORG_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210004;
 const ADMIN_WORKFLOWS_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210005;
 const ADMIN_WORKFLOWS_ORG_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210006;
+const ADMIN_CONCURRENT_INDEXES: &[(i64, &str, &str, &str)] = &[
+    (
+        ADMIN_JOB_EVENTS_HISTORY_INDEX_MIGRATION_VERSION,
+        "job_events",
+        "idx_job_events_job_id_newest",
+        "(job_id, id DESC)",
+    ),
+    (
+        ADMIN_JOB_LOGS_HISTORY_INDEX_MIGRATION_VERSION,
+        "job_logs",
+        "idx_job_logs_job_id_newest",
+        "(job_id, id DESC)",
+    ),
+    (
+        ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION,
+        "job_queue",
+        "idx_job_queue_admin_created",
+        "(created_at DESC, id DESC)",
+    ),
+    (
+        ADMIN_JOBS_ORG_CREATED_INDEX_MIGRATION_VERSION,
+        "job_queue",
+        "idx_job_queue_admin_org_created",
+        "(organization_id, created_at DESC, id DESC)",
+    ),
+    (
+        ADMIN_WORKFLOWS_CREATED_INDEX_MIGRATION_VERSION,
+        "workflow_runs",
+        "idx_workflow_runs_admin_created",
+        "(created_at DESC, id DESC)",
+    ),
+    (
+        ADMIN_WORKFLOWS_ORG_CREATED_INDEX_MIGRATION_VERSION,
+        "workflow_runs",
+        "idx_workflow_runs_admin_org_created",
+        "(organization_id, created_at DESC, id DESC)",
+    ),
+];
 const ADMIN_JOBS_FOR_ORGANIZATION_QUERY: &str =
     include_str!("../src/jobs/admin/queries/list_job_summaries_for_organization.sql");
 const ADMIN_JOBS_GLOBAL_QUERY: &str =
@@ -557,44 +595,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
 
 #[tokio::test]
 async fn migrate_recovers_invalid_indexes_left_by_failed_concurrent_builds() {
-    for (migration_version, table_name, index_name, expected_columns) in [
-        (
-            ADMIN_JOB_EVENTS_HISTORY_INDEX_MIGRATION_VERSION,
-            "job_events",
-            "idx_job_events_job_id_newest",
-            "(job_id, id DESC)",
-        ),
-        (
-            ADMIN_JOB_LOGS_HISTORY_INDEX_MIGRATION_VERSION,
-            "job_logs",
-            "idx_job_logs_job_id_newest",
-            "(job_id, id DESC)",
-        ),
-        (
-            ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION,
-            "job_queue",
-            "idx_job_queue_admin_created",
-            "(created_at DESC, id DESC)",
-        ),
-        (
-            ADMIN_JOBS_ORG_CREATED_INDEX_MIGRATION_VERSION,
-            "job_queue",
-            "idx_job_queue_admin_org_created",
-            "(organization_id, created_at DESC, id DESC)",
-        ),
-        (
-            ADMIN_WORKFLOWS_CREATED_INDEX_MIGRATION_VERSION,
-            "workflow_runs",
-            "idx_workflow_runs_admin_created",
-            "(created_at DESC, id DESC)",
-        ),
-        (
-            ADMIN_WORKFLOWS_ORG_CREATED_INDEX_MIGRATION_VERSION,
-            "workflow_runs",
-            "idx_workflow_runs_admin_org_created",
-            "(organization_id, created_at DESC, id DESC)",
-        ),
-    ] {
+    for &(migration_version, table_name, index_name, expected_columns) in ADMIN_CONCURRENT_INDEXES {
         let harness = TestHarness::fresh("runledger_pg_concurrent_index_recovery").await;
         let server_version_num = sqlx::query_scalar::<_, String>("SHOW server_version_num")
             .fetch_one(&harness.pool)
@@ -717,6 +718,111 @@ async fn migrate_recovers_invalid_indexes_left_by_failed_concurrent_builds() {
 
         harness.teardown().await;
     }
+}
+
+#[tokio::test]
+async fn migrate_records_valid_indexes_left_by_interrupted_bookkeeping() {
+    for &(migration_version, _table_name, index_name, expected_columns) in ADMIN_CONCURRENT_INDEXES
+    {
+        let harness = TestHarness::fresh("runledger_pg_concurrent_index_adoption").await;
+        let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+            .fetch_one(&harness.pool)
+            .await
+            .expect("read PostgreSQL version for concurrent index adoption");
+        eprintln!("concurrent index adoption PostgreSQL server_version={server_version}");
+
+        apply_runledger_migrations_through(&harness.pool, migration_version - 1).await;
+        execute_migration_sql_without_history(&harness.pool, migration_version).await;
+
+        let index_oid_before = sqlx::query_scalar::<_, i32>(
+            "SELECT index_state.indexrelid::int4
+             FROM pg_index index_state
+             WHERE index_state.indexrelid = to_regclass($1)
+               AND index_state.indisvalid",
+        )
+        .bind(index_name)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap_or_else(|error| panic!("read valid unrecorded index {index_name}: {error}"));
+        assert!(
+            !migration_history_contains(&harness.pool, migration_version).await,
+            "diagnostic setup must leave {migration_version} unrecorded"
+        );
+
+        migrate_after_idempotency_cutover(&harness.pool)
+            .await
+            .unwrap_or_else(|error| panic!("adopt valid index {index_name}: {error}"));
+
+        let index_oid_after = sqlx::query_scalar::<_, i32>(
+            "SELECT index_state.indexrelid::int4
+             FROM pg_index index_state
+             WHERE index_state.indexrelid = to_regclass($1)
+               AND index_state.indisvalid",
+        )
+        .bind(index_name)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap_or_else(|error| panic!("read adopted index {index_name}: {error}"));
+        assert_eq!(
+            index_oid_after, index_oid_before,
+            "recovery must record rather than rebuild the valid index"
+        );
+        let definition = sqlx::query_scalar::<_, String>("SELECT pg_get_indexdef($1::oid)")
+            .bind(index_oid_after)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap_or_else(|error| panic!("read adopted index definition {index_name}: {error}"));
+        assert!(definition.contains(expected_columns));
+        assert!(migration_history_contains(&harness.pool, migration_version).await);
+
+        harness.teardown().await;
+    }
+}
+
+#[tokio::test]
+async fn migrate_rejects_a_valid_same_named_index_with_the_wrong_shape() {
+    let harness = TestHarness::fresh("runledger_pg_concurrent_index_conflict").await;
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read PostgreSQL version for concurrent index conflict");
+    eprintln!("concurrent index conflict PostgreSQL server_version={server_version}");
+
+    apply_runledger_migrations_through(
+        &harness.pool,
+        ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION - 1,
+    )
+    .await;
+    sqlx::query(
+        "CREATE INDEX CONCURRENTLY idx_job_queue_admin_created
+         ON job_queue (job_type)",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("create conflicting valid index");
+
+    let error = migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect_err("a mismatched valid index must remain a hard migration error");
+    assert!(
+        error
+            .to_string()
+            .contains("valid index does not match the pending migration"),
+        "unexpected migration error: {error}"
+    );
+    assert!(
+        !migration_history_contains(&harness.pool, ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION)
+            .await
+    );
+    let definition = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef('idx_job_queue_admin_created'::regclass)",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("read preserved conflicting index");
+    assert!(definition.contains("(job_type)"));
+
+    harness.teardown().await;
 }
 
 #[tokio::test]
@@ -1992,6 +2098,36 @@ async fn apply_runledger_migrations_through(pool: &PgPool, latest_version: i64) 
             )
         });
     }
+}
+
+async fn execute_migration_sql_without_history(pool: &PgPool, migration_version: i64) {
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| {
+            migration.migration_type.is_up_migration() && migration.version == migration_version
+        })
+        .unwrap_or_else(|| panic!("migration {migration_version} should exist"));
+
+    sqlx::raw_sql(migration.sql.as_ref())
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("execute migration {migration_version} without history: {error}")
+        });
+}
+
+async fn migration_history_contains(pool: &PgPool, migration_version: i64) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM _sqlx_migrations
+            WHERE version = $1 AND success
+         )",
+    )
+    .bind(migration_version)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|error| panic!("read migration history for {migration_version}: {error}"))
 }
 
 async fn apply_enqueue_request_cutover_migration(pool: &PgPool) {
