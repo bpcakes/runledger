@@ -447,7 +447,7 @@ function Pagination({
       </span>
       <button
         className="rla-button"
-        disabled={!page.has_more}
+        disabled={!page.has_more || page.offset + page.limit > page.max_offset}
         onClick={() => onOffset(page.offset + page.limit)}
         type="button"
       >

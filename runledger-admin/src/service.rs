@@ -16,9 +16,9 @@ use uuid::Uuid;
 use crate::dto::{
     DefinitionsQuery, DefinitionsResponse, HistoryOrder, HistoryPageDto, HistoryQuery,
     JobDefinitionDto, JobDto, JobEventDto, JobEventsResponse, JobLogDto, JobLogsResponse,
-    JobMetricsDto, JobResponse, JobsQuery, JobsResponse, MAX_PAGE_LIMIT, MetricsQuery,
-    MetricsResponse, PageDto, WorkflowDependencyDto, WorkflowDto, WorkflowQuery, WorkflowResponse,
-    WorkflowStepDto, WorkflowsQuery, WorkflowsResponse,
+    JobMetricsDto, JobResponse, JobsQuery, JobsResponse, MAX_PAGE_LIMIT, MAX_PAGE_OFFSET,
+    MetricsQuery, MetricsResponse, PageDto, WorkflowDependencyDto, WorkflowDto, WorkflowQuery,
+    WorkflowResponse, WorkflowStepDto, WorkflowsQuery, WorkflowsResponse,
 };
 use crate::{AdminAccess, AdminApiError, AdminScope, DataVisibility};
 
@@ -131,6 +131,7 @@ impl AdminService {
             page: PageDto {
                 limit: query.limit,
                 offset: query.offset,
+                max_offset: MAX_PAGE_OFFSET,
                 has_more,
             },
         })
@@ -287,6 +288,7 @@ impl AdminService {
             page: PageDto {
                 limit: query.limit,
                 offset: query.offset,
+                max_offset: MAX_PAGE_OFFSET,
                 has_more,
             },
         })
@@ -336,6 +338,7 @@ impl AdminService {
             steps_page: PageDto {
                 limit: query.step_limit,
                 offset: query.step_offset,
+                max_offset: MAX_PAGE_OFFSET,
                 has_more: steps_has_more,
             },
             dependencies: dependencies
@@ -345,6 +348,7 @@ impl AdminService {
             dependencies_page: PageDto {
                 limit: query.dependency_limit,
                 offset: query.dependency_offset,
+                max_offset: MAX_PAGE_OFFSET,
                 has_more: dependencies_has_more,
             },
         })
@@ -389,6 +393,7 @@ impl AdminService {
             page: PageDto {
                 limit: query.limit,
                 offset: query.offset,
+                max_offset: MAX_PAGE_OFFSET,
                 has_more,
             },
         })
@@ -407,7 +412,7 @@ impl AdminService {
 }
 
 fn validate_page(limit: i64, offset: i64) -> Result<(), AdminApiError> {
-    if !(1..=MAX_PAGE_LIMIT).contains(&limit) || offset < 0 {
+    if !(1..=MAX_PAGE_LIMIT).contains(&limit) || !(0..=MAX_PAGE_OFFSET).contains(&offset) {
         return Err(AdminApiError::invalid_query());
     }
     Ok(())

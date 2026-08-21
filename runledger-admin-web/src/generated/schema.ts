@@ -358,6 +358,8 @@ export interface components {
             /** Format: int64 */
             readonly limit: number;
             /** Format: int64 */
+            readonly max_offset: number;
+            /** Format: int64 */
             readonly offset: number;
         };
         /** @description Safe workflow run representation. */

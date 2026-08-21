@@ -77,6 +77,7 @@
               "type": "integer",
               "format": "int64",
               "default": 0,
+              "maximum": 10000,
               "minimum": 0
             }
           }
@@ -179,6 +180,7 @@
               "type": "integer",
               "format": "int64",
               "default": 0,
+              "maximum": 10000,
               "minimum": 0
             }
           }
@@ -614,6 +616,7 @@
               "type": "integer",
               "format": "int64",
               "default": 0,
+              "maximum": 10000,
               "minimum": 0
             }
           }
@@ -699,6 +702,7 @@
               "type": "integer",
               "format": "int64",
               "default": 0,
+              "maximum": 10000,
               "minimum": 0
             }
           },
@@ -722,6 +726,7 @@
               "type": "integer",
               "format": "int64",
               "default": 0,
+              "maximum": 10000,
               "minimum": 0
             }
           }
@@ -1449,6 +1454,7 @@
         "required": [
           "limit",
           "offset",
+          "max_offset",
           "has_more"
         ],
         "properties": {
@@ -1456,6 +1462,10 @@
             "type": "boolean"
           },
           "limit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "max_offset": {
             "type": "integer",
             "format": "int64"
           },

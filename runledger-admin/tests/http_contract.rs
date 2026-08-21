@@ -255,6 +255,7 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     assert!(!organization_a_ids.contains(&organization_b_job));
     assert!(!organization_a_ids.contains(&global_job));
     assert_eq!(body["page"]["has_more"], false);
+    assert_eq!(body["page"]["max_offset"], runledger_admin::MAX_PAGE_OFFSET);
     assert!(
         body["items"]
             .as_array()
@@ -479,6 +480,21 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     assert_eq!(body["items"], json!([]));
 
     let (status, _, body) = get_json(&app, "/jobs?limit=0", Some(metadata_access)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "admin.invalid_query");
+    let (status, _, _) = get_json(
+        &app,
+        &format!("/jobs?offset={}", runledger_admin::MAX_PAGE_OFFSET),
+        Some(metadata_access),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = get_json(
+        &app,
+        &format!("/jobs?offset={}", runledger_admin::MAX_PAGE_OFFSET + 1),
+        Some(metadata_access),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "admin.invalid_query");
     let (status, _, body) = get_json(&app, "/jobs/not-a-uuid", Some(metadata_access)).await;

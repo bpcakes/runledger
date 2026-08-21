@@ -25,6 +25,8 @@ All notable changes to this workspace are documented here.
 
 - Extend CI, packaged-consumer smoke tests, license checks, and release tooling
   to build, test, pack, and publish the Rust and npm admin artifacts together.
+- Bound every HTTP admin offset so an authenticated caller cannot force
+  arbitrarily deep PostgreSQL scans; history remains cursor-paged.
 
 ## [0.10.1] - 2026-08-20
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)

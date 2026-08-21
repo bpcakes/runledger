@@ -97,6 +97,30 @@ describe("RunledgerAdminPanel", () => {
     ).toBeTruthy();
   });
 
+  it("does not navigate beyond the server-owned offset window", async () => {
+    render(
+      <RunledgerAdminPanel
+        client={{
+          ...client,
+          jobs: async () => ({
+            ...jobs,
+            page: {
+              ...jobs.page,
+              has_more: true,
+              offset: jobs.page.max_offset,
+            },
+          }),
+        }}
+        onRouteChange={() => undefined}
+        pollIntervalMs={0}
+        route={{ name: "jobs", offset: jobs.page.max_offset }}
+      />,
+    );
+
+    const next = await screen.findByRole("button", { name: "Next" });
+    expect((next as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("navigates from a workflow step to its job without a router dependency", async () => {
     render(<Harness />);
     fireEvent.click(await screen.findByRole("button", { name: "Workflows" }));

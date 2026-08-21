@@ -77,3 +77,4 @@ request the service-wide definition catalog unless the host granted that
 resource. Job events and logs start with the newest records and expose Older /
 Newer controls backed by opaque cursors. Offset-paged lists and workflow graph
 collections use the API's `has_more` value instead of guessing from page length.
+The API caps offsets at 10,000 skipped rows; narrow filters for deeper data.

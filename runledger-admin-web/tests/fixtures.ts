@@ -82,7 +82,7 @@ export const metrics: MetricsResponse = {
 
 export const jobs: JobsResponse = {
   items: [job],
-  page: { has_more: false, limit: 50, offset: 0 },
+  page: { has_more: false, limit: 50, max_offset: 10_000, offset: 0 },
 };
 export const jobResponse: JobResponse = { job };
 export const events: JobEventsResponse = {
@@ -144,11 +144,16 @@ const workflow = {
 
 export const workflows: WorkflowsResponse = {
   items: [workflow],
-  page: { has_more: false, limit: 50, offset: 0 },
+  page: { has_more: false, limit: 50, max_offset: 10_000, offset: 0 },
 };
 export const workflowResponse: WorkflowResponse = {
   dependencies: [],
-  dependencies_page: { has_more: false, limit: 50, offset: 0 },
+  dependencies_page: {
+    has_more: false,
+    limit: 50,
+    max_offset: 10_000,
+    offset: 0,
+  },
   steps: [
     {
       allow_handler_continuation: false,
@@ -176,7 +181,12 @@ export const workflowResponse: WorkflowResponse = {
       workflow_run_id: workflowId,
     },
   ],
-  steps_page: { has_more: false, limit: 50, offset: 0 },
+  steps_page: {
+    has_more: false,
+    limit: 50,
+    max_offset: 10_000,
+    offset: 0,
+  },
   workflow,
 };
 
@@ -193,5 +203,5 @@ export const definitions: DefinitionsResponse = {
       version: 1,
     },
   ],
-  page: { has_more: false, limit: 50, offset: 0 },
+  page: { has_more: false, limit: 50, max_offset: 10_000, offset: 0 },
 };

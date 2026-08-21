@@ -62,3 +62,32 @@ fn openapi_contract_distinguishes_null_from_redaction() {
         "v1"
     );
 }
+
+#[test]
+fn openapi_contract_bounds_every_offset_parameter() {
+    let document: Value = serde_json::from_str(&runledger_admin::openapi_json())
+        .expect("generated OpenAPI must be valid JSON");
+    let expected_maximum = Value::from(runledger_admin::MAX_PAGE_OFFSET);
+    let mut offset_parameters = 0;
+
+    for path in document["paths"]
+        .as_object()
+        .expect("OpenAPI paths must be an object")
+        .values()
+    {
+        for parameter in path["get"]["parameters"].as_array().into_iter().flatten() {
+            let Some(name) = parameter["name"].as_str() else {
+                continue;
+            };
+            if name == "offset" || name.ends_with("_offset") {
+                offset_parameters += 1;
+                assert_eq!(
+                    parameter["schema"]["maximum"], expected_maximum,
+                    "{name} must match MAX_PAGE_OFFSET"
+                );
+            }
+        }
+    }
+
+    assert_eq!(offset_parameters, 5);
+}

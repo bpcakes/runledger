@@ -13,6 +13,12 @@ pub const DEFAULT_PAGE_LIMIT: i64 = 50;
 /// Maximum number of records returned by one admin request.
 pub const MAX_PAGE_LIMIT: i64 = 200;
 
+/// Maximum number of records an offset-paged admin request may skip.
+///
+/// Operators should narrow filters instead of requesting pages beyond this
+/// bounded window. History endpoints use cursor pagination and are unaffected.
+pub const MAX_PAGE_OFFSET: i64 = 10_000;
+
 fn default_page_limit() -> i64 {
     DEFAULT_PAGE_LIMIT
 }
@@ -39,7 +45,7 @@ pub struct JobsQuery {
     #[param(default = 50, minimum = 1, maximum = 200)]
     pub limit: i64,
     #[serde(default)]
-    #[param(default = 0, minimum = 0)]
+    #[param(default = 0, minimum = 0, maximum = 10000)]
     pub offset: i64,
 }
 
@@ -103,7 +109,7 @@ pub struct WorkflowsQuery {
     #[param(default = 50, minimum = 1, maximum = 200)]
     pub limit: i64,
     #[serde(default)]
-    #[param(default = 0, minimum = 0)]
+    #[param(default = 0, minimum = 0, maximum = 10000)]
     pub offset: i64,
 }
 
@@ -126,13 +132,13 @@ pub struct WorkflowQuery {
     #[param(default = 50, minimum = 1, maximum = 200)]
     pub step_limit: i64,
     #[serde(default)]
-    #[param(default = 0, minimum = 0)]
+    #[param(default = 0, minimum = 0, maximum = 10000)]
     pub step_offset: i64,
     #[serde(default = "default_page_limit")]
     #[param(default = 50, minimum = 1, maximum = 200)]
     pub dependency_limit: i64,
     #[serde(default)]
-    #[param(default = 0, minimum = 0)]
+    #[param(default = 0, minimum = 0, maximum = 10000)]
     pub dependency_offset: i64,
 }
 
@@ -158,7 +164,7 @@ pub struct DefinitionsQuery {
     #[param(default = 50, minimum = 1, maximum = 200)]
     pub limit: i64,
     #[serde(default)]
-    #[param(default = 0, minimum = 0)]
+    #[param(default = 0, minimum = 0, maximum = 10000)]
     pub offset: i64,
 }
 
@@ -226,6 +232,7 @@ impl From<AdminAccess> for CapabilitiesDto {
 pub struct PageDto {
     pub limit: i64,
     pub offset: i64,
+    pub max_offset: i64,
     pub has_more: bool,
 }
 
