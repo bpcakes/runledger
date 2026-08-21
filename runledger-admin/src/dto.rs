@@ -18,6 +18,7 @@ fn default_page_limit() -> i64 {
 /// Query accepted by `GET /metrics`.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 pub struct MetricsQuery {
+    /// Exact job type to return.
     pub job_type: Option<String>,
 }
 
@@ -25,6 +26,7 @@ pub struct MetricsQuery {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct JobsQuery {
     pub status: Option<String>,
+    /// Case-insensitive literal substring matched against the job type.
     pub job_type: Option<String>,
     #[serde(default = "default_page_limit")]
     pub limit: i64,
@@ -79,6 +81,7 @@ impl Default for HistoryQuery {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct WorkflowsQuery {
     pub status: Option<String>,
+    /// Case-insensitive literal substring matched against the workflow type.
     pub workflow_type: Option<String>,
     #[serde(default = "default_page_limit")]
     pub limit: i64,
@@ -124,6 +127,7 @@ impl Default for WorkflowQuery {
 /// Query accepted by `GET /definitions`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct DefinitionsQuery {
+    /// Case-insensitive literal substring matched against the job type.
     pub job_type: Option<String>,
     #[serde(default = "default_page_limit")]
     pub limit: i64,

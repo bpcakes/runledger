@@ -6,8 +6,8 @@ use runledger_postgres::jobs::{
     JobDefinitionListFilter, JobEventRecord, JobListFilter, JobLogRecord, JobQueueRecord,
     WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowStepDbRecord,
     WorkflowStepDependencyDbRecord, get_job_by_id, get_job_continuation_metrics, get_job_metrics,
-    get_workflow_run_by_id, list_job_definitions, list_job_events, list_job_events_before,
-    list_job_logs, list_job_logs_before, list_jobs, list_workflow_runs,
+    get_job_metrics_in_organization, get_workflow_run_by_id, list_job_definitions, list_job_events,
+    list_job_events_before, list_job_logs, list_job_logs_before, list_jobs, list_workflow_runs,
     list_workflow_step_dependencies_in_organization_page, list_workflow_steps_in_organization_page,
 };
 use uuid::Uuid;
@@ -19,7 +19,7 @@ use crate::dto::{
     MetricsResponse, PageDto, WorkflowDependencyDto, WorkflowDto, WorkflowQuery, WorkflowResponse,
     WorkflowStepDto, WorkflowsQuery, WorkflowsResponse,
 };
-use crate::{AdminAccess, AdminApiError, DataVisibility};
+use crate::{AdminAccess, AdminApiError, AdminScope, DataVisibility};
 
 /// Read-only application service behind the HTTP router.
 #[derive(Clone)]
@@ -42,13 +42,22 @@ impl AdminService {
     ) -> Result<MetricsResponse, AdminApiError> {
         validate_filter(query.job_type.as_deref())?;
         let organization_id = access.scope().organization_id();
-        let metrics = get_job_metrics(&self.pool, organization_id, query.job_type.as_deref())
-            .await
-            .map_err(|_| AdminApiError::storage())?;
+        let metrics = match access.scope() {
+            AdminScope::All => get_job_metrics(&self.pool, None, query.job_type.as_deref()).await,
+            AdminScope::Organization(organization_id) => {
+                get_job_metrics_in_organization(
+                    &self.pool,
+                    organization_id,
+                    query.job_type.as_deref(),
+                )
+                .await
+            }
+        }
+        .map_err(|error| storage_error("load job metrics", error))?;
         let continuations =
             get_job_continuation_metrics(&self.pool, organization_id, query.job_type.as_deref())
                 .await
-                .map_err(|_| AdminApiError::storage())?;
+                .map_err(|error| storage_error("load job continuation metrics", error))?;
         let mut continuation_by_type = continuations
             .into_iter()
             .map(|metric| (metric.job_type.as_str().to_owned(), metric))
@@ -93,18 +102,19 @@ impl AdminService {
         validate_page(query.limit, query.offset)?;
         validate_filter(query.job_type.as_deref())?;
         let status = parse_job_status(query.status.as_deref())?;
+        let job_type = query.job_type.as_deref().map(escape_ilike_pattern);
         let rows = list_jobs(
             &self.pool,
             &JobListFilter {
                 organization_id: access.scope().organization_id(),
                 status,
-                job_type: query.job_type.as_deref(),
+                job_type: job_type.as_deref(),
                 limit: fetch_limit(query.limit),
                 offset: query.offset,
             },
         )
         .await
-        .map_err(|_| AdminApiError::storage())?;
+        .map_err(|error| storage_error("list jobs", error))?;
         let (rows, has_more) = take_page(rows, query.limit);
         Ok(JobsResponse {
             items: rows
@@ -162,9 +172,14 @@ impl AdminService {
                 .await
             }
         }
-        .map_err(|_| AdminApiError::storage())?;
+        .map_err(|error| storage_error("list job events", error))?;
         let (rows, has_more) = take_page(rows, query.limit);
-        let next_cursor = rows.last().map(|row| row.id.to_string());
+        let next_cursor = has_more.then(|| {
+            rows.last()
+                .expect("a page with more history has a last row")
+                .id
+                .to_string()
+        });
         Ok(JobEventsResponse {
             items: rows
                 .into_iter()
@@ -211,9 +226,14 @@ impl AdminService {
                 .await
             }
         }
-        .map_err(|_| AdminApiError::storage())?;
+        .map_err(|error| storage_error("list job logs", error))?;
         let (rows, has_more) = take_page(rows, query.limit);
-        let next_cursor = rows.last().map(|row| row.id.to_string());
+        let next_cursor = has_more.then(|| {
+            rows.last()
+                .expect("a page with more history has a last row")
+                .id
+                .to_string()
+        });
         Ok(JobLogsResponse {
             items: rows
                 .into_iter()
@@ -238,18 +258,19 @@ impl AdminService {
         validate_page(query.limit, query.offset)?;
         validate_filter(query.workflow_type.as_deref())?;
         let status = parse_workflow_status(query.status.as_deref())?;
+        let workflow_type = query.workflow_type.as_deref().map(escape_ilike_pattern);
         let rows = list_workflow_runs(
             &self.pool,
             &WorkflowRunListFilter {
                 organization_id: access.scope().organization_id(),
                 status,
-                workflow_type: query.workflow_type.as_deref(),
+                workflow_type: workflow_type.as_deref(),
                 limit: fetch_limit(query.limit),
                 offset: query.offset,
             },
         )
         .await
-        .map_err(|_| AdminApiError::storage())?;
+        .map_err(|error| storage_error("list workflow runs", error))?;
         let (rows, has_more) = take_page(rows, query.limit);
         Ok(WorkflowsResponse {
             items: rows
@@ -276,7 +297,7 @@ impl AdminService {
         let organization_id = access.scope().organization_id();
         let workflow = get_workflow_run_by_id(&self.pool, organization_id, workflow_id)
             .await
-            .map_err(|_| AdminApiError::storage())?
+            .map_err(|error| storage_error("load workflow run", error))?
             .ok_or_else(AdminApiError::not_found)?;
         let steps = list_workflow_steps_in_organization_page(
             &self.pool,
@@ -286,7 +307,7 @@ impl AdminService {
             query.step_offset,
         )
         .await
-        .map_err(|_| AdminApiError::storage())?;
+        .map_err(|error| storage_error("list workflow steps", error))?;
         let dependencies = list_workflow_step_dependencies_in_organization_page(
             &self.pool,
             organization_id,
@@ -295,7 +316,7 @@ impl AdminService {
             query.dependency_offset,
         )
         .await
-        .map_err(|_| AdminApiError::storage())?;
+        .map_err(|error| storage_error("list workflow dependencies", error))?;
         let (steps, steps_has_more) = take_page(steps, query.step_limit);
         let (dependencies, dependencies_has_more) = take_page(dependencies, query.dependency_limit);
 
@@ -342,7 +363,7 @@ impl AdminService {
             },
         )
         .await
-        .map_err(|_| AdminApiError::storage())?;
+        .map_err(|error| storage_error("list job definitions", error))?;
         let (rows, has_more) = take_page(rows, query.limit);
         Ok(DefinitionsResponse {
             items: rows
@@ -373,7 +394,7 @@ impl AdminService {
     ) -> Result<JobQueueRecord, AdminApiError> {
         get_job_by_id(&self.pool, access.scope().organization_id(), job_id)
             .await
-            .map_err(|_| AdminApiError::storage())?
+            .map_err(|error| storage_error("load job", error))?
             .ok_or_else(AdminApiError::not_found)
     }
 }
@@ -416,6 +437,29 @@ fn validate_filter(filter: Option<&str>) -> Result<(), AdminApiError> {
         return Err(AdminApiError::invalid_query());
     }
     Ok(())
+}
+
+fn escape_ilike_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn storage_error(operation: &'static str, error: runledger_postgres::Error) -> AdminApiError {
+    let (error_kind, error_code) = match &error {
+        runledger_postgres::Error::ConfigError(_) => ("config", "admin.storage_error"),
+        runledger_postgres::Error::ConnectionError(_) => ("connection", "admin.storage_error"),
+        runledger_postgres::Error::MigrationError(_) => ("migration", "admin.storage_error"),
+        runledger_postgres::Error::QueryError(error) => ("query", error.code()),
+    };
+    tracing::error!(
+        operation,
+        error_kind,
+        error_code,
+        "Runledger admin storage read failed"
+    );
+    AdminApiError::storage()
 }
 
 fn parse_job_status(status: Option<&str>) -> Result<Option<JobStatus>, AdminApiError> {

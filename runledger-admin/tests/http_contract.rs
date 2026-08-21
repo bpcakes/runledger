@@ -17,13 +17,14 @@ use uuid::Uuid;
 
 const BASE: &str = "/api/admin/runledger/v1";
 const JOB_TYPE: &str = "jobs.admin.contract";
+const UNUSED_JOB_TYPE: &str = "jobs.admin.unused_catalog_entry";
 
-async fn register_definition(pool: &DbPool) {
+async fn register_definition(pool: &DbPool, job_type: &str) {
     let mut tx = pool.begin().await.expect("begin definition transaction");
     upsert_job_definition_tx(
         &mut tx,
         &JobDefinitionUpsert {
-            job_type: JobType::new(JOB_TYPE),
+            job_type: JobType::new(job_type),
             version: 3,
             max_attempts: 4,
             default_timeout_seconds: 90,
@@ -148,7 +149,8 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
         "contract test must run against PostgreSQL 18; got {server_version}"
     );
 
-    register_definition(&pool).await;
+    register_definition(&pool, JOB_TYPE).await;
+    register_definition(&pool, UNUSED_JOB_TYPE).await;
     let organization_a = Uuid::from_u128(0xaaaaaaaa_aaaa_4aaa_8aaa_aaaaaaaaaaaa);
     let organization_b = Uuid::from_u128(0xbbbbbbbb_bbbb_4bbb_8bbb_bbbbbbbbbbbb);
     let secret_payload = json!({"customer_email": "private@example.test"});
@@ -346,6 +348,7 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
         "customer private@example.test imported"
     );
     assert_eq!(body["page"]["has_more"], false);
+    assert_eq!(body["page"]["next_cursor"], Value::Null);
 
     let (status, _, body) = get_json(
         &app,
@@ -368,6 +371,32 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
             .iter()
             .any(|item| item["job_type"] == JOB_TYPE
                 && item["pending_count"].as_i64().unwrap_or(0) >= 1)
+    );
+    assert!(
+        body["items"]
+            .as_array()
+            .expect("metric items")
+            .iter()
+            .all(|item| item["job_type"] != UNUSED_JOB_TYPE)
+    );
+
+    let (status, _, body) = get_json(
+        &app,
+        &format!("/metrics?job_type={UNUSED_JOB_TYPE}"),
+        Some(metadata_access),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"], json!([]));
+
+    let (status, _, body) = get_json(&app, "/metrics", Some(all_access)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["items"]
+            .as_array()
+            .expect("service-wide metric items")
+            .iter()
+            .any(|item| item["job_type"] == UNUSED_JOB_TYPE)
     );
 
     let (status, _, body) = get_json(&app, "/workflows", Some(metadata_access)).await;
@@ -434,6 +463,14 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
             .iter()
             .any(|item| item["job_type"] == JOB_TYPE)
     );
+
+    let (status, _, body) = get_json(&app, "/jobs?job_type=%25", Some(metadata_access)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"], json!([]));
+    let (status, _, body) =
+        get_json(&app, "/workflows?workflow_type=%25", Some(metadata_access)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"], json!([]));
 
     let (status, _, body) = get_json(&app, "/jobs?limit=0", Some(metadata_access)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

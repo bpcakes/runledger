@@ -58,6 +58,64 @@ pub async fn get_job_metrics(
         .collect::<Result<Vec<_>>>()
 }
 
+/// Returns metrics only for job types with rows in one organization scope.
+///
+/// Unlike [`get_job_metrics`], this does not synthesize zero-valued rows from
+/// the service-wide definition catalog. HTTP tenant boundaries should use this
+/// form so an organization cannot enumerate job types it has never used.
+pub async fn get_job_metrics_in_organization(
+    pool: &DbPool,
+    organization_id: Uuid,
+    job_type: Option<&str>,
+) -> Result<Vec<JobMetricsRecord>> {
+    let rows = sqlx::query!(
+        "SELECT
+            jmr.job_type AS \"job_type!\",
+            SUM(jmr.pending_count)::bigint AS \"pending_count!\",
+            SUM(jmr.leased_count)::bigint AS \"leased_count!\",
+            SUM(jmr.stale_leases)::bigint AS \"stale_leases!\",
+            SUM(jmr.succeeded_24h)::bigint AS \"succeeded_24h!\",
+            SUM(jmr.retryable_24h)::bigint AS \"retryable_24h!\",
+            SUM(jmr.terminal_24h)::bigint AS \"terminal_24h!\",
+            SUM(jmr.panicked_24h)::bigint AS \"panicked_24h!\",
+            SUM(jmr.timeout_24h)::bigint AS \"timeout_24h!\",
+            SUM(jmr.dead_lettered_24h)::bigint AS \"dead_lettered_24h!\",
+            AVG(jmr.p50_duration_ms_24h) AS p50_duration_ms_24h,
+            AVG(jmr.p95_duration_ms_24h) AS p95_duration_ms_24h
+         FROM job_metrics_rollup jmr
+         WHERE jmr.organization_id = $1
+           AND ($2::text IS NULL OR jmr.job_type = $2)
+         GROUP BY jmr.job_type
+         ORDER BY jmr.job_type ASC",
+        organization_id,
+        job_type,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("get job metrics in organization", error)
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(JobMetricsRecord {
+                job_type: parse_job_type_name(row.job_type)?,
+                pending_count: row.pending_count,
+                leased_count: row.leased_count,
+                stale_leases: row.stale_leases,
+                succeeded_24h: row.succeeded_24h,
+                retryable_24h: row.retryable_24h,
+                terminal_24h: row.terminal_24h,
+                panicked_24h: row.panicked_24h,
+                timeout_24h: row.timeout_24h,
+                dead_lettered_24h: row.dead_lettered_24h,
+                p50_duration_ms_24h: row.p50_duration_ms_24h,
+                p95_duration_ms_24h: row.p95_duration_ms_24h,
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+}
+
 /// Returns continuation-specific canary and runaway-loop signals by job type.
 pub async fn get_job_continuation_metrics(
     pool: &DbPool,
