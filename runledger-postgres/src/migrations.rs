@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
 use std::fmt;
+use std::hash::BuildHasher;
 use std::time::{Duration, Instant};
 
 use sqlx::Row;
@@ -36,8 +38,53 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;
 type RunledgerMigrationMap = HashMap<i64, &'static sqlx::migrate::Migration>;
 
-const MIGRATION_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const MIGRATION_LOCK_RETRY_INITIAL_INTERVAL: Duration = Duration::from_millis(100);
+const MIGRATION_LOCK_RETRY_NOMINAL_MAX_INTERVAL: Duration = Duration::from_millis(1_600);
+const MIGRATION_LOCK_RETRY_MAX_INTERVAL: Duration = Duration::from_secs(2);
 const MIGRATION_LOCK_WAIT_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+struct MigrationLockBackoff {
+    attempt: u32,
+    jitter_state: u64,
+}
+
+impl MigrationLockBackoff {
+    fn new(seed: u64) -> Self {
+        Self {
+            attempt: 0,
+            // Xorshift has an absorbing all-zero state.
+            jitter_state: seed.max(1),
+        }
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let multiplier = 1_u32 << self.attempt.min(4);
+        let nominal = MIGRATION_LOCK_RETRY_INITIAL_INTERVAL
+            .saturating_mul(multiplier)
+            .min(MIGRATION_LOCK_RETRY_NOMINAL_MAX_INTERVAL);
+        self.attempt = self.attempt.saturating_add(1);
+
+        // Add up to 25% jitter. This keeps retries bounded while preventing a
+        // set of replicas that started together from polling in lockstep.
+        let jitter_window = nominal / 4;
+        let jitter_bound_nanos = u64::try_from(jitter_window.as_nanos()).unwrap_or(u64::MAX - 1);
+        let jitter =
+            Duration::from_nanos(self.next_random() % jitter_bound_nanos.saturating_add(1));
+
+        nominal
+            .saturating_add(jitter)
+            .min(MIGRATION_LOCK_RETRY_MAX_INTERVAL)
+    }
+
+    fn next_random(&mut self) -> u64 {
+        let mut value = self.jitter_state;
+        value ^= value << 13;
+        value ^= value >> 7;
+        value ^= value << 17;
+        self.jitter_state = value;
+        value
+    }
+}
 
 struct RecoverableConcurrentIndex {
     migration_version: i64,
@@ -237,6 +284,8 @@ async fn acquire_migration_lock(conn: &mut PgPoolConnection) -> Result<(), Migra
         .fetch_one(&mut **conn)
         .await?;
     let lock_id = sqlx_migration_lock_id(&database_name);
+    let jitter_seed = RandomState::new().hash_one((lock_id, std::process::id()));
+    let mut retry_backoff = MigrationLockBackoff::new(jitter_seed);
     let wait_started = Instant::now();
     let mut next_wait_log = MIGRATION_LOCK_WAIT_LOG_INTERVAL;
     let mut waiting = false;
@@ -256,6 +305,7 @@ async fn acquire_migration_lock(conn: &mut PgPoolConnection) -> Result<(), Migra
             }
             return Ok(());
         }
+        let retry_delay = retry_backoff.next_delay();
         if waiting {
             let elapsed = wait_started.elapsed();
             if elapsed >= next_wait_log {
@@ -269,12 +319,12 @@ async fn acquire_migration_lock(conn: &mut PgPoolConnection) -> Result<(), Migra
         } else {
             tracing::info!(
                 database_name,
-                retry_interval_ms = MIGRATION_LOCK_RETRY_INTERVAL.as_millis(),
+                retry_interval_ms = retry_delay.as_millis(),
                 "waiting for Runledger migration lock"
             );
             waiting = true;
         }
-        tokio::time::sleep(MIGRATION_LOCK_RETRY_INTERVAL).await;
+        tokio::time::sleep(retry_delay).await;
     }
 }
 
@@ -857,8 +907,29 @@ fn validate_checksum(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
 
-    use super::{MIGRATOR, RECOVERABLE_CONCURRENT_INDEXES};
+    use super::{
+        MIGRATION_LOCK_RETRY_MAX_INTERVAL, MIGRATOR, MigrationLockBackoff,
+        RECOVERABLE_CONCURRENT_INDEXES,
+    };
+
+    #[test]
+    fn migration_lock_backoff_grows_and_remains_bounded() {
+        let mut backoff = MigrationLockBackoff::new(0x5eed);
+        let expected_nominal_intervals = [100_u64, 200, 400, 800, 1_600, 1_600, 1_600];
+
+        for expected_nominal_ms in expected_nominal_intervals {
+            let delay = backoff.next_delay();
+            let nominal = Duration::from_millis(expected_nominal_ms);
+            assert!(delay >= nominal, "delay {delay:?} must include its base");
+            assert!(
+                delay <= nominal + nominal / 4,
+                "delay {delay:?} must keep jitter within 25%"
+            );
+            assert!(delay <= MIGRATION_LOCK_RETRY_MAX_INTERVAL);
+        }
+    }
 
     #[test]
     fn every_concurrent_index_migration_has_exact_recovery_metadata() {
