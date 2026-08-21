@@ -288,6 +288,27 @@ pub async fn get_job_by_id(
     row.map(JobQueueRow::into_record).transpose()
 }
 
+/// Reports whether a job is visible within the requested organization scope.
+pub async fn job_exists_in_scope(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    job_id: Uuid,
+) -> Result<bool> {
+    sqlx::query_scalar!(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM job_queue
+            WHERE id = $1
+              AND ($2::uuid IS NULL OR organization_id = $2)
+         ) AS \"exists!\"",
+        job_id,
+        organization_id,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("check job existence in scope", error))
+}
+
 pub async fn get_job_payload_by_idempotency_key(
     pool: &DbPool,
     organization_id: Uuid,

@@ -4,10 +4,10 @@ use runledger_postgres::jobs::{
     AdminJobSummaryFilter, AdminJobSummaryRecord, AdminWorkflowSummaryFilter,
     AdminWorkflowSummaryRecord, JobDefinitionListFilter, JobEventRecord, JobLogRecord,
     JobQueueRecord, WorkflowRunDbRecord, WorkflowStepDbRecord, WorkflowStepDependencyDbRecord,
-    get_admin_job_metrics_page, get_job_by_id, get_workflow_run_by_id, list_admin_job_summaries,
-    list_admin_workflow_summaries, list_job_definitions, list_job_events, list_job_events_before,
-    list_job_logs, list_job_logs_before, list_workflow_step_dependencies_in_organization_page,
-    list_workflow_steps_in_organization_page,
+    get_admin_job_metrics_page, get_job_by_id, get_workflow_run_by_id, job_exists_in_scope,
+    list_admin_job_summaries, list_admin_workflow_summaries, list_job_definitions, list_job_events,
+    list_job_events_before, list_job_logs, list_job_logs_before,
+    list_workflow_step_dependencies_in_organization_page, list_workflow_steps_in_organization_page,
 };
 use uuid::Uuid;
 
@@ -136,7 +136,7 @@ impl AdminService {
         query: &HistoryQuery,
     ) -> Result<JobEventsResponse, AdminApiError> {
         let cursor = validate_history_query(query)?;
-        self.find_job(access, job_id).await?;
+        self.ensure_job_exists(access, job_id).await?;
         let rows = match query.order {
             HistoryOrder::NewestFirst => {
                 list_job_events_before(
@@ -190,7 +190,7 @@ impl AdminService {
         query: &HistoryQuery,
     ) -> Result<JobLogsResponse, AdminApiError> {
         let cursor = validate_history_query(query)?;
-        self.find_job(access, job_id).await?;
+        self.ensure_job_exists(access, job_id).await?;
         let rows = match query.order {
             HistoryOrder::NewestFirst => {
                 list_job_logs_before(
@@ -383,6 +383,17 @@ impl AdminService {
             .await
             .map_err(|error| storage_error("load job", error))?
             .ok_or_else(AdminApiError::not_found)
+    }
+
+    async fn ensure_job_exists(
+        &self,
+        access: AdminAccess,
+        job_id: Uuid,
+    ) -> Result<(), AdminApiError> {
+        let exists = job_exists_in_scope(&self.pool, access.scope().organization_id(), job_id)
+            .await
+            .map_err(|error| storage_error("check job existence", error))?;
+        exists.then_some(()).ok_or_else(AdminApiError::not_found)
     }
 }
 
