@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            id,\n            workflow_type,\n            organization_id,\n            status::text AS \"status!\",\n            result_step_key,\n            started_at,\n            finished_at,\n            created_at,\n            updated_at\n         FROM workflow_runs\n         WHERE ($1::uuid IS NULL OR organization_id = $1)\n           AND ($2::text IS NULL OR status = $2::text::workflow_run_status)\n           AND ($3::text IS NULL OR workflow_type ILIKE '%' || $3 || '%')\n         ORDER BY created_at DESC, id DESC\n         LIMIT $4 OFFSET $5",
+  "query": "SELECT\n    id,\n    workflow_type,\n    organization_id,\n    status::text AS \"status!\",\n    result_step_key,\n    started_at,\n    finished_at,\n    created_at,\n    updated_at\nFROM workflow_runs\nWHERE ($1::text IS NULL OR status = $1::text::workflow_run_status)\n  AND ($2::text IS NULL OR workflow_type ILIKE '%' || $2 || '%')\nORDER BY created_at DESC, id DESC\nLIMIT $3\nOFFSET $4\n",
   "describe": {
     "columns": [
       {
@@ -51,7 +51,6 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
         "Text",
         "Text",
         "Int8",
@@ -70,5 +69,5 @@
       false
     ]
   },
-  "hash": "b7a8e908086581680f2bee52c3036f99f919cd4af4797d4939a780b9cfbdeeee"
+  "hash": "bcf1fb355f151ef5cf6687237ec182628b14020787fe67f8364422604fa91960"
 }

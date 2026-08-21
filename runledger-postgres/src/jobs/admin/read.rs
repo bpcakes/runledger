@@ -58,74 +58,62 @@ pub async fn list_admin_job_summaries(
 
     let status_filter = filter.status.map(JobStatus::as_db_value);
     let job_type_pattern = filter.job_type_contains.map(escape_ilike_pattern);
-    let rows = sqlx::query_as!(
-        AdminJobSummaryRow,
-        "SELECT
-            id,
-            job_type,
-            organization_id,
-            status::text AS \"status!\",
-            priority,
-            run_number,
-            attempt,
-            max_attempts,
-            timeout_seconds,
-            next_run_at,
-            lease_expires_at,
-            last_heartbeat_at,
-            started_at,
-            finished_at,
-            stage,
-            progress_done,
-            progress_total,
-            progress_pct::float8 AS progress_pct,
-            last_error_code,
-            created_at,
-            updated_at
-         FROM job_queue
-         WHERE ($1::uuid IS NULL OR organization_id = $1)
-           AND ($2::text::job_status IS NULL OR status = $2::text::job_status)
-           AND ($3::text IS NULL OR job_type ILIKE '%' || $3 || '%')
-         ORDER BY created_at DESC, id DESC
-         LIMIT $4
-         OFFSET $5",
-        filter.organization_id,
-        status_filter,
-        job_type_pattern.as_deref(),
-        filter.limit,
-        filter.offset,
-    )
-    .fetch_all(pool)
-    .await
+    let rows = match filter.organization_id {
+        Some(organization_id) => {
+            sqlx::query_file_as!(
+                AdminJobSummaryRow,
+                "src/jobs/admin/queries/list_job_summaries_for_organization.sql",
+                organization_id,
+                status_filter,
+                job_type_pattern.as_deref(),
+                filter.limit,
+                filter.offset,
+            )
+            .fetch_all(pool)
+            .await
+        }
+        None => {
+            sqlx::query_file_as!(
+                AdminJobSummaryRow,
+                "src/jobs/admin/queries/list_job_summaries_global.sql",
+                status_filter,
+                job_type_pattern.as_deref(),
+                filter.limit,
+                filter.offset,
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
     .map_err(|error| Error::from_query_sqlx_with_context("list admin job summaries", error))?;
 
-    rows.into_iter()
-        .map(|row| {
-            Ok(AdminJobSummaryRecord {
-                id: row.id,
-                job_type: parse_job_type_name(row.job_type)?,
-                organization_id: row.organization_id,
-                status: parse_job_status(row.status)?,
-                priority: row.priority,
-                run_number: row.run_number,
-                attempt: row.attempt,
-                max_attempts: row.max_attempts,
-                timeout_seconds: row.timeout_seconds,
-                next_run_at: row.next_run_at,
-                lease_expires_at: row.lease_expires_at,
-                last_heartbeat_at: row.last_heartbeat_at,
-                started_at: row.started_at,
-                finished_at: row.finished_at,
-                stage: parse_job_stage(row.stage)?,
-                progress_done: row.progress_done,
-                progress_total: row.progress_total,
-                progress_pct: row.progress_pct,
-                last_error_code: row.last_error_code,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            })
-        })
-        .collect()
+    rows.into_iter().map(admin_job_summary_record).collect()
+}
+
+fn admin_job_summary_record(row: AdminJobSummaryRow) -> Result<AdminJobSummaryRecord> {
+    Ok(AdminJobSummaryRecord {
+        id: row.id,
+        job_type: parse_job_type_name(row.job_type)?,
+        organization_id: row.organization_id,
+        status: parse_job_status(row.status)?,
+        priority: row.priority,
+        run_number: row.run_number,
+        attempt: row.attempt,
+        max_attempts: row.max_attempts,
+        timeout_seconds: row.timeout_seconds,
+        next_run_at: row.next_run_at,
+        lease_expires_at: row.lease_expires_at,
+        last_heartbeat_at: row.last_heartbeat_at,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        stage: parse_job_stage(row.stage)?,
+        progress_done: row.progress_done,
+        progress_total: row.progress_total,
+        progress_pct: row.progress_pct,
+        last_error_code: row.last_error_code,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
 }
 
 pub async fn list_admin_workflow_summaries(
@@ -136,49 +124,54 @@ pub async fn list_admin_workflow_summaries(
 
     let status_filter = filter.status.map(|status| status.as_db_value());
     let workflow_type_pattern = filter.workflow_type_contains.map(escape_ilike_pattern);
-    let rows = sqlx::query_as!(
-        AdminWorkflowSummaryRow,
-        "SELECT
-            id,
-            workflow_type,
-            organization_id,
-            status::text AS \"status!\",
-            result_step_key,
-            started_at,
-            finished_at,
-            created_at,
-            updated_at
-         FROM workflow_runs
-         WHERE ($1::uuid IS NULL OR organization_id = $1)
-           AND ($2::text IS NULL OR status = $2::text::workflow_run_status)
-           AND ($3::text IS NULL OR workflow_type ILIKE '%' || $3 || '%')
-         ORDER BY created_at DESC, id DESC
-         LIMIT $4 OFFSET $5",
-        filter.organization_id,
-        status_filter,
-        workflow_type_pattern.as_deref(),
-        filter.limit,
-        filter.offset,
-    )
-    .fetch_all(pool)
-    .await
+    let rows = match filter.organization_id {
+        Some(organization_id) => {
+            sqlx::query_file_as!(
+                AdminWorkflowSummaryRow,
+                "src/jobs/admin/queries/list_workflow_summaries_for_organization.sql",
+                organization_id,
+                status_filter,
+                workflow_type_pattern.as_deref(),
+                filter.limit,
+                filter.offset,
+            )
+            .fetch_all(pool)
+            .await
+        }
+        None => {
+            sqlx::query_file_as!(
+                AdminWorkflowSummaryRow,
+                "src/jobs/admin/queries/list_workflow_summaries_global.sql",
+                status_filter,
+                workflow_type_pattern.as_deref(),
+                filter.limit,
+                filter.offset,
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
     .map_err(|error| Error::from_query_sqlx_with_context("list admin workflow summaries", error))?;
 
     rows.into_iter()
-        .map(|row| {
-            Ok(AdminWorkflowSummaryRecord {
-                id: row.id,
-                workflow_type: parse_workflow_type_name(row.workflow_type)?,
-                organization_id: row.organization_id,
-                status: parse_workflow_run_status(row.status)?,
-                result_step_key: row.result_step_key.map(parse_step_key_name).transpose()?,
-                started_at: row.started_at,
-                finished_at: row.finished_at,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            })
-        })
+        .map(admin_workflow_summary_record)
         .collect()
+}
+
+fn admin_workflow_summary_record(
+    row: AdminWorkflowSummaryRow,
+) -> Result<AdminWorkflowSummaryRecord> {
+    Ok(AdminWorkflowSummaryRecord {
+        id: row.id,
+        workflow_type: parse_workflow_type_name(row.workflow_type)?,
+        organization_id: row.organization_id,
+        status: parse_workflow_run_status(row.status)?,
+        result_step_key: row.result_step_key.map(parse_step_key_name).transpose()?,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
 }
 
 pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<JobQueueRecord>> {

@@ -14,7 +14,7 @@ use runledger_test_support::{
 };
 use serde_json::{Value, json};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
 const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
 const V0_6_LATEST_MIGRATION_VERSION: i64 = 202606030001;
@@ -32,6 +32,14 @@ const ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210003;
 const ADMIN_JOBS_ORG_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210004;
 const ADMIN_WORKFLOWS_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210005;
 const ADMIN_WORKFLOWS_ORG_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210006;
+const ADMIN_JOBS_FOR_ORGANIZATION_QUERY: &str =
+    include_str!("../src/jobs/admin/queries/list_job_summaries_for_organization.sql");
+const ADMIN_JOBS_GLOBAL_QUERY: &str =
+    include_str!("../src/jobs/admin/queries/list_job_summaries_global.sql");
+const ADMIN_WORKFLOWS_FOR_ORGANIZATION_QUERY: &str =
+    include_str!("../src/jobs/admin/queries/list_workflow_summaries_for_organization.sql");
+const ADMIN_WORKFLOWS_GLOBAL_QUERY: &str =
+    include_str!("../src/jobs/admin/queries/list_workflow_summaries_global.sql");
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,
@@ -221,38 +229,43 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
             "PostgreSQL 18 must plan {table_name} newest-first pagination with {index_name}:\n{plan}"
         );
     }
-    for (table_name, organization_id, index_name) in [
-        ("job_queue", None, "idx_job_queue_admin_created"),
+    for (query_name, query, index_name) in [
         (
-            "job_queue",
-            Some("00000000-0000-4000-8000-000000000001"),
+            "global job list",
+            ADMIN_JOBS_GLOBAL_QUERY,
+            "idx_job_queue_admin_created",
+        ),
+        (
+            "organization job list",
+            ADMIN_JOBS_FOR_ORGANIZATION_QUERY,
             "idx_job_queue_admin_org_created",
         ),
-        ("workflow_runs", None, "idx_workflow_runs_admin_created"),
         (
-            "workflow_runs",
-            Some("00000000-0000-4000-8000-000000000001"),
+            "global workflow list",
+            ADMIN_WORKFLOWS_GLOBAL_QUERY,
+            "idx_workflow_runs_admin_created",
+        ),
+        (
+            "organization workflow list",
+            ADMIN_WORKFLOWS_FOR_ORGANIZATION_QUERY,
             "idx_workflow_runs_admin_org_created",
         ),
     ] {
-        let organization_filter = organization_id.map_or_else(String::new, |organization_id| {
-            format!("WHERE organization_id = '{organization_id}'::uuid")
-        });
-        let plan = sqlx::query_scalar::<_, String>(&format!(
-            "EXPLAIN (COSTS OFF) \
-             SELECT id \
-             FROM {table_name} \
-             {organization_filter} \
-             ORDER BY created_at DESC, id DESC \
-             LIMIT 51"
-        ))
-        .fetch_all(&mut *plan_tx)
-        .await
-        .unwrap_or_else(|error| panic!("explain {table_name} admin list scan: {error}"))
-        .join("\n");
+        let explain = format!("EXPLAIN (GENERIC_PLAN, COSTS OFF) {query}");
+        let plan = sqlx::raw_sql(&explain)
+            .fetch_all(&mut *plan_tx)
+            .await
+            .unwrap_or_else(|error| panic!("explain {query_name}: {error}"))
+            .into_iter()
+            .map(|row| {
+                row.try_get::<String, _>(0)
+                    .unwrap_or_else(|error| panic!("decode {query_name} plan row: {error}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             plan.contains(index_name),
-            "PostgreSQL 18 must plan {table_name} admin pagination with {index_name}:\n{plan}"
+            "PostgreSQL 18 must generically plan {query_name} with {index_name}:\n{plan}"
         );
     }
     plan_tx
