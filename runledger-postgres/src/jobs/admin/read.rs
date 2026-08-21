@@ -300,12 +300,13 @@ pub async fn list_admin_workflow_dependencies(
 ) -> Result<Vec<AdminWorkflowDependencyRecord>> {
     validate_pagination(limit, offset)?;
 
-    let rows = sqlx::query_as::<_, AdminWorkflowDependencyRow>(
-        "SELECT
+    let rows = sqlx::query_as!(
+        AdminWorkflowDependencyRow,
+        r#"SELECT
             dependency.workflow_run_id,
             dependency.prerequisite_step_id,
             dependency.dependent_step_id,
-            dependency.release_mode::text AS release_mode,
+            dependency.release_mode::text AS "release_mode!",
             dependency.created_at
          FROM workflow_step_dependencies dependency
          JOIN workflow_runs workflow
@@ -326,12 +327,12 @@ pub async fn list_admin_workflow_dependencies(
          ORDER BY
            dependency.prerequisite_step_id ASC,
            dependency.dependent_step_id ASC
-         LIMIT $3 OFFSET $4",
+         LIMIT $3 OFFSET $4"#,
+        workflow_run_id,
+        organization_id,
+        limit,
+        offset,
     )
-    .bind(workflow_run_id)
-    .bind(organization_id)
-    .bind(limit)
-    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(|error| {

@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            dependency.workflow_run_id,\n            dependency.prerequisite_step_id,\n            dependency.dependent_step_id,\n            dependency.release_mode::text AS \"release_mode!\",\n            dependency.created_at\n         FROM workflow_step_dependencies dependency\n         JOIN workflow_runs workflow\n           ON workflow.id = dependency.workflow_run_id\n         JOIN workflow_steps prerequisite\n           ON prerequisite.id = dependency.prerequisite_step_id\n         JOIN workflow_steps dependent\n           ON dependent.id = dependency.dependent_step_id\n         WHERE dependency.workflow_run_id = $1\n           AND (\n             $2::uuid IS NULL\n             OR (\n               workflow.organization_id = $2\n               AND prerequisite.organization_id = $2\n               AND dependent.organization_id = $2\n             )\n           )\n         ORDER BY\n           dependency.prerequisite_step_id ASC,\n           dependency.dependent_step_id ASC\n         LIMIT $3 OFFSET $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "prerequisite_step_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "dependent_step_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "release_mode!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "2c58051a26c3e467fc27a567d2106e4cb2e3a67b59726914d2f4bd24c65bc904"
+}
