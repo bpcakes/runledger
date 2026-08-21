@@ -1,0 +1,57 @@
+{
+  "name": "@runledger/admin",
+  "version": "0.10.1",
+  "description": "Framework-neutral client and reusable React admin panel for Runledger",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": [
+    "./dist/styles.css"
+  ],
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/copy-css.mjs",
+    "clean": "node scripts/clean.mjs",
+    "prepack": "npm run build",
+    "test": "npm run typecheck && vitest run",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "react": ">=18.2 <20"
+  },
+  "devDependencies": {
+    "@testing-library/react": "16.3.2",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "jsdom": "30.0.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

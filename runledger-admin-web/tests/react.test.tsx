@@ -1,0 +1,161 @@
+import { useState } from "react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { RunledgerAdminClient } from "../src/client.js";
+import { RunledgerAdminPanel, type RunledgerAdminRoute } from "../src/react.js";
+import {
+  capabilities,
+  definitions,
+  events,
+  jobId,
+  jobResponse,
+  jobs,
+  logs,
+  metrics,
+  workflowResponse,
+  workflows,
+} from "./fixtures.js";
+
+const client: RunledgerAdminClient = {
+  capabilities: async () => capabilities,
+  definitions: async () => definitions,
+  job: async () => jobResponse,
+  jobEvents: async () => events,
+  jobLogs: async () => logs,
+  jobs: async () => jobs,
+  metrics: async () => metrics,
+  workflow: async () => workflowResponse,
+  workflows: async () => workflows,
+};
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+function Harness() {
+  const [route, setRoute] = useState<RunledgerAdminRoute>({ name: "overview" });
+  return (
+    <RunledgerAdminPanel
+      client={client}
+      onRouteChange={setRoute}
+      pollIntervalMs={0}
+      route={route}
+    />
+  );
+}
+
+describe("RunledgerAdminPanel", () => {
+  it("renders overview metrics and effective access", async () => {
+    render(<Harness />);
+    expect(await screen.findByRole("heading", { level: 2, name: "Overview" })).toBeTruthy();
+    expect(await screen.findByText("Organization aaaaaaaa", { exact: false })).toBeTruthy();
+    expect(screen.getByRole("table", { name: "Current job health" })).toBeTruthy();
+    expect(screen.getByText("jobs.customer.import")).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Dead-lettered 24h" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "2" })).toBeTruthy();
+  });
+
+  it("uses controlled navigation and communicates redaction", async () => {
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole("button", { name: "Jobs" }));
+    expect(await screen.findByRole("heading", { level: 2, name: "Jobs" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: jobId }));
+    expect(await screen.findByRole("heading", { level: 2, name: `Job ${jobId}` })).toBeTruthy();
+    expect(screen.getAllByRole("note")[0]?.textContent).toContain("Sensitive fields hidden");
+    expect(screen.queryByText("private@example.test")).toBeNull();
+    expect(screen.getByText("Message hidden")).toBeTruthy();
+  });
+
+  it("navigates from a workflow step to its job without a router dependency", async () => {
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole("button", { name: "Workflows" }));
+    expect(await screen.findByRole("heading", { level: 2, name: "Workflows" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: workflows.items[0]!.id }));
+    expect(await screen.findByRole("heading", { level: 2, name: /Workflow/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: jobId }));
+    expect(await screen.findByRole("heading", { level: 2, name: `Job ${jobId}` })).toBeTruthy();
+  });
+
+  it("does not request service-wide definitions when capabilities omit them", async () => {
+    const definitionsSpy = vi.fn(client.definitions);
+    const restrictedClient: RunledgerAdminClient = {
+      ...client,
+      capabilities: async () => ({
+        ...capabilities,
+        resources: capabilities.resources.filter((resource) => resource !== "definitions"),
+      }),
+      definitions: definitionsSpy,
+    };
+    render(
+      <RunledgerAdminPanel
+        client={restrictedClient}
+        onRouteChange={() => undefined}
+        pollIntervalMs={0}
+        route={{ name: "definitions" }}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Definitions unavailable" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Definitions" })).toBeNull();
+    expect(definitionsSpy).not.toHaveBeenCalled();
+  });
+
+  it("pages backward through newest-first job history", async () => {
+    const jobEvents = vi.fn<RunledgerAdminClient["jobEvents"]>(async (_jobId, params) => ({
+      ...events,
+      items: [{ ...events.items[0]!, id: params?.cursor === undefined ? "51" : "1" }],
+      page: {
+        ...events.page,
+        cursor: params?.cursor ?? null,
+        has_more: params?.cursor === undefined,
+        next_cursor: params?.cursor === undefined ? "2" : "1",
+      },
+    }));
+    render(
+      <RunledgerAdminPanel
+        client={{ ...client, jobEvents }}
+        onRouteChange={() => undefined}
+        pollIntervalMs={0}
+        route={{ name: "job", jobId }}
+      />,
+    );
+
+    fireEvent.click((await screen.findAllByRole("button", { name: "Older" }))[0]!);
+    expect(await screen.findByText("Page 2 · newest first")).toBeTruthy();
+    expect(jobEvents).toHaveBeenLastCalledWith(jobId, expect.objectContaining({ cursor: "2" }));
+  });
+
+  it("waits for each poll to settle before scheduling the next one", async () => {
+    vi.useFakeTimers();
+    let resolveFirst: ((value: typeof jobs) => void) | undefined;
+    const first = new Promise<typeof jobs>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const jobsLoader = vi
+      .fn<RunledgerAdminClient["jobs"]>()
+      .mockImplementationOnce(async () => first)
+      .mockResolvedValue(jobs);
+    render(
+      <RunledgerAdminPanel
+        client={{ ...client, jobs: jobsLoader }}
+        onRouteChange={() => undefined}
+        pollIntervalMs={100}
+        route={{ name: "jobs" }}
+      />,
+    );
+    await act(async () => undefined);
+    expect(jobsLoader).toHaveBeenCalledTimes(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(jobsLoader).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirst?.(jobs);
+      await Promise.resolve();
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(100));
+    expect(jobsLoader).toHaveBeenCalledTimes(2);
+  });
+});

@@ -20,6 +20,10 @@ smoke/external-consumer/target/
 /.idea/
 /.vscode/
 
+# JavaScript package artifacts
+node_modules/
+dist/
+
 # OS metadata
 .DS_Store
 
