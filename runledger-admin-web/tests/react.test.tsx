@@ -313,4 +313,54 @@ describe("RunledgerAdminPanel", () => {
     expect(capabilitiesLoader).toHaveBeenCalledTimes(1);
     expect(metricsLoader.mock.calls.length).toBeGreaterThan(1);
   });
+
+  it("reloads scoped resources when effective capabilities change", async () => {
+    vi.useFakeTimers();
+    const organizationB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const capabilitiesLoader = vi
+      .fn<RunledgerAdminClient["capabilities"]>()
+      .mockResolvedValueOnce({ ...capabilities, visibility: "full" })
+      .mockResolvedValue({
+        ...capabilities,
+        scope: { kind: "organization", organization_id: organizationB },
+        visibility: "metadata_only",
+      });
+    const jobsLoader = vi
+      .fn<RunledgerAdminClient["jobs"]>()
+      .mockResolvedValueOnce(jobs)
+      .mockResolvedValue({
+        ...jobs,
+        items: [
+          {
+            ...jobs.items[0]!,
+            job_type: "jobs.organization-b.import",
+            organization_id: organizationB,
+          },
+        ],
+      });
+
+    render(
+      <RunledgerAdminPanel
+        capabilitiesPollIntervalMs={100}
+        client={{
+          ...client,
+          capabilities: capabilitiesLoader,
+          jobs: jobsLoader,
+        }}
+        onRouteChange={() => undefined}
+        route={{ name: "jobs" }}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(screen.getByText("jobs.customer.import")).toBeTruthy();
+    expect(jobsLoader).toHaveBeenCalledTimes(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(100));
+
+    expect(capabilitiesLoader).toHaveBeenCalledTimes(2);
+    expect(jobsLoader).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("jobs.customer.import")).toBeNull();
+    expect(screen.getByText("jobs.organization-b.import")).toBeTruthy();
+  });
 });

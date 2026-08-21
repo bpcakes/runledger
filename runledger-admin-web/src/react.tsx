@@ -187,6 +187,20 @@ function scopeLabel(capabilities: Capabilities): string {
     : `Organization ${capabilities.scope.organization_id}`;
 }
 
+function capabilityBoundaryKey(capabilities: Capabilities): string {
+  const scope =
+    capabilities.scope.kind === "all"
+      ? "all"
+      : `organization:${capabilities.scope.organization_id}`;
+  return [
+    capabilities.api_version,
+    scope,
+    capabilities.visibility,
+    [...capabilities.actions].sort().join(","),
+    [...capabilities.resources].sort().join(","),
+  ].join("|");
+}
+
 function OverviewScreen({
   client,
   capabilities,
@@ -1263,6 +1277,7 @@ export function RunledgerAdminPanel({
           <PanelBody
             capabilities={capabilities}
             client={client}
+            key={capabilityBoundaryKey(capabilities)}
             metricsPollIntervalMs={metricsPollIntervalMs}
             onRouteChange={onRouteChange}
             pollIntervalMs={pollIntervalMs}
