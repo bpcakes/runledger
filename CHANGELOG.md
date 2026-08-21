@@ -34,6 +34,8 @@ All notable changes to this workspace are documented here.
 - Acquire the SQLx-compatible migration advisory lock through nonblocking
   attempts, preventing a waiting startup snapshot from deadlocking a lock
   holder that is building a concurrent index.
+- Correct service-wide `get_job_metrics` duration percentiles to compute over
+  all matching attempts instead of averaging per-organization percentiles.
 - Normalize the generated npm OpenAPI artifact to mode 0644 and verify that
   mode during contract checks and release packaging.
 
