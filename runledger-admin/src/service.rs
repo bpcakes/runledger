@@ -3,22 +3,24 @@ use std::collections::HashMap;
 use runledger_core::jobs::{JobStatus, WorkflowRunStatus};
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    JobDefinitionListFilter, JobEventRecord, JobListFilter, JobLogRecord, JobQueueRecord,
-    WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowStepDbRecord,
-    WorkflowStepDependencyDbRecord, get_job_by_id, get_job_continuation_metrics,
-    get_job_continuation_metrics_in_organization, get_job_metrics, get_job_metrics_in_organization,
-    get_workflow_run_by_id, list_job_definitions, list_job_events, list_job_events_before,
-    list_job_logs, list_job_logs_before, list_jobs, list_workflow_runs,
-    list_workflow_step_dependencies_in_organization_page, list_workflow_steps_in_organization_page,
+    AdminJobSummaryRecord, AdminWorkflowSummaryRecord, JobDefinitionListFilter, JobEventRecord,
+    JobListFilter, JobLogRecord, JobQueueRecord, WorkflowRunDbRecord, WorkflowRunListFilter,
+    WorkflowStepDbRecord, WorkflowStepDependencyDbRecord, get_job_by_id,
+    get_job_continuation_metrics, get_job_continuation_metrics_in_organization, get_job_metrics,
+    get_job_metrics_in_organization, get_workflow_run_by_id, list_admin_job_summaries,
+    list_admin_workflow_summaries, list_job_definitions, list_job_events, list_job_events_before,
+    list_job_logs, list_job_logs_before, list_workflow_step_dependencies_in_organization_page,
+    list_workflow_steps_in_organization_page,
 };
 use uuid::Uuid;
 
 use crate::dto::{
     DefinitionsQuery, DefinitionsResponse, HistoryOrder, HistoryPageDto, HistoryQuery,
     JobDefinitionDto, JobDto, JobEventDto, JobEventsResponse, JobLogDto, JobLogsResponse,
-    JobMetricsDto, JobResponse, JobsQuery, JobsResponse, MAX_PAGE_LIMIT, MAX_PAGE_OFFSET,
-    MetricsQuery, MetricsResponse, PageDto, WorkflowDependencyDto, WorkflowDto, WorkflowQuery,
-    WorkflowResponse, WorkflowStepDto, WorkflowsQuery, WorkflowsResponse,
+    JobMetricsDto, JobResponse, JobSummaryDto, JobsQuery, JobsResponse, MAX_PAGE_LIMIT,
+    MAX_PAGE_OFFSET, MetricsQuery, MetricsResponse, PageDto, WorkflowDependencyDto, WorkflowDto,
+    WorkflowQuery, WorkflowResponse, WorkflowStepDto, WorkflowSummaryDto, WorkflowsQuery,
+    WorkflowsResponse,
 };
 use crate::{AdminAccess, AdminApiError, AdminScope, DataVisibility};
 
@@ -110,7 +112,7 @@ impl AdminService {
         validate_filter(query.job_type.as_deref())?;
         let status = parse_job_status(query.status.as_deref())?;
         let job_type = query.job_type.as_deref().map(escape_ilike_pattern);
-        let rows = list_jobs(
+        let rows = list_admin_job_summaries(
             &self.pool,
             &JobListFilter {
                 organization_id: access.scope().organization_id(),
@@ -124,10 +126,7 @@ impl AdminService {
         .map_err(|error| storage_error("list jobs", error))?;
         let (rows, has_more) = take_page(rows, query.limit);
         Ok(JobsResponse {
-            items: rows
-                .into_iter()
-                .map(|row| job_dto(row, access.visibility()))
-                .collect(),
+            items: rows.into_iter().map(job_summary_dto).collect(),
             page: PageDto {
                 limit: query.limit,
                 offset: query.offset,
@@ -267,7 +266,7 @@ impl AdminService {
         validate_filter(query.workflow_type.as_deref())?;
         let status = parse_workflow_status(query.status.as_deref())?;
         let workflow_type = query.workflow_type.as_deref().map(escape_ilike_pattern);
-        let rows = list_workflow_runs(
+        let rows = list_admin_workflow_summaries(
             &self.pool,
             &WorkflowRunListFilter {
                 organization_id: access.scope().organization_id(),
@@ -281,10 +280,7 @@ impl AdminService {
         .map_err(|error| storage_error("list workflow runs", error))?;
         let (rows, has_more) = take_page(rows, query.limit);
         Ok(WorkflowsResponse {
-            items: rows
-                .into_iter()
-                .map(|row| workflow_dto(row, access.visibility()))
-                .collect(),
+            items: rows.into_iter().map(workflow_summary_dto).collect(),
             page: PageDto {
                 limit: query.limit,
                 offset: query.offset,
@@ -553,6 +549,32 @@ fn job_dto(row: JobQueueRecord, visibility: DataVisibility) -> JobDto {
     }
 }
 
+fn job_summary_dto(row: AdminJobSummaryRecord) -> JobSummaryDto {
+    JobSummaryDto {
+        id: row.id,
+        job_type: row.job_type.as_str().to_owned(),
+        organization_id: row.organization_id,
+        status: row.status.as_db_value().to_owned(),
+        priority: row.priority,
+        run_number: row.run_number,
+        attempt: row.attempt,
+        max_attempts: row.max_attempts,
+        timeout_seconds: row.timeout_seconds,
+        next_run_at: row.next_run_at,
+        lease_expires_at: row.lease_expires_at,
+        last_heartbeat_at: row.last_heartbeat_at,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        stage: row.stage.as_db_value().to_owned(),
+        progress_done: row.progress_done,
+        progress_total: row.progress_total,
+        progress_pct: row.progress_pct,
+        last_error_code: row.last_error_code,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
 fn job_event_dto(row: JobEventRecord, visibility: DataVisibility) -> JobEventDto {
     JobEventDto {
         id: row.id.to_string(),
@@ -597,6 +619,20 @@ fn workflow_dto(row: WorkflowRunDbRecord, visibility: DataVisibility) -> Workflo
         idempotency_key: full_optional(visibility, row.idempotency_key),
         metadata: full(visibility, row.metadata),
         redacted_fields: redacted(visibility, &["idempotency_key", "metadata"]),
+    }
+}
+
+fn workflow_summary_dto(row: AdminWorkflowSummaryRecord) -> WorkflowSummaryDto {
+    WorkflowSummaryDto {
+        id: row.id,
+        workflow_type: row.workflow_type.as_str().to_owned(),
+        organization_id: row.organization_id,
+        status: row.status.as_db_value().to_owned(),
+        result_step_key: row.result_step_key.map(|key| key.as_str().to_owned()),
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
     }
 }
 

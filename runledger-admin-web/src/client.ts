@@ -29,9 +29,8 @@ export type Job = JsonFields<
   Schemas["Job"],
   "checkpoint" | "output" | "payload"
 >;
-export type JobsResponse = Omit<Schemas["JobsResponse"], "items"> & {
-  readonly items: readonly Job[];
-};
+export type JobSummary = Schemas["JobSummary"];
+export type JobsResponse = Schemas["JobsResponse"];
 export type JobResponse = { readonly job: Job };
 
 export type JobEvent = JsonFields<Schemas["JobEvent"], "payload">;
@@ -45,9 +44,8 @@ export type JobLogsResponse = Omit<Schemas["JobLogsResponse"], "items"> & {
 };
 
 export type Workflow = JsonFields<Schemas["Workflow"], "metadata">;
-export type WorkflowsResponse = Omit<Schemas["WorkflowsResponse"], "items"> & {
-  readonly items: readonly Workflow[];
-};
+export type WorkflowSummary = Schemas["WorkflowSummary"];
+export type WorkflowsResponse = Schemas["WorkflowsResponse"];
 
 export type WorkflowStep = JsonFields<
   Schemas["WorkflowStep"],

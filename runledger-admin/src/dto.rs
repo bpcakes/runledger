@@ -277,7 +277,44 @@ pub struct MetricsResponse {
     pub items: Vec<JobMetricsDto>,
 }
 
-/// Safe job representation used by list and detail endpoints.
+/// Lightweight job representation used by list endpoints.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+#[schema(as = JobSummary)]
+pub struct JobSummaryDto {
+    pub id: Uuid,
+    pub job_type: String,
+    #[schema(required = true)]
+    pub organization_id: Option<Uuid>,
+    pub status: String,
+    pub priority: i32,
+    pub run_number: i32,
+    pub attempt: i32,
+    pub max_attempts: i32,
+    pub timeout_seconds: i32,
+    pub next_run_at: DateTime<Utc>,
+    #[schema(required = true)]
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    #[schema(required = true)]
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    #[schema(required = true)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[schema(required = true)]
+    pub finished_at: Option<DateTime<Utc>>,
+    pub stage: String,
+    #[schema(required = true)]
+    pub progress_done: Option<i64>,
+    #[schema(required = true)]
+    pub progress_total: Option<i64>,
+    #[schema(required = true)]
+    pub progress_pct: Option<f64>,
+    #[schema(required = true)]
+    pub last_error_code: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Job detail representation. Sensitive and potentially large fields are
+/// available only from the single-job endpoint and remain visibility-gated.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 #[schema(as = Job)]
 pub struct JobDto {
@@ -337,7 +374,7 @@ pub struct JobDto {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct JobsResponse {
-    pub items: Vec<JobDto>,
+    pub items: Vec<JobSummaryDto>,
     pub page: PageDto,
 }
 
@@ -401,7 +438,26 @@ pub struct JobLogsResponse {
     pub page: HistoryPageDto,
 }
 
-/// Safe workflow run representation.
+/// Lightweight workflow run representation used by list endpoints.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+#[schema(as = WorkflowSummary)]
+pub struct WorkflowSummaryDto {
+    pub id: Uuid,
+    pub workflow_type: String,
+    #[schema(required = true)]
+    pub organization_id: Option<Uuid>,
+    pub status: String,
+    #[schema(required = true)]
+    pub result_step_key: Option<String>,
+    pub started_at: DateTime<Utc>,
+    #[schema(required = true)]
+    pub finished_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Workflow detail representation. Sensitive and potentially large fields are
+/// available only from the single-workflow endpoint and remain visibility-gated.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 #[schema(as = Workflow)]
 pub struct WorkflowDto {
@@ -428,7 +484,7 @@ pub struct WorkflowDto {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct WorkflowsResponse {
-    pub items: Vec<WorkflowDto>,
+    pub items: Vec<WorkflowSummaryDto>,
     pub page: PageDto,
 }
 

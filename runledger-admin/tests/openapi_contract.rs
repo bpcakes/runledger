@@ -64,6 +64,36 @@ fn openapi_contract_distinguishes_null_from_redaction() {
 }
 
 #[test]
+fn openapi_contract_keeps_sensitive_fields_out_of_list_summaries() {
+    let document: Value = serde_json::from_str(&runledger_admin::openapi_json())
+        .expect("generated OpenAPI must be valid JSON");
+    let schemas = &document["components"]["schemas"];
+
+    let job_summary = schemas["JobSummary"]["properties"]
+        .as_object()
+        .expect("JobSummary.properties must be an object");
+    for detail_only_field in [
+        "payload",
+        "checkpoint",
+        "output",
+        "idempotency_key",
+        "worker_id",
+        "status_reason",
+        "last_error_message",
+        "redacted_fields",
+    ] {
+        assert!(!job_summary.contains_key(detail_only_field));
+    }
+
+    let workflow_summary = schemas["WorkflowSummary"]["properties"]
+        .as_object()
+        .expect("WorkflowSummary.properties must be an object");
+    for detail_only_field in ["idempotency_key", "metadata", "redacted_fields"] {
+        assert!(!workflow_summary.contains_key(detail_only_field));
+    }
+}
+
+#[test]
 fn openapi_contract_bounds_every_offset_parameter() {
     let document: Value = serde_json::from_str(&runledger_admin::openapi_json())
         .expect("generated OpenAPI must be valid JSON");

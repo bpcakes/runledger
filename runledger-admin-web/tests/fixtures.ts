@@ -2,12 +2,14 @@ import type {
   Capabilities,
   DefinitionsResponse,
   Job,
+  JobSummary,
   JobEventsResponse,
   JobLogsResponse,
   JobResponse,
   JobsResponse,
   MetricsResponse,
   WorkflowResponse,
+  WorkflowSummary,
   WorkflowsResponse,
 } from "../src/client.js";
 
@@ -58,6 +60,30 @@ export const job: Job = {
   updated_at: timestamp,
 };
 
+export const jobSummary: JobSummary = {
+  attempt: job.attempt,
+  created_at: job.created_at,
+  finished_at: job.finished_at,
+  id: job.id,
+  job_type: job.job_type,
+  last_error_code: job.last_error_code,
+  last_heartbeat_at: job.last_heartbeat_at,
+  lease_expires_at: job.lease_expires_at,
+  max_attempts: job.max_attempts,
+  next_run_at: job.next_run_at,
+  organization_id: job.organization_id,
+  priority: job.priority,
+  progress_done: job.progress_done,
+  progress_pct: job.progress_pct,
+  progress_total: job.progress_total,
+  run_number: job.run_number,
+  stage: job.stage,
+  started_at: job.started_at,
+  status: job.status,
+  timeout_seconds: job.timeout_seconds,
+  updated_at: job.updated_at,
+};
+
 export const metrics: MetricsResponse = {
   items: [
     {
@@ -81,7 +107,7 @@ export const metrics: MetricsResponse = {
 };
 
 export const jobs: JobsResponse = {
-  items: [job],
+  items: [jobSummary],
   page: { has_more: false, limit: 50, max_offset: 10_000, offset: 0 },
 };
 export const jobResponse: JobResponse = { job };
@@ -129,21 +155,25 @@ export const logs: JobLogsResponse = {
   },
 };
 
-const workflow = {
+const workflowSummary: WorkflowSummary = {
   created_at: timestamp,
   finished_at: null,
   id: workflowId,
   organization_id: job.organization_id,
-  redacted_fields: ["metadata", "idempotency_key"],
   result_step_key: null,
   started_at: timestamp,
   status: "RUNNING",
   updated_at: timestamp,
   workflow_type: "workflow.customer.import",
+};
+
+const workflow = {
+  ...workflowSummary,
+  redacted_fields: ["metadata", "idempotency_key"],
 } as const;
 
 export const workflows: WorkflowsResponse = {
-  items: [workflow],
+  items: [workflowSummary],
   page: { has_more: false, limit: 50, max_offset: 10_000, offset: 0 },
 };
 export const workflowResponse: WorkflowResponse = {

@@ -200,7 +200,10 @@ export interface components {
             readonly next_cursor: string | null;
             readonly order: components["schemas"]["HistoryOrder"];
         };
-        /** @description Safe job representation used by list and detail endpoints. */
+        /**
+         * @description Job detail representation. Sensitive and potentially large fields are
+         *     available only from the single-job endpoint and remain visibility-gated.
+         */
         readonly Job: {
             /** Format: int32 */
             readonly attempt: number;
@@ -345,8 +348,49 @@ export interface components {
         readonly JobResponse: {
             readonly job: components["schemas"]["Job"];
         };
+        /** @description Lightweight job representation used by list endpoints. */
+        readonly JobSummary: {
+            /** Format: int32 */
+            readonly attempt: number;
+            /** Format: date-time */
+            readonly created_at: string;
+            /** Format: date-time */
+            readonly finished_at: string | null;
+            /** Format: uuid */
+            readonly id: string;
+            readonly job_type: string;
+            readonly last_error_code: string | null;
+            /** Format: date-time */
+            readonly last_heartbeat_at: string | null;
+            /** Format: date-time */
+            readonly lease_expires_at: string | null;
+            /** Format: int32 */
+            readonly max_attempts: number;
+            /** Format: date-time */
+            readonly next_run_at: string;
+            /** Format: uuid */
+            readonly organization_id: string | null;
+            /** Format: int32 */
+            readonly priority: number;
+            /** Format: int64 */
+            readonly progress_done: number | null;
+            /** Format: double */
+            readonly progress_pct: number | null;
+            /** Format: int64 */
+            readonly progress_total: number | null;
+            /** Format: int32 */
+            readonly run_number: number;
+            readonly stage: string;
+            /** Format: date-time */
+            readonly started_at: string | null;
+            readonly status: string;
+            /** Format: int32 */
+            readonly timeout_seconds: number;
+            /** Format: date-time */
+            readonly updated_at: string;
+        };
         readonly JobsResponse: {
-            readonly items: readonly components["schemas"]["Job"][];
+            readonly items: readonly components["schemas"]["JobSummary"][];
             readonly page: components["schemas"]["Page"];
         };
         readonly MetricsResponse: {
@@ -362,7 +406,10 @@ export interface components {
             /** Format: int64 */
             readonly offset: number;
         };
-        /** @description Safe workflow run representation. */
+        /**
+         * @description Workflow detail representation. Sensitive and potentially large fields are
+         *     available only from the single-workflow endpoint and remain visibility-gated.
+         */
         readonly Workflow: {
             /** Format: date-time */
             readonly created_at: string;
@@ -447,8 +494,26 @@ export interface components {
             /** Format: uuid */
             readonly workflow_run_id: string;
         };
+        /** @description Lightweight workflow run representation used by list endpoints. */
+        readonly WorkflowSummary: {
+            /** Format: date-time */
+            readonly created_at: string;
+            /** Format: date-time */
+            readonly finished_at: string | null;
+            /** Format: uuid */
+            readonly id: string;
+            /** Format: uuid */
+            readonly organization_id: string | null;
+            readonly result_step_key: string | null;
+            /** Format: date-time */
+            readonly started_at: string;
+            readonly status: string;
+            /** Format: date-time */
+            readonly updated_at: string;
+            readonly workflow_type: string;
+        };
         readonly WorkflowsResponse: {
-            readonly items: readonly components["schemas"]["Workflow"][];
+            readonly items: readonly components["schemas"]["WorkflowSummary"][];
             readonly page: components["schemas"]["Page"];
         };
     };

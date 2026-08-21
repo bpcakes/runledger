@@ -264,6 +264,24 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
             .all(|item| item["organization_id"] == organization_a.to_string())
     );
 
+    let (status, _, body) = get_json(&app, "/jobs", Some(full_access)).await;
+    assert_eq!(status, StatusCode::OK);
+    for detail_only_field in [
+        "payload",
+        "checkpoint",
+        "output",
+        "idempotency_key",
+        "worker_id",
+        "status_reason",
+        "last_error_message",
+        "redacted_fields",
+    ] {
+        assert!(
+            body["items"][0].get(detail_only_field).is_none(),
+            "job list summaries must not expose or load {detail_only_field}"
+        );
+    }
+
     let (status, _, body) = get_json(
         &app,
         &format!("/jobs/{organization_a_job}"),
@@ -403,6 +421,15 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     let (status, _, body) = get_json(&app, "/workflows", Some(metadata_access)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(item_ids(&body).contains(&workflow_run.id));
+
+    let (status, _, body) = get_json(&app, "/workflows", Some(all_full_access)).await;
+    assert_eq!(status, StatusCode::OK);
+    for detail_only_field in ["idempotency_key", "metadata", "redacted_fields"] {
+        assert!(
+            body["items"][0].get(detail_only_field).is_none(),
+            "workflow list summaries must not expose or load {detail_only_field}"
+        );
+    }
 
     let (status, _, body) = get_json(
         &app,

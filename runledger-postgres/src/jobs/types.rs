@@ -1,6 +1,6 @@
 pub use self::admin::{
-    JOB_LIST_PAGE_LIMIT_MAX, JobContinuationMetricsRecord, JobListFilter, JobLogRecord,
-    JobLogRecordInput, JobMetricsRecord,
+    AdminJobSummaryRecord, AdminWorkflowSummaryRecord, JOB_LIST_PAGE_LIMIT_MAX,
+    JobContinuationMetricsRecord, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
 };
 pub use self::definitions::{
     JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,

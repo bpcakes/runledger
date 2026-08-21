@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use runledger_core::jobs::{JobStatus, JobTypeName};
+use runledger_core::jobs::{
+    JobStage, JobStatus, JobTypeName, StepKeyName, WorkflowRunStatus, WorkflowTypeName,
+};
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -8,6 +10,52 @@ use sqlx::types::Uuid;
 /// This bounds accidental unbounded reads from admin/TUI surfaces while still
 /// allowing operators to inspect a large page when needed.
 pub const JOB_LIST_PAGE_LIMIT_MAX: i64 = 1_000;
+
+/// Lightweight operational projection for admin job lists.
+///
+/// Payloads, results, worker identity, idempotency keys, and diagnostic text
+/// are intentionally detail-only and cannot be fetched through this shape.
+#[derive(Clone, Debug)]
+pub struct AdminJobSummaryRecord {
+    pub id: Uuid,
+    pub job_type: JobTypeName,
+    pub organization_id: Option<Uuid>,
+    pub status: JobStatus,
+    pub priority: i32,
+    pub run_number: i32,
+    pub attempt: i32,
+    pub max_attempts: i32,
+    pub timeout_seconds: i32,
+    pub next_run_at: DateTime<Utc>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub stage: JobStage,
+    pub progress_done: Option<i64>,
+    pub progress_total: Option<i64>,
+    pub progress_pct: Option<f64>,
+    pub last_error_code: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Lightweight operational projection for admin workflow lists.
+///
+/// Idempotency keys and arbitrary workflow metadata are intentionally
+/// detail-only and cannot be fetched through this shape.
+#[derive(Clone, Debug)]
+pub struct AdminWorkflowSummaryRecord {
+    pub id: Uuid,
+    pub workflow_type: WorkflowTypeName,
+    pub organization_id: Option<Uuid>,
+    pub status: WorkflowRunStatus,
+    pub result_step_key: Option<StepKeyName>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
 
 #[derive(Clone, Debug)]
 pub struct JobMetricsRecord {
