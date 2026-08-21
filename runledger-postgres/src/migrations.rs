@@ -957,6 +957,26 @@ mod tests {
             "every concurrent-index migration must have exactly one recovery entry"
         );
         for recovery in RECOVERABLE_CONCURRENT_INDEXES {
+            let migration = MIGRATOR
+                .iter()
+                .find(|migration| {
+                    migration.version == recovery.migration_version
+                        && migration.migration_type.is_up_migration()
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "recovery metadata references missing concurrent-index migration {}",
+                        recovery.migration_version
+                    )
+                });
+            let statements = executable_sql_statements(migration.sql.as_ref());
+            assert_eq!(
+                statements.len(),
+                1,
+                "recoverable concurrent-index migration {} must contain exactly one executable \
+                 statement because recovery records it without executing the migration SQL",
+                recovery.migration_version
+            );
             let target = concurrent_indexes
                 .get(&recovery.migration_version)
                 .unwrap_or_else(|| {
@@ -972,6 +992,38 @@ mod tests {
                 format!("DROP INDEX CONCURRENTLY {}", recovery.index_name)
             );
         }
+    }
+
+    #[test]
+    fn executable_sql_statements_ignore_comments_and_empty_segments() {
+        assert_eq!(
+            executable_sql_statements(
+                "-- no-transaction\n\nCREATE INDEX CONCURRENTLY idx_example ON example (id);\n-- end\n",
+            ),
+            ["CREATE INDEX CONCURRENTLY idx_example ON example (id)"]
+        );
+        assert_eq!(
+            executable_sql_statements(
+                "CREATE INDEX CONCURRENTLY idx_one ON example (id);\n\
+                 CREATE INDEX CONCURRENTLY idx_two ON example (created_at);",
+            ),
+            [
+                "CREATE INDEX CONCURRENTLY idx_one ON example (id)",
+                "CREATE INDEX CONCURRENTLY idx_two ON example (created_at)",
+            ]
+        );
+    }
+
+    fn executable_sql_statements(sql: &str) -> Vec<String> {
+        sql.lines()
+            .map(|line| line.split_once("--").map_or(line, |(sql, _)| sql))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+            .map(str::to_owned)
+            .collect()
     }
 
     fn concurrent_index_target(sql: &str) -> Option<(&str, &str)> {
