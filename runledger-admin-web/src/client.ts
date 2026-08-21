@@ -260,18 +260,26 @@ export interface RunledgerAdminClient {
   jobEvents(jobId: string, params?: HistoryParams): Promise<JobEventsResponse>;
   jobLogs(jobId: string, params?: HistoryParams): Promise<JobLogsResponse>;
   workflows(params?: WorkflowsParams): Promise<WorkflowsResponse>;
-  workflow(workflowId: string, params?: WorkflowParams): Promise<WorkflowResponse>;
+  workflow(
+    workflowId: string,
+    params?: WorkflowParams,
+  ): Promise<WorkflowResponse>;
   definitions(params?: DefinitionsParams): Promise<DefinitionsResponse>;
 }
 
-export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export type FetchLike = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
 export interface RunledgerAdminClientOptions {
   readonly baseUrl?: string;
   readonly fetch?: FetchLike;
   readonly credentials?: RequestCredentials;
   readonly headers?:
     | Readonly<Record<string, string>>
-    | (() => Readonly<Record<string, string>> | Promise<Readonly<Record<string, string>>>);
+    | (() =>
+        | Readonly<Record<string, string>>
+        | Promise<Readonly<Record<string, string>>>);
 }
 
 export class RunledgerAdminHttpError extends Error {
@@ -300,19 +308,26 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isString = (value: unknown): value is string => typeof value === "string";
 const isNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
-const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
+const isBoolean = (value: unknown): value is boolean =>
+  typeof value === "boolean";
 const isJsonValue = (value: unknown): value is JsonValue => {
-  if (value === null || isBoolean(value) || isNumber(value) || isString(value)) return true;
+  if (value === null || isBoolean(value) || isNumber(value) || isString(value))
+    return true;
   if (Array.isArray(value)) return value.every(isJsonValue);
   return isRecord(value) && Object.values(value).every(isJsonValue);
 };
-const isNullable = <T>(value: unknown, decoder: Decoder<T>): value is T | null =>
-  value === null || decoder(value);
-const isOptional = <T>(value: unknown, decoder: Decoder<T>): value is T | undefined =>
-  value === undefined || decoder(value);
+const isNullable = <T>(
+  value: unknown,
+  decoder: Decoder<T>,
+): value is T | null => value === null || decoder(value);
+const isOptional = <T>(
+  value: unknown,
+  decoder: Decoder<T>,
+): value is T | undefined => value === undefined || decoder(value);
 const isArrayOf = <T>(value: unknown, decoder: Decoder<T>): value is T[] =>
   Array.isArray(value) && value.every(decoder);
-const isStringArray = (value: unknown): value is string[] => isArrayOf(value, isString);
+const isStringArray = (value: unknown): value is string[] =>
+  isArrayOf(value, isString);
 
 const isPage = (value: unknown): value is Page =>
   isRecord(value) &&
@@ -330,7 +345,8 @@ const isHistoryPage = (value: unknown): value is HistoryPage =>
   isBoolean(value.has_more);
 const isScope = (value: unknown): value is AdminScope =>
   isRecord(value) &&
-  (value.kind === "all" || (value.kind === "organization" && isString(value.organization_id)));
+  (value.kind === "all" ||
+    (value.kind === "organization" && isString(value.organization_id)));
 const isCapabilities = (value: unknown): value is Capabilities =>
   isRecord(value) &&
   value.api_version === "v1" &&
@@ -484,19 +500,30 @@ const isDefinition = (value: unknown): value is JobDefinition =>
   isString(value.created_at) &&
   isString(value.updated_at);
 
-const listDecoder = <T>(itemDecoder: Decoder<T>): Decoder<{ readonly items: readonly T[] }> =>
+const listDecoder =
+  <T>(itemDecoder: Decoder<T>): Decoder<{ readonly items: readonly T[] }> =>
   (value: unknown): value is { readonly items: readonly T[] } =>
     isRecord(value) && isArrayOf(value.items, itemDecoder);
-const pagedDecoder = <T>(
-  itemDecoder: Decoder<T>,
-): Decoder<{ readonly items: readonly T[]; readonly page: Page }> =>
-  (value: unknown): value is { readonly items: readonly T[]; readonly page: Page } =>
-    isRecord(value) && isArrayOf(value.items, itemDecoder) && isPage(value.page);
-const historyDecoder = <T>(
-  itemDecoder: Decoder<T>,
-): Decoder<{ readonly items: readonly T[]; readonly page: HistoryPage }> =>
-  (value: unknown): value is { readonly items: readonly T[]; readonly page: HistoryPage } =>
-    isRecord(value) && isArrayOf(value.items, itemDecoder) && isHistoryPage(value.page);
+const pagedDecoder =
+  <T>(
+    itemDecoder: Decoder<T>,
+  ): Decoder<{ readonly items: readonly T[]; readonly page: Page }> =>
+  (
+    value: unknown,
+  ): value is { readonly items: readonly T[]; readonly page: Page } =>
+    isRecord(value) &&
+    isArrayOf(value.items, itemDecoder) &&
+    isPage(value.page);
+const historyDecoder =
+  <T>(
+    itemDecoder: Decoder<T>,
+  ): Decoder<{ readonly items: readonly T[]; readonly page: HistoryPage }> =>
+  (
+    value: unknown,
+  ): value is { readonly items: readonly T[]; readonly page: HistoryPage } =>
+    isRecord(value) &&
+    isArrayOf(value.items, itemDecoder) &&
+    isHistoryPage(value.page);
 const isJobResponse = (value: unknown): value is JobResponse =>
   isRecord(value) && isJob(value.job);
 const isWorkflowResponse = (value: unknown): value is WorkflowResponse =>
@@ -509,12 +536,16 @@ const isWorkflowResponse = (value: unknown): value is WorkflowResponse =>
 
 function decode<T>(value: unknown, decoder: Decoder<T>, resource: string): T {
   if (!decoder(value)) {
-    throw new RunledgerAdminContractError(`Invalid Runledger ${resource} response.`);
+    throw new RunledgerAdminContractError(
+      `Invalid Runledger ${resource} response.`,
+    );
   }
   return value;
 }
 
-function queryString(values: Readonly<Record<string, string | number | undefined>>): string {
+function queryString(
+  values: Readonly<Record<string, string | number | undefined>>,
+): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
     if (value !== undefined) search.set(key, String(value));
@@ -526,7 +557,10 @@ function queryString(values: Readonly<Record<string, string | number | undefined
 export function createRunledgerAdminClient(
   options: RunledgerAdminClientOptions = {},
 ): RunledgerAdminClient {
-  const baseUrl = (options.baseUrl ?? "/api/admin/runledger/v1").replace(/\/$/, "");
+  const baseUrl = (options.baseUrl ?? "/api/admin/runledger/v1").replace(
+    /\/$/,
+    "",
+  );
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
   async function request<T>(
@@ -536,7 +570,9 @@ export function createRunledgerAdminClient(
     signal?: AbortSignal,
   ): Promise<T> {
     const configuredHeaders =
-      typeof options.headers === "function" ? await options.headers() : options.headers;
+      typeof options.headers === "function"
+        ? await options.headers()
+        : options.headers;
     const response = await fetcher(`${baseUrl}${path}`, {
       credentials: options.credentials ?? "same-origin",
       headers: { Accept: "application/json", ...configuredHeaders },
@@ -554,11 +590,19 @@ export function createRunledgerAdminClient(
           `Runledger request failed with HTTP ${response.status}.`,
         );
       }
-      throw new RunledgerAdminContractError("Runledger returned a non-JSON response.");
+      throw new RunledgerAdminContractError(
+        "Runledger returned a non-JSON response.",
+      );
     }
     if (!response.ok) {
-      const detail = isRecord(payload) && isRecord(payload.error) ? payload.error : undefined;
-      const code = detail !== undefined && isString(detail.code) ? detail.code : "admin.http_error";
+      const detail =
+        isRecord(payload) && isRecord(payload.error)
+          ? payload.error
+          : undefined;
+      const code =
+        detail !== undefined && isString(detail.code)
+          ? detail.code
+          : "admin.http_error";
       const message =
         detail !== undefined && isString(detail.message)
           ? detail.message
@@ -570,7 +614,12 @@ export function createRunledgerAdminClient(
 
   return {
     capabilities: (requestOptions) =>
-      request("/capabilities", isCapabilities, "capabilities", requestOptions?.signal),
+      request(
+        "/capabilities",
+        isCapabilities,
+        "capabilities",
+        requestOptions?.signal,
+      ),
     metrics: (params = {}) =>
       request(
         `/metrics${queryString({ job_type: params.jobType })}`,
@@ -591,7 +640,12 @@ export function createRunledgerAdminClient(
         params.signal,
       ),
     job: (jobId, requestOptions) =>
-      request(`/jobs/${encodeURIComponent(jobId)}`, isJobResponse, "job", requestOptions?.signal),
+      request(
+        `/jobs/${encodeURIComponent(jobId)}`,
+        isJobResponse,
+        "job",
+        requestOptions?.signal,
+      ),
     jobEvents: (jobId, params = {}) =>
       request(
         `/jobs/${encodeURIComponent(jobId)}/events${queryString({

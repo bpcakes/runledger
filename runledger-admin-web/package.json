@@ -9,6 +9,7 @@
   ],
   "files": [
     "dist",
+    "src",
     "LICENSE",
     "README.md"
   ],
@@ -30,8 +31,9 @@
   "scripts": {
     "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/copy-css.mjs",
     "clean": "node scripts/clean.mjs",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"tests/**/*.{ts,tsx}\" \"*.json\"",
     "prepack": "npm run build",
-    "test": "npm run typecheck && vitest run",
+    "test": "npm run typecheck && npm run format:check && vitest run",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "test:watch": "vitest"
   },
@@ -43,6 +45,7 @@
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "jsdom": "30.0.1",
+    "prettier": "3.9.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "typescript": "6.0.3",

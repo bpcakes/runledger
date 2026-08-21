@@ -18,8 +18,18 @@ const timestamp = "2026-08-21T07:00:00Z";
 export const capabilities: Capabilities = {
   actions: [],
   api_version: "v1",
-  resources: ["metrics", "jobs", "job_events", "job_logs", "workflows", "definitions"],
-  scope: { kind: "organization", organization_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+  resources: [
+    "metrics",
+    "jobs",
+    "job_events",
+    "job_logs",
+    "workflows",
+    "definitions",
+  ],
+  scope: {
+    kind: "organization",
+    organization_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  },
   visibility: "metadata_only",
 };
 
@@ -70,7 +80,10 @@ export const metrics: MetricsResponse = {
   ],
 };
 
-export const jobs: JobsResponse = { items: [job], page: { has_more: false, limit: 50, offset: 0 } };
+export const jobs: JobsResponse = {
+  items: [job],
+  page: { has_more: false, limit: 50, offset: 0 },
+};
 export const jobResponse: JobResponse = { job };
 export const events: JobEventsResponse = {
   items: [
@@ -87,7 +100,13 @@ export const events: JobEventsResponse = {
       stage: "queued",
     },
   ],
-  page: { cursor: null, has_more: false, limit: 50, next_cursor: "1", order: "newest_first" },
+  page: {
+    cursor: null,
+    has_more: false,
+    limit: 50,
+    next_cursor: "1",
+    order: "newest_first",
+  },
 };
 export const logs: JobLogsResponse = {
   items: [
@@ -101,7 +120,13 @@ export const logs: JobLogsResponse = {
       run_number: 1,
     },
   ],
-  page: { cursor: null, has_more: false, limit: 50, next_cursor: "1", order: "newest_first" },
+  page: {
+    cursor: null,
+    has_more: false,
+    limit: 50,
+    next_cursor: "1",
+    order: "newest_first",
+  },
 };
 
 const workflow = {

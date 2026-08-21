@@ -21,8 +21,8 @@ smoke/external-consumer/target/
 /.vscode/
 
 # JavaScript package artifacts
-node_modules/
-dist/
+/runledger-admin-web/node_modules/
+/runledger-admin-web/dist/
 
 # OS metadata
 .DS_Store

@@ -29,7 +29,10 @@ function jsonResponse(value: unknown, status = 200): Response {
 
 describe("createRunledgerAdminClient", () => {
   it("calls every v1 read endpoint and validates its response", async () => {
-    const calls: Array<{ readonly input: string; readonly init?: RequestInit }> = [];
+    const calls: Array<{
+      readonly input: string;
+      readonly init?: RequestInit;
+    }> = [];
     const fetcher: FetchLike = async (input, init) => {
       const url = String(input);
       calls.push({ input: url, ...(init === undefined ? {} : { init }) });
@@ -39,10 +42,14 @@ describe("createRunledgerAdminClient", () => {
       if (url.includes(`/jobs/${jobId}/logs`)) return jsonResponse(logs);
       if (url.endsWith(`/jobs/${jobId}`)) return jsonResponse(jobResponse);
       if (url.includes("/jobs")) return jsonResponse(jobs);
-      if (url.includes(`/workflows/${workflowId}`)) return jsonResponse(workflowResponse);
+      if (url.includes(`/workflows/${workflowId}`))
+        return jsonResponse(workflowResponse);
       if (url.includes("/workflows")) return jsonResponse(workflows);
       if (url.includes("/definitions")) return jsonResponse(definitions);
-      return jsonResponse({ error: { code: "test.missing", message: "Missing fixture." } }, 500);
+      return jsonResponse(
+        { error: { code: "test.missing", message: "Missing fixture." } },
+        500,
+      );
     };
     const client = createRunledgerAdminClient({
       baseUrl: "/custom/runledger/",
@@ -55,15 +62,23 @@ describe("createRunledgerAdminClient", () => {
     await client.metrics({ jobType: "jobs.customer" });
     await client.jobs({ limit: 25, offset: 50, status: "PENDING" });
     await client.job(jobId);
-    await client.jobEvents(jobId, { cursor: "9007199254740993", limit: 10, order: "oldest_first" });
+    await client.jobEvents(jobId, {
+      cursor: "9007199254740993",
+      limit: 10,
+      order: "oldest_first",
+    });
     await client.jobLogs(jobId);
     await client.workflows({ workflowType: "customer" });
     await client.workflow(workflowId, { dependencyOffset: 25, stepLimit: 10 });
     await client.definitions({ jobType: "import" });
 
     expect(calls).toHaveLength(9);
-    expect(calls[1]?.input).toBe("/custom/runledger/metrics?job_type=jobs.customer");
-    expect(calls[2]?.input).toBe("/custom/runledger/jobs?limit=25&offset=50&status=PENDING");
+    expect(calls[1]?.input).toBe(
+      "/custom/runledger/metrics?job_type=jobs.customer",
+    );
+    expect(calls[2]?.input).toBe(
+      "/custom/runledger/jobs?limit=25&offset=50&status=PENDING",
+    );
     expect(calls[4]?.input).toBe(
       `/custom/runledger/jobs/${jobId}/events?cursor=9007199254740993&limit=10&order=oldest_first`,
     );
@@ -71,16 +86,29 @@ describe("createRunledgerAdminClient", () => {
       `/custom/runledger/workflows/${workflowId}?dependency_offset=25&step_limit=10`,
     );
     expect(calls[0]?.init?.credentials).toBe("include");
-    expect(calls[0]?.init?.headers).toEqual({ Accept: "application/json", "X-CSRF-Token": "csrf-token" });
+    expect(calls[0]?.init?.headers).toEqual({
+      Accept: "application/json",
+      "X-CSRF-Token": "csrf-token",
+    });
   });
 
   it("returns a typed safe HTTP error", async () => {
     const client = createRunledgerAdminClient({
       fetch: async () =>
-        jsonResponse({ error: { code: "admin.unauthorized", message: "Admin access is required." } }, 401),
+        jsonResponse(
+          {
+            error: {
+              code: "admin.unauthorized",
+              message: "Admin access is required.",
+            },
+          },
+          401,
+        ),
     });
 
-    const error = await client.capabilities().catch((reason: unknown) => reason);
+    const error = await client
+      .capabilities()
+      .catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(RunledgerAdminHttpError);
     expect(error).toMatchObject({ code: "admin.unauthorized", status: 401 });
     expect((error as Error).message).toBe("Admin access is required.");
@@ -91,14 +119,20 @@ describe("createRunledgerAdminClient", () => {
       fetch: async () => new Response("Bad gateway", { status: 502 }),
     });
 
-    const error = await client.capabilities().catch((reason: unknown) => reason);
+    const error = await client
+      .capabilities()
+      .catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(RunledgerAdminHttpError);
     expect(error).toMatchObject({ code: "admin.http_error", status: 502 });
   });
 
   it("rejects a successful response that violates the contract", async () => {
-    const client = createRunledgerAdminClient({ fetch: async () => jsonResponse({ items: [{}] }) });
-    await expect(client.metrics()).rejects.toBeInstanceOf(RunledgerAdminContractError);
+    const client = createRunledgerAdminClient({
+      fetch: async () => jsonResponse({ items: [{}] }),
+    });
+    await expect(client.metrics()).rejects.toBeInstanceOf(
+      RunledgerAdminContractError,
+    );
   });
 
   it("rejects non-JSON values hidden inside typed payload fields", async () => {
@@ -107,8 +141,11 @@ describe("createRunledgerAdminClient", () => {
       items: [{ ...jobs.items[0], payload: { invalid: undefined } }],
     };
     const client = createRunledgerAdminClient({
-      fetch: async () => ({ json: async () => invalidJobs, ok: true, status: 200 }) as Response,
+      fetch: async () =>
+        ({ json: async () => invalidJobs, ok: true, status: 200 }) as Response,
     });
-    await expect(client.jobs()).rejects.toBeInstanceOf(RunledgerAdminContractError);
+    await expect(client.jobs()).rejects.toBeInstanceOf(
+      RunledgerAdminContractError,
+    );
   });
 });

@@ -48,6 +48,10 @@ export function RunledgerPage() {
 }
 ```
 
+Keep the client identity stable for the lifetime of the panel, as in the
+module-scoped example above (or create it with `useMemo`). Passing a newly
+created client on every render restarts the active reads and polling cycle.
+
 Translate `route` to your own URL if deep linking is needed. Override the
 `--rla-*` CSS custom properties or omit the stylesheet and target the semantic
 `rla-*` class names from the host design system.

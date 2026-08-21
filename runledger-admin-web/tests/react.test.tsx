@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RunledgerAdminClient } from "../src/client.js";
@@ -49,33 +55,72 @@ function Harness() {
 describe("RunledgerAdminPanel", () => {
   it("renders overview metrics and effective access", async () => {
     render(<Harness />);
-    expect(await screen.findByRole("heading", { level: 2, name: "Overview" })).toBeTruthy();
-    expect(await screen.findByText("Organization aaaaaaaa", { exact: false })).toBeTruthy();
-    expect(screen.getByRole("table", { name: "Current job health" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Overview" }),
+    ).toBeTruthy();
+    expect(
+      await screen.findByText("Organization aaaaaaaa", { exact: false }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("table", { name: "Current job health" }),
+    ).toBeTruthy();
     expect(screen.getByText("jobs.customer.import")).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "Dead-lettered 24h" })).toBeTruthy();
+    expect(
+      screen.getByRole("columnheader", { name: "Dead-lettered 24h" }),
+    ).toBeTruthy();
     expect(screen.getByRole("cell", { name: "2" })).toBeTruthy();
   });
 
   it("uses controlled navigation and communicates redaction", async () => {
     render(<Harness />);
     fireEvent.click(await screen.findByRole("button", { name: "Jobs" }));
-    expect(await screen.findByRole("heading", { level: 2, name: "Jobs" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Jobs" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", { name: "Job list pagination" }),
+    ).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: jobId }));
-    expect(await screen.findByRole("heading", { level: 2, name: `Job ${jobId}` })).toBeTruthy();
-    expect(screen.getAllByRole("note")[0]?.textContent).toContain("Sensitive fields hidden");
+    expect(
+      await screen.findByRole("heading", { level: 2, name: `Job ${jobId}` }),
+    ).toBeTruthy();
+    expect(screen.getAllByRole("note")[0]?.textContent).toContain(
+      "Sensitive fields hidden",
+    );
     expect(screen.queryByText("private@example.test")).toBeNull();
     expect(screen.getByText("Message hidden")).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", { name: "Event history pagination" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", { name: "Log history pagination" }),
+    ).toBeTruthy();
   });
 
   it("navigates from a workflow step to its job without a router dependency", async () => {
     render(<Harness />);
     fireEvent.click(await screen.findByRole("button", { name: "Workflows" }));
-    expect(await screen.findByRole("heading", { level: 2, name: "Workflows" })).toBeTruthy();
-    fireEvent.click(await screen.findByRole("button", { name: workflows.items[0]!.id }));
-    expect(await screen.findByRole("heading", { level: 2, name: /Workflow/ })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Workflows" }),
+    ).toBeTruthy();
+    fireEvent.click(
+      await screen.findByRole("button", { name: workflows.items[0]!.id }),
+    );
+    expect(
+      await screen.findByRole("heading", { level: 2, name: /Workflow/ }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", { name: "Workflow step pagination" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", {
+        name: "Workflow dependency pagination",
+      }),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: jobId }));
-    expect(await screen.findByRole("heading", { level: 2, name: `Job ${jobId}` })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: `Job ${jobId}` }),
+    ).toBeTruthy();
   });
 
   it("does not request service-wide definitions when capabilities omit them", async () => {
@@ -84,7 +129,9 @@ describe("RunledgerAdminPanel", () => {
       ...client,
       capabilities: async () => ({
         ...capabilities,
-        resources: capabilities.resources.filter((resource) => resource !== "definitions"),
+        resources: capabilities.resources.filter(
+          (resource) => resource !== "definitions",
+        ),
       }),
       definitions: definitionsSpy,
     };
@@ -97,22 +144,31 @@ describe("RunledgerAdminPanel", () => {
       />,
     );
 
-    expect(await screen.findByRole("heading", { name: "Definitions unavailable" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "Definitions unavailable" }),
+    ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Definitions" })).toBeNull();
     expect(definitionsSpy).not.toHaveBeenCalled();
   });
 
   it("pages backward through newest-first job history", async () => {
-    const jobEvents = vi.fn<RunledgerAdminClient["jobEvents"]>(async (_jobId, params) => ({
-      ...events,
-      items: [{ ...events.items[0]!, id: params?.cursor === undefined ? "51" : "1" }],
-      page: {
-        ...events.page,
-        cursor: params?.cursor ?? null,
-        has_more: params?.cursor === undefined,
-        next_cursor: params?.cursor === undefined ? "2" : "1",
-      },
-    }));
+    const jobEvents = vi.fn<RunledgerAdminClient["jobEvents"]>(
+      async (_jobId, params) => ({
+        ...events,
+        items: [
+          {
+            ...events.items[0]!,
+            id: params?.cursor === undefined ? "51" : "1",
+          },
+        ],
+        page: {
+          ...events.page,
+          cursor: params?.cursor ?? null,
+          has_more: params?.cursor === undefined,
+          next_cursor: params?.cursor === undefined ? "2" : "1",
+        },
+      }),
+    );
     render(
       <RunledgerAdminPanel
         client={{ ...client, jobEvents }}
@@ -122,9 +178,14 @@ describe("RunledgerAdminPanel", () => {
       />,
     );
 
-    fireEvent.click((await screen.findAllByRole("button", { name: "Older" }))[0]!);
+    fireEvent.click(
+      (await screen.findAllByRole("button", { name: "Older" }))[0]!,
+    );
     expect(await screen.findByText("Page 2 · newest first")).toBeTruthy();
-    expect(jobEvents).toHaveBeenLastCalledWith(jobId, expect.objectContaining({ cursor: "2" }));
+    expect(jobEvents).toHaveBeenLastCalledWith(
+      jobId,
+      expect.objectContaining({ cursor: "2" }),
+    );
   });
 
   it("waits for each poll to settle before scheduling the next one", async () => {
