@@ -1622,6 +1622,13 @@ creates a `v0.10.1` tag, and atomically pushes the current branch and tag. The
 publication preflight requires authenticated GitHub and npm CLIs. Set
 `PUBLISH_REMOTE` to override the git remote for the final push.
 
+The publish command is safely resumable after a partial registry publication,
+but only from the exact artifact set built by the current release commit. Before
+the first irreversible upload it packages every crate and the npm package. Any
+same-version artifact already present on crates.io or npm must have the same
+SHA-256 or registry integrity value; a mismatch aborts instead of combining
+artifacts from different commits under one version.
+
 Observable contract changes to call out in release notes for this line:
 
 - Migration `202608180001_job_enqueue_intents` adds durable, strictly

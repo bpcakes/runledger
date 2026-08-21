@@ -19,12 +19,13 @@ WORKSPACE_DEPENDENCY_CRATES=(
   "runledger-runtime"
 )
 PUBLISH_REMOTE="${PUBLISH_REMOTE:-origin}"
-NPM_PACK_DIR=""
+RELEASE_ARTIFACT_DIR=""
 NPM_PACKAGE_ARCHIVE=""
+CARGO_PACKAGE_DIR=""
 
 cleanup() {
-  if [[ -n "$NPM_PACK_DIR" ]]; then
-    rm -rf -- "$NPM_PACK_DIR"
+  if [[ -n "$RELEASE_ARTIFACT_DIR" ]]; then
+    rm -rf -- "$RELEASE_ARTIFACT_DIR"
   fi
 }
 
@@ -177,21 +178,58 @@ version_exists_on_crates_io() {
   esac
 }
 
-npm_version_exists() {
-  local version="$1"
-  local output
-  if output="$(npm view "@runledger/admin@${version}" version --json 2>&1)"; then
-    return 0
-  fi
-  if [[ "$output" == *E404* ]]; then
-    return 1
-  fi
-  echo "npm lookup failed: ${output}" >&2
-  return 2
+file_digest() {
+  local algorithm="$1"
+  local path="$2"
+
+  node -e '
+    const { createHash } = require("node:crypto");
+    const { readFileSync } = require("node:fs");
+    const [algorithm, path] = process.argv.slice(1);
+    process.stdout.write(createHash(algorithm).update(readFileSync(path)).digest("hex"));
+  ' "$algorithm" "$path"
 }
 
-prepare_npm_package() {
-  NPM_PACK_DIR="$(mktemp -d)"
+file_sha512_integrity() {
+  local path="$1"
+
+  node -e '
+    const { createHash } = require("node:crypto");
+    const { readFileSync } = require("node:fs");
+    const digest = createHash("sha512").update(readFileSync(process.argv[1])).digest("base64");
+    process.stdout.write(`sha512-${digest}`);
+  ' "$path"
+}
+
+crate_package_archive() {
+  local crate="$1"
+  local version="$2"
+  echo "${CARGO_PACKAGE_DIR}/${crate}-${version}.crate"
+}
+
+prepare_release_artifacts() {
+  local version="$1"
+  RELEASE_ARTIFACT_DIR="$(mktemp -d)"
+  CARGO_PACKAGE_DIR="$(
+    cargo metadata --format-version 1 --no-deps \
+      | node -e '
+          let input = "";
+          process.stdin.setEncoding("utf8");
+          process.stdin.on("data", (chunk) => { input += chunk; });
+          process.stdin.on("end", () => {
+            process.stdout.write(`${JSON.parse(input).target_directory}/package`);
+          });
+        '
+  )"
+
+  local crate
+  for crate in "${PUBLISHABLE_CRATES[@]}"; do
+    cargo package --locked --no-verify -p "$crate" >/dev/null
+    local archive
+    archive="$(crate_package_archive "$crate" "$version")"
+    [[ -f "$archive" ]] \
+      || die "cargo package did not create the expected archive: ${archive}"
+  done
 
   npm ci --prefix "$ROOT_DIR/runledger-admin-web"
 
@@ -199,10 +237,10 @@ prepare_npm_package() {
   archive_name="$(
     npm pack \
       "$ROOT_DIR/runledger-admin-web" \
-      --pack-destination "$NPM_PACK_DIR" \
+      --pack-destination "$RELEASE_ARTIFACT_DIR" \
       --silent
   )"
-  NPM_PACKAGE_ARCHIVE="$NPM_PACK_DIR/$archive_name"
+  NPM_PACKAGE_ARCHIVE="$RELEASE_ARTIFACT_DIR/$archive_name"
   [[ -f "$NPM_PACKAGE_ARCHIVE" ]] \
     || die "npm pack did not create the expected archive: ${NPM_PACKAGE_ARCHIVE}"
 
@@ -226,7 +264,61 @@ prepare_npm_package() {
   [[ "$openapi_mode" == "-rw-r--r--" ]] \
     || die "npm package openapi.json must have mode 0644, found ${openapi_mode}"
 
-  echo "Prepared npm package: ${NPM_PACKAGE_ARCHIVE}"
+  echo "Prepared release artifacts from commit $(git rev-parse HEAD)."
+}
+
+verify_existing_crate_artifact() {
+  local crate="$1"
+  local version="$2"
+  local local_archive
+  local_archive="$(crate_package_archive "$crate" "$version")"
+  local remote_archive="$RELEASE_ARTIFACT_DIR/${crate}-${version}.published.crate"
+
+  curl -fsSL \
+    -A "runledger-release-script" \
+    "https://crates.io/api/v1/crates/${crate}/${version}/download" \
+    -o "$remote_archive" \
+    || die "failed to download published ${crate} ${version} for identity verification"
+
+  local local_digest
+  local remote_digest
+  local_digest="$(file_digest sha256 "$local_archive")"
+  remote_digest="$(file_digest sha256 "$remote_archive")"
+  if [[ "$local_digest" != "$remote_digest" ]]; then
+    die "published ${crate} ${version} does not match the artifact built from commit $(git rev-parse HEAD)"
+  fi
+
+  echo "Verified identical published artifact: ${crate} ${version} (${local_digest})"
+}
+
+npm_version_exists() {
+  local version="$1"
+  local output
+  if output="$(npm view "@runledger/admin@${version}" version --json 2>&1)"; then
+    return 0
+  fi
+  if [[ "$output" == *E404* ]]; then
+    return 1
+  fi
+  echo "npm lookup failed: ${output}" >&2
+  return 2
+}
+
+verify_existing_npm_artifact() {
+  local version="$1"
+  local published_integrity
+  published_integrity="$(npm view "@runledger/admin@${version}" dist.integrity)" \
+    || die "failed to read npm integrity for @runledger/admin ${version}"
+  [[ -n "$published_integrity" ]] \
+    || die "npm did not report integrity for @runledger/admin ${version}"
+
+  local local_integrity
+  local_integrity="$(file_sha512_integrity "$NPM_PACKAGE_ARCHIVE")"
+  if [[ "$local_integrity" != "$published_integrity" ]]; then
+    die "published @runledger/admin ${version} does not match the artifact built from commit $(git rev-parse HEAD)"
+  fi
+
+  echo "Verified identical published artifact: @runledger/admin ${version} (${local_integrity})"
 }
 
 wait_for_npm_index() {
@@ -286,19 +378,29 @@ git remote get-url "$PUBLISH_REMOTE" >/dev/null \
 require_remote_tag_absent "$PUBLISH_REMOTE" "$TAG"
 ./scripts/verify-release-ci.sh "$PUBLISH_REMOTE" "$current_branch"
 require_dry_run_push "$PUBLISH_REMOTE" "$current_branch" "$TAG"
+prepare_release_artifacts "$VERSION"
+
+for crate in "${PUBLISHABLE_CRATES[@]}"; do
+  if version_exists_on_crates_io "$crate" "$VERSION"; then
+    verify_existing_crate_artifact "$crate" "$VERSION"
+  fi
+done
 
 npm_already_published=false
 npm_status=0
 npm_version_exists "$VERSION" || npm_status=$?
 case "$npm_status" in
-  0) npm_already_published=true ;;
-  1) prepare_npm_package ;;
+  0)
+    verify_existing_npm_artifact "$VERSION"
+    npm_already_published=true
+    ;;
+  1) ;;
   *) die "could not determine whether @runledger/admin ${VERSION} exists on npm" ;;
 esac
 
 for crate in "${PUBLISHABLE_CRATES[@]}"; do
   if version_exists_on_crates_io "$crate" "$VERSION"; then
-    echo "${crate} ${VERSION} already exists on crates.io; assuming a previous publish completed."
+    echo "${crate} ${VERSION} already exists on crates.io and matches this release commit."
   else
     cargo publish --dry-run -p "$crate"
     cargo publish -p "$crate"
@@ -308,7 +410,7 @@ for crate in "${PUBLISHABLE_CRATES[@]}"; do
 done
 
 if [[ "$npm_already_published" == true ]]; then
-  echo "@runledger/admin ${VERSION} already exists on npm; assuming a previous publish completed."
+  echo "@runledger/admin ${VERSION} already exists on npm and matches this release commit."
 else
   npm publish "$NPM_PACKAGE_ARCHIVE" --access public
 fi

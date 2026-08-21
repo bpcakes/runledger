@@ -38,6 +38,9 @@ All notable changes to this workspace are documented here.
   all matching attempts instead of averaging per-organization percentiles.
 - Normalize the generated npm OpenAPI artifact to mode 0644 and verify that
   mode during contract checks and release packaging.
+- Verify the exact crates.io and npm artifact identities before resuming a
+  partially published release, preventing one version from combining artifacts
+  built from different commits.
 
 ## [0.10.1] - 2026-08-20
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)
