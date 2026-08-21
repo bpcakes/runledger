@@ -7,10 +7,12 @@ PUBLISHABLE_CRATES=(
   "runledger-core"
   "runledger-test-support"
   "runledger-postgres"
+  "runledger-admin"
   "runledger-runtime"
   "runledger-tui"
 )
 WORKSPACE_DEPENDENCY_CRATES=(
+  "runledger-admin"
   "runledger-core"
   "runledger-test-support"
   "runledger-postgres"
@@ -38,6 +40,9 @@ release_generated_path() {
     Cargo.toml | \
       Cargo.lock | \
       smoke/external-consumer/Cargo.lock | \
+      runledger-admin/Cargo.toml | \
+      runledger-admin-web/package.json | \
+      runledger-admin-web/package-lock.json | \
       runledger-core/Cargo.toml | \
       runledger-test-support/Cargo.toml | \
       runledger-postgres/Cargo.toml | \
@@ -102,6 +107,13 @@ require_manifest_versions() {
       "$ROOT_DIR/Cargo.toml" \
       || die "cannot resume: workspace dependency for ${crate} is not pinned to ${version}"
   done
+
+  local npm_version
+  npm_version="$(node -p "require('./runledger-admin-web/package.json').version")" \
+    || die "could not read @runledger/admin package version"
+  if [[ "$npm_version" != "$version" ]]; then
+    die "cannot resume: @runledger/admin package is ${npm_version}, expected ${version}"
+  fi
 }
 
 require_clean_or_resumable_worktree() {
@@ -159,6 +171,19 @@ version_exists_on_crates_io() {
   esac
 }
 
+npm_version_exists() {
+  local version="$1"
+  local output
+  if output="$(npm view "@runledger/admin@${version}" version --json 2>&1)"; then
+    return 0
+  fi
+  if [[ "$output" == *E404* ]]; then
+    return 1
+  fi
+  echo "npm lookup failed: ${output}" >&2
+  return 2
+}
+
 bump_crate_manifest() {
   local manifest="$1"
   RELEASE_VERSION="$VERSION" perl -0pi -e '
@@ -188,6 +213,7 @@ package_with_workspace_patches() {
     -p "$crate" \
     "$@" \
     --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
+    --config "patch.crates-io.runledger-admin.path=\"${ROOT_DIR}/runledger-admin\"" \
     --config "patch.crates-io.runledger-test-support.path=\"${ROOT_DIR}/runledger-test-support\"" \
     --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
     --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
@@ -206,6 +232,8 @@ cd "$ROOT_DIR"
 require_command cargo
 require_command curl
 require_command git
+require_command node
+require_command npm
 validate_version "$VERSION"
 require_clean_or_resumable_worktree "$VERSION"
 
@@ -215,6 +243,14 @@ for crate in "${PUBLISHABLE_CRATES[@]}"; do
   fi
 done
 
+npm_status=0
+npm_version_exists "$VERSION" || npm_status=$?
+case "$npm_status" in
+  0) die "@runledger/admin ${VERSION} already exists on npm" ;;
+  1) ;;
+  *) die "could not determine whether @runledger/admin ${VERSION} exists on npm" ;;
+esac
+
 for crate in "${PUBLISHABLE_CRATES[@]}"; do
   bump_crate_manifest "$ROOT_DIR/${crate}/Cargo.toml"
 done
@@ -223,12 +259,15 @@ for crate in "${WORKSPACE_DEPENDENCY_CRATES[@]}"; do
   bump_workspace_dependency "$crate"
 done
 
+npm version "$VERSION" --allow-same-version --no-git-tag-version --prefix "$ROOT_DIR/runledger-admin-web" >/dev/null
+
 cargo update -w
 cargo update \
   --manifest-path "$ROOT_DIR/smoke/external-consumer/Cargo.toml" \
   -p runledger-core \
   -p runledger-test-support \
   -p runledger-postgres \
+  -p runledger-admin \
   -p runledger-runtime
 
 ./scripts/refresh-sqlx-cache.sh
@@ -236,9 +275,13 @@ cargo test --workspace
 ./scripts/run-external-consumer-smoke.sh
 ./scripts/check-package-licenses.sh
 
+npm ci --prefix "$ROOT_DIR/runledger-admin-web"
+npm test --prefix "$ROOT_DIR/runledger-admin-web"
+npm pack "$ROOT_DIR/runledger-admin-web" --dry-run >/dev/null
+
 cargo publish --allow-dirty --dry-run -p runledger-core
 
-for crate in runledger-test-support runledger-postgres runledger-runtime; do
+for crate in runledger-test-support runledger-postgres runledger-admin runledger-runtime; do
   package_with_workspace_patches "$crate" --no-verify >/dev/null
 done
 

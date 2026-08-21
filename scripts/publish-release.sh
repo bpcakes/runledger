@@ -7,16 +7,28 @@ PUBLISHABLE_CRATES=(
   "runledger-core"
   "runledger-test-support"
   "runledger-postgres"
+  "runledger-admin"
   "runledger-runtime"
   "runledger-tui"
 )
 WORKSPACE_DEPENDENCY_CRATES=(
+  "runledger-admin"
   "runledger-core"
   "runledger-test-support"
   "runledger-postgres"
   "runledger-runtime"
 )
 PUBLISH_REMOTE="${PUBLISH_REMOTE:-origin}"
+NPM_PACK_DIR=""
+NPM_PACKAGE_ARCHIVE=""
+
+cleanup() {
+  if [[ -n "$NPM_PACK_DIR" ]]; then
+    rm -rf -- "$NPM_PACK_DIR"
+  fi
+}
+
+trap cleanup EXIT
 
 usage() {
   echo "usage: $0 <version>" >&2
@@ -68,6 +80,13 @@ require_manifest_versions() {
       "$ROOT_DIR/Cargo.toml" \
       || die "workspace dependency for ${crate} is not pinned to ${version}"
   done
+
+  local npm_version
+  npm_version="$(node -p "require('./runledger-admin-web/package.json').version")" \
+    || die "could not read @runledger/admin package version"
+  if [[ "$npm_version" != "$version" ]]; then
+    die "@runledger/admin package is ${npm_version}, expected ${version}"
+  fi
 }
 
 wait_for_crates_io_index() {
@@ -158,6 +177,75 @@ version_exists_on_crates_io() {
   esac
 }
 
+npm_version_exists() {
+  local version="$1"
+  local output
+  if output="$(npm view "@runledger/admin@${version}" version --json 2>&1)"; then
+    return 0
+  fi
+  if [[ "$output" == *E404* ]]; then
+    return 1
+  fi
+  echo "npm lookup failed: ${output}" >&2
+  return 2
+}
+
+prepare_npm_package() {
+  NPM_PACK_DIR="$(mktemp -d)"
+
+  npm ci --prefix "$ROOT_DIR/runledger-admin-web"
+
+  local archive_name
+  archive_name="$(
+    npm pack \
+      "$ROOT_DIR/runledger-admin-web" \
+      --pack-destination "$NPM_PACK_DIR" \
+      --silent
+  )"
+  NPM_PACKAGE_ARCHIVE="$NPM_PACK_DIR/$archive_name"
+  [[ -f "$NPM_PACKAGE_ARCHIVE" ]] \
+    || die "npm pack did not create the expected archive: ${NPM_PACKAGE_ARCHIVE}"
+
+  local required_path
+  for required_path in \
+    package/dist/index.js \
+    package/dist/index.d.ts \
+    package/dist/client.js \
+    package/dist/client.d.ts \
+    package/dist/react.js \
+    package/dist/react.d.ts \
+    package/dist/styles.css; do
+    tar -tzf "$NPM_PACKAGE_ARCHIVE" "$required_path" >/dev/null \
+      || die "npm package is missing ${required_path}"
+  done
+
+  echo "Prepared npm package: ${NPM_PACKAGE_ARCHIVE}"
+}
+
+wait_for_npm_index() {
+  local version="$1"
+  local timeout_seconds="${NPM_INDEX_TIMEOUT_SECONDS:-600}"
+  local start
+  start="$(date +%s)"
+
+  echo "Waiting for npm to index @runledger/admin ${version}..."
+  while true; do
+    local npm_status=0
+    npm_version_exists "$version" || npm_status=$?
+    case "$npm_status" in
+      0) break ;;
+      1)
+        if (( $(date +%s) - start >= timeout_seconds )); then
+          die "timed out waiting for npm to index @runledger/admin ${version}"
+        fi
+        sleep 10
+        ;;
+      *) die "could not query npm while waiting for @runledger/admin ${version}" ;;
+    esac
+  done
+  echo "Indexed: @runledger/admin ${version}"
+}
+
 if [[ $# -ne 1 ]]; then
   usage
   exit 2
@@ -172,6 +260,9 @@ require_command cargo
 require_command curl
 require_command gh
 require_command git
+require_command node
+require_command npm
+require_command tar
 require_clean_worktree
 validate_version "$VERSION"
 require_manifest_versions "$VERSION"
@@ -189,6 +280,15 @@ require_remote_tag_absent "$PUBLISH_REMOTE" "$TAG"
 ./scripts/verify-release-ci.sh "$PUBLISH_REMOTE" "$current_branch"
 require_dry_run_push "$PUBLISH_REMOTE" "$current_branch" "$TAG"
 
+npm_already_published=false
+npm_status=0
+npm_version_exists "$VERSION" || npm_status=$?
+case "$npm_status" in
+  0) npm_already_published=true ;;
+  1) prepare_npm_package ;;
+  *) die "could not determine whether @runledger/admin ${VERSION} exists on npm" ;;
+esac
+
 for crate in "${PUBLISHABLE_CRATES[@]}"; do
   if version_exists_on_crates_io "$crate" "$VERSION"; then
     echo "${crate} ${VERSION} already exists on crates.io; assuming a previous publish completed."
@@ -199,6 +299,13 @@ for crate in "${PUBLISHABLE_CRATES[@]}"; do
 
   wait_for_crates_io_index "$crate" "$VERSION"
 done
+
+if [[ "$npm_already_published" == true ]]; then
+  echo "@runledger/admin ${VERSION} already exists on npm; assuming a previous publish completed."
+else
+  npm publish "$NPM_PACKAGE_ARCHIVE" --access public
+fi
+wait_for_npm_index "$VERSION"
 
 git tag "$TAG"
 

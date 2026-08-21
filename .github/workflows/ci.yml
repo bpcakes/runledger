@@ -65,6 +65,8 @@ jobs:
         run: cargo test -p runledger-postgres
       - name: Test runledger-runtime
         run: cargo test -p runledger-runtime
+      - name: Test runledger-admin
+        run: cargo test -p runledger-admin --all-features -- --nocapture
       - name: Test runledger-test-support library
         run: cargo test -p runledger-test-support --lib
       - name: Test container cleanup after normal exit
@@ -95,6 +97,30 @@ jobs:
         run: cargo test -p runledger-tui
       - name: Run packaged-crate smoke test
         run: ./scripts/run-external-consumer-smoke.sh
+
+  frontend:
+    name: Admin React package
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # actions/setup-node v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: runledger-admin-web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: runledger-admin-web
+      - name: Test package
+        run: npm test
+        working-directory: runledger-admin-web
+      - name: Verify clean package build and contents
+        run: |
+          npm run clean
+          npm pack --dry-run
+        working-directory: runledger-admin-web
 
   deny:
     name: Cargo deny
