@@ -21,6 +21,7 @@ test-support = []
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+crc = "3.4"
 cron = { workspace = true }
 runledger-core = { workspace = true, features = ["sqlx-postgres"] }
 serde = { version = "1", features = ["derive"] }

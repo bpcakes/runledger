@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Duration;
 
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migrator};
 
@@ -33,6 +34,8 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;
 type RunledgerMigrationMap = HashMap<i64, &'static sqlx::migrate::Migration>;
+
+const MIGRATION_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 struct RecoverableConcurrentIndex {
     migration_version: i64,
@@ -167,8 +170,7 @@ pub async fn migrate_after_idempotency_cutover(
         // PostgreSQL advisory migration locks are session-scoped; never return
         // a possibly locked session to the pool if this future is cancelled.
         conn.close_on_drop();
-        (*conn)
-            .lock()
+        acquire_migration_lock(&mut conn)
             .await
             .map_err(SchemaCompatibilityError::Incompatible)?;
     }
@@ -198,6 +200,39 @@ pub async fn migrate_after_idempotency_cutover(
             validate_idempotency_cutover_constraints(&mut conn).await
         }
     }
+}
+
+/// Acquire SQLx's PostgreSQL migration lock without leaving a statement-level
+/// snapshot open while another migrator owns it.
+///
+/// `CREATE INDEX CONCURRENTLY` waits for snapshots that predate its validation
+/// scan. A blocking `pg_advisory_lock` statement can therefore deadlock with
+/// the lock holder when the holder is applying a concurrent-index migration.
+/// Polling `pg_try_advisory_lock` gives each unsuccessful attempt a bounded
+/// statement lifetime while preserving coordination with raw SQLx migrators.
+async fn acquire_migration_lock(conn: &mut PgPoolConnection) -> Result<(), MigrateError> {
+    let database_name = sqlx::query_scalar::<_, String>("SELECT current_database()")
+        .fetch_one(&mut **conn)
+        .await?;
+    let lock_id = sqlx_migration_lock_id(&database_name);
+
+    loop {
+        let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+            .bind(lock_id)
+            .fetch_one(&mut **conn)
+            .await?;
+        if acquired {
+            return Ok(());
+        }
+        tokio::time::sleep(MIGRATION_LOCK_RETRY_INTERVAL).await;
+    }
+}
+
+/// Match SQLx 0.8's private PostgreSQL migrator key so mixed-version rolling
+/// deployments and callers of the raw SQLx migrator still serialize together.
+fn sqlx_migration_lock_id(database_name: &str) -> i64 {
+    const CRC_IEEE: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
+    0x3d32ad9e * i64::from(CRC_IEEE.checksum(database_name.as_bytes()))
 }
 
 /// Apply the bundled Runledger schema migrations to a PostgreSQL pool.

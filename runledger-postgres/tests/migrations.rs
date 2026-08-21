@@ -1012,6 +1012,88 @@ async fn raw_version_missing_strands_session_lock_until_pool_close_but_safe_path
 }
 
 #[tokio::test]
+async fn safe_migrator_does_not_deadlock_concurrent_index_migrations_while_waiting() {
+    let harness = TestHarness::fresh("runledger_pg_concurrent_migration_lock").await;
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read exact PostgreSQL version for concurrent migration lock regression");
+    eprintln!("concurrent migration lock regression PostgreSQL server_version={server_version}");
+
+    apply_runledger_migrations_through(
+        &harness.pool,
+        ADMIN_JOB_LOGS_HISTORY_INDEX_MIGRATION_VERSION,
+    )
+    .await;
+
+    let _migration_connection_budget = acquire_test_db_connection_budget(2).await;
+    let database_url = harness.database.url.clone();
+    let holder_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect migration lock holder pool");
+    let mut holder = holder_pool
+        .acquire()
+        .await
+        .expect("acquire migration lock holder connection");
+    (*holder)
+        .lock()
+        .await
+        .expect("acquire raw SQLx migration lock");
+
+    let safe_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect waiting safe migration pool");
+    let waiting_safe_pool = safe_pool.clone();
+    let safe_migration =
+        tokio::spawn(async move { migrate_after_idempotency_cutover(&waiting_safe_pool).await });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        !safe_migration.is_finished(),
+        "safe migrator must coordinate with the raw SQLx migration lock"
+    );
+
+    let concurrent_index_migration = MIGRATOR
+        .iter()
+        .find(|migration| {
+            migration.migration_type.is_up_migration()
+                && migration.version == ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION
+        })
+        .expect("admin jobs created-at concurrent index migration exists");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        (*holder).apply(concurrent_index_migration),
+    )
+    .await
+    .expect("concurrent index migration must not deadlock with the waiting safe migrator")
+    .expect("apply concurrent index migration while holding the migration lock");
+
+    (*holder)
+        .unlock()
+        .await
+        .expect("release raw SQLx migration lock");
+    drop(holder);
+    holder_pool.close().await;
+
+    tokio::time::timeout(Duration::from_secs(10), safe_migration)
+        .await
+        .expect("safe migrator must acquire the released lock")
+        .expect("safe migration task must not panic")
+        .expect("safe migrator must apply remaining migrations");
+    assert_eq!(
+        advisory_lock_count_for_database(&harness.pool).await,
+        0,
+        "safe migration completion must release the migration lock"
+    );
+    safe_pool.close().await;
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
 async fn continuation_metrics_require_well_typed_v0_6_or_v0_7_payloads() {
     const JOB_TYPE: &str = "jobs.test.continuation_payload_validation";
 

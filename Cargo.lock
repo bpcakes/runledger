@@ -2481,6 +2481,7 @@ name = "runledger-postgres"
 version = "0.10.1"
 dependencies = [
  "chrono",
+ "crc",
  "cron",
  "runledger-core",
  "runledger-test-support",
