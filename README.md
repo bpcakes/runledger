@@ -1318,7 +1318,9 @@ nonblocking lock attempts. This keeps each unsuccessful statement snapshot
 short-lived, so a waiting startup process cannot deadlock a lock holder that is
 building one of the concurrent indexes. Raw `MIGRATOR.run(...)` still uses
 SQLx's blocking lock behavior and retains the disposable-connection guidance
-above.
+above. Lock acquisition retains SQLx's unbounded-wait semantics; the helper
+emits tracing events when it begins waiting, every 30 seconds while contention
+continues, and after it acquires the lock.
 
 Release 0.8 requires the complete migration set through
 `202607280005_workflow_recoveries` before any 0.8 runtime loop or persistence

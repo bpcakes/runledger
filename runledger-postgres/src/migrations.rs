@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migrator};
 
@@ -36,6 +36,7 @@ type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;
 type RunledgerMigrationMap = HashMap<i64, &'static sqlx::migrate::Migration>;
 
 const MIGRATION_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const MIGRATION_LOCK_WAIT_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 struct RecoverableConcurrentIndex {
     migration_version: i64,
@@ -215,6 +216,9 @@ async fn acquire_migration_lock(conn: &mut PgPoolConnection) -> Result<(), Migra
         .fetch_one(&mut **conn)
         .await?;
     let lock_id = sqlx_migration_lock_id(&database_name);
+    let wait_started = Instant::now();
+    let mut next_wait_log = MIGRATION_LOCK_WAIT_LOG_INTERVAL;
+    let mut waiting = false;
 
     loop {
         let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
@@ -222,7 +226,32 @@ async fn acquire_migration_lock(conn: &mut PgPoolConnection) -> Result<(), Migra
             .fetch_one(&mut **conn)
             .await?;
         if acquired {
+            if waiting {
+                tracing::info!(
+                    database_name,
+                    waited_seconds = wait_started.elapsed().as_secs(),
+                    "acquired Runledger migration lock"
+                );
+            }
             return Ok(());
+        }
+        if waiting {
+            let elapsed = wait_started.elapsed();
+            if elapsed >= next_wait_log {
+                tracing::info!(
+                    database_name,
+                    waited_seconds = elapsed.as_secs(),
+                    "still waiting for Runledger migration lock"
+                );
+                next_wait_log = next_wait_log.saturating_add(MIGRATION_LOCK_WAIT_LOG_INTERVAL);
+            }
+        } else {
+            tracing::info!(
+                database_name,
+                retry_interval_ms = MIGRATION_LOCK_RETRY_INTERVAL.as_millis(),
+                "waiting for Runledger migration lock"
+            );
+            waiting = true;
         }
         tokio::time::sleep(MIGRATION_LOCK_RETRY_INTERVAL).await;
     }
@@ -230,6 +259,9 @@ async fn acquire_migration_lock(conn: &mut PgPoolConnection) -> Result<(), Migra
 
 /// Match SQLx 0.8's private PostgreSQL migrator key so mixed-version rolling
 /// deployments and callers of the raw SQLx migrator still serialize together.
+/// The PostgreSQL-backed `safe_migrator_does_not_deadlock_concurrent_index_migrations_while_waiting`
+/// regression test must remain enabled when updating SQLx because it verifies
+/// this private upstream contract end to end.
 fn sqlx_migration_lock_id(database_name: &str) -> i64 {
     const CRC_IEEE: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
     0x3d32ad9e * i64::from(CRC_IEEE.checksum(database_name.as_bytes()))
@@ -665,4 +697,71 @@ fn validate_checksum(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{MIGRATOR, RECOVERABLE_CONCURRENT_INDEXES};
+
+    #[test]
+    fn every_concurrent_index_migration_has_exact_recovery_metadata() {
+        let concurrent_indexes = MIGRATOR
+            .iter()
+            .filter(|migration| migration.migration_type.is_up_migration())
+            .filter_map(|migration| {
+                concurrent_index_target(migration.sql.as_ref())
+                    .map(|(index_name, table_name)| (migration.version, (index_name, table_name)))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let recovery_versions = RECOVERABLE_CONCURRENT_INDEXES
+            .iter()
+            .map(|recovery| recovery.migration_version)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            recovery_versions.len(),
+            RECOVERABLE_CONCURRENT_INDEXES.len(),
+            "concurrent-index recovery entries must not duplicate migration versions"
+        );
+        assert_eq!(
+            concurrent_indexes.keys().copied().collect::<BTreeSet<_>>(),
+            recovery_versions,
+            "every concurrent-index migration must have exactly one recovery entry"
+        );
+        for recovery in RECOVERABLE_CONCURRENT_INDEXES {
+            let target = concurrent_indexes
+                .get(&recovery.migration_version)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "recovery metadata references missing concurrent-index migration {}",
+                        recovery.migration_version
+                    )
+                });
+            assert_eq!(target.0, recovery.index_name);
+            assert_eq!(target.1, recovery.table_name);
+            assert_eq!(
+                recovery.drop_sql,
+                format!("DROP INDEX CONCURRENTLY {}", recovery.index_name)
+            );
+        }
+    }
+
+    fn concurrent_index_target(sql: &str) -> Option<(&str, &str)> {
+        let tokens = sql.split_whitespace().collect::<Vec<_>>();
+        let create_index = tokens
+            .windows(3)
+            .position(|tokens| tokens == ["CREATE", "INDEX", "CONCURRENTLY"])?;
+        let index_name = tokens.get(create_index + 3)?;
+        if tokens.get(create_index + 4) != Some(&"ON") {
+            return None;
+        }
+        let table_name = tokens.get(create_index + 5)?;
+
+        Some((
+            index_name.trim_end_matches(';'),
+            table_name.trim_end_matches(';'),
+        ))
+    }
 }
