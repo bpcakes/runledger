@@ -398,6 +398,9 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
             .iter()
             .all(|item| item["job_type"] != UNUSED_JOB_TYPE)
     );
+    assert_eq!(body["page"]["limit"], 50);
+    assert_eq!(body["page"]["offset"], 0);
+    assert_eq!(body["page"]["max_offset"], runledger_admin::MAX_PAGE_OFFSET);
 
     let (status, _, body) = get_json(
         &app,
@@ -416,6 +419,20 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
             .expect("service-wide metric items")
             .iter()
             .any(|item| item["job_type"] == UNUSED_JOB_TYPE)
+    );
+
+    let (status, _, first_metrics_page) =
+        get_json(&app, "/metrics?limit=1", Some(all_access)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first_metrics_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first_metrics_page["page"]["has_more"], true);
+    let (status, _, second_metrics_page) =
+        get_json(&app, "/metrics?limit=1&offset=1", Some(all_access)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second_metrics_page["items"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        first_metrics_page["items"][0]["job_type"],
+        second_metrics_page["items"][0]["job_type"]
     );
 
     let (status, _, body) = get_json(&app, "/workflows", Some(metadata_access)).await;

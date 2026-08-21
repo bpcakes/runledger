@@ -395,6 +395,7 @@ export interface components {
         };
         readonly MetricsResponse: {
             readonly items: readonly components["schemas"]["JobMetrics"][];
+            readonly page: components["schemas"]["Page"];
         };
         /** @description Offset pagination echoed in list responses. */
         readonly Page: {
@@ -858,6 +859,8 @@ export interface operations {
             readonly query?: {
                 /** @description Exact job type to return. */
                 readonly job_type?: string;
+                readonly limit?: number;
+                readonly offset?: number;
             };
             readonly header?: never;
             readonly path?: never;

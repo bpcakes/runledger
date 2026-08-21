@@ -119,5 +119,5 @@ fn openapi_contract_bounds_every_offset_parameter() {
         }
     }
 
-    assert_eq!(offset_parameters, 5);
+    assert_eq!(offset_parameters, 6);
 }

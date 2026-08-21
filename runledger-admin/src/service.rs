@@ -1,15 +1,12 @@
-use std::collections::HashMap;
-
 use runledger_core::jobs::{JobStatus, WorkflowRunStatus};
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
     AdminJobSummaryRecord, AdminWorkflowSummaryRecord, JobDefinitionListFilter, JobEventRecord,
     JobListFilter, JobLogRecord, JobQueueRecord, WorkflowRunDbRecord, WorkflowRunListFilter,
-    WorkflowStepDbRecord, WorkflowStepDependencyDbRecord, get_job_by_id,
-    get_job_continuation_metrics, get_job_continuation_metrics_in_organization, get_job_metrics,
-    get_job_metrics_in_organization, get_workflow_run_by_id, list_admin_job_summaries,
-    list_admin_workflow_summaries, list_job_definitions, list_job_events, list_job_events_before,
-    list_job_logs, list_job_logs_before, list_workflow_step_dependencies_in_organization_page,
+    WorkflowStepDbRecord, WorkflowStepDependencyDbRecord, get_admin_job_metrics_page,
+    get_job_by_id, get_workflow_run_by_id, list_admin_job_summaries, list_admin_workflow_summaries,
+    list_job_definitions, list_job_events, list_job_events_before, list_job_logs,
+    list_job_logs_before, list_workflow_step_dependencies_in_organization_page,
     list_workflow_steps_in_organization_page,
 };
 use uuid::Uuid;
@@ -22,7 +19,7 @@ use crate::dto::{
     WorkflowQuery, WorkflowResponse, WorkflowStepDto, WorkflowSummaryDto, WorkflowsQuery,
     WorkflowsResponse,
 };
-use crate::{AdminAccess, AdminApiError, AdminScope, DataVisibility};
+use crate::{AdminAccess, AdminApiError, DataVisibility};
 
 /// Read-only application service behind the HTTP router.
 #[derive(Clone)]
@@ -43,63 +40,47 @@ impl AdminService {
         access: AdminAccess,
         query: &MetricsQuery,
     ) -> Result<MetricsResponse, AdminApiError> {
+        validate_page(query.limit, query.offset)?;
         validate_filter(query.job_type.as_deref())?;
-        let (metrics, continuations) = match access.scope() {
-            AdminScope::All => (
-                get_job_metrics(&self.pool, None, query.job_type.as_deref()).await,
-                get_job_continuation_metrics(&self.pool, None, query.job_type.as_deref()).await,
-            ),
-            AdminScope::Organization(organization_id) => (
-                get_job_metrics_in_organization(
-                    &self.pool,
-                    organization_id,
-                    query.job_type.as_deref(),
-                )
-                .await,
-                get_job_continuation_metrics_in_organization(
-                    &self.pool,
-                    organization_id,
-                    query.job_type.as_deref(),
-                )
-                .await,
-            ),
-        };
-        let metrics = metrics.map_err(|error| storage_error("load job metrics", error))?;
-        let continuations =
-            continuations.map_err(|error| storage_error("load job continuation metrics", error))?;
-        let mut continuation_by_type = continuations
+        let rows = get_admin_job_metrics_page(
+            &self.pool,
+            access.scope().organization_id(),
+            query.job_type.as_deref(),
+            fetch_limit(query.limit),
+            query.offset,
+        )
+        .await
+        .map_err(|error| storage_error("load job metrics", error))?;
+        let (rows, has_more) = take_page(rows, query.limit);
+        let items = rows
             .into_iter()
-            .map(|metric| (metric.job_type.as_str().to_owned(), metric))
-            .collect::<HashMap<_, _>>();
-
-        let items = metrics
-            .into_iter()
-            .map(|metric| {
-                let continuation = continuation_by_type.remove(metric.job_type.as_str());
-                JobMetricsDto {
-                    job_type: metric.job_type.as_str().to_owned(),
-                    pending_count: metric.pending_count,
-                    leased_count: metric.leased_count,
-                    stale_leases: metric.stale_leases,
-                    succeeded_24h: metric.succeeded_24h,
-                    retryable_24h: metric.retryable_24h,
-                    terminal_24h: metric.terminal_24h,
-                    panicked_24h: metric.panicked_24h,
-                    timeout_24h: metric.timeout_24h,
-                    dead_lettered_24h: metric.dead_lettered_24h,
-                    p50_duration_ms_24h: metric.p50_duration_ms_24h,
-                    p95_duration_ms_24h: metric.p95_duration_ms_24h,
-                    continued_24h: continuation.as_ref().map_or(0, |value| value.continued_24h),
-                    active_continued_count: continuation
-                        .as_ref()
-                        .map_or(0, |value| value.active_continued_count),
-                    max_active_run_number: continuation
-                        .as_ref()
-                        .map_or(0, |value| value.max_active_run_number),
-                }
+            .map(|metric| JobMetricsDto {
+                job_type: metric.job_type.as_str().to_owned(),
+                pending_count: metric.pending_count,
+                leased_count: metric.leased_count,
+                stale_leases: metric.stale_leases,
+                succeeded_24h: metric.succeeded_24h,
+                retryable_24h: metric.retryable_24h,
+                terminal_24h: metric.terminal_24h,
+                panicked_24h: metric.panicked_24h,
+                timeout_24h: metric.timeout_24h,
+                dead_lettered_24h: metric.dead_lettered_24h,
+                p50_duration_ms_24h: metric.p50_duration_ms_24h,
+                p95_duration_ms_24h: metric.p95_duration_ms_24h,
+                continued_24h: metric.continued_24h,
+                active_continued_count: metric.active_continued_count,
+                max_active_run_number: metric.max_active_run_number,
             })
             .collect();
-        Ok(MetricsResponse { items })
+        Ok(MetricsResponse {
+            items,
+            page: PageDto {
+                limit: query.limit,
+                offset: query.offset,
+                max_offset: MAX_PAGE_OFFSET,
+                has_more,
+            },
+        })
     }
 
     /// Lists jobs in the authorized scope.

@@ -24,12 +24,28 @@ fn default_page_limit() -> i64 {
 }
 
 /// Query accepted by `GET /metrics`.
-#[derive(Clone, Debug, Default, Deserialize, Eq, IntoParams, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, IntoParams, PartialEq)]
 #[into_params(parameter_in = Query)]
 pub struct MetricsQuery {
     /// Exact job type to return.
     #[param(value_type = String, required = false)]
     pub job_type: Option<String>,
+    #[serde(default = "default_page_limit")]
+    #[param(default = 50, minimum = 1, maximum = 200)]
+    pub limit: i64,
+    #[serde(default)]
+    #[param(default = 0, minimum = 0, maximum = 10000)]
+    pub offset: i64,
+}
+
+impl Default for MetricsQuery {
+    fn default() -> Self {
+        Self {
+            job_type: None,
+            limit: DEFAULT_PAGE_LIMIT,
+            offset: 0,
+        }
+    }
 }
 
 /// Query accepted by `GET /jobs`.
@@ -275,6 +291,7 @@ pub struct JobMetricsDto {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct MetricsResponse {
     pub items: Vec<JobMetricsDto>,
+    pub page: PageDto,
 }
 
 /// Lightweight job representation used by list endpoints.

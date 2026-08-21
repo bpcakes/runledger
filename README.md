@@ -1042,11 +1042,11 @@ responses use `Cache-Control: private, no-store`.
 Job definitions are service-wide rather than organization-owned, so an
 organization scope does not include `/definitions` unless the host calls
 `with_service_wide_definitions()`. The capability response advertises the exact
-resources granted to the request. List and workflow graph responses report
-`has_more` and cap offset pagination at 10,000 skipped rows; narrow the filters
-instead of requesting deeper pages. Event and log history is newest-first by
-default and uses opaque string cursors so JavaScript callers never lose 64-bit
-identifiers.
+resources granted to the request. Metrics, list, and workflow graph responses
+report `has_more` and cap offset pagination at 10,000 skipped rows; narrow the
+filters instead of requesting deeper pages. Event and log history is
+newest-first by default and uses opaque string cursors so JavaScript callers
+never lose 64-bit identifiers.
 
 The v1 router exposes only `GET` routes:
 

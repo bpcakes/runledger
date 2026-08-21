@@ -23,7 +23,7 @@ import type {
 } from "./client.js";
 
 export type RunledgerAdminRoute =
-  | { readonly name: "overview" }
+  | { readonly name: "overview"; readonly offset?: number }
   | {
       readonly name: "jobs";
       readonly status?: string;
@@ -191,14 +191,19 @@ function OverviewScreen({
   client,
   capabilities,
   metricsPollIntervalMs,
+  onRouteChange,
+  route,
 }: {
   readonly client: RunledgerAdminClient;
   readonly capabilities: Capabilities;
   readonly metricsPollIntervalMs: number;
+  readonly onRouteChange: (route: RunledgerAdminRoute) => void;
+  readonly route: Extract<RunledgerAdminRoute, { name: "overview" }>;
 }) {
+  const offset = route.offset ?? 0;
   const loader = useCallback(
-    (signal: AbortSignal) => client.metrics({ signal }),
-    [client],
+    (signal: AbortSignal) => client.metrics({ limit: 50, offset, signal }),
+    [client, offset],
   );
   const [state, retry] = useResource(loader, metricsPollIntervalMs);
   return (
@@ -226,6 +231,18 @@ function OverviewScreen({
               </div>
             </dl>
             <MetricsTable metrics={metrics} />
+            <Pagination
+              itemCount={metrics.items.length}
+              label="Metrics pagination"
+              onOffset={(nextOffset) =>
+                onRouteChange(
+                  nextOffset === 0
+                    ? { name: "overview" }
+                    : { name: "overview", offset: nextOffset },
+                )
+              }
+              page={metrics.page}
+            />
           </>
         )}
       </Resource>
@@ -1131,6 +1148,8 @@ function PanelBody({
             capabilities={capabilities}
             client={client}
             metricsPollIntervalMs={metricsPollIntervalMs}
+            onRouteChange={onRouteChange}
+            route={route}
           />
         );
       case "jobs":

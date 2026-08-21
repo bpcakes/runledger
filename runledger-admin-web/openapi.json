@@ -526,6 +526,30 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "maximum": 10000,
+              "minimum": 0
+            }
           }
         ],
         "responses": {
@@ -1573,7 +1597,8 @@
       "MetricsResponse": {
         "type": "object",
         "required": [
-          "items"
+          "items",
+          "page"
         ],
         "properties": {
           "items": {
@@ -1581,6 +1606,9 @@
             "items": {
               "$ref": "#/components/schemas/JobMetrics"
             }
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
           }
         }
       },

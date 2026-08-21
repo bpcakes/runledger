@@ -68,6 +68,8 @@ export interface RequestOptions {
 }
 export interface MetricsParams extends RequestOptions {
   readonly jobType?: string;
+  readonly limit?: number;
+  readonly offset?: number;
 }
 export interface JobsParams extends RequestOptions {
   readonly status?: string;
@@ -291,6 +293,8 @@ export function createRunledgerAdminClient(
               ...(params.jobType === undefined
                 ? {}
                 : { job_type: params.jobType }),
+              ...(params.limit === undefined ? {} : { limit: params.limit }),
+              ...(params.offset === undefined ? {} : { offset: params.offset }),
             },
           },
           ...signalOption(params.signal),

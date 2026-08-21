@@ -57,6 +57,26 @@ pub struct AdminWorkflowSummaryRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Complete admin metrics projection for one job type.
+#[derive(Clone, Debug)]
+pub struct AdminJobMetricsRecord {
+    pub job_type: JobTypeName,
+    pub pending_count: i64,
+    pub leased_count: i64,
+    pub stale_leases: i64,
+    pub succeeded_24h: i64,
+    pub retryable_24h: i64,
+    pub terminal_24h: i64,
+    pub panicked_24h: i64,
+    pub timeout_24h: i64,
+    pub dead_lettered_24h: i64,
+    pub p50_duration_ms_24h: Option<f64>,
+    pub p95_duration_ms_24h: Option<f64>,
+    pub continued_24h: i64,
+    pub active_continued_count: i64,
+    pub max_active_run_number: i32,
+}
+
 #[derive(Clone, Debug)]
 pub struct JobMetricsRecord {
     pub job_type: JobTypeName,

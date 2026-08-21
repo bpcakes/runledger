@@ -104,6 +104,7 @@ export const metrics: MetricsResponse = {
       timeout_24h: 0,
     },
   ],
+  page: { has_more: false, limit: 50, max_offset: 10_000, offset: 0 },
 };
 
 export const jobs: JobsResponse = {

@@ -36,7 +36,7 @@ mod workflows;
 )]
 pub use admin::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
-    compare_and_requeue_job, compare_and_requeue_job_tx, get_job_by_id,
+    compare_and_requeue_job, compare_and_requeue_job_tx, get_admin_job_metrics_page, get_job_by_id,
     get_job_continuation_metrics, get_job_continuation_metrics_in_organization, get_job_metrics,
     get_job_metrics_in_organization, get_job_payload_by_idempotency_key,
     get_latest_job_payload_for_run, list_admin_job_summaries, list_admin_workflow_summaries,
@@ -81,7 +81,7 @@ pub use schedules::{
     upsert_job_schedule_tx,
 };
 pub use types::{
-    AdminJobSummaryRecord, AdminWorkflowSummaryRecord, CompareAndRequeueJob,
+    AdminJobMetricsRecord, AdminJobSummaryRecord, AdminWorkflowSummaryRecord, CompareAndRequeueJob,
     CompareAndRequeueJobOutcome, DecodedJobEventPayload, DecodedRequeuedEventPayload,
     JOB_LIST_PAGE_LIMIT_MAX, JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate,
     JobContinuationMetricsRecord, JobContinuationOutcome, JobContinuationUpdate,
