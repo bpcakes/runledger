@@ -17,8 +17,9 @@ All notable changes to this workspace are documented here.
   React is the only peer dependency; host applications keep ownership of URL
   routing, query caching, and design-system integration. The shared client owns
   typed request construction, HTTP error normalization, opaque history cursors,
-  pagination metadata, and non-overlapping polling behavior. Successful JSON
-  responses are compile-time typed but are not runtime schema-validated.
+  pagination metadata, and non-overlapping, cost-aware polling lifecycles.
+  Successful JSON responses are compile-time typed but are not runtime
+  schema-validated.
 
 ### Changed
 

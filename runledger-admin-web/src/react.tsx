@@ -49,8 +49,10 @@ export interface RunledgerAdminPanelProps {
   readonly route: RunledgerAdminRoute;
   readonly onRouteChange: (route: RunledgerAdminRoute) => void;
   readonly className?: string;
-  /** Operational data polling interval. Set to zero to disable. Defaults to ten seconds. */
+  /** List and detail polling interval. Set to zero to disable. Defaults to ten seconds. */
   readonly pollIntervalMs?: number;
+  /** Aggregate metrics polling interval. Set to zero to load once. Defaults to zero. */
+  readonly metricsPollIntervalMs?: number;
   /** Capability polling interval. Set to zero to load once. Defaults to zero. */
   readonly capabilitiesPollIntervalMs?: number;
   readonly title?: string;
@@ -188,17 +190,17 @@ function scopeLabel(capabilities: Capabilities): string {
 function OverviewScreen({
   client,
   capabilities,
-  pollIntervalMs,
+  metricsPollIntervalMs,
 }: {
   readonly client: RunledgerAdminClient;
   readonly capabilities: Capabilities;
-  readonly pollIntervalMs: number;
+  readonly metricsPollIntervalMs: number;
 }) {
   const loader = useCallback(
     (signal: AbortSignal) => client.metrics({ signal }),
     [client],
   );
-  const [state, retry] = useResource(loader, pollIntervalMs);
+  const [state, retry] = useResource(loader, metricsPollIntervalMs);
   return (
     <section aria-labelledby="rla-overview-heading">
       <h2 id="rla-overview-heading">Overview</h2>
@@ -1107,12 +1109,14 @@ function navName(
 function PanelBody({
   capabilities,
   client,
+  metricsPollIntervalMs,
   onRouteChange,
   pollIntervalMs,
   route,
 }: {
   readonly capabilities: Capabilities;
   readonly client: RunledgerAdminClient;
+  readonly metricsPollIntervalMs: number;
   readonly onRouteChange: (route: RunledgerAdminRoute) => void;
   readonly pollIntervalMs: number;
   readonly route: RunledgerAdminRoute;
@@ -1126,7 +1130,7 @@ function PanelBody({
           <OverviewScreen
             capabilities={capabilities}
             client={client}
-            pollIntervalMs={pollIntervalMs}
+            metricsPollIntervalMs={metricsPollIntervalMs}
           />
         );
       case "jobs":
@@ -1220,6 +1224,7 @@ export function RunledgerAdminPanel({
   onRouteChange,
   className,
   pollIntervalMs = 10_000,
+  metricsPollIntervalMs = 0,
   capabilitiesPollIntervalMs = 0,
   title = "Runledger",
 }: RunledgerAdminPanelProps) {
@@ -1239,6 +1244,7 @@ export function RunledgerAdminPanel({
           <PanelBody
             capabilities={capabilities}
             client={client}
+            metricsPollIntervalMs={metricsPollIntervalMs}
             onRouteChange={onRouteChange}
             pollIntervalMs={pollIntervalMs}
             route={route}

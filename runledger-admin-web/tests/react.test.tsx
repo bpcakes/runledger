@@ -220,7 +220,7 @@ describe("RunledgerAdminPanel", () => {
     expect(jobsLoader).toHaveBeenCalledTimes(2);
   });
 
-  it("does not refetch capabilities on the operational data interval", async () => {
+  it("does not refetch aggregate metrics on the list and detail interval", async () => {
     vi.useFakeTimers();
     const capabilitiesLoader = vi.fn(client.capabilities);
     const metricsLoader = vi.fn(client.metrics);
@@ -233,6 +233,33 @@ describe("RunledgerAdminPanel", () => {
         }}
         onRouteChange={() => undefined}
         pollIntervalMs={100}
+        route={{ name: "overview" }}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(capabilitiesLoader).toHaveBeenCalledTimes(1);
+    expect(metricsLoader).toHaveBeenCalledTimes(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(300));
+    expect(capabilitiesLoader).toHaveBeenCalledTimes(1);
+    expect(metricsLoader).toHaveBeenCalledTimes(1);
+  });
+
+  it("polls aggregate metrics only on their explicit interval", async () => {
+    vi.useFakeTimers();
+    const capabilitiesLoader = vi.fn(client.capabilities);
+    const metricsLoader = vi.fn(client.metrics);
+    render(
+      <RunledgerAdminPanel
+        client={{
+          ...client,
+          capabilities: capabilitiesLoader,
+          metrics: metricsLoader,
+        }}
+        metricsPollIntervalMs={100}
+        onRouteChange={() => undefined}
+        pollIntervalMs={0}
         route={{ name: "overview" }}
       />,
     );
