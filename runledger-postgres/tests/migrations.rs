@@ -26,6 +26,7 @@ const HANDLER_RETRY_AUDIT_MIGRATION_VERSION: i64 = 202607280003;
 const JOB_EXECUTION_RESOURCES_MIGRATION_VERSION: i64 = 202607280004;
 const WORKFLOW_RECOVERIES_MIGRATION_VERSION: i64 = 202607280005;
 const JOB_ENQUEUE_INTENTS_MIGRATION_VERSION: i64 = 202608180001;
+const ADMIN_HISTORY_INDEXES_MIGRATION_VERSION: i64 = 202608210001;
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,
@@ -46,6 +47,8 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // ignore. Promoted rows deliberately fence linked-job deletion, so rollout
     // must order application retention as documented by the public API.
     JOB_ENQUEUE_INTENTS_MIGRATION_VERSION,
+    // Adds read-only admin history indexes without changing legacy writes.
+    ADMIN_HISTORY_INDEXES_MIGRATION_VERSION,
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 
@@ -135,6 +138,57 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     .await
     .expect("query continuation metrics view");
     assert!(continuation_metrics_view_exists);
+    for (index_name, expected_columns) in [
+        ("idx_job_events_job_id_newest", "(job_id, id DESC)"),
+        ("idx_job_logs_job_id_newest", "(job_id, id DESC)"),
+    ] {
+        let index_definition = sqlx::query_scalar::<_, String>(&format!(
+            "SELECT pg_get_indexdef('{index_name}'::regclass)"
+        ))
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap_or_else(|error| panic!("read {index_name}: {error}"));
+        assert!(
+            index_definition.contains(expected_columns),
+            "{index_name} must support bounded newest-first history scans: {index_definition}"
+        );
+    }
+    let mut plan_tx = harness
+        .pool
+        .begin()
+        .await
+        .expect("begin history plan check");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *plan_tx)
+        .await
+        .expect("prefer indexes for deterministic history plan check");
+    for (table_name, index_name) in [
+        ("job_events", "idx_job_events_job_id_newest"),
+        ("job_logs", "idx_job_logs_job_id_newest"),
+    ] {
+        let plan = sqlx::query_scalar::<_, String>(&format!(
+            "EXPLAIN (COSTS OFF) \
+             SELECT history.id \
+             FROM {table_name} history \
+             JOIN job_queue job ON job.id = history.job_id \
+             WHERE history.job_id = '00000000-0000-4000-8000-000000000001'::uuid \
+               AND history.id < 9223372036854775807 \
+             ORDER BY history.id DESC \
+             LIMIT 51"
+        ))
+        .fetch_all(&mut *plan_tx)
+        .await
+        .unwrap_or_else(|error| panic!("explain {table_name} newest-first scan: {error}"))
+        .join("\n");
+        assert!(
+            plan.contains(index_name),
+            "PostgreSQL 18 must plan {table_name} newest-first pagination with {index_name}:\n{plan}"
+        );
+    }
+    plan_tx
+        .rollback()
+        .await
+        .expect("rollback history plan check");
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('job_replays')::text")
             .fetch_one(&harness.pool)

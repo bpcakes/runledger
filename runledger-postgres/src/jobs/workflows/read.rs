@@ -205,8 +205,10 @@ pub async fn list_workflow_steps_page(
 /// Lists workflow steps visible to an exact organization scope.
 ///
 /// Unlike [`list_workflow_steps_page`], an organization filter applies to both
-/// the parent run and each step's effective execution organization. `None`
-/// remains the service-wide operator scope.
+/// the parent run and each step's effective execution organization. Dependency
+/// counters are recomputed from organization-visible prerequisite edges so the
+/// counts cannot disclose hidden steps. `None` remains the service-wide
+/// operator scope and returns the persisted counters.
 pub async fn list_workflow_steps_in_organization_page(
     pool: &DbPool,
     organization_id: Option<Uuid>,
@@ -236,9 +238,18 @@ pub async fn list_workflow_steps_in_organization_page(
             ws.released_at,
             ws.started_at,
             ws.finished_at,
-            ws.dependency_count_total,
-            ws.dependency_count_pending,
-            ws.dependency_count_unsatisfied,
+            CASE WHEN $2::uuid IS NULL
+                THEN ws.dependency_count_total
+                ELSE COALESCE(visible_dependencies.total, 0)
+            END AS dependency_count_total,
+            CASE WHEN $2::uuid IS NULL
+                THEN ws.dependency_count_pending
+                ELSE COALESCE(visible_dependencies.pending, 0)
+            END AS dependency_count_pending,
+            CASE WHEN $2::uuid IS NULL
+                THEN ws.dependency_count_unsatisfied
+                ELSE COALESCE(visible_dependencies.unsatisfied, 0)
+            END AS dependency_count_unsatisfied,
             ws.status_reason,
             ws.last_error_code,
             ws.last_error_message,
@@ -247,6 +258,22 @@ pub async fn list_workflow_steps_in_organization_page(
             ws.updated_at
          FROM workflow_steps ws
          JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
+         LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*)::int4 AS total,
+                COUNT(*) FILTER (
+                    WHERE prerequisite.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELED')
+                )::int4 AS pending,
+                COUNT(*) FILTER (
+                    WHERE dependency.release_mode = 'ON_SUCCESS'
+                      AND prerequisite.status IN ('FAILED', 'CANCELED')
+                )::int4 AS unsatisfied
+            FROM workflow_step_dependencies dependency
+            JOIN workflow_steps prerequisite
+              ON prerequisite.id = dependency.prerequisite_step_id
+            WHERE dependency.dependent_step_id = ws.id
+              AND prerequisite.organization_id = $2
+         ) visible_dependencies ON $2::uuid IS NOT NULL
          WHERE ws.workflow_run_id = $1
            AND (
              $2::uuid IS NULL

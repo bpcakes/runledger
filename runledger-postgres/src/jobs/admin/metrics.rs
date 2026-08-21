@@ -153,3 +153,45 @@ pub async fn get_job_continuation_metrics(
         })
         .collect::<Result<Vec<_>>>()
 }
+
+/// Returns continuation metrics only for job types used by one organization.
+///
+/// Unlike [`get_job_continuation_metrics`], this does not join the service-wide
+/// definition catalog. Organization-scoped HTTP boundaries should use this
+/// form so the query does not enumerate and discard unrelated job types.
+pub async fn get_job_continuation_metrics_in_organization(
+    pool: &DbPool,
+    organization_id: Uuid,
+    job_type: Option<&str>,
+) -> Result<Vec<JobContinuationMetricsRecord>> {
+    let rows = sqlx::query!(
+        "SELECT
+            jcmr.job_type AS \"job_type!\",
+            SUM(jcmr.continued_24h)::bigint AS \"continued_24h!\",
+            SUM(jcmr.active_continued_count)::bigint AS \"active_continued_count!\",
+            MAX(jcmr.max_active_run_number)::int4 AS \"max_active_run_number!\"
+         FROM job_continuation_metrics_rollup jcmr
+         WHERE jcmr.organization_id = $1
+           AND ($2::text IS NULL OR jcmr.job_type = $2)
+         GROUP BY jcmr.job_type
+         ORDER BY jcmr.job_type ASC",
+        organization_id,
+        job_type,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("get job continuation metrics in organization", error)
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(JobContinuationMetricsRecord {
+                job_type: parse_job_type_name(row.job_type)?,
+                continued_24h: row.continued_24h,
+                active_continued_count: row.active_continued_count,
+                max_active_run_number: row.max_active_run_number,
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+}

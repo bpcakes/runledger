@@ -185,6 +185,7 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
         JobType::new(JOB_TYPE),
         &workflow_payload,
     )
+    .depends_on_success(&[StepKey::new("foreign-import")])
     .try_build()
     .expect("build workflow step");
     let foreign_workflow_payload = json!({"organization_b_secret": true});
@@ -194,7 +195,6 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
         &foreign_workflow_payload,
     )
     .organization_id(organization_b)
-    .depends_on_success(&[StepKey::new("import")])
     .try_build()
     .expect("build cross-organization workflow step");
     let workflow = WorkflowRunEnqueueBuilder::new(
@@ -254,7 +254,7 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     assert_eq!(organization_a_ids.len(), 1);
     assert!(!organization_a_ids.contains(&organization_b_job));
     assert!(!organization_a_ids.contains(&global_job));
-    assert_eq!(body["page"]["has_more"], true);
+    assert_eq!(body["page"]["has_more"], false);
     assert!(
         body["items"]
             .as_array()
@@ -417,6 +417,9 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
         organization_a.to_string()
     );
     assert!(body["steps"][0].get("payload").is_none());
+    assert_eq!(body["steps"][0]["dependency_count_total"], 0);
+    assert_eq!(body["steps"][0]["dependency_count_pending"], 0);
+    assert_eq!(body["steps"][0]["dependency_count_unsatisfied"], 0);
     assert_eq!(body["steps_page"]["has_more"], false);
     assert_eq!(body["dependencies"], json!([]));
 
@@ -431,6 +434,9 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["steps"].as_array().expect("workflow steps").len(), 1);
+    assert_eq!(body["steps"][0]["dependency_count_total"], 1);
+    assert_eq!(body["steps"][0]["dependency_count_pending"], 1);
+    assert_eq!(body["steps"][0]["dependency_count_unsatisfied"], 0);
     assert_eq!(body["steps_page"]["has_more"], true);
     assert_eq!(
         body["dependencies"].as_array().expect("dependencies").len(),

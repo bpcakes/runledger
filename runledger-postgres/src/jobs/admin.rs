@@ -3,7 +3,10 @@ mod payload;
 mod read;
 mod recovery;
 
-pub use metrics::{get_job_continuation_metrics, get_job_metrics, get_job_metrics_in_organization};
+pub use metrics::{
+    get_job_continuation_metrics, get_job_continuation_metrics_in_organization, get_job_metrics,
+    get_job_metrics_in_organization,
+};
 pub use payload::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection,
     update_job_payload_uuid_array_field,

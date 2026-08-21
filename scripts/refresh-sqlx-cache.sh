@@ -29,6 +29,13 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
   exit 1
 fi
 
+for crate_dir in "${VENDORED_MIGRATION_CRATES[@]}"; do
+  echo "Syncing workspace migrations into ${crate_dir}/migrations..."
+  rm -rf "${crate_dir}/migrations"
+  mkdir -p "${crate_dir}/migrations"
+  cp -R migrations/. "${crate_dir}/migrations/"
+done
+
 echo "Refreshing workspace SQLx cache..."
 cargo sqlx prepare --workspace -- --all-targets
 
@@ -37,13 +44,6 @@ for crate_dir in "${PUBLISHABLE_SQLX_CRATES[@]}"; do
   rm -rf "${crate_dir}/.sqlx"
   mkdir -p "${crate_dir}/.sqlx"
   cp -R .sqlx/. "${crate_dir}/.sqlx/"
-done
-
-for crate_dir in "${VENDORED_MIGRATION_CRATES[@]}"; do
-  echo "Syncing workspace migrations into ${crate_dir}/migrations..."
-  rm -rf "${crate_dir}/migrations"
-  mkdir -p "${crate_dir}/migrations"
-  cp -R migrations/. "${crate_dir}/migrations/"
 done
 
 echo "Verifying workspace build with refreshed offline metadata..."

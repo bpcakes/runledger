@@ -1244,10 +1244,13 @@ forward migrations:
   transactional handoff records, promotion/conflict state, backlog indexes,
   and promoted-row retention support. It is additive and intentionally remains
   outside the custom compatibility fence during the expand-first rollout.
+- `202608210001_admin_history_indexes` — adds `(job_id, id DESC)` indexes for
+  bounded newest-first admin event and log history reads. It is additive and
+  intentionally remains outside the custom compatibility fence.
 
 Every forward migration from
 `202607190001_job_replays_and_continuation_metrics` through
-`202608180001_job_enqueue_intents` is recorded and checksum-validated in
+`202608210001_admin_history_indexes` is recorded and checksum-validated in
 `_sqlx_migrations` but deliberately omitted from the custom
 `runledger_migration_history` compatibility fence. This lets released filtered
 startup helpers coexist during the documented expand-first windows; it does

@@ -5,9 +5,10 @@ use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
     JobDefinitionListFilter, JobEventRecord, JobListFilter, JobLogRecord, JobQueueRecord,
     WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowStepDbRecord,
-    WorkflowStepDependencyDbRecord, get_job_by_id, get_job_continuation_metrics, get_job_metrics,
-    get_job_metrics_in_organization, get_workflow_run_by_id, list_job_definitions, list_job_events,
-    list_job_events_before, list_job_logs, list_job_logs_before, list_jobs, list_workflow_runs,
+    WorkflowStepDependencyDbRecord, get_job_by_id, get_job_continuation_metrics,
+    get_job_continuation_metrics_in_organization, get_job_metrics, get_job_metrics_in_organization,
+    get_workflow_run_by_id, list_job_definitions, list_job_events, list_job_events_before,
+    list_job_logs, list_job_logs_before, list_jobs, list_workflow_runs,
     list_workflow_step_dependencies_in_organization_page, list_workflow_steps_in_organization_page,
 };
 use uuid::Uuid;
@@ -41,23 +42,29 @@ impl AdminService {
         query: &MetricsQuery,
     ) -> Result<MetricsResponse, AdminApiError> {
         validate_filter(query.job_type.as_deref())?;
-        let organization_id = access.scope().organization_id();
-        let metrics = match access.scope() {
-            AdminScope::All => get_job_metrics(&self.pool, None, query.job_type.as_deref()).await,
-            AdminScope::Organization(organization_id) => {
+        let (metrics, continuations) = match access.scope() {
+            AdminScope::All => (
+                get_job_metrics(&self.pool, None, query.job_type.as_deref()).await,
+                get_job_continuation_metrics(&self.pool, None, query.job_type.as_deref()).await,
+            ),
+            AdminScope::Organization(organization_id) => (
                 get_job_metrics_in_organization(
                     &self.pool,
                     organization_id,
                     query.job_type.as_deref(),
                 )
-                .await
-            }
-        }
-        .map_err(|error| storage_error("load job metrics", error))?;
+                .await,
+                get_job_continuation_metrics_in_organization(
+                    &self.pool,
+                    organization_id,
+                    query.job_type.as_deref(),
+                )
+                .await,
+            ),
+        };
+        let metrics = metrics.map_err(|error| storage_error("load job metrics", error))?;
         let continuations =
-            get_job_continuation_metrics(&self.pool, organization_id, query.job_type.as_deref())
-                .await
-                .map_err(|error| storage_error("load job continuation metrics", error))?;
+            continuations.map_err(|error| storage_error("load job continuation metrics", error))?;
         let mut continuation_by_type = continuations
             .into_iter()
             .map(|metric| (metric.job_type.as_str().to_owned(), metric))
