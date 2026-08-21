@@ -29,6 +29,7 @@ cargo run \
   --example export_openapi \
   >"$TEMP_FILE"
 
+chmod 0644 "$TEMP_FILE"
 mv -- "$TEMP_FILE" "$OUTPUT_PATH"
 
 if [[ "$OUTPUT_OVERRIDDEN" == false ]]; then

@@ -221,6 +221,11 @@ prepare_npm_package() {
       || die "npm package is missing ${required_path}"
   done
 
+  local openapi_mode
+  read -r openapi_mode _ < <(tar -tvzf "$NPM_PACKAGE_ARCHIVE" package/openapi.json)
+  [[ "$openapi_mode" == "-rw-r--r--" ]] \
+    || die "npm package openapi.json must have mode 0644, found ${openapi_mode}"
+
   echo "Prepared npm package: ${NPM_PACKAGE_ARCHIVE}"
 }
 
