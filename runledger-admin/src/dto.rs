@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{AdminAccess, AdminScope, DataVisibility};
@@ -16,21 +18,28 @@ fn default_page_limit() -> i64 {
 }
 
 /// Query accepted by `GET /metrics`.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, IntoParams, PartialEq)]
+#[into_params(parameter_in = Query)]
 pub struct MetricsQuery {
     /// Exact job type to return.
+    #[param(value_type = String, required = false)]
     pub job_type: Option<String>,
 }
 
 /// Query accepted by `GET /jobs`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, IntoParams, PartialEq)]
+#[into_params(parameter_in = Query)]
 pub struct JobsQuery {
+    #[param(value_type = String, required = false)]
     pub status: Option<String>,
     /// Case-insensitive literal substring matched against the job type.
+    #[param(value_type = String, required = false)]
     pub job_type: Option<String>,
     #[serde(default = "default_page_limit")]
+    #[param(default = 50, minimum = 1, maximum = 200)]
     pub limit: i64,
     #[serde(default)]
+    #[param(default = 0, minimum = 0)]
     pub offset: i64,
 }
 
@@ -46,7 +55,7 @@ impl Default for JobsQuery {
 }
 
 /// Ordering for job event and log history.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryOrder {
     /// Return the newest records first. This is the operator-view default.
@@ -57,13 +66,17 @@ pub enum HistoryOrder {
 }
 
 /// Query accepted by event and log endpoints.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, IntoParams, PartialEq)]
+#[into_params(parameter_in = Query)]
 pub struct HistoryQuery {
     #[serde(default = "default_page_limit")]
+    #[param(default = 50, minimum = 1, maximum = 200)]
     pub limit: i64,
     #[serde(default)]
+    #[param(value_type = String, required = false)]
     pub cursor: Option<String>,
     #[serde(default)]
+    #[param(default = "newest_first")]
     pub order: HistoryOrder,
 }
 
@@ -78,14 +91,19 @@ impl Default for HistoryQuery {
 }
 
 /// Query accepted by `GET /workflows`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, IntoParams, PartialEq)]
+#[into_params(parameter_in = Query)]
 pub struct WorkflowsQuery {
+    #[param(value_type = String, required = false)]
     pub status: Option<String>,
     /// Case-insensitive literal substring matched against the workflow type.
+    #[param(value_type = String, required = false)]
     pub workflow_type: Option<String>,
     #[serde(default = "default_page_limit")]
+    #[param(default = 50, minimum = 1, maximum = 200)]
     pub limit: i64,
     #[serde(default)]
+    #[param(default = 0, minimum = 0)]
     pub offset: i64,
 }
 
@@ -101,15 +119,20 @@ impl Default for WorkflowsQuery {
 }
 
 /// Pagination accepted by `GET /workflows/{id}` for the two graph collections.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, IntoParams, PartialEq)]
+#[into_params(parameter_in = Query)]
 pub struct WorkflowQuery {
     #[serde(default = "default_page_limit")]
+    #[param(default = 50, minimum = 1, maximum = 200)]
     pub step_limit: i64,
     #[serde(default)]
+    #[param(default = 0, minimum = 0)]
     pub step_offset: i64,
     #[serde(default = "default_page_limit")]
+    #[param(default = 50, minimum = 1, maximum = 200)]
     pub dependency_limit: i64,
     #[serde(default)]
+    #[param(default = 0, minimum = 0)]
     pub dependency_offset: i64,
 }
 
@@ -125,13 +148,17 @@ impl Default for WorkflowQuery {
 }
 
 /// Query accepted by `GET /definitions`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, IntoParams, PartialEq)]
+#[into_params(parameter_in = Query)]
 pub struct DefinitionsQuery {
     /// Case-insensitive literal substring matched against the job type.
+    #[param(value_type = String, required = false)]
     pub job_type: Option<String>,
     #[serde(default = "default_page_limit")]
+    #[param(default = 50, minimum = 1, maximum = 200)]
     pub limit: i64,
     #[serde(default)]
+    #[param(default = 0, minimum = 0)]
     pub offset: i64,
 }
 
@@ -146,7 +173,8 @@ impl Default for DefinitionsQuery {
 }
 
 /// Effective request scope reported by the capabilities endpoint.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[schema(as = AdminScope)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScopeDto {
     All,
@@ -154,8 +182,17 @@ pub enum ScopeDto {
 }
 
 /// Version and permissions discovered by the frontend.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+fn api_version_schema() -> Object {
+    ObjectBuilder::new()
+        .schema_type(Type::String)
+        .enum_values(Some([crate::API_VERSION]))
+        .build()
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[schema(as = Capabilities)]
 pub struct CapabilitiesDto {
+    #[schema(schema_with = api_version_schema)]
     pub api_version: String,
     pub scope: ScopeDto,
     pub visibility: DataVisibility,
@@ -184,7 +221,8 @@ impl From<AdminAccess> for CapabilitiesDto {
 }
 
 /// Offset pagination echoed in list responses.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[schema(as = Page)]
 pub struct PageDto {
     pub limit: i64,
     pub offset: i64,
@@ -192,17 +230,21 @@ pub struct PageDto {
 }
 
 /// Cursor information returned with event and log history.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[schema(as = HistoryPage)]
 pub struct HistoryPageDto {
     pub limit: i64,
+    #[schema(required = true)]
     pub cursor: Option<String>,
+    #[schema(required = true)]
     pub next_cursor: Option<String>,
     pub order: HistoryOrder,
     pub has_more: bool,
 }
 
 /// Per-job-type operational metrics.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+#[schema(as = JobMetrics)]
 pub struct JobMetricsDto {
     pub job_type: String,
     pub pending_count: i64,
@@ -214,23 +256,27 @@ pub struct JobMetricsDto {
     pub panicked_24h: i64,
     pub timeout_24h: i64,
     pub dead_lettered_24h: i64,
+    #[schema(required = true)]
     pub p50_duration_ms_24h: Option<f64>,
+    #[schema(required = true)]
     pub p95_duration_ms_24h: Option<f64>,
     pub continued_24h: i64,
     pub active_continued_count: i64,
     pub max_active_run_number: i32,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct MetricsResponse {
     pub items: Vec<JobMetricsDto>,
 }
 
 /// Safe job representation used by list and detail endpoints.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+#[schema(as = Job)]
 pub struct JobDto {
     pub id: Uuid,
     pub job_type: String,
+    #[schema(required = true)]
     pub organization_id: Option<Uuid>,
     pub status: String,
     pub priority: i32,
@@ -239,154 +285,203 @@ pub struct JobDto {
     pub max_attempts: i32,
     pub timeout_seconds: i32,
     pub next_run_at: DateTime<Utc>,
+    #[schema(required = true)]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    #[schema(required = true)]
     pub last_heartbeat_at: Option<DateTime<Utc>>,
+    #[schema(required = true)]
     pub started_at: Option<DateTime<Utc>>,
+    #[schema(required = true)]
     pub finished_at: Option<DateTime<Utc>>,
     pub stage: String,
+    #[schema(required = true)]
     pub progress_done: Option<i64>,
+    #[schema(required = true)]
     pub progress_total: Option<i64>,
+    #[schema(required = true)]
     pub progress_pct: Option<f64>,
+    #[schema(required = true)]
     pub last_error_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Value)]
     pub payload: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Value)]
     pub checkpoint: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Value)]
     pub output: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = String)]
     pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = String)]
     pub worker_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = String)]
     pub status_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = String)]
     pub last_error_message: Option<String>,
     pub redacted_fields: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct JobsResponse {
     pub items: Vec<JobDto>,
     pub page: PageDto,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct JobResponse {
     pub job: JobDto,
 }
 
 /// One durable job event.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+#[schema(as = JobEvent)]
 pub struct JobEventDto {
     pub id: String,
     pub job_id: Uuid,
     pub run_number: i32,
+    #[schema(required = true)]
     pub attempt: Option<i32>,
     pub event_type: String,
+    #[schema(required = true)]
     pub stage: Option<String>,
+    #[schema(required = true)]
     pub progress_done: Option<i64>,
+    #[schema(required = true)]
     pub progress_total: Option<i64>,
     pub occurred_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Value)]
     pub payload: Option<Value>,
     pub redacted_fields: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct JobEventsResponse {
     pub items: Vec<JobEventDto>,
     pub page: HistoryPageDto,
 }
 
 /// One application-provided job log entry.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+#[schema(as = JobLog)]
 pub struct JobLogDto {
     pub id: String,
     pub job_id: Uuid,
     pub run_number: i32,
+    #[schema(required = true)]
     pub attempt: Option<i32>,
     pub level: String,
     pub occurred_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = String)]
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Value)]
     pub payload: Option<Value>,
     pub redacted_fields: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct JobLogsResponse {
     pub items: Vec<JobLogDto>,
     pub page: HistoryPageDto,
 }
 
 /// Safe workflow run representation.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+#[schema(as = Workflow)]
 pub struct WorkflowDto {
     pub id: Uuid,
     pub workflow_type: String,
+    #[schema(required = true)]
     pub organization_id: Option<Uuid>,
     pub status: String,
+    #[schema(required = true)]
     pub result_step_key: Option<String>,
     pub started_at: DateTime<Utc>,
+    #[schema(required = true)]
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = String)]
     pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Value)]
     pub metadata: Option<Value>,
     pub redacted_fields: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct WorkflowsResponse {
     pub items: Vec<WorkflowDto>,
     pub page: PageDto,
 }
 
 /// Safe workflow step representation.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+#[schema(as = WorkflowStep)]
 pub struct WorkflowStepDto {
     pub id: Uuid,
     pub workflow_run_id: Uuid,
     pub step_key: String,
     pub execution_kind: String,
+    #[schema(required = true)]
     pub job_type: Option<String>,
+    #[schema(required = true)]
     pub organization_id: Option<Uuid>,
+    #[schema(required = true)]
     pub priority: Option<i32>,
+    #[schema(required = true)]
     pub max_attempts: Option<i32>,
+    #[schema(required = true)]
     pub timeout_seconds: Option<i32>,
+    #[schema(required = true)]
     pub stage: Option<String>,
     pub allow_handler_continuation: bool,
     pub status: String,
+    #[schema(required = true)]
     pub job_id: Option<Uuid>,
+    #[schema(required = true)]
     pub released_at: Option<DateTime<Utc>>,
+    #[schema(required = true)]
     pub started_at: Option<DateTime<Utc>>,
+    #[schema(required = true)]
     pub finished_at: Option<DateTime<Utc>>,
     pub dependency_count_total: i32,
     pub dependency_count_pending: i32,
     pub dependency_count_unsatisfied: i32,
+    #[schema(required = true)]
     pub last_error_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Value)]
     pub payload: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = String)]
     pub execution_resource_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = String)]
     pub status_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = String)]
     pub last_error_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Value)]
     pub output: Option<Value>,
     pub redacted_fields: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[schema(as = WorkflowDependency)]
 pub struct WorkflowDependencyDto {
     pub workflow_run_id: Uuid,
     pub prerequisite_step_id: Uuid,
@@ -395,7 +490,7 @@ pub struct WorkflowDependencyDto {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct WorkflowResponse {
     pub workflow: WorkflowDto,
     pub steps: Vec<WorkflowStepDto>,
@@ -405,7 +500,8 @@ pub struct WorkflowResponse {
 }
 
 /// Registered job definition.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[schema(as = JobDefinition)]
 pub struct JobDefinitionDto {
     pub job_type: String,
     pub version: i32,
@@ -417,7 +513,7 @@ pub struct JobDefinitionDto {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct DefinitionsResponse {
     pub items: Vec<JobDefinitionDto>,
     pub page: PageDto,

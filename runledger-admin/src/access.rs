@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// The data scope the host has authorized for one request.
@@ -20,7 +21,7 @@ impl AdminScope {
 }
 
 /// Whether sensitive stored data may be returned to this request.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DataVisibility {
     /// Return operational metadata while omitting payloads and diagnostic text.

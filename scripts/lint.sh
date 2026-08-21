@@ -10,6 +10,8 @@ cd "$ROOT_DIR"
 cargo fmt --all -- --check
 cargo fmt --manifest-path "$SMOKE_MANIFEST" -- --check
 
+./scripts/check-admin-openapi.sh
+
 cargo clippy \
   --workspace \
   --all-targets \

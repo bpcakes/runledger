@@ -1,0 +1,1784 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Runledger Admin API",
+    "description": "Read-only administration contract. The embedding application owns authentication and authorization.",
+    "version": "v1"
+  },
+  "servers": [
+    {
+      "url": "/api/admin/runledger/v1"
+    }
+  ],
+  "paths": {
+    "/capabilities": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "getAdminCapabilities",
+        "responses": {
+          "200": {
+            "description": "Version and effective permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/definitions": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "listAdminDefinitions",
+        "parameters": [
+          {
+            "name": "job_type",
+            "in": "query",
+            "description": "Case-insensitive literal substring matched against the job type.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of registered job definitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DefinitionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access does not include service-wide definitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "listAdminJobs",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_type",
+            "in": "query",
+            "description": "Case-insensitive literal substring matched against the job type.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "getAdminJob",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "Job identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid job identifier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job was not found in the authorized scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/{job_id}/events": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "listAdminJobEvents",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "Job identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/HistoryOrder"
+                }
+              ],
+              "default": "newest_first"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of durable job events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobEventsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier or query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job was not found in the authorized scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/{job_id}/logs": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "listAdminJobLogs",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "Job identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/HistoryOrder"
+                }
+              ],
+              "default": "newest_first"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of application-provided job logs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobLogsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier or query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job was not found in the authorized scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "getAdminMetrics",
+        "parameters": [
+          {
+            "name": "job_type",
+            "in": "query",
+            "description": "Exact job type to return.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-job-type operational metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workflows": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "listAdminWorkflows",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workflow_type",
+            "in": "query",
+            "description": "Case-insensitive literal substring matched against the workflow type.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of workflow runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workflows/{workflow_id}": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "getAdminWorkflow",
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "description": "Workflow run identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "step_limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "step_offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "minimum": 0
+            }
+          },
+          {
+            "name": "dependency_limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "dependency_offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workflow detail and paged graph collections",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier or query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workflow was not found in the authorized scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AdminErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        }
+      },
+      "AdminScope": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "all"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "organization_id",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "organization"
+                ]
+              },
+              "organization_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ],
+        "description": "Effective request scope reported by the capabilities endpoint."
+      },
+      "Capabilities": {
+        "type": "object",
+        "required": [
+          "api_version",
+          "scope",
+          "visibility",
+          "actions",
+          "resources"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "api_version": {
+            "type": "string",
+            "enum": [
+              "v1"
+            ]
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scope": {
+            "$ref": "#/components/schemas/AdminScope"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/DataVisibility"
+          }
+        }
+      },
+      "DataVisibility": {
+        "type": "string",
+        "description": "Whether sensitive stored data may be returned to this request.",
+        "enum": [
+          "metadata_only",
+          "full"
+        ]
+      },
+      "DefinitionsResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobDefinition"
+            }
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          }
+        }
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "HistoryOrder": {
+        "type": "string",
+        "description": "Ordering for job event and log history.",
+        "enum": [
+          "newest_first",
+          "oldest_first"
+        ]
+      },
+      "HistoryPage": {
+        "type": "object",
+        "description": "Cursor information returned with event and log history.",
+        "required": [
+          "limit",
+          "cursor",
+          "next_cursor",
+          "order",
+          "has_more"
+        ],
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order": {
+            "$ref": "#/components/schemas/HistoryOrder"
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "description": "Safe job representation used by list and detail endpoints.",
+        "required": [
+          "id",
+          "job_type",
+          "organization_id",
+          "status",
+          "priority",
+          "run_number",
+          "attempt",
+          "max_attempts",
+          "timeout_seconds",
+          "next_run_at",
+          "lease_expires_at",
+          "last_heartbeat_at",
+          "started_at",
+          "finished_at",
+          "stage",
+          "progress_done",
+          "progress_total",
+          "progress_pct",
+          "last_error_code",
+          "created_at",
+          "updated_at",
+          "redacted_fields"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "checkpoint": {},
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "job_type": {
+            "type": "string"
+          },
+          "last_error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error_message": {
+            "type": "string"
+          },
+          "last_heartbeat_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "lease_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "next_run_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "organization_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "output": {},
+          "payload": {},
+          "priority": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "progress_done": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "progress_pct": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "progress_total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "redacted_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "run_number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "stage": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "status_reason": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "worker_id": {
+            "type": "string"
+          }
+        }
+      },
+      "JobDefinition": {
+        "type": "object",
+        "description": "Registered job definition.",
+        "required": [
+          "job_type",
+          "version",
+          "max_attempts",
+          "default_timeout_seconds",
+          "default_priority",
+          "is_enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "default_priority": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "default_timeout_seconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "is_enabled": {
+            "type": "boolean"
+          },
+          "job_type": {
+            "type": "string"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "JobEvent": {
+        "type": "object",
+        "description": "One durable job event.",
+        "required": [
+          "id",
+          "job_id",
+          "run_number",
+          "attempt",
+          "event_type",
+          "stage",
+          "progress_done",
+          "progress_total",
+          "occurred_at",
+          "redacted_fields"
+        ],
+        "properties": {
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "payload": {},
+          "progress_done": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "progress_total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "redacted_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "run_number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "stage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "JobEventsResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobEvent"
+            }
+          },
+          "page": {
+            "$ref": "#/components/schemas/HistoryPage"
+          }
+        }
+      },
+      "JobLog": {
+        "type": "object",
+        "description": "One application-provided job log entry.",
+        "required": [
+          "id",
+          "job_id",
+          "run_number",
+          "attempt",
+          "level",
+          "occurred_at",
+          "redacted_fields"
+        ],
+        "properties": {
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "id": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "payload": {},
+          "redacted_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "run_number": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "JobLogsResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobLog"
+            }
+          },
+          "page": {
+            "$ref": "#/components/schemas/HistoryPage"
+          }
+        }
+      },
+      "JobMetrics": {
+        "type": "object",
+        "description": "Per-job-type operational metrics.",
+        "required": [
+          "job_type",
+          "pending_count",
+          "leased_count",
+          "stale_leases",
+          "succeeded_24h",
+          "retryable_24h",
+          "terminal_24h",
+          "panicked_24h",
+          "timeout_24h",
+          "dead_lettered_24h",
+          "p50_duration_ms_24h",
+          "p95_duration_ms_24h",
+          "continued_24h",
+          "active_continued_count",
+          "max_active_run_number"
+        ],
+        "properties": {
+          "active_continued_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "continued_24h": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "dead_lettered_24h": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "job_type": {
+            "type": "string"
+          },
+          "leased_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "max_active_run_number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "p50_duration_ms_24h": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "p95_duration_ms_24h": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "panicked_24h": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "pending_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "retryable_24h": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "stale_leases": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "succeeded_24h": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "terminal_24h": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "timeout_24h": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "JobResponse": {
+        "type": "object",
+        "required": [
+          "job"
+        ],
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/Job"
+          }
+        }
+      },
+      "JobsResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Job"
+            }
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          }
+        }
+      },
+      "MetricsResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobMetrics"
+            }
+          }
+        }
+      },
+      "Page": {
+        "type": "object",
+        "description": "Offset pagination echoed in list responses.",
+        "required": [
+          "limit",
+          "offset",
+          "has_more"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "Workflow": {
+        "type": "object",
+        "description": "Safe workflow run representation.",
+        "required": [
+          "id",
+          "workflow_type",
+          "organization_id",
+          "status",
+          "result_step_key",
+          "started_at",
+          "finished_at",
+          "created_at",
+          "updated_at",
+          "redacted_fields"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "metadata": {},
+          "organization_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "redacted_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "result_step_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workflow_type": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkflowDependency": {
+        "type": "object",
+        "required": [
+          "workflow_run_id",
+          "prerequisite_step_id",
+          "dependent_step_id",
+          "release_mode",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "dependent_step_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "prerequisite_step_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "release_mode": {
+            "type": "string"
+          },
+          "workflow_run_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "WorkflowResponse": {
+        "type": "object",
+        "required": [
+          "workflow",
+          "steps",
+          "steps_page",
+          "dependencies",
+          "dependencies_page"
+        ],
+        "properties": {
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowDependency"
+            }
+          },
+          "dependencies_page": {
+            "$ref": "#/components/schemas/Page"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowStep"
+            }
+          },
+          "steps_page": {
+            "$ref": "#/components/schemas/Page"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/Workflow"
+          }
+        }
+      },
+      "WorkflowStep": {
+        "type": "object",
+        "description": "Safe workflow step representation.",
+        "required": [
+          "id",
+          "workflow_run_id",
+          "step_key",
+          "execution_kind",
+          "job_type",
+          "organization_id",
+          "priority",
+          "max_attempts",
+          "timeout_seconds",
+          "stage",
+          "allow_handler_continuation",
+          "status",
+          "job_id",
+          "released_at",
+          "started_at",
+          "finished_at",
+          "dependency_count_total",
+          "dependency_count_pending",
+          "dependency_count_unsatisfied",
+          "last_error_code",
+          "created_at",
+          "updated_at",
+          "redacted_fields"
+        ],
+        "properties": {
+          "allow_handler_continuation": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "dependency_count_pending": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "dependency_count_total": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "dependency_count_unsatisfied": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "execution_kind": {
+            "type": "string"
+          },
+          "execution_resource_key": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "job_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error_message": {
+            "type": "string"
+          },
+          "max_attempts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "organization_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "output": {},
+          "payload": {},
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "redacted_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "released_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "stage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "status_reason": {
+            "type": "string"
+          },
+          "step_key": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workflow_run_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "WorkflowsResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Workflow"
+            }
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          }
+        }
+      }
+    }
+  }
+}

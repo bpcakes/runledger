@@ -1,5 +1,6 @@
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Safe HTTP error returned by the admin contract.
 #[derive(Debug)]
@@ -9,12 +10,13 @@ pub struct AdminApiError {
     message: &'static str,
 }
 
-#[derive(Serialize)]
-struct ErrorBody {
+#[derive(Serialize, ToSchema)]
+#[schema(as = AdminErrorResponse)]
+pub(crate) struct ErrorBody {
     error: ErrorDetail,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ErrorDetail {
     code: &'static str,
     message: &'static str,

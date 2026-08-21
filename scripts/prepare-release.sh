@@ -271,6 +271,7 @@ cargo update \
   -p runledger-runtime
 
 ./scripts/refresh-sqlx-cache.sh
+./scripts/check-admin-openapi.sh
 cargo test --workspace
 ./scripts/run-external-consumer-smoke.sh
 ./scripts/check-package-licenses.sh
