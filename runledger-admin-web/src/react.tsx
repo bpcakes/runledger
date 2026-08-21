@@ -488,12 +488,6 @@ function Pagination({
   );
 }
 
-interface JobDetailData {
-  readonly job: JobResponse;
-  readonly events: JobEventsResponse;
-  readonly logs: JobLogsResponse;
-}
-
 function JobScreen({
   client,
   jobId,
@@ -509,24 +503,29 @@ function JobScreen({
   const [logCursors, setLogCursors] = useState<readonly string[]>([]);
   const eventCursor = eventCursors.at(-1);
   const logCursor = logCursors.at(-1);
-  const loader = useCallback(
-    async (signal: AbortSignal): Promise<JobDetailData> => {
-      const [job, events, logs] = await Promise.all([
-        client.job(jobId, { signal }),
-        client.jobEvents(jobId, {
-          ...(eventCursor === undefined ? {} : { cursor: eventCursor }),
-          signal,
-        }),
-        client.jobLogs(jobId, {
-          ...(logCursor === undefined ? {} : { cursor: logCursor }),
-          signal,
-        }),
-      ]);
-      return { job, events, logs };
-    },
-    [client, eventCursor, jobId, logCursor],
+  const jobLoader = useCallback(
+    (signal: AbortSignal) => client.job(jobId, { signal }),
+    [client, jobId],
   );
-  const [state, retry] = useResource(loader, pollIntervalMs);
+  const eventLoader = useCallback(
+    (signal: AbortSignal) =>
+      client.jobEvents(jobId, {
+        ...(eventCursor === undefined ? {} : { cursor: eventCursor }),
+        signal,
+      }),
+    [client, eventCursor, jobId],
+  );
+  const logLoader = useCallback(
+    (signal: AbortSignal) =>
+      client.jobLogs(jobId, {
+        ...(logCursor === undefined ? {} : { cursor: logCursor }),
+        signal,
+      }),
+    [client, jobId, logCursor],
+  );
+  const [jobState, retryJob] = useResource(jobLoader, pollIntervalMs);
+  const [eventState, retryEvents] = useResource(eventLoader, pollIntervalMs);
+  const [logState, retryLogs] = useResource(logLoader, pollIntervalMs);
   return (
     <section aria-labelledby="rla-job-heading">
       <BackButton
@@ -534,12 +533,14 @@ function JobScreen({
         onClick={() => onRouteChange({ name: "jobs" })}
       />
       <h2 id="rla-job-heading">Job {jobId}</h2>
-      <Resource retry={retry} state={state}>
-        {(data) => (
+      <Resource retry={retryJob} state={jobState}>
+        {(job) => (
           <JobDetail
-            data={data}
             eventPage={eventCursors.length + 1}
+            eventState={eventState}
+            job={job}
             logPage={logCursors.length + 1}
+            logState={logState}
             onNextEvents={(cursor) =>
               setEventCursors((current) => [...current, cursor])
             }
@@ -552,6 +553,8 @@ function JobScreen({
             onPreviousLogs={() =>
               setLogCursors((current) => current.slice(0, -1))
             }
+            retryEvents={retryEvents}
+            retryLogs={retryLogs}
           />
         )}
       </Resource>
@@ -560,23 +563,31 @@ function JobScreen({
 }
 
 function JobDetail({
-  data,
   eventPage,
+  eventState,
+  job: response,
   logPage,
+  logState,
   onNextEvents,
   onNextLogs,
   onPreviousEvents,
   onPreviousLogs,
+  retryEvents,
+  retryLogs,
 }: {
-  readonly data: JobDetailData;
   readonly eventPage: number;
+  readonly eventState: ResourceState<JobEventsResponse>;
+  readonly job: JobResponse;
   readonly logPage: number;
+  readonly logState: ResourceState<JobLogsResponse>;
   readonly onNextEvents: (cursor: string) => void;
   readonly onNextLogs: (cursor: string) => void;
   readonly onPreviousEvents: () => void;
   readonly onPreviousLogs: () => void;
+  readonly retryEvents: () => void;
+  readonly retryLogs: () => void;
 }) {
-  const job = data.job.job;
+  const job = response.job;
   return (
     <>
       <RedactionNotice fields={job.redacted_fields} />
@@ -614,53 +625,66 @@ function JobDetail({
       <JsonBlock label="Checkpoint" value={job.checkpoint} />
       <JsonBlock label="Output" value={job.output} />
       <h3>Events</h3>
-      {data.events.items.length === 0 ? (
-        <p>No events.</p>
-      ) : (
-        <ol className="rla-timeline">
-          {data.events.items.map((event) => (
-            <li key={event.id}>
-              <Status value={event.event_type} />{" "}
-              <time dateTime={event.occurred_at}>
-                {formatDate(event.occurred_at)}
-              </time>
-              <RedactionNotice fields={event.redacted_fields} />
-              <JsonBlock label="Event payload" value={event.payload} />
-            </li>
-          ))}
-        </ol>
-      )}
-      <HistoryPagination
-        label="Event history pagination"
-        onNext={onNextEvents}
-        onPrevious={onPreviousEvents}
-        page={eventPage}
-        response={data.events.page}
-      />
+      <Resource retry={retryEvents} state={eventState}>
+        {(events) => (
+          <>
+            {events.items.length === 0 ? (
+              <p>No events.</p>
+            ) : (
+              <ol className="rla-timeline">
+                {events.items.map((event) => (
+                  <li key={event.id}>
+                    <Status value={event.event_type} />{" "}
+                    <time dateTime={event.occurred_at}>
+                      {formatDate(event.occurred_at)}
+                    </time>
+                    <RedactionNotice fields={event.redacted_fields} />
+                    <JsonBlock label="Event payload" value={event.payload} />
+                  </li>
+                ))}
+              </ol>
+            )}
+            <HistoryPagination
+              label="Event history pagination"
+              onNext={onNextEvents}
+              onPrevious={onPreviousEvents}
+              page={eventPage}
+              response={events.page}
+            />
+          </>
+        )}
+      </Resource>
       <h3>Logs</h3>
-      {data.logs.items.length === 0 ? (
-        <p>No application logs.</p>
-      ) : (
-        <ol className="rla-timeline">
-          {data.logs.items.map((log) => (
-            <li key={log.id}>
-              <strong>{log.level}</strong> {log.message ?? "Message hidden"}{" "}
-              <time dateTime={log.occurred_at}>
-                {formatDate(log.occurred_at)}
-              </time>
-              <RedactionNotice fields={log.redacted_fields} />
-              <JsonBlock label="Log payload" value={log.payload} />
-            </li>
-          ))}
-        </ol>
-      )}
-      <HistoryPagination
-        label="Log history pagination"
-        onNext={onNextLogs}
-        onPrevious={onPreviousLogs}
-        page={logPage}
-        response={data.logs.page}
-      />
+      <Resource retry={retryLogs} state={logState}>
+        {(logs) => (
+          <>
+            {logs.items.length === 0 ? (
+              <p>No application logs.</p>
+            ) : (
+              <ol className="rla-timeline">
+                {logs.items.map((log) => (
+                  <li key={log.id}>
+                    <strong>{log.level}</strong>{" "}
+                    {log.message ?? "Message hidden"}{" "}
+                    <time dateTime={log.occurred_at}>
+                      {formatDate(log.occurred_at)}
+                    </time>
+                    <RedactionNotice fields={log.redacted_fields} />
+                    <JsonBlock label="Log payload" value={log.payload} />
+                  </li>
+                ))}
+              </ol>
+            )}
+            <HistoryPagination
+              label="Log history pagination"
+              onNext={onNextLogs}
+              onPrevious={onPreviousLogs}
+              page={logPage}
+              response={logs.page}
+            />
+          </>
+        )}
+      </Resource>
       {job.organization_id !== null ? null : (
         <p className="rla-muted">This is a global job.</p>
       )}

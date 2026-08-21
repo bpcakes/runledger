@@ -198,6 +198,7 @@ describe("RunledgerAdminPanel", () => {
   });
 
   it("pages backward through newest-first job history", async () => {
+    const job = vi.fn(client.job);
     const jobEvents = vi.fn<RunledgerAdminClient["jobEvents"]>(
       async (_jobId, params) => ({
         ...events,
@@ -215,9 +216,10 @@ describe("RunledgerAdminPanel", () => {
         },
       }),
     );
+    const jobLogs = vi.fn(client.jobLogs);
     render(
       <RunledgerAdminPanel
-        client={{ ...client, jobEvents }}
+        client={{ ...client, job, jobEvents, jobLogs }}
         onRouteChange={() => undefined}
         pollIntervalMs={0}
         route={{ name: "job", jobId }}
@@ -232,6 +234,8 @@ describe("RunledgerAdminPanel", () => {
       jobId,
       expect.objectContaining({ cursor: "2" }),
     );
+    expect(job).toHaveBeenCalledTimes(1);
+    expect(jobLogs).toHaveBeenCalledTimes(1);
   });
 
   it("waits for each poll to settle before scheduling the next one", async () => {
