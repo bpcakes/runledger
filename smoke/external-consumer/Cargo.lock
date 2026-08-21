@@ -1940,6 +1940,7 @@ dependencies = [
  "sqlx",
  "testcontainers",
  "tokio",
+ "utoipa",
 ]
 
 [[package]]

@@ -1,16 +1,13 @@
+use std::collections::BTreeSet;
+
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, Request, State};
-use axum::handler::Handler;
 use axum::http::{HeaderValue, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
-use utoipa::__dev::{SchemaReferences, Tags};
-use utoipa::Path as OpenApiPath;
-use utoipa::openapi::{
-    Components, Info, OpenApi, OpenApiBuilder, path::HttpMethod, server::Server,
-};
+use utoipa::openapi::{Info, OpenApi, server::Server};
 use uuid::Uuid;
 
 use crate::dto::{
@@ -23,66 +20,13 @@ use crate::{AdminAccess, AdminApiError, AdminService};
 
 const DEFAULT_SERVER_URL: &str = "/api/admin/runledger/v1";
 
-struct DocumentedRouter<S> {
-    router: Router<S>,
-    document: OpenApi,
-}
-
-// Keep Axum registration and the generated contract on the same path metadata.
-// Pin Utoipa while this bridge relies on its integration traits under `__dev`.
-impl<S> DocumentedRouter<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    fn new(document: OpenApi) -> Self {
-        Self {
-            router: Router::new(),
-            document,
-        }
-    }
-
-    fn get<P, H, T>(mut self, handler: H) -> Self
-    where
-        P: OpenApiPath + SchemaReferences + for<'tags> Tags<'tags>,
-        H: Handler<T, S>,
-        T: 'static,
-    {
-        let path = P::path();
-        let methods = P::methods();
-        assert!(
-            methods.len() == 1 && matches!(methods.first(), Some(HttpMethod::Get)),
-            "the read-only admin router only accepts documented GET handlers"
-        );
-
-        self.router = self.router.route(&path, get(handler));
-        let mut operation = P::operation();
-        operation
-            .tags
-            .get_or_insert_default()
-            .extend(P::tags().into_iter().map(str::to_owned));
-        self.document
-            .paths
-            .add_path_operation(&path, methods, operation);
-
-        let mut schemas = Vec::new();
-        P::schemas(&mut schemas);
-        self.document
-            .components
-            .get_or_insert_with(Components::new)
-            .schemas
-            .extend(schemas);
-        self
-    }
-}
-
 /// Builds the read-only v1 route tree.
 ///
 /// Routes are relative. A typical host nests the result at
 /// `/api/admin/runledger/v1` and inserts [`AdminAccess`] after authenticating
 /// each request.
 pub fn router(service: AdminService) -> Router {
-    documented_router()
-        .router
+    operation_router()
         .with_state(service)
         .layer(middleware::from_fn(no_store))
 }
@@ -93,33 +37,34 @@ pub fn router(service: AdminService) -> Router {
 /// conventional `/api/admin/runledger/v1` mount point as its server URL.
 #[must_use]
 pub fn openapi_json() -> String {
-    documented_router()
-        .document
+    openapi_document()
         .to_pretty_json()
         .expect("the static admin OpenAPI document must serialize as JSON")
 }
 
-fn documented_router() -> DocumentedRouter<AdminService> {
+fn openapi_document() -> OpenApi {
+    let mut document = <AdminApiDocument as utoipa::OpenApi>::openapi();
     let mut info = Info::new("Runledger Admin API", crate::API_VERSION);
     info.description = Some(
         "Read-only administration contract. The embedding application owns authentication and authorization."
             .to_owned(),
     );
-    let document = OpenApiBuilder::new()
-        .info(info)
-        .servers(Some([Server::new(DEFAULT_SERVER_URL)]))
-        .build();
+    document.info = info;
+    document.servers = Some(vec![Server::new(DEFAULT_SERVER_URL)]);
 
-    DocumentedRouter::new(document)
-        .get::<__path_capabilities, _, _>(capabilities)
-        .get::<__path_metrics, _, _>(metrics)
-        .get::<__path_jobs, _, _>(jobs)
-        .get::<__path_job, _, _>(job)
-        .get::<__path_job_events, _, _>(job_events)
-        .get::<__path_job_logs, _, _>(job_logs)
-        .get::<__path_workflows, _, _>(workflows)
-        .get::<__path_workflow, _, _>(workflow)
-        .get::<__path_definitions, _, _>(definitions)
+    let documented_paths = document
+        .paths
+        .paths
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let registered_paths = ADMIN_ROUTE_PATHS.iter().copied().collect::<BTreeSet<_>>();
+    assert_eq!(
+        documented_paths, registered_paths,
+        "admin route registration and OpenAPI paths must match"
+    );
+
+    document
 }
 
 async fn no_store(request: Request, next: Next) -> Response {
@@ -383,4 +328,33 @@ async fn definitions(
             .definitions(require_access(access)?, &require_query(query)?)
             .await?,
     ))
+}
+
+// This is the single route inventory for both Axum registration and Utoipa's
+// public OpenApi derive. Handler annotations still own operation-level details;
+// the assertion in `openapi_document` catches a path typo between the two.
+macro_rules! define_admin_routes {
+    ($( $path:literal => $handler:ident ),+ $(,)?) => {
+        #[derive(utoipa::OpenApi)]
+        #[openapi(paths($( $handler ),+))]
+        struct AdminApiDocument;
+
+        const ADMIN_ROUTE_PATHS: &[&str] = &[$($path),+];
+
+        fn operation_router() -> Router<AdminService> {
+            Router::new()$(.route($path, get($handler)))+
+        }
+    };
+}
+
+define_admin_routes! {
+    "/capabilities" => capabilities,
+    "/metrics" => metrics,
+    "/jobs" => jobs,
+    "/jobs/{job_id}" => job,
+    "/jobs/{job_id}/events" => job_events,
+    "/jobs/{job_id}/logs" => job_logs,
+    "/workflows" => workflows,
+    "/workflows/{workflow_id}" => workflow,
+    "/definitions" => definitions,
 }

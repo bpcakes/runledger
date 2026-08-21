@@ -56,6 +56,7 @@ async fn packaged_crates_support_external_consumer_embedding() {
     let harness = PostgresHarness::start().await;
     let _admin_router = runledger_admin::router(AdminService::new(harness.pool.clone()));
     let _admin_access = AdminAccess::all(DataVisibility::MetadataOnly);
+    let _admin_job_schema = <runledger_admin::JobDto as utoipa::PartialSchema>::schema();
     runledger_postgres::migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect("apply packaged migrations");
