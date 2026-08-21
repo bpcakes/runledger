@@ -36,8 +36,8 @@ All notable changes to this workspace are documented here.
   holder that is building a concurrent index.
 - Correct service-wide `get_job_metrics` duration percentiles to compute over
   all matching attempts instead of averaging per-organization percentiles.
-- Normalize the generated npm OpenAPI artifact to mode 0644 and verify that
-  mode during contract checks and release packaging.
+- Normalize the generated npm OpenAPI artifact to mode 0644, verify the
+  committed contract's portable Git file mode, and verify the packaged mode.
 - Verify the exact crates.io and npm artifact identities before resuming a
   partially published release, preventing one version from combining artifacts
   built from different commits.

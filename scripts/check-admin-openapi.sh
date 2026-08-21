@@ -3,7 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONTRACT_PATH="$ROOT_DIR/runledger-admin-web/openapi.json"
+CONTRACT_REPO_PATH="runledger-admin-web/openapi.json"
+CONTRACT_PATH="$ROOT_DIR/$CONTRACT_REPO_PATH"
 TEMP_DIR="$(mktemp -d)"
 GENERATED_PATH="$TEMP_DIR/openapi.json"
 
@@ -23,13 +24,17 @@ file_mode() {
   fi
 }
 
-for path in "$CONTRACT_PATH" "$GENERATED_PATH"; do
-  mode="$(file_mode "$path")"
-  if [[ "$mode" != "644" ]]; then
-    echo "error: ${path} must have mode 0644, found ${mode}" >&2
-    exit 1
-  fi
-done
+contract_index_mode="$(git -C "$ROOT_DIR" ls-files --stage -- "$CONTRACT_REPO_PATH" | awk 'NR == 1 { print $1 }')"
+if [[ "$contract_index_mode" != "100644" ]]; then
+  echo "error: ${CONTRACT_REPO_PATH} must be a non-executable regular file in Git, found ${contract_index_mode:-untracked}" >&2
+  exit 1
+fi
+
+generated_mode="$(file_mode "$GENERATED_PATH")"
+if [[ "$generated_mode" != "644" ]]; then
+  echo "error: ${GENERATED_PATH} must have mode 0644, found ${generated_mode}" >&2
+  exit 1
+fi
 
 if ! cmp -s "$CONTRACT_PATH" "$GENERATED_PATH"; then
   diff -u "$CONTRACT_PATH" "$GENERATED_PATH" || true
