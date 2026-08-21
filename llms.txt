@@ -42,11 +42,26 @@ can be imported together.
 | Worker process lifecycle | `Supervisor::run_until_shutdown` |
 | Custom worker lifecycle persistence | `JobLeaseIdentity` with `_for_lease` lifecycle APIs introduced in 0.9.0 |
 | Admin/status views | `get_*` / `list_*` APIs and `count_workflow_runs` in `runledger_postgres::jobs` |
+| Versioned read-only HTTP admin | `runledger_admin::router(AdminService)` mounted by the authenticated host |
+| Reusable React admin | `@runledger/admin/client` and `@runledger/admin/react` |
 
 Use `set_job_schedule_active` to pause/resume schedules and
 `set_job_schedule_next_fire_at` to retime a schedule cursor.
 Use `runledger_postgres::jobs::count_workflow_runs` with
 `runledger_postgres::jobs::WorkflowRunCountFilter` for workflow counters.
+
+For browser-based operator views, mount the state-complete `runledger-admin`
+router at `/api/admin/runledger/v1`. The embedding service must authenticate the
+caller and insert `AdminAccess`; never derive it directly from an untrusted
+request field. `AdminAccess::organization` is exactly tenant-scoped, while
+`AdminAccess::all` includes global and every organization's rows. Default to
+`DataVisibility::MetadataOnly`; `Full` exposes stored payloads and diagnostic
+text. Organization scope also filters workflow steps by their effective
+execution organization and hides graph edges unless both endpoints are visible.
+Definitions are service-wide and require either `AdminAccess::all` or an explicit
+`with_service_wide_definitions()` grant. The v1 router has no mutation actions.
+The React package discovers these resources from `/capabilities`, uses controlled
+route values, and has no router, query-cache, or design-system dependency.
 
 For transactional handoff before a job definition exists, record a strictly
 idempotent `JobEnqueueIntent` in the application's `READ COMMITTED` transaction.

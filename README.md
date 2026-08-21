@@ -9,7 +9,8 @@ and external (human or API) approval gates. State lives entirely in your
 database, so there is no broker to run and nothing to lose on restart.
 
 The crates are libraries: you embed them in your own service and supply the
-handlers, process model, and admin surface.
+handlers and process model. Runledger also ships an optional host-authorized
+read-only HTTP admin contract and React panel.
 
 ## Features
 
@@ -40,6 +41,8 @@ handlers, process model, and admin surface.
   declare schedules from one source of truth at startup.
 - **Operator TUI** — a read-only terminal dashboard for queue metrics, jobs,
   workflows, and definitions.
+- **Reusable web admin** — a versioned read-only Axum API plus a React package
+  whose client, navigation, and styles can be adopted independently.
 - **Offline builds** — SQLx compile-time-checked queries with a committed
   `.sqlx/` cache, so the workspace builds without a live database.
 
@@ -63,6 +66,7 @@ handlers, process model, and admin surface.
   - [Job definition catalog](#job-definition-catalog)
 - [Examples](#examples)
 - [Admin reads](#admin-reads)
+- [Admin HTTP and React](#admin-http-and-react)
 - [Operator TUI](#operator-tui)
 - [Configuration](#configuration)
 - [Database schema and migrations](#database-schema-and-migrations)
@@ -78,6 +82,7 @@ handlers, process model, and admin surface.
 
 | Crate | Role |
 | --- | --- |
+| [`runledger-admin`](runledger-admin) | Host-authorized, read-only Axum API and safe DTO contract for jobs, events, logs, metrics, workflows, and definitions. |
 | [`runledger-core`](runledger-core) | Storage-agnostic contracts: handler traits, runtime types, statuses, identifiers, and workflow enqueue/DAG validation. No persistence or async loops. |
 | [`runledger-postgres`](runledger-postgres) | SQLx-backed PostgreSQL persistence: queue and job lifecycle, schedules, the workflow DAG state machine, runtime configs, logs, and admin reads/mutations. |
 | [`runledger-runtime`](runledger-runtime) | The async runtime: `Supervisor`, worker/intent-promoter/scheduler/reaper loops, the job catalog, the handler registry, and runtime configuration. |
@@ -94,12 +99,13 @@ Add the libraries to your service:
 
 ```toml
 [dependencies]
-runledger-core = "0.9"
-runledger-postgres = "0.9"
-runledger-runtime = "0.9"
+runledger-core = "0.10.1"
+runledger-postgres = "0.10.1"
+runledger-runtime = "0.10.1"
+runledger-admin = "0.10.1" # optional HTTP admin API
 
 [dev-dependencies]
-runledger-test-support = "0.9"
+runledger-test-support = "0.10.1"
 ```
 
 The published crates require **Rust 1.88+** and **PostgreSQL 18+**. Older
@@ -999,6 +1005,69 @@ unclaimed. It returns `JobPayloadUuidArrayFieldUpdate::Updated`, `NotFound`, or
 idempotent request snapshots that cannot be kept consistent, and jobs that are
 already claimed or terminal.
 
+## Admin HTTP and React
+
+`runledger-admin` turns the persistence reads above into a stable, versioned,
+read-only HTTP contract. The host still owns authentication and authorization:
+after authenticating a request, insert an `AdminAccess` extension and nest the
+state-complete router at `/api/admin/runledger/v1`.
+
+```rust
+use runledger_admin::{AdminAccess, AdminService, DataVisibility};
+
+let admin_routes = runledger_admin::router(AdminService::new(pool.clone()));
+let app = axum::Router::new().nest("/api/admin/runledger/v1", admin_routes);
+
+// In host authentication middleware, after checking the caller:
+request.extensions_mut().insert(AdminAccess::organization(
+    organization_id,
+    DataVisibility::MetadataOnly,
+));
+```
+
+Do not construct `AdminAccess` from an untrusted query parameter or header.
+`AdminAccess::all` can observe global jobs and every organization;
+`AdminAccess::organization` is restricted to exactly one organization. On a
+workflow detail response, that restriction applies to each step's effective
+execution organization as well as the parent run; a dependency is returned only
+when both of its steps are visible. Global rows are not part of an organization
+scope. Missing access fails with HTTP 401. Metadata-only visibility omits stored
+JSON, idempotency values, worker identifiers, log text, and diagnostic messages
+while listing the omitted field names in `redacted_fields`; full visibility is
+an explicit host grant. All responses use `Cache-Control: private, no-store`.
+
+Job definitions are service-wide rather than organization-owned, so an
+organization scope does not include `/definitions` unless the host calls
+`with_service_wide_definitions()`. The capability response advertises the exact
+resources granted to the request. List and workflow graph responses report
+`has_more`; event and log history is newest-first by default and uses opaque
+string cursors so JavaScript callers never lose 64-bit identifiers.
+
+The v1 router exposes only `GET` routes:
+
+```text
+/capabilities              /metrics
+/jobs                       /jobs/{id}
+/jobs/{id}/events           /jobs/{id}/logs
+/workflows                  /workflows/{id}
+/definitions
+```
+
+The companion package is published as `@runledger/admin`:
+
+```bash
+npm install @runledger/admin react
+```
+
+Import the transport independently from `@runledger/admin/client`, or use the
+controlled panel from `@runledger/admin/react` and optional
+`@runledger/admin/styles.css`. The panel accepts a discriminated `route` value
+and `onRouteChange` callback, so the host may synchronize it with any router.
+React is the only peer dependency; the package does not expose a router, query
+cache, CSS framework, or component-library contract. See
+[`runledger-admin-web/README.md`](runledger-admin-web/README.md) for a complete
+integration example.
+
 ## Operator TUI
 
 `runledger-tui` is a read-only terminal UI for operators and local development.
@@ -1421,7 +1490,8 @@ deliberately disables cleanup for debugging. Supplying
 does not start a container or reaper.
 
 The packaged external-consumer smoke test packages `runledger-core`,
-`runledger-test-support`, `runledger-postgres`, and `runledger-runtime`,
+`runledger-test-support`, `runledger-postgres`, `runledger-runtime`, and
+`runledger-admin`,
 extracts the `.crate` archives, builds a standalone host crate against the
 packaged manifests via `[patch.crates-io]` and its checked-in lockfile, then
 runs migrations, starts the supervisor, enqueues jobs, and asserts terminal
@@ -1489,8 +1559,9 @@ It rejects changes outside the files it generates. The script bumps publishable
 crate and root workspace dependency versions, refreshes the root and standalone
 smoke lockfiles plus SQLx offline metadata, runs workspace tests and the locked
 packaged smoke test, dry-runs `runledger-core`, packages the library crates, and
-build-verifies the packaged `runledger-tui` binary. It also verifies that every
-crate archive contains the repository license. If publishing manually, run
+build-verifies the packaged `runledger-tui` binary. It also tests, builds, and
+dry-run packs `@runledger/admin`, and verifies that every crate archive contains
+the repository license. If publishing manually, run
 `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres` or
 `runledger-runtime` and commit any resulting `.sqlx/` changes.
 
@@ -1505,9 +1576,10 @@ is absent locally and remotely, requires the same-named remote branch to point
 at the exact local commit, and verifies that commit's completed GitHub Actions
 `CI` run and every job succeeded. It then dry-runs the branch and tag push,
 publishes crates in dependency order, dry-runs each once its workspace
-dependencies are indexed, creates a `v0.10.1` tag, and atomically pushes the
-current branch and tag. The publication preflight requires an authenticated
-GitHub CLI. Set `PUBLISH_REMOTE` to override the git remote for the final push.
+dependencies are indexed, publishes the same-version React package to npm,
+creates a `v0.10.1` tag, and atomically pushes the current branch and tag. The
+publication preflight requires authenticated GitHub and npm CLIs. Set
+`PUBLISH_REMOTE` to override the git remote for the final push.
 
 Observable contract changes to call out in release notes for this line:
 
@@ -1538,6 +1610,8 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 ├── docs/                     # downstream agent guide and notes
 ├── scripts/                  # release, SQLx cache, and smoke-test scripts
 ├── smoke/                    # external-consumer smoke test crate
+├── runledger-admin/          # read-only Axum admin contract
+├── runledger-admin-web/      # @runledger/admin client and React package
 ├── runledger-core/
 ├── runledger-postgres/
 ├── runledger-runtime/

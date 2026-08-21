@@ -51,3 +51,9 @@ export function RunledgerPage() {
 Translate `route` to your own URL if deep linking is needed. Override the
 `--rla-*` CSS custom properties or omit the stylesheet and target the semantic
 `rla-*` class names from the host design system.
+
+The panel discovers its available sections from `/capabilities`; it does not
+request the service-wide definition catalog unless the host granted that
+resource. Job events and logs start with the newest records and expose Older /
+Newer controls backed by opaque cursors. Offset-paged lists and workflow graph
+collections use the API's `has_more` value instead of guessing from page length.

@@ -4,6 +4,26 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add the host-authorized, read-only `runledger-admin` Axum API with a versioned
+  v1 contract for capabilities, metrics, jobs, events, logs, workflows, and job
+  definitions. Organization scoping fails closed and sensitive stored data is
+  redacted unless the host explicitly grants full visibility. Service-wide
+  definitions require an explicit grant, and workflow graph reads filter both
+  steps and dependency endpoints by effective organization.
+- Add the `@runledger/admin` npm package with a framework-neutral validated
+  client, controlled accessible React panel, and optional scoped stylesheet.
+  React is the only peer dependency; host applications keep ownership of URL
+  routing, query caching, and design-system integration. The shared client owns
+  response validation, opaque history cursors, pagination metadata, and
+  non-overlapping polling behavior.
+
+### Changed
+
+- Extend CI, packaged-consumer smoke tests, license checks, and release tooling
+  to build, test, pack, and publish the Rust and npm admin artifacts together.
+
 ## [0.10.1] - 2026-08-20
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)
 
