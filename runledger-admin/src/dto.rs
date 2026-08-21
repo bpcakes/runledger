@@ -7,6 +7,29 @@ use uuid::Uuid;
 
 use crate::{AdminAccess, AdminScope, DataVisibility};
 
+/// Exact decimal representation of a signed 64-bit integer on the JSON wire.
+///
+/// JSON numbers are not safe for the full PostgreSQL `bigint` range in
+/// JavaScript, so unbounded counters and progress values use strings in the v1
+/// contract.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(transparent)]
+#[schema(as = ExactI64, value_type = String, pattern = "^-?[0-9]+$")]
+pub struct ExactI64(String);
+
+impl ExactI64 {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<i64> for ExactI64 {
+    fn from(value: i64) -> Self {
+        Self(value.to_string())
+    }
+}
+
 /// Default number of records returned by list endpoints.
 pub const DEFAULT_PAGE_LIMIT: i64 = 50;
 
@@ -270,21 +293,21 @@ pub struct HistoryPageDto {
 #[schema(as = JobMetrics)]
 pub struct JobMetricsDto {
     pub job_type: String,
-    pub pending_count: i64,
-    pub leased_count: i64,
-    pub stale_leases: i64,
-    pub succeeded_24h: i64,
-    pub retryable_24h: i64,
-    pub terminal_24h: i64,
-    pub panicked_24h: i64,
-    pub timeout_24h: i64,
-    pub dead_lettered_24h: i64,
+    pub pending_count: ExactI64,
+    pub leased_count: ExactI64,
+    pub stale_leases: ExactI64,
+    pub succeeded_24h: ExactI64,
+    pub retryable_24h: ExactI64,
+    pub terminal_24h: ExactI64,
+    pub panicked_24h: ExactI64,
+    pub timeout_24h: ExactI64,
+    pub dead_lettered_24h: ExactI64,
     #[schema(required = true)]
     pub p50_duration_ms_24h: Option<f64>,
     #[schema(required = true)]
     pub p95_duration_ms_24h: Option<f64>,
-    pub continued_24h: i64,
-    pub active_continued_count: i64,
+    pub continued_24h: ExactI64,
+    pub active_continued_count: ExactI64,
     pub max_active_run_number: i32,
 }
 
@@ -319,9 +342,9 @@ pub struct JobSummaryDto {
     pub finished_at: Option<DateTime<Utc>>,
     pub stage: String,
     #[schema(required = true)]
-    pub progress_done: Option<i64>,
+    pub progress_done: Option<ExactI64>,
     #[schema(required = true)]
-    pub progress_total: Option<i64>,
+    pub progress_total: Option<ExactI64>,
     #[schema(required = true)]
     pub progress_pct: Option<f64>,
     #[schema(required = true)]
@@ -356,9 +379,9 @@ pub struct JobDto {
     pub finished_at: Option<DateTime<Utc>>,
     pub stage: String,
     #[schema(required = true)]
-    pub progress_done: Option<i64>,
+    pub progress_done: Option<ExactI64>,
     #[schema(required = true)]
-    pub progress_total: Option<i64>,
+    pub progress_total: Option<ExactI64>,
     #[schema(required = true)]
     pub progress_pct: Option<f64>,
     #[schema(required = true)]
@@ -413,9 +436,9 @@ pub struct JobEventDto {
     #[schema(required = true)]
     pub stage: Option<String>,
     #[schema(required = true)]
-    pub progress_done: Option<i64>,
+    pub progress_done: Option<ExactI64>,
     #[schema(required = true)]
-    pub progress_total: Option<i64>,
+    pub progress_total: Option<ExactI64>,
     pub occurred_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Value)]
@@ -602,4 +625,23 @@ pub struct JobDefinitionDto {
 pub struct DefinitionsResponse {
     pub items: Vec<JobDefinitionDto>,
     pub page: PageDto,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::ExactI64;
+
+    #[test]
+    fn exact_i64_serializes_the_full_range_as_decimal_strings() {
+        assert_eq!(
+            serde_json::to_value(ExactI64::from(i64::MIN)).expect("serialize minimum i64"),
+            json!(i64::MIN.to_string())
+        );
+        assert_eq!(
+            serde_json::to_value(ExactI64::from(i64::MAX)).expect("serialize maximum i64"),
+            json!(i64::MAX.to_string())
+        );
+    }
 }

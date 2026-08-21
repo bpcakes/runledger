@@ -94,6 +94,54 @@ fn openapi_contract_keeps_sensitive_fields_out_of_list_summaries() {
 }
 
 #[test]
+fn openapi_contract_uses_exact_decimal_strings_for_unbounded_integers() {
+    let document: Value = serde_json::from_str(&runledger_admin::openapi_json())
+        .expect("generated OpenAPI must be valid JSON");
+    let schemas = &document["components"]["schemas"];
+
+    assert_eq!(schemas["ExactI64"]["type"], "string");
+    assert_eq!(schemas["ExactI64"]["pattern"], "^-?[0-9]+$");
+
+    for (schema, fields) in [
+        (
+            "JobMetrics",
+            &[
+                "pending_count",
+                "leased_count",
+                "stale_leases",
+                "succeeded_24h",
+                "retryable_24h",
+                "terminal_24h",
+                "panicked_24h",
+                "timeout_24h",
+                "dead_lettered_24h",
+                "continued_24h",
+                "active_continued_count",
+            ][..],
+        ),
+        ("JobSummary", &["progress_done", "progress_total"]),
+        ("Job", &["progress_done", "progress_total"]),
+        ("JobEvent", &["progress_done", "progress_total"]),
+    ] {
+        for field in fields {
+            let property = &schemas[schema]["properties"][field];
+            let exact_reference = property["$ref"].as_str().or_else(|| {
+                ["oneOf", "anyOf"].iter().find_map(|composition| {
+                    property[*composition].as_array().and_then(|options| {
+                        options.iter().find_map(|option| option["$ref"].as_str())
+                    })
+                })
+            });
+            assert_eq!(
+                exact_reference,
+                Some("#/components/schemas/ExactI64"),
+                "{schema}.{field} must preserve the full signed 64-bit range"
+            );
+        }
+    }
+}
+
+#[test]
 fn openapi_contract_bounds_every_offset_parameter() {
     let document: Value = serde_json::from_str(&runledger_admin::openapi_json())
         .expect("generated OpenAPI must be valid JSON");

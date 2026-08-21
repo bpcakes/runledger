@@ -108,6 +108,22 @@ async fn insert_finished_attempt(pool: &DbPool, job_id: Uuid, attempt: i32, dura
     .expect("insert finished metrics attempt");
 }
 
+async fn set_large_progress(pool: &DbPool, job_id: Uuid) {
+    const LARGE_PROGRESS: i64 = 9_007_199_254_740_993;
+
+    sqlx::query(
+        "UPDATE job_queue
+         SET progress_done = $2,
+             progress_total = $2
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .bind(LARGE_PROGRESS)
+    .execute(pool)
+    .await
+    .expect("set progress outside the JavaScript safe-integer range");
+}
+
 async fn request_json(
     app: &Router,
     method: Method,
@@ -212,6 +228,7 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     insert_finished_attempt(&pool, organization_b_job, 1, 1_000).await;
     insert_finished_attempt(&pool, organization_b_job, 2, 2_000).await;
     insert_finished_attempt(&pool, organization_b_job, 3, 3_000).await;
+    set_large_progress(&pool, organization_a_job).await;
 
     let workflow_payload = json!({"customer_email": "workflow-private@example.test"});
     let workflow_metadata = json!({"source": "admin-contract", "secret": true});
@@ -298,6 +315,8 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
             .iter()
             .all(|item| item["organization_id"] == organization_a.to_string())
     );
+    assert_eq!(body["items"][0]["progress_done"], "9007199254740993");
+    assert_eq!(body["items"][0]["progress_total"], "9007199254740993");
 
     let (status, _, body) = get_json(&app, "/jobs", Some(full_access)).await;
     assert_eq!(status, StatusCode::OK);
@@ -324,6 +343,8 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["job"]["progress_done"], "9007199254740993");
+    assert_eq!(body["job"]["progress_total"], "9007199254740993");
     assert!(body["job"].get("payload").is_none());
     assert!(body["job"].get("idempotency_key").is_none());
     assert!(
@@ -424,7 +445,11 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
             .expect("metric items")
             .iter()
             .any(|item| item["job_type"] == JOB_TYPE
-                && item["pending_count"].as_i64().unwrap_or(0) >= 1)
+                && item["pending_count"]
+                    .as_str()
+                    .and_then(|count| count.parse::<i64>().ok())
+                    .unwrap_or(0)
+                    >= 1)
     );
     assert!(
         body["items"]

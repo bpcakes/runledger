@@ -187,6 +187,14 @@ export interface components {
             readonly message: string;
         };
         /**
+         * @description Exact decimal representation of a signed 64-bit integer on the JSON wire.
+         *
+         *     JSON numbers are not safe for the full PostgreSQL `bigint` range in
+         *     JavaScript, so unbounded counters and progress values use strings in the v1
+         *     contract.
+         */
+        readonly ExactI64: string;
+        /**
          * @description Ordering for job event and log history.
          * @enum {string}
          */
@@ -232,12 +240,10 @@ export interface components {
             readonly payload?: unknown;
             /** Format: int32 */
             readonly priority: number;
-            /** Format: int64 */
-            readonly progress_done: number | null;
+            readonly progress_done: null | components["schemas"]["ExactI64"];
             /** Format: double */
             readonly progress_pct: number | null;
-            /** Format: int64 */
-            readonly progress_total: number | null;
+            readonly progress_total: null | components["schemas"]["ExactI64"];
             readonly redacted_fields: readonly string[];
             /** Format: int32 */
             readonly run_number: number;
@@ -280,10 +286,8 @@ export interface components {
             /** Format: date-time */
             readonly occurred_at: string;
             readonly payload?: unknown;
-            /** Format: int64 */
-            readonly progress_done: number | null;
-            /** Format: int64 */
-            readonly progress_total: number | null;
+            readonly progress_done: null | components["schemas"]["ExactI64"];
+            readonly progress_total: null | components["schemas"]["ExactI64"];
             readonly redacted_fields: readonly string[];
             /** Format: int32 */
             readonly run_number: number;
@@ -315,35 +319,24 @@ export interface components {
         };
         /** @description Per-job-type operational metrics. */
         readonly JobMetrics: {
-            /** Format: int64 */
-            readonly active_continued_count: number;
-            /** Format: int64 */
-            readonly continued_24h: number;
-            /** Format: int64 */
-            readonly dead_lettered_24h: number;
+            readonly active_continued_count: components["schemas"]["ExactI64"];
+            readonly continued_24h: components["schemas"]["ExactI64"];
+            readonly dead_lettered_24h: components["schemas"]["ExactI64"];
             readonly job_type: string;
-            /** Format: int64 */
-            readonly leased_count: number;
+            readonly leased_count: components["schemas"]["ExactI64"];
             /** Format: int32 */
             readonly max_active_run_number: number;
             /** Format: double */
             readonly p50_duration_ms_24h: number | null;
             /** Format: double */
             readonly p95_duration_ms_24h: number | null;
-            /** Format: int64 */
-            readonly panicked_24h: number;
-            /** Format: int64 */
-            readonly pending_count: number;
-            /** Format: int64 */
-            readonly retryable_24h: number;
-            /** Format: int64 */
-            readonly stale_leases: number;
-            /** Format: int64 */
-            readonly succeeded_24h: number;
-            /** Format: int64 */
-            readonly terminal_24h: number;
-            /** Format: int64 */
-            readonly timeout_24h: number;
+            readonly panicked_24h: components["schemas"]["ExactI64"];
+            readonly pending_count: components["schemas"]["ExactI64"];
+            readonly retryable_24h: components["schemas"]["ExactI64"];
+            readonly stale_leases: components["schemas"]["ExactI64"];
+            readonly succeeded_24h: components["schemas"]["ExactI64"];
+            readonly terminal_24h: components["schemas"]["ExactI64"];
+            readonly timeout_24h: components["schemas"]["ExactI64"];
         };
         readonly JobResponse: {
             readonly job: components["schemas"]["Job"];
@@ -372,12 +365,10 @@ export interface components {
             readonly organization_id: string | null;
             /** Format: int32 */
             readonly priority: number;
-            /** Format: int64 */
-            readonly progress_done: number | null;
+            readonly progress_done: null | components["schemas"]["ExactI64"];
             /** Format: double */
             readonly progress_pct: number | null;
-            /** Format: int64 */
-            readonly progress_total: number | null;
+            readonly progress_total: null | components["schemas"]["ExactI64"];
             /** Format: int32 */
             readonly run_number: number;
             readonly stage: string;

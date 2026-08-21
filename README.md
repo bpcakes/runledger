@@ -1046,7 +1046,9 @@ resources granted to the request. Metrics, list, and workflow graph responses
 report `has_more` and cap offset pagination at 10,000 skipped rows; narrow the
 filters instead of requesting deeper pages. Event and log history is
 newest-first by default and uses opaque string cursors so JavaScript callers
-never lose 64-bit identifiers.
+never lose 64-bit identifiers. Unbounded PostgreSQL `bigint` counters and
+progress values are likewise represented as exact decimal strings; bounded
+pagination values remain JSON numbers.
 
 The v1 router exposes only `GET` routes:
 

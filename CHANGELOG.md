@@ -41,6 +41,9 @@ All notable changes to this workspace are documented here.
 - Verify the exact crates.io and npm artifact identities before resuming a
   partially published release, preventing one version from combining artifacts
   built from different commits.
+- Represent unbounded admin metrics and progress `bigint` values as exact
+  decimal strings so JavaScript consumers never silently lose integer
+  precision.
 
 ## [0.10.1] - 2026-08-20
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)

@@ -938,6 +938,11 @@
           }
         }
       },
+      "ExactI64": {
+        "type": "string",
+        "description": "Exact decimal representation of a signed 64-bit integer on the JSON wire.\n\nJSON numbers are not safe for the full PostgreSQL `bigint` range in\nJavaScript, so unbounded counters and progress values use strings in the v1\ncontract.",
+        "pattern": "^-?[0-9]+$"
+      },
       "HistoryOrder": {
         "type": "string",
         "description": "Ordering for job event and log history.",
@@ -1080,11 +1085,14 @@
             "format": "int32"
           },
           "progress_done": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExactI64"
+              }
+            ]
           },
           "progress_pct": {
             "type": [
@@ -1094,11 +1102,14 @@
             "format": "double"
           },
           "progress_total": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExactI64"
+              }
+            ]
           },
           "redacted_fields": {
             "type": "array",
@@ -1224,18 +1235,24 @@
           },
           "payload": {},
           "progress_done": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExactI64"
+              }
+            ]
           },
           "progress_total": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExactI64"
+              }
+            ]
           },
           "redacted_fields": {
             "type": "array",
@@ -1363,23 +1380,19 @@
         ],
         "properties": {
           "active_continued_count": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "continued_24h": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "dead_lettered_24h": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "job_type": {
             "type": "string"
           },
           "leased_count": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "max_active_run_number": {
             "type": "integer",
@@ -1400,32 +1413,25 @@
             "format": "double"
           },
           "panicked_24h": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "pending_count": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "retryable_24h": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "stale_leases": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "succeeded_24h": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "terminal_24h": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           },
           "timeout_24h": {
-            "type": "integer",
-            "format": "int64"
+            "$ref": "#/components/schemas/ExactI64"
           }
         }
       },
@@ -1529,11 +1535,14 @@
             "format": "int32"
           },
           "progress_done": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExactI64"
+              }
+            ]
           },
           "progress_pct": {
             "type": [
@@ -1543,11 +1552,14 @@
             "format": "double"
           },
           "progress_total": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExactI64"
+              }
+            ]
           },
           "run_number": {
             "type": "integer",
