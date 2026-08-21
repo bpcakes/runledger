@@ -103,7 +103,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        react: ["18.2.0", "19.2.8"]
+        include:
+          - react: "18.2.0"
+            react_types: "18.3.31"
+            react_dom_types: "18.3.7"
+          - react: "19.2.8"
+            react_types: "19.2.14"
+            react_dom_types: "19.2.3"
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -120,6 +126,8 @@ jobs:
         run: >-
           npm install --no-save --package-lock=false
           react@${{ matrix.react }} react-dom@${{ matrix.react }}
+          @types/react@${{ matrix.react_types }}
+          @types/react-dom@${{ matrix.react_dom_types }}
         working-directory: runledger-admin-web
       - name: Test package
         run: npm test
