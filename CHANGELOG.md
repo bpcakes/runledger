@@ -27,6 +27,15 @@ All notable changes to this workspace are documented here.
   to build, test, pack, and publish the Rust and npm admin artifacts together.
 - Bound every HTTP admin offset so an authenticated caller cannot force
   arbitrarily deep PostgreSQL scans; history remains cursor-paged.
+- Add concurrent global and organization-scoped pagination indexes for admin
+  job and workflow lists. Their production queries now have separate scope
+  shapes so PostgreSQL generic prepared plans can use the organization-leading
+  indexes reliably.
+- Acquire the SQLx-compatible migration advisory lock through nonblocking
+  attempts, preventing a waiting startup snapshot from deadlocking a lock
+  holder that is building a concurrent index.
+- Normalize the generated npm OpenAPI artifact to mode 0644 and verify that
+  mode during contract checks and release packaging.
 
 ## [0.10.1] - 2026-08-20
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)

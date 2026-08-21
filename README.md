@@ -1256,11 +1256,22 @@ forward migrations:
   concurrently in its own nontransactional migration so an upgrade does not
   block event or log writers. They are additive and intentionally remain
   outside the custom compatibility fence.
+- `202608210003_admin_jobs_created_index` and
+  `202608210004_admin_jobs_org_created_index` — add global
+  `(created_at DESC, id DESC)` and organization-scoped
+  `(organization_id, created_at DESC, id DESC)` indexes for bounded admin job
+  list pagination.
+- `202608210005_admin_workflows_created_index` and
+  `202608210006_admin_workflows_org_created_index` — add the corresponding
+  global and organization-scoped indexes for bounded admin workflow list
+  pagination. Like the history indexes, all four list indexes are built
+  concurrently in separate nontransactional migrations and remain outside the
+  custom compatibility fence.
 
 Every forward migration from
 `202607190001_job_replays_and_continuation_metrics` through
-`202608210002_admin_job_logs_history_index` is recorded and checksum-validated in
-`_sqlx_migrations` but deliberately omitted from the custom
+`202608210006_admin_workflows_org_created_index` is recorded and
+checksum-validated in `_sqlx_migrations` but deliberately omitted from the custom
 `runledger_migration_history` compatibility fence. This lets released filtered
 startup helpers coexist during the documented expand-first windows; it does
 not make a raw migrator from an older crate tolerate unknown SQLx history rows.
@@ -1301,6 +1312,13 @@ externally, before using `runledger-postgres` or running DB-backed tests. SQLx
 its session advisory lock. A process that unavoidably executes a raw migrator
 must use a disposable connection or pool and close it after any error rather
 than retrying with the possibly locked pool.
+
+The supported Runledger migration helper polls SQLx's advisory-lock key with
+nonblocking lock attempts. This keeps each unsuccessful statement snapshot
+short-lived, so a waiting startup process cannot deadlock a lock holder that is
+building one of the concurrent indexes. Raw `MIGRATOR.run(...)` still uses
+SQLx's blocking lock behavior and retains the disposable-connection guidance
+above.
 
 Release 0.8 requires the complete migration set through
 `202607280005_workflow_recoveries` before any 0.8 runtime loop or persistence
