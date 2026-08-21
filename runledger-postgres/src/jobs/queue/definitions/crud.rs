@@ -1,6 +1,6 @@
 use runledger_core::jobs::JobType;
 
-use super::super::super::errors::validate_pagination;
+use super::super::super::errors::{escape_ilike_pattern, validate_pagination};
 use super::super::super::row_decode::parse_job_type_name;
 use super::super::super::schedule_definition_guard::{
     self, GuardLockContext, ScheduleDefinitionLockError,
@@ -193,13 +193,6 @@ pub async fn list_job_definitions(
             })
         })
         .collect()
-}
-
-fn escape_ilike_pattern(input: &str) -> String {
-    input
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
 }
 
 async fn prepare_definition_disable_update_guard_tx(tx: &mut DbTx<'_>) -> Result<()> {

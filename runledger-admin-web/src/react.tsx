@@ -49,7 +49,7 @@ export interface RunledgerAdminPanelProps {
   readonly route: RunledgerAdminRoute;
   readonly onRouteChange: (route: RunledgerAdminRoute) => void;
   readonly className?: string;
-  /** List and detail polling interval. Set to zero to disable. Defaults to ten seconds. */
+  /** List and detail polling interval. Set to zero to load once. Defaults to zero. */
   readonly pollIntervalMs?: number;
   /** Aggregate metrics polling interval. Set to zero to load once. Defaults to zero. */
   readonly metricsPollIntervalMs?: number;
@@ -1242,7 +1242,7 @@ export function RunledgerAdminPanel({
   route,
   onRouteChange,
   className,
-  pollIntervalMs = 10_000,
+  pollIntervalMs = 0,
   metricsPollIntervalMs = 0,
   capabilitiesPollIntervalMs = 0,
   title = "Runledger",

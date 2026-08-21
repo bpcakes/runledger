@@ -522,6 +522,10 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
         get_json(&app, "/workflows?workflow_type=%25", Some(metadata_access)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["items"], json!([]));
+    let (status, _, body) =
+        get_json(&app, "/definitions?job_type=%25", Some(definition_access)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"], json!([]));
 
     let (status, _, body) = get_json(&app, "/jobs?limit=0", Some(metadata_access)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

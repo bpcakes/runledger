@@ -81,7 +81,8 @@ pub use schedules::{
     upsert_job_schedule_tx,
 };
 pub use types::{
-    AdminJobMetricsRecord, AdminJobSummaryRecord, AdminWorkflowSummaryRecord, CompareAndRequeueJob,
+    AdminJobMetricsRecord, AdminJobSummaryFilter, AdminJobSummaryRecord,
+    AdminWorkflowSummaryFilter, AdminWorkflowSummaryRecord, CompareAndRequeueJob,
     CompareAndRequeueJobOutcome, DecodedJobEventPayload, DecodedRequeuedEventPayload,
     JOB_LIST_PAGE_LIMIT_MAX, JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCompletionUpdate,
     JobContinuationMetricsRecord, JobContinuationOutcome, JobContinuationUpdate,

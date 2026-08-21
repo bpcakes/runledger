@@ -57,6 +57,24 @@ pub struct AdminWorkflowSummaryRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+pub struct AdminJobSummaryFilter<'a> {
+    pub organization_id: Option<Uuid>,
+    pub status: Option<JobStatus>,
+    /// Case-insensitive literal substring, not a SQL pattern.
+    pub job_type_contains: Option<&'a str>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+pub struct AdminWorkflowSummaryFilter<'a> {
+    pub organization_id: Option<Uuid>,
+    pub status: Option<WorkflowRunStatus>,
+    /// Case-insensitive literal substring, not a SQL pattern.
+    pub workflow_type_contains: Option<&'a str>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 /// Complete admin metrics projection for one job type.
 #[derive(Clone, Debug)]
 pub struct AdminJobMetricsRecord {

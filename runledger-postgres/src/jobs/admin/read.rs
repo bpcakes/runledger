@@ -3,17 +3,16 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, Error, Result};
 
-use super::super::errors::{validate_page_limit, validate_pagination};
+use super::super::errors::{escape_ilike_pattern, validate_page_limit, validate_pagination};
 use super::super::row_decode::{
     parse_job_event_type, parse_job_stage, parse_job_status, parse_job_type_name,
     parse_step_key_name, parse_workflow_run_status, parse_workflow_type_name,
 };
 use super::super::rows::JobQueueRow;
 use super::super::types::{
-    AdminJobSummaryRecord, AdminWorkflowSummaryRecord, JobEventRecord, JobListFilter,
-    JobQueueRecord,
+    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminWorkflowSummaryFilter,
+    AdminWorkflowSummaryRecord, JobEventRecord, JobListFilter, JobQueueRecord,
 };
-use super::super::workflow_types::WorkflowRunListFilter;
 
 #[derive(sqlx::FromRow)]
 struct AdminJobSummaryRow {
@@ -55,11 +54,12 @@ struct AdminWorkflowSummaryRow {
 
 pub async fn list_admin_job_summaries(
     pool: &DbPool,
-    filter: &JobListFilter<'_>,
+    filter: &AdminJobSummaryFilter<'_>,
 ) -> Result<Vec<AdminJobSummaryRecord>> {
     validate_pagination(filter.limit, filter.offset)?;
 
     let status_filter = filter.status.map(JobStatus::as_db_value);
+    let job_type_pattern = filter.job_type_contains.map(escape_ilike_pattern);
     let rows = sqlx::query_as!(
         AdminJobSummaryRow,
         "SELECT
@@ -93,7 +93,7 @@ pub async fn list_admin_job_summaries(
          OFFSET $5",
         filter.organization_id,
         status_filter,
-        filter.job_type,
+        job_type_pattern.as_deref(),
         filter.limit,
         filter.offset,
     )
@@ -132,11 +132,12 @@ pub async fn list_admin_job_summaries(
 
 pub async fn list_admin_workflow_summaries(
     pool: &DbPool,
-    filter: &WorkflowRunListFilter<'_>,
+    filter: &AdminWorkflowSummaryFilter<'_>,
 ) -> Result<Vec<AdminWorkflowSummaryRecord>> {
     validate_pagination(filter.limit, filter.offset)?;
 
     let status_filter = filter.status.map(|status| status.as_db_value());
+    let workflow_type_pattern = filter.workflow_type_contains.map(escape_ilike_pattern);
     let rows = sqlx::query_as::<_, AdminWorkflowSummaryRow>(
         "SELECT
             id,
@@ -157,7 +158,7 @@ pub async fn list_admin_workflow_summaries(
     )
     .bind(filter.organization_id)
     .bind(status_filter)
-    .bind(filter.workflow_type)
+    .bind(workflow_type_pattern.as_deref())
     .bind(filter.limit)
     .bind(filter.offset)
     .fetch_all(pool)

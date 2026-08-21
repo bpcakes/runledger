@@ -1080,9 +1080,8 @@ and `onRouteChange` callback, so the host may synchronize it with any router.
 React is the only peer dependency; the package does not expose a router, query
 cache, CSS framework, or component-library contract. See
 [`runledger-admin-web/README.md`](runledger-admin-web/README.md) for a complete
-integration example. List and detail views poll every ten seconds by default;
-aggregate metrics and capabilities load once unless the host configures their
-independent polling intervals.
+integration example. List, detail, aggregate metrics, and capabilities load
+once unless the host configures their independent polling intervals.
 
 ## Operator TUI
 

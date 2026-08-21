@@ -1,12 +1,12 @@
 use runledger_core::jobs::{JobStatus, WorkflowRunStatus};
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    AdminJobSummaryRecord, AdminWorkflowSummaryRecord, JobDefinitionListFilter, JobEventRecord,
-    JobListFilter, JobLogRecord, JobQueueRecord, WorkflowRunDbRecord, WorkflowRunListFilter,
-    WorkflowStepDbRecord, WorkflowStepDependencyDbRecord, get_admin_job_metrics_page,
-    get_job_by_id, get_workflow_run_by_id, list_admin_job_summaries, list_admin_workflow_summaries,
-    list_job_definitions, list_job_events, list_job_events_before, list_job_logs,
-    list_job_logs_before, list_workflow_step_dependencies_in_organization_page,
+    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminWorkflowSummaryFilter,
+    AdminWorkflowSummaryRecord, JobDefinitionListFilter, JobEventRecord, JobLogRecord,
+    JobQueueRecord, WorkflowRunDbRecord, WorkflowStepDbRecord, WorkflowStepDependencyDbRecord,
+    get_admin_job_metrics_page, get_job_by_id, get_workflow_run_by_id, list_admin_job_summaries,
+    list_admin_workflow_summaries, list_job_definitions, list_job_events, list_job_events_before,
+    list_job_logs, list_job_logs_before, list_workflow_step_dependencies_in_organization_page,
     list_workflow_steps_in_organization_page,
 };
 use uuid::Uuid;
@@ -92,13 +92,12 @@ impl AdminService {
         validate_page(query.limit, query.offset)?;
         validate_filter(query.job_type.as_deref())?;
         let status = parse_job_status(query.status.as_deref())?;
-        let job_type = query.job_type.as_deref().map(escape_ilike_pattern);
         let rows = list_admin_job_summaries(
             &self.pool,
-            &JobListFilter {
+            &AdminJobSummaryFilter {
                 organization_id: access.scope().organization_id(),
                 status,
-                job_type: job_type.as_deref(),
+                job_type_contains: query.job_type.as_deref(),
                 limit: fetch_limit(query.limit),
                 offset: query.offset,
             },
@@ -246,13 +245,12 @@ impl AdminService {
         validate_page(query.limit, query.offset)?;
         validate_filter(query.workflow_type.as_deref())?;
         let status = parse_workflow_status(query.status.as_deref())?;
-        let workflow_type = query.workflow_type.as_deref().map(escape_ilike_pattern);
         let rows = list_admin_workflow_summaries(
             &self.pool,
-            &WorkflowRunListFilter {
+            &AdminWorkflowSummaryFilter {
                 organization_id: access.scope().organization_id(),
                 status,
-                workflow_type: workflow_type.as_deref(),
+                workflow_type_contains: query.workflow_type.as_deref(),
                 limit: fetch_limit(query.limit),
                 offset: query.offset,
             },
@@ -426,13 +424,6 @@ fn validate_filter(filter: Option<&str>) -> Result<(), AdminApiError> {
         return Err(AdminApiError::invalid_query());
     }
     Ok(())
-}
-
-fn escape_ilike_pattern(input: &str) -> String {
-    input
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
 }
 
 fn storage_error(operation: &'static str, error: runledger_postgres::Error) -> AdminApiError {

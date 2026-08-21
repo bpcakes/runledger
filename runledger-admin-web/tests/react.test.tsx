@@ -244,6 +244,23 @@ describe("RunledgerAdminPanel", () => {
     expect(jobsLoader).toHaveBeenCalledTimes(2);
   });
 
+  it("loads list data once when polling is not explicitly enabled", async () => {
+    vi.useFakeTimers();
+    const jobsLoader = vi.fn(client.jobs);
+    render(
+      <RunledgerAdminPanel
+        client={{ ...client, jobs: jobsLoader }}
+        onRouteChange={() => undefined}
+        route={{ name: "jobs" }}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(jobsLoader).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(jobsLoader).toHaveBeenCalledTimes(1);
+  });
+
   it("does not refetch aggregate metrics on the list and detail interval", async () => {
     vi.useFakeTimers();
     const capabilitiesLoader = vi.fn(client.capabilities);

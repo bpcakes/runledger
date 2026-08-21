@@ -61,12 +61,11 @@ export function RunledgerPage() {
 Keep the client identity stable for the lifetime of the panel, as in the
 module-scoped example above (or create it with `useMemo`). Passing a newly
 created client on every render restarts the active reads and polling cycle.
-List and detail data polls every ten seconds by default. Aggregate metrics and
-capabilities each load once by default because metrics scan operational history
-and capability grants usually change less often. Set `metricsPollIntervalMs`
-only after choosing a cadence appropriate for the database size and number of
-open panels. Set `capabilitiesPollIntervalMs` only when the host can change the
-current admin grant without remounting the panel.
+List, detail, aggregate metrics, and capabilities each load once by default.
+Set `pollIntervalMs` or `metricsPollIntervalMs` only after choosing a cadence
+appropriate for the database size and number of open panels. Set
+`capabilitiesPollIntervalMs` only when the host can change the current admin
+grant without remounting the panel.
 
 Translate `route` to your own URL if deep linking is needed. Override the
 `--rla-*` CSS custom properties or omit the stylesheet and target the semantic

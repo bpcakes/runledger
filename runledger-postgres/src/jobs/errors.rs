@@ -4,6 +4,14 @@ use super::types::JOB_LIST_PAGE_LIMIT_MAX;
 
 pub(super) const JOB_REPLAY_REQUEST_KEY_MAX_BYTES: usize = 512;
 
+/// Escapes user input for a literal substring inside an `ILIKE` pattern.
+pub(super) fn escape_ilike_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 fn invalid_pagination_error(detail: String) -> Error {
     Error::QueryError(QueryError::from_classified(
         QueryErrorCategory::Validation,
@@ -270,7 +278,7 @@ pub(super) fn job_replay_missing_existing_error() -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_rejection_rollback_succeeded;
+    use super::{ensure_rejection_rollback_succeeded, escape_ilike_pattern};
     use crate::Error;
 
     #[test]
@@ -286,5 +294,10 @@ mod tests {
             Err(Error::ConnectionError(message)) => assert!(!message.is_empty()),
             other => panic!("expected connection error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ilike_escape_treats_every_pattern_metacharacter_literally() {
+        assert_eq!(escape_ilike_pattern(r"jobs\\%_test"), r"jobs\\\\\%\_test");
     }
 }
