@@ -1050,6 +1050,11 @@ never lose 64-bit identifiers. Unbounded PostgreSQL `bigint` counters and
 progress values are likewise represented as exact decimal strings; bounded
 pagination values remain JSON numbers.
 
+Pagination limits response size but cannot bound live aggregation or substring
+search work. Those admin queries therefore run in read-only transactions with
+a transaction-local 30-second PostgreSQL `statement_timeout`; a stricter host
+setting remains effective. Treat this as a safety cutoff, not a latency target.
+
 The v1 router exposes only `GET` routes:
 
 ```text

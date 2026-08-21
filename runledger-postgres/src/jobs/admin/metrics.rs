@@ -5,6 +5,7 @@ use crate::{DbPool, Error, Result};
 use super::super::errors::validate_pagination;
 use super::super::row_decode::parse_job_type_name;
 use super::super::types::{AdminJobMetricsRecord, JobContinuationMetricsRecord, JobMetricsRecord};
+use super::read_budget::AdminReadTransaction;
 
 #[derive(sqlx::FromRow)]
 struct AdminJobMetricsRow {
@@ -58,6 +59,7 @@ pub async fn get_admin_job_metrics_page(
     offset: i64,
 ) -> Result<Vec<AdminJobMetricsRecord>> {
     validate_pagination(limit, offset)?;
+    let mut read = AdminReadTransaction::begin(pool).await?;
 
     let rows = if let Some(organization_id) = organization_id {
         sqlx::query_as!(
@@ -106,7 +108,7 @@ pub async fn get_admin_job_metrics_page(
             limit,
             offset,
         )
-        .fetch_all(pool)
+        .fetch_all(&mut **read.as_tx())
         .await
     } else {
         sqlx::query_as!(
@@ -186,10 +188,11 @@ pub async fn get_admin_job_metrics_page(
             limit,
             offset,
         )
-        .fetch_all(pool)
+        .fetch_all(&mut **read.as_tx())
         .await
     }
     .map_err(|error| Error::from_query_sqlx_with_context("get admin job metrics page", error))?;
+    read.commit().await?;
 
     rows.into_iter().map(admin_job_metrics_record).collect()
 }

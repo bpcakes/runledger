@@ -15,6 +15,7 @@ use super::super::types::{
     AdminWorkflowStepRecord, AdminWorkflowSummaryFilter, AdminWorkflowSummaryRecord,
     JobEventRecord, JobListFilter, JobQueueRecord,
 };
+use super::read_budget::AdminReadTransaction;
 
 struct AdminJobSummaryRow {
     id: Uuid,
@@ -100,6 +101,7 @@ pub async fn list_admin_job_summaries(
 
     let status_filter = filter.status.map(JobStatus::as_db_value);
     let job_type_pattern = filter.job_type_contains.map(escape_ilike_pattern);
+    let mut read = AdminReadTransaction::begin(pool).await?;
     let rows = match filter.organization_id {
         Some(organization_id) => {
             sqlx::query_file_as!(
@@ -111,7 +113,7 @@ pub async fn list_admin_job_summaries(
                 filter.limit,
                 filter.offset,
             )
-            .fetch_all(pool)
+            .fetch_all(&mut **read.as_tx())
             .await
         }
         None => {
@@ -123,11 +125,12 @@ pub async fn list_admin_job_summaries(
                 filter.limit,
                 filter.offset,
             )
-            .fetch_all(pool)
+            .fetch_all(&mut **read.as_tx())
             .await
         }
     }
     .map_err(|error| Error::from_query_sqlx_with_context("list admin job summaries", error))?;
+    read.commit().await?;
 
     rows.into_iter().map(admin_job_summary_record).collect()
 }
@@ -166,6 +169,7 @@ pub async fn list_admin_workflow_summaries(
 
     let status_filter = filter.status.map(|status| status.as_db_value());
     let workflow_type_pattern = filter.workflow_type_contains.map(escape_ilike_pattern);
+    let mut read = AdminReadTransaction::begin(pool).await?;
     let rows = match filter.organization_id {
         Some(organization_id) => {
             sqlx::query_file_as!(
@@ -177,7 +181,7 @@ pub async fn list_admin_workflow_summaries(
                 filter.limit,
                 filter.offset,
             )
-            .fetch_all(pool)
+            .fetch_all(&mut **read.as_tx())
             .await
         }
         None => {
@@ -189,11 +193,12 @@ pub async fn list_admin_workflow_summaries(
                 filter.limit,
                 filter.offset,
             )
-            .fetch_all(pool)
+            .fetch_all(&mut **read.as_tx())
             .await
         }
     }
     .map_err(|error| Error::from_query_sqlx_with_context("list admin workflow summaries", error))?;
+    read.commit().await?;
 
     rows.into_iter()
         .map(admin_workflow_summary_record)
