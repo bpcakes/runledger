@@ -54,6 +54,30 @@ const RECOVERABLE_CONCURRENT_INDEXES: &[RecoverableConcurrentIndex] = &[
         table_name: "job_logs",
         drop_sql: "DROP INDEX CONCURRENTLY idx_job_logs_job_id_newest",
     },
+    RecoverableConcurrentIndex {
+        migration_version: 202608210003,
+        index_name: "idx_job_queue_admin_created",
+        table_name: "job_queue",
+        drop_sql: "DROP INDEX CONCURRENTLY idx_job_queue_admin_created",
+    },
+    RecoverableConcurrentIndex {
+        migration_version: 202608210004,
+        index_name: "idx_job_queue_admin_org_created",
+        table_name: "job_queue",
+        drop_sql: "DROP INDEX CONCURRENTLY idx_job_queue_admin_org_created",
+    },
+    RecoverableConcurrentIndex {
+        migration_version: 202608210005,
+        index_name: "idx_workflow_runs_admin_created",
+        table_name: "workflow_runs",
+        drop_sql: "DROP INDEX CONCURRENTLY idx_workflow_runs_admin_created",
+    },
+    RecoverableConcurrentIndex {
+        migration_version: 202608210006,
+        index_name: "idx_workflow_runs_admin_org_created",
+        table_name: "workflow_runs",
+        drop_sql: "DROP INDEX CONCURRENTLY idx_workflow_runs_admin_org_created",
+    },
 ];
 
 #[derive(Debug)]

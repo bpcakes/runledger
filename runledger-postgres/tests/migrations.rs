@@ -28,6 +28,10 @@ const WORKFLOW_RECOVERIES_MIGRATION_VERSION: i64 = 202607280005;
 const JOB_ENQUEUE_INTENTS_MIGRATION_VERSION: i64 = 202608180001;
 const ADMIN_JOB_EVENTS_HISTORY_INDEX_MIGRATION_VERSION: i64 = 202608210001;
 const ADMIN_JOB_LOGS_HISTORY_INDEX_MIGRATION_VERSION: i64 = 202608210002;
+const ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210003;
+const ADMIN_JOBS_ORG_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210004;
+const ADMIN_WORKFLOWS_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210005;
+const ADMIN_WORKFLOWS_ORG_CREATED_INDEX_MIGRATION_VERSION: i64 = 202608210006;
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,
@@ -48,9 +52,13 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // ignore. Promoted rows deliberately fence linked-job deletion, so rollout
     // must order application retention as documented by the public API.
     JOB_ENQUEUE_INTENTS_MIGRATION_VERSION,
-    // Adds read-only admin history indexes without changing legacy writes.
+    // Adds read-only admin pagination indexes without changing legacy writes.
     ADMIN_JOB_EVENTS_HISTORY_INDEX_MIGRATION_VERSION,
     ADMIN_JOB_LOGS_HISTORY_INDEX_MIGRATION_VERSION,
+    ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION,
+    ADMIN_JOBS_ORG_CREATED_INDEX_MIGRATION_VERSION,
+    ADMIN_WORKFLOWS_CREATED_INDEX_MIGRATION_VERSION,
+    ADMIN_WORKFLOWS_ORG_CREATED_INDEX_MIGRATION_VERSION,
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 
@@ -155,6 +163,32 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
             "{index_name} must support bounded newest-first history scans: {index_definition}"
         );
     }
+    for (index_name, expected_columns) in [
+        ("idx_job_queue_admin_created", "(created_at DESC, id DESC)"),
+        (
+            "idx_job_queue_admin_org_created",
+            "(organization_id, created_at DESC, id DESC)",
+        ),
+        (
+            "idx_workflow_runs_admin_created",
+            "(created_at DESC, id DESC)",
+        ),
+        (
+            "idx_workflow_runs_admin_org_created",
+            "(organization_id, created_at DESC, id DESC)",
+        ),
+    ] {
+        let index_definition = sqlx::query_scalar::<_, String>(&format!(
+            "SELECT pg_get_indexdef('{index_name}'::regclass)"
+        ))
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap_or_else(|error| panic!("read {index_name}: {error}"));
+        assert!(
+            index_definition.contains(expected_columns),
+            "{index_name} must support bounded admin list scans: {index_definition}"
+        );
+    }
     let mut plan_tx = harness
         .pool
         .begin()
@@ -185,6 +219,40 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
         assert!(
             plan.contains(index_name),
             "PostgreSQL 18 must plan {table_name} newest-first pagination with {index_name}:\n{plan}"
+        );
+    }
+    for (table_name, organization_id, index_name) in [
+        ("job_queue", None, "idx_job_queue_admin_created"),
+        (
+            "job_queue",
+            Some("00000000-0000-4000-8000-000000000001"),
+            "idx_job_queue_admin_org_created",
+        ),
+        ("workflow_runs", None, "idx_workflow_runs_admin_created"),
+        (
+            "workflow_runs",
+            Some("00000000-0000-4000-8000-000000000001"),
+            "idx_workflow_runs_admin_org_created",
+        ),
+    ] {
+        let organization_filter = organization_id.map_or_else(String::new, |organization_id| {
+            format!("WHERE organization_id = '{organization_id}'::uuid")
+        });
+        let plan = sqlx::query_scalar::<_, String>(&format!(
+            "EXPLAIN (COSTS OFF) \
+             SELECT id \
+             FROM {table_name} \
+             {organization_filter} \
+             ORDER BY created_at DESC, id DESC \
+             LIMIT 51"
+        ))
+        .fetch_all(&mut *plan_tx)
+        .await
+        .unwrap_or_else(|error| panic!("explain {table_name} admin list scan: {error}"))
+        .join("\n");
+        assert!(
+            plan.contains(index_name),
+            "PostgreSQL 18 must plan {table_name} admin pagination with {index_name}:\n{plan}"
         );
     }
     plan_tx
@@ -437,16 +505,42 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
 
 #[tokio::test]
 async fn migrate_recovers_invalid_indexes_left_by_failed_concurrent_builds() {
-    for (migration_version, table_name, index_name) in [
+    for (migration_version, table_name, index_name, expected_columns) in [
         (
             ADMIN_JOB_EVENTS_HISTORY_INDEX_MIGRATION_VERSION,
             "job_events",
             "idx_job_events_job_id_newest",
+            "(job_id, id DESC)",
         ),
         (
             ADMIN_JOB_LOGS_HISTORY_INDEX_MIGRATION_VERSION,
             "job_logs",
             "idx_job_logs_job_id_newest",
+            "(job_id, id DESC)",
+        ),
+        (
+            ADMIN_JOBS_CREATED_INDEX_MIGRATION_VERSION,
+            "job_queue",
+            "idx_job_queue_admin_created",
+            "(created_at DESC, id DESC)",
+        ),
+        (
+            ADMIN_JOBS_ORG_CREATED_INDEX_MIGRATION_VERSION,
+            "job_queue",
+            "idx_job_queue_admin_org_created",
+            "(organization_id, created_at DESC, id DESC)",
+        ),
+        (
+            ADMIN_WORKFLOWS_CREATED_INDEX_MIGRATION_VERSION,
+            "workflow_runs",
+            "idx_workflow_runs_admin_created",
+            "(created_at DESC, id DESC)",
+        ),
+        (
+            ADMIN_WORKFLOWS_ORG_CREATED_INDEX_MIGRATION_VERSION,
+            "workflow_runs",
+            "idx_workflow_runs_admin_org_created",
+            "(organization_id, created_at DESC, id DESC)",
         ),
     ] {
         let harness = TestHarness::fresh("runledger_pg_concurrent_index_recovery").await;
@@ -457,36 +551,65 @@ async fn migrate_recovers_invalid_indexes_left_by_failed_concurrent_builds() {
         eprintln!("concurrent index recovery PostgreSQL server_version_num={server_version_num}");
 
         apply_runledger_migrations_through(&harness.pool, migration_version - 1).await;
-        seed_legacy_job_definition(&harness.pool).await;
-        let job_id = sqlx::query_scalar::<_, sqlx::types::Uuid>(
-            "INSERT INTO job_queue (
-                job_type, payload, max_attempts, timeout_seconds
-             )
-             VALUES ('jobs.test.legacy_cutover', '{}'::jsonb, 3, 30)
-             RETURNING id",
-        )
-        .fetch_one(&harness.pool)
-        .await
-        .expect("insert job for concurrent index failure");
-        let seed_history_sql = match table_name {
-            "job_events" => {
-                "INSERT INTO job_events (job_id, event_type)
-                 VALUES ($1, 'ENQUEUED'), ($1, 'ENQUEUED')"
+        let duplicate_column = match table_name {
+            "job_events" | "job_logs" => {
+                seed_legacy_job_definition(&harness.pool).await;
+                let job_id = sqlx::query_scalar::<_, sqlx::types::Uuid>(
+                    "INSERT INTO job_queue (
+                        job_type, payload, max_attempts, timeout_seconds
+                     )
+                     VALUES ('jobs.test.legacy_cutover', '{}'::jsonb, 3, 30)
+                     RETURNING id",
+                )
+                .fetch_one(&harness.pool)
+                .await
+                .expect("insert job for concurrent index failure");
+                let seed_history_sql = if table_name == "job_events" {
+                    "INSERT INTO job_events (job_id, event_type)
+                     VALUES ($1, 'ENQUEUED'), ($1, 'ENQUEUED')"
+                } else {
+                    "INSERT INTO job_logs (job_id, level, message)
+                     VALUES ($1, 'INFO', 'first'), ($1, 'INFO', 'second')"
+                };
+                sqlx::query(seed_history_sql)
+                    .bind(job_id)
+                    .execute(&harness.pool)
+                    .await
+                    .unwrap_or_else(|error| panic!("seed duplicate {table_name} rows: {error}"));
+                "job_id"
             }
-            "job_logs" => {
-                "INSERT INTO job_logs (job_id, level, message)
-                 VALUES ($1, 'INFO', 'first'), ($1, 'INFO', 'second')"
+            "job_queue" => {
+                seed_legacy_job_definition(&harness.pool).await;
+                sqlx::query(
+                    "INSERT INTO job_queue (
+                        job_type, payload, max_attempts, timeout_seconds
+                     )
+                     VALUES
+                        ('jobs.test.legacy_cutover', '{}'::jsonb, 3, 30),
+                        ('jobs.test.legacy_cutover', '{}'::jsonb, 3, 30)",
+                )
+                .execute(&harness.pool)
+                .await
+                .expect("seed duplicate job queue rows");
+                "job_type"
+            }
+            "workflow_runs" => {
+                sqlx::query(
+                    "INSERT INTO workflow_runs (workflow_type, metadata)
+                     VALUES
+                        ('workflow.test.concurrent_index', '{}'::jsonb),
+                        ('workflow.test.concurrent_index', '{}'::jsonb)",
+                )
+                .execute(&harness.pool)
+                .await
+                .expect("seed duplicate workflow run rows");
+                "workflow_type"
             }
             other => panic!("unexpected concurrent index recovery table {other}"),
         };
-        sqlx::query(seed_history_sql)
-            .bind(job_id)
-            .execute(&harness.pool)
-            .await
-            .unwrap_or_else(|error| panic!("seed duplicate {table_name} rows: {error}"));
 
         let failed_build = sqlx::query(&format!(
-            "CREATE UNIQUE INDEX CONCURRENTLY {index_name} ON {table_name} (job_id)"
+            "CREATE UNIQUE INDEX CONCURRENTLY {index_name} ON {table_name} ({duplicate_column})"
         ))
         .execute(&harness.pool)
         .await;
@@ -522,7 +645,7 @@ async fn migrate_recovers_invalid_indexes_left_by_failed_concurrent_builds() {
         .await
         .unwrap_or_else(|error| panic!("read recovered index {index_name}: {error}"));
         assert!(
-            recovered_definition.contains("(job_id, id DESC)"),
+            recovered_definition.contains(expected_columns),
             "migration must replace the invalid relation with its canonical index: {recovered_definition}"
         );
         assert!(
