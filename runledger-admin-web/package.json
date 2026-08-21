@@ -10,6 +10,7 @@
   "files": [
     "dist",
     "src",
+    "openapi.json",
     "LICENSE",
     "README.md"
   ],
@@ -26,14 +27,17 @@
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
     },
+    "./openapi.json": "./openapi.json",
     "./styles.css": "./dist/styles.css"
   },
   "scripts": {
     "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/copy-css.mjs",
     "clean": "node scripts/clean.mjs",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"tests/**/*.{ts,tsx}\" \"*.json\"",
+    "generate": "openapi-typescript openapi.json -o src/generated/schema.ts --immutable --empty-objects-unknown",
+    "generate:check": "openapi-typescript openapi.json -o src/generated/schema.ts --immutable --empty-objects-unknown --check",
     "prepack": "npm run build",
-    "test": "npm run typecheck && npm run format:check && vitest run",
+    "test": "npm run generate:check && npm run typecheck && npm run format:check && vitest run",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "test:watch": "vitest"
   },
@@ -45,10 +49,11 @@
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "jsdom": "30.0.1",
+    "openapi-typescript": "7.13.0",
     "prettier": "3.9.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "typescript": "6.0.3",
+    "typescript": "5.9.3",
     "vitest": "4.1.10"
   },
   "engines": {
@@ -56,5 +61,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0"
   }
 }

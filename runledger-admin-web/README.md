@@ -23,6 +23,16 @@ const client = createRunledgerAdminClient({
 });
 ```
 
+The client request paths, query parameters, and response types are generated
+from the backend's OpenAPI 3.1 contract. The raw document is also exported as
+`@runledger/admin/openapi.json` for host documentation or other generators.
+`RunledgerAdminClient` remains the supported application boundary; generated
+library types are intentionally not exported.
+
+This minimal client performs typed Fetch calls and normalizes Runledger HTTP
+errors. It rejects malformed or empty JSON responses, but it does not perform a
+second full runtime schema validation of successful JSON payloads.
+
 Render the controlled React panel:
 
 ```tsx

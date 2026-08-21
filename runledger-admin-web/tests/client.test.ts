@@ -28,7 +28,7 @@ function jsonResponse(value: unknown, status = 200): Response {
 }
 
 describe("createRunledgerAdminClient", () => {
-  it("calls every v1 read endpoint and validates its response", async () => {
+  it("calls every endpoint through the generated v1 contract", async () => {
     const calls: Array<{
       readonly input: string;
       readonly init?: RequestInit;
@@ -86,10 +86,9 @@ describe("createRunledgerAdminClient", () => {
       `/custom/runledger/workflows/${workflowId}?dependency_offset=25&step_limit=10`,
     );
     expect(calls[0]?.init?.credentials).toBe("include");
-    expect(calls[0]?.init?.headers).toEqual({
-      Accept: "application/json",
-      "X-CSRF-Token": "csrf-token",
-    });
+    const headers = new Headers(calls[0]?.init?.headers);
+    expect(headers.get("Accept")).toBe("application/json");
+    expect(headers.get("X-CSRF-Token")).toBe("csrf-token");
   });
 
   it("returns a typed safe HTTP error", async () => {
@@ -126,25 +125,24 @@ describe("createRunledgerAdminClient", () => {
     expect(error).toMatchObject({ code: "admin.http_error", status: 502 });
   });
 
-  it("rejects a successful response that violates the contract", async () => {
+  it("rejects a successful response that is not JSON", async () => {
     const client = createRunledgerAdminClient({
-      fetch: async () => jsonResponse({ items: [{}] }),
+      fetch: async () => new Response("not JSON"),
     });
     await expect(client.metrics()).rejects.toBeInstanceOf(
       RunledgerAdminContractError,
     );
   });
 
-  it("rejects non-JSON values hidden inside typed payload fields", async () => {
-    const invalidJobs = {
-      ...jobs,
-      items: [{ ...jobs.items[0], payload: { invalid: undefined } }],
-    };
+  it("rejects an empty successful response", async () => {
     const client = createRunledgerAdminClient({
       fetch: async () =>
-        ({ json: async () => invalidJobs, ok: true, status: 200 }) as Response,
+        new Response(null, {
+          headers: { "Content-Length": "0" },
+          status: 200,
+        }),
     });
-    await expect(client.jobs()).rejects.toBeInstanceOf(
+    await expect(client.metrics()).rejects.toBeInstanceOf(
       RunledgerAdminContractError,
     );
   });

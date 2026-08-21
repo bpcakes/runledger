@@ -212,9 +212,11 @@ prepare_npm_package() {
     package/dist/index.d.ts \
     package/dist/client.js \
     package/dist/client.d.ts \
+    package/dist/generated/schema.d.ts \
     package/dist/react.js \
     package/dist/react.d.ts \
-    package/dist/styles.css; do
+    package/dist/styles.css \
+    package/openapi.json; do
     tar -tzf "$NPM_PACKAGE_ARCHIVE" "$required_path" >/dev/null \
       || die "npm package is missing ${required_path}"
   done
