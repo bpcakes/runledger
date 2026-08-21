@@ -21,10 +21,7 @@ fn openapi_contract_is_versioned_and_covers_every_route() {
 
     assert_eq!(document["openapi"], "3.1.0");
     assert_eq!(document["info"]["version"], runledger_admin::API_VERSION);
-    assert_eq!(
-        document["servers"][0]["url"],
-        "/api/admin/runledger/v1"
-    );
+    assert_eq!(document["servers"][0]["url"], "/api/admin/runledger/v1");
 
     let paths = document["paths"]
         .as_object()
@@ -61,8 +58,7 @@ fn openapi_contract_distinguishes_null_from_redaction() {
     assert!(!required.contains("last_error_message"));
     assert_eq!(job["properties"]["organization_id"]["type"][1], "null");
     assert_eq!(
-        document["components"]["schemas"]["Capabilities"]["properties"]["api_version"]
-            ["enum"][0],
+        document["components"]["schemas"]["Capabilities"]["properties"]["api_version"]["enum"][0],
         "v1"
     );
 }
