@@ -218,76 +218,31 @@ pub async fn list_workflow_steps_in_organization_page(
 ) -> Result<Vec<WorkflowStepDbRecord>> {
     validate_pagination(limit, offset)?;
 
-    let rows = sqlx::query_as::<_, WorkflowStepRow>(
-        "SELECT
-            ws.id,
-            ws.workflow_run_id,
-            ws.step_key,
-            ws.execution_kind::text AS execution_kind,
-            ws.job_type,
-            ws.organization_id,
-            ws.payload,
-            ws.priority,
-            ws.max_attempts,
-            ws.timeout_seconds,
-            ws.stage,
-            ws.allow_handler_continuation,
-            ws.execution_resource_key,
-            ws.status::text AS status,
-            ws.job_id,
-            ws.released_at,
-            ws.started_at,
-            ws.finished_at,
-            CASE WHEN $2::uuid IS NULL
-                THEN ws.dependency_count_total
-                ELSE COALESCE(visible_dependencies.total, 0)
-            END AS dependency_count_total,
-            CASE WHEN $2::uuid IS NULL
-                THEN ws.dependency_count_pending
-                ELSE COALESCE(visible_dependencies.pending, 0)
-            END AS dependency_count_pending,
-            CASE WHEN $2::uuid IS NULL
-                THEN ws.dependency_count_unsatisfied
-                ELSE COALESCE(visible_dependencies.unsatisfied, 0)
-            END AS dependency_count_unsatisfied,
-            ws.status_reason,
-            ws.last_error_code,
-            ws.last_error_message,
-            ws.output,
-            ws.created_at,
-            ws.updated_at
-         FROM workflow_steps ws
-         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
-         LEFT JOIN LATERAL (
-            SELECT
-                COUNT(*)::int4 AS total,
-                COUNT(*) FILTER (
-                    WHERE prerequisite.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELED')
-                )::int4 AS pending,
-                COUNT(*) FILTER (
-                    WHERE dependency.release_mode = 'ON_SUCCESS'
-                      AND prerequisite.status IN ('FAILED', 'CANCELED')
-                )::int4 AS unsatisfied
-            FROM workflow_step_dependencies dependency
-            JOIN workflow_steps prerequisite
-              ON prerequisite.id = dependency.prerequisite_step_id
-            WHERE dependency.dependent_step_id = ws.id
-              AND prerequisite.organization_id = $2
-         ) visible_dependencies ON $2::uuid IS NOT NULL
-         WHERE ws.workflow_run_id = $1
-           AND (
-             $2::uuid IS NULL
-             OR (wr.organization_id = $2 AND ws.organization_id = $2)
-           )
-         ORDER BY ws.created_at ASC, ws.id ASC
-         LIMIT $3 OFFSET $4",
-    )
-    .bind(workflow_run_id)
-    .bind(organization_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
+    let rows = match organization_id {
+        Some(organization_id) => {
+            sqlx::query_file_as!(
+                WorkflowStepRow,
+                "src/jobs/workflows/queries/list_workflow_steps_for_organization.sql",
+                workflow_run_id,
+                organization_id,
+                limit,
+                offset,
+            )
+            .fetch_all(pool)
+            .await
+        }
+        None => {
+            sqlx::query_file_as!(
+                WorkflowStepRow,
+                "src/jobs/workflows/queries/list_workflow_steps_global.sql",
+                workflow_run_id,
+                limit,
+                offset,
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
     .map_err(|error| {
         crate::Error::from_query_sqlx_with_context(
             "list workflow steps in organization page",

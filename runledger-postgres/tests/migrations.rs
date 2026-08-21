@@ -40,6 +40,10 @@ const ADMIN_WORKFLOWS_FOR_ORGANIZATION_QUERY: &str =
     include_str!("../src/jobs/admin/queries/list_workflow_summaries_for_organization.sql");
 const ADMIN_WORKFLOWS_GLOBAL_QUERY: &str =
     include_str!("../src/jobs/admin/queries/list_workflow_summaries_global.sql");
+const WORKFLOW_STEPS_FOR_ORGANIZATION_QUERY: &str =
+    include_str!("../src/jobs/workflows/queries/list_workflow_steps_for_organization.sql");
+const WORKFLOW_STEPS_GLOBAL_QUERY: &str =
+    include_str!("../src/jobs/workflows/queries/list_workflow_steps_global.sql");
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,
@@ -267,6 +271,41 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
             plan.contains(index_name),
             "PostgreSQL 18 must generically plan {query_name} with {index_name}:\n{plan}"
         );
+    }
+    for (query_name, query, expected_relation) in [
+        (
+            "global workflow step list",
+            WORKFLOW_STEPS_GLOBAL_QUERY,
+            None,
+        ),
+        (
+            "organization workflow step list",
+            WORKFLOW_STEPS_FOR_ORGANIZATION_QUERY,
+            Some("workflow_step_dependencies"),
+        ),
+    ] {
+        let explain = format!("EXPLAIN (GENERIC_PLAN, COSTS OFF) {query}");
+        let plan = sqlx::raw_sql(&explain)
+            .fetch_all(&mut *plan_tx)
+            .await
+            .unwrap_or_else(|error| panic!("explain {query_name}: {error}"))
+            .into_iter()
+            .map(|row| {
+                row.try_get::<String, _>(0)
+                    .unwrap_or_else(|error| panic!("decode {query_name} plan row: {error}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        match expected_relation {
+            Some(relation) => assert!(
+                plan.contains(relation),
+                "PostgreSQL 18 must retain scoped dependency aggregation in {query_name}:\n{plan}"
+            ),
+            None => assert!(
+                !plan.contains("workflow_step_dependencies"),
+                "service-wide workflow steps must not aggregate scoped dependencies:\n{plan}"
+            ),
+        }
     }
     plan_tx
         .rollback()
