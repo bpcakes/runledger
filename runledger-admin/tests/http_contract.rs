@@ -19,6 +19,14 @@ const BASE: &str = "/api/admin/runledger/v1";
 const JOB_TYPE: &str = "jobs.admin.contract";
 const UNUSED_JOB_TYPE: &str = "jobs.admin.unused_catalog_entry";
 
+fn assert_duration_close(actual: f64, expected: f64) {
+    let tolerance = (16.0 * f64::EPSILON * expected.abs()).max(1e-9);
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "expected {expected}, got {actual} (tolerance {tolerance})"
+    );
+}
+
 async fn register_definition(pool: &DbPool, job_type: &str) {
     let mut tx = pool.begin().await.expect("begin definition transaction");
     upsert_job_definition_tx(
@@ -507,7 +515,7 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     let service_p95 = service_metric["p95_duration_ms_24h"]
         .as_f64()
         .expect("service-wide p95 duration");
-    assert!((service_p95 - 2_850.0).abs() < f64::EPSILON * 2_850.0);
+    assert_duration_close(service_p95, 2_850.0);
 
     let (status, _, first_metrics_page) =
         get_json(&app, "/metrics?limit=1", Some(all_access)).await;

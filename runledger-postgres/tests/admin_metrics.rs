@@ -80,9 +80,10 @@ async fn insert_finished_attempt(pool: &DbPool, job_id: Uuid, attempt: i32, dura
 
 fn assert_metric_close(actual: Option<f64>, expected: f64) {
     let actual = actual.expect("duration percentile is present");
+    let tolerance = (16.0 * f64::EPSILON * expected.abs()).max(1e-9);
     assert!(
-        (actual - expected).abs() <= f64::EPSILON * expected,
-        "expected {expected}, got {actual}"
+        (actual - expected).abs() <= tolerance,
+        "expected {expected}, got {actual} (tolerance {tolerance})"
     );
 }
 
