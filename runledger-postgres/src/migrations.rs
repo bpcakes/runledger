@@ -34,6 +34,28 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;
 type RunledgerMigrationMap = HashMap<i64, &'static sqlx::migrate::Migration>;
 
+struct RecoverableConcurrentIndex {
+    migration_version: i64,
+    index_name: &'static str,
+    table_name: &'static str,
+    drop_sql: &'static str,
+}
+
+const RECOVERABLE_CONCURRENT_INDEXES: &[RecoverableConcurrentIndex] = &[
+    RecoverableConcurrentIndex {
+        migration_version: 202608210001,
+        index_name: "idx_job_events_job_id_newest",
+        table_name: "job_events",
+        drop_sql: "DROP INDEX CONCURRENTLY idx_job_events_job_id_newest",
+    },
+    RecoverableConcurrentIndex {
+        migration_version: 202608210002,
+        index_name: "idx_job_logs_job_id_newest",
+        table_name: "job_logs",
+        drop_sql: "DROP INDEX CONCURRENTLY idx_job_logs_job_id_newest",
+    },
+];
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SchemaCompatibilityError {
@@ -514,10 +536,55 @@ async fn run_migrations_with_filtered_history(
                 validate_checksum(migration.version, applied_migration, migration)?
             }
             None => {
+                recover_invalid_concurrent_index(conn, migration.version).await?;
                 (**conn).apply(migration).await?;
             }
         }
     }
+
+    Ok(())
+}
+
+async fn recover_invalid_concurrent_index(
+    conn: &mut PgPoolConnection,
+    migration_version: i64,
+) -> Result<(), MigrateError> {
+    let Some(index) = RECOVERABLE_CONCURRENT_INDEXES
+        .iter()
+        .find(|index| index.migration_version == migration_version)
+    else {
+        return Ok(());
+    };
+
+    // PostgreSQL deliberately leaves an invalid index relation behind when a
+    // concurrent build fails. A later CREATE with the same name cannot make
+    // progress until that relation is removed. Only repair the exact pending
+    // migration target on its expected table; a valid or same-named unrelated
+    // index remains a hard schema error rather than being silently replaced.
+    let expected_invalid_index_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM pg_index index_state
+            WHERE index_state.indexrelid = to_regclass($1)
+              AND index_state.indrelid = to_regclass($2)
+              AND NOT index_state.indisvalid
+         )",
+    )
+    .bind(index.index_name)
+    .bind(index.table_name)
+    .fetch_one(&mut **conn)
+    .await?;
+
+    if !expected_invalid_index_exists {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        migration_version,
+        index_name = index.index_name,
+        "removing invalid index left by a failed concurrent migration"
+    );
+    sqlx::query(index.drop_sql).execute(&mut **conn).await?;
 
     Ok(())
 }

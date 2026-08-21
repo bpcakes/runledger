@@ -436,6 +436,116 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
 }
 
 #[tokio::test]
+async fn migrate_recovers_invalid_indexes_left_by_failed_concurrent_builds() {
+    for (migration_version, table_name, index_name) in [
+        (
+            ADMIN_JOB_EVENTS_HISTORY_INDEX_MIGRATION_VERSION,
+            "job_events",
+            "idx_job_events_job_id_newest",
+        ),
+        (
+            ADMIN_JOB_LOGS_HISTORY_INDEX_MIGRATION_VERSION,
+            "job_logs",
+            "idx_job_logs_job_id_newest",
+        ),
+    ] {
+        let harness = TestHarness::fresh("runledger_pg_concurrent_index_recovery").await;
+        let server_version_num = sqlx::query_scalar::<_, String>("SHOW server_version_num")
+            .fetch_one(&harness.pool)
+            .await
+            .expect("read PostgreSQL version for concurrent index recovery");
+        eprintln!("concurrent index recovery PostgreSQL server_version_num={server_version_num}");
+
+        apply_runledger_migrations_through(&harness.pool, migration_version - 1).await;
+        seed_legacy_job_definition(&harness.pool).await;
+        let job_id = sqlx::query_scalar::<_, sqlx::types::Uuid>(
+            "INSERT INTO job_queue (
+                job_type, payload, max_attempts, timeout_seconds
+             )
+             VALUES ('jobs.test.legacy_cutover', '{}'::jsonb, 3, 30)
+             RETURNING id",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("insert job for concurrent index failure");
+        let seed_history_sql = match table_name {
+            "job_events" => {
+                "INSERT INTO job_events (job_id, event_type)
+                 VALUES ($1, 'ENQUEUED'), ($1, 'ENQUEUED')"
+            }
+            "job_logs" => {
+                "INSERT INTO job_logs (job_id, level, message)
+                 VALUES ($1, 'INFO', 'first'), ($1, 'INFO', 'second')"
+            }
+            other => panic!("unexpected concurrent index recovery table {other}"),
+        };
+        sqlx::query(seed_history_sql)
+            .bind(job_id)
+            .execute(&harness.pool)
+            .await
+            .unwrap_or_else(|error| panic!("seed duplicate {table_name} rows: {error}"));
+
+        let failed_build = sqlx::query(&format!(
+            "CREATE UNIQUE INDEX CONCURRENTLY {index_name} ON {table_name} (job_id)"
+        ))
+        .execute(&harness.pool)
+        .await;
+        assert!(
+            failed_build.is_err(),
+            "duplicate job ids must make the diagnostic unique index build fail"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT index_state.indisvalid
+                 FROM pg_index index_state
+                 WHERE index_state.indexrelid = to_regclass($1)",
+            )
+            .bind(index_name)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap_or_else(|error| panic!("inspect failed index {index_name}: {error}")),
+            false,
+            "PostgreSQL 18 must retain the failed concurrent build as an invalid index"
+        );
+
+        migrate_after_idempotency_cutover(&harness.pool)
+            .await
+            .unwrap_or_else(|error| panic!("recover failed build for {index_name}: {error}"));
+
+        let recovered_definition = sqlx::query_scalar::<_, String>(
+            "SELECT pg_get_indexdef(index_state.indexrelid)
+             FROM pg_index index_state
+             WHERE index_state.indexrelid = to_regclass($1)
+               AND index_state.indisvalid",
+        )
+        .bind(index_name)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap_or_else(|error| panic!("read recovered index {index_name}: {error}"));
+        assert!(
+            recovered_definition.contains("(job_id, id DESC)"),
+            "migration must replace the invalid relation with its canonical index: {recovered_definition}"
+        );
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1
+                    FROM _sqlx_migrations
+                    WHERE version = $1 AND success
+                 )",
+            )
+            .bind(migration_version)
+            .fetch_one(&harness.pool)
+            .await
+            .expect("read recovered migration history"),
+            "recovered concurrent migration must be recorded as applied"
+        );
+
+        harness.teardown().await;
+    }
+}
+
+#[tokio::test]
 async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_boundary() {
     let harness = TestHarness::fresh("runledger_pg_replay_metrics_upgrade").await;
     let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
