@@ -14,7 +14,6 @@ use super::super::types::{
     AdminWorkflowSummaryRecord, JobEventRecord, JobListFilter, JobQueueRecord,
 };
 
-#[derive(sqlx::FromRow)]
 struct AdminJobSummaryRow {
     id: Uuid,
     job_type: String,
@@ -39,7 +38,6 @@ struct AdminJobSummaryRow {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(sqlx::FromRow)]
 struct AdminWorkflowSummaryRow {
     id: Uuid,
     workflow_type: String,
@@ -138,12 +136,13 @@ pub async fn list_admin_workflow_summaries(
 
     let status_filter = filter.status.map(|status| status.as_db_value());
     let workflow_type_pattern = filter.workflow_type_contains.map(escape_ilike_pattern);
-    let rows = sqlx::query_as::<_, AdminWorkflowSummaryRow>(
+    let rows = sqlx::query_as!(
+        AdminWorkflowSummaryRow,
         "SELECT
             id,
             workflow_type,
             organization_id,
-            status::text AS status,
+            status::text AS \"status!\",
             result_step_key,
             started_at,
             finished_at,
@@ -155,12 +154,12 @@ pub async fn list_admin_workflow_summaries(
            AND ($3::text IS NULL OR workflow_type ILIKE '%' || $3 || '%')
          ORDER BY created_at DESC, id DESC
          LIMIT $4 OFFSET $5",
+        filter.organization_id,
+        status_filter,
+        workflow_type_pattern.as_deref(),
+        filter.limit,
+        filter.offset,
     )
-    .bind(filter.organization_id)
-    .bind(status_filter)
-    .bind(workflow_type_pattern.as_deref())
-    .bind(filter.limit)
-    .bind(filter.offset)
     .fetch_all(pool)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("list admin workflow summaries", error))?;
