@@ -237,9 +237,11 @@ async function unwrap<T>(
     );
   }
 
-  // openapi-fetch checks requests and responses against the generated type at
-  // compile time. JSON payload fields are narrowed from `unknown` to JsonValue
-  // here because every value produced by JSON.parse satisfies that union.
+  // openapi-fetch checks request construction and expected response shapes
+  // against the generated type at compile time. It does not validate response
+  // values at runtime. JSON payload fields are narrowed from `unknown` to
+  // JsonValue here because every value produced by JSON.parse satisfies that
+  // union.
   return result.data as T;
 }
 

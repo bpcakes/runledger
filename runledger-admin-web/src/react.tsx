@@ -49,8 +49,10 @@ export interface RunledgerAdminPanelProps {
   readonly route: RunledgerAdminRoute;
   readonly onRouteChange: (route: RunledgerAdminRoute) => void;
   readonly className?: string;
-  /** Set to zero to disable polling. Defaults to ten seconds. */
+  /** Operational data polling interval. Set to zero to disable. Defaults to ten seconds. */
   readonly pollIntervalMs?: number;
+  /** Capability polling interval. Set to zero to load once. Defaults to zero. */
+  readonly capabilitiesPollIntervalMs?: number;
   readonly title?: string;
 }
 
@@ -1218,13 +1220,14 @@ export function RunledgerAdminPanel({
   onRouteChange,
   className,
   pollIntervalMs = 10_000,
+  capabilitiesPollIntervalMs = 0,
   title = "Runledger",
 }: RunledgerAdminPanelProps) {
   const loader = useCallback(
     (signal: AbortSignal) => client.capabilities({ signal }),
     [client],
   );
-  const [state, retry] = useResource(loader, pollIntervalMs);
+  const [state, retry] = useResource(loader, capabilitiesPollIntervalMs);
   return (
     <div className={["rla-panel", className].filter(Boolean).join(" ")}>
       <header className="rla-header">

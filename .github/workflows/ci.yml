@@ -99,8 +99,11 @@ jobs:
         run: ./scripts/run-external-consumer-smoke.sh
 
   frontend:
-    name: Admin React package
+    name: Admin React package (React ${{ matrix.react }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        react: ["18.2.0", "19.2.8"]
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -112,6 +115,11 @@ jobs:
           cache-dependency-path: runledger-admin-web/package-lock.json
       - name: Install dependencies
         run: npm ci
+        working-directory: runledger-admin-web
+      - name: Select React peer version
+        run: >-
+          npm install --no-save --package-lock=false
+          react@${{ matrix.react }} react-dom@${{ matrix.react }}
         working-directory: runledger-admin-web
       - name: Test package
         run: npm test

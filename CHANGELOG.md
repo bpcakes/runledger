@@ -12,12 +12,13 @@ All notable changes to this workspace are documented here.
   redacted unless the host explicitly grants full visibility. Service-wide
   definitions require an explicit grant, and workflow graph reads filter both
   steps and dependency endpoints by effective organization.
-- Add the `@runledger/admin` npm package with a framework-neutral validated
+- Add the `@runledger/admin` npm package with a framework-neutral generated
   client, controlled accessible React panel, and optional scoped stylesheet.
   React is the only peer dependency; host applications keep ownership of URL
   routing, query caching, and design-system integration. The shared client owns
-  response validation, opaque history cursors, pagination metadata, and
-  non-overlapping polling behavior.
+  typed request construction, HTTP error normalization, opaque history cursors,
+  pagination metadata, and non-overlapping polling behavior. Successful JSON
+  responses are compile-time typed but are not runtime schema-validated.
 
 ### Changed
 
