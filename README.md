@@ -1063,6 +1063,9 @@ The v1 router exposes only `GET` routes:
 The Axum route registration also generates the OpenAPI 3.1 contract, so handler
 paths and the published schema cannot drift independently. Call
 `runledger_admin::openapi_json()` to expose or inspect the document in a host.
+Public admin DTOs also implement utoipa's schema traits as a supported Rust API;
+use the matching traits through `runledger_admin::utoipa` rather than adding a
+second utoipa dependency.
 The same document is shipped from npm as `@runledger/admin/openapi.json`; its
 generated TypeScript request/response types drive the package client internally.
 After changing the HTTP contract, run `./scripts/generate-admin-openapi.sh` to

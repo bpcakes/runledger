@@ -16,6 +16,11 @@ pub use dto::*;
 pub use error::AdminApiError;
 pub use http::{openapi_json, router};
 pub use service::AdminService;
+/// OpenAPI schema traits implemented by the public admin DTOs.
+///
+/// Use this re-export instead of adding a separate `utoipa` dependency so the
+/// trait version always matches the implementations provided by this crate.
+pub use utoipa;
 
 /// Stable API version represented by this crate.
 pub const API_VERSION: &str = "v1";
