@@ -6,12 +6,14 @@ use crate::{DbPool, Error, Result};
 use super::super::errors::{escape_ilike_pattern, validate_page_limit, validate_pagination};
 use super::super::row_decode::{
     parse_job_event_type, parse_job_stage, parse_job_status, parse_job_type_name,
-    parse_step_key_name, parse_workflow_run_status, parse_workflow_type_name,
+    parse_step_key_name, parse_workflow_release_mode, parse_workflow_run_status,
+    parse_workflow_step_execution_kind, parse_workflow_step_status, parse_workflow_type_name,
 };
 use super::super::rows::JobQueueRow;
 use super::super::types::{
-    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminWorkflowSummaryFilter,
-    AdminWorkflowSummaryRecord, JobEventRecord, JobListFilter, JobQueueRecord,
+    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminWorkflowDependencyRecord,
+    AdminWorkflowStepRecord, AdminWorkflowSummaryFilter, AdminWorkflowSummaryRecord,
+    JobEventRecord, JobListFilter, JobQueueRecord,
 };
 
 struct AdminJobSummaryRow {
@@ -48,6 +50,46 @@ struct AdminWorkflowSummaryRow {
     finished_at: Option<chrono::DateTime<chrono::Utc>>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+struct AdminWorkflowStepRow {
+    id: Uuid,
+    workflow_run_id: Uuid,
+    step_key: String,
+    execution_kind: String,
+    job_type: Option<String>,
+    organization_id: Option<Uuid>,
+    payload: serde_json::Value,
+    priority: Option<i32>,
+    max_attempts: Option<i32>,
+    timeout_seconds: Option<i32>,
+    stage: Option<String>,
+    allow_handler_continuation: bool,
+    execution_resource_key: Option<String>,
+    status: String,
+    job_id: Option<Uuid>,
+    released_at: Option<chrono::DateTime<chrono::Utc>>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    visible_dependency_count_total: i32,
+    visible_dependency_count_pending: i32,
+    visible_dependency_count_unsatisfied: i32,
+    has_hidden_prerequisites: bool,
+    status_reason: Option<String>,
+    last_error_code: Option<String>,
+    last_error_message: Option<String>,
+    output: Option<serde_json::Value>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct AdminWorkflowDependencyRow {
+    workflow_run_id: Uuid,
+    prerequisite_step_id: Uuid,
+    dependent_step_id: Uuid,
+    release_mode: String,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 pub async fn list_admin_job_summaries(
@@ -172,6 +214,141 @@ fn admin_workflow_summary_record(
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
+}
+
+/// Lists workflow steps in an admin scope without changing the meaning of the
+/// durable workflow-step record's dependency counters.
+pub async fn list_admin_workflow_steps(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    workflow_run_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AdminWorkflowStepRecord>> {
+    validate_pagination(limit, offset)?;
+
+    let rows = match organization_id {
+        Some(organization_id) => {
+            sqlx::query_file_as!(
+                AdminWorkflowStepRow,
+                "src/jobs/admin/queries/list_workflow_steps_for_organization.sql",
+                workflow_run_id,
+                organization_id,
+                limit,
+                offset,
+            )
+            .fetch_all(pool)
+            .await
+        }
+        None => {
+            sqlx::query_file_as!(
+                AdminWorkflowStepRow,
+                "src/jobs/admin/queries/list_workflow_steps_global.sql",
+                workflow_run_id,
+                limit,
+                offset,
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|error| Error::from_query_sqlx_with_context("list admin workflow steps", error))?;
+
+    rows.into_iter().map(admin_workflow_step_record).collect()
+}
+
+fn admin_workflow_step_record(row: AdminWorkflowStepRow) -> Result<AdminWorkflowStepRecord> {
+    Ok(AdminWorkflowStepRecord {
+        id: row.id,
+        workflow_run_id: row.workflow_run_id,
+        step_key: parse_step_key_name(row.step_key)?,
+        execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,
+        job_type: row.job_type.map(parse_job_type_name).transpose()?,
+        organization_id: row.organization_id,
+        payload: row.payload,
+        priority: row.priority,
+        max_attempts: row.max_attempts,
+        timeout_seconds: row.timeout_seconds,
+        stage: row.stage.map(parse_job_stage).transpose()?,
+        allow_handler_continuation: row.allow_handler_continuation,
+        execution_resource_key: row.execution_resource_key,
+        status: parse_workflow_step_status(row.status)?,
+        job_id: row.job_id,
+        released_at: row.released_at,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        visible_dependency_count_total: row.visible_dependency_count_total,
+        visible_dependency_count_pending: row.visible_dependency_count_pending,
+        visible_dependency_count_unsatisfied: row.visible_dependency_count_unsatisfied,
+        has_hidden_prerequisites: row.has_hidden_prerequisites,
+        status_reason: row.status_reason,
+        last_error_code: row.last_error_code,
+        last_error_message: row.last_error_message,
+        output: row.output,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+/// Lists only dependency edges whose two steps are visible in the admin scope.
+pub async fn list_admin_workflow_dependencies(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    workflow_run_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AdminWorkflowDependencyRecord>> {
+    validate_pagination(limit, offset)?;
+
+    let rows = sqlx::query_as::<_, AdminWorkflowDependencyRow>(
+        "SELECT
+            dependency.workflow_run_id,
+            dependency.prerequisite_step_id,
+            dependency.dependent_step_id,
+            dependency.release_mode::text AS release_mode,
+            dependency.created_at
+         FROM workflow_step_dependencies dependency
+         JOIN workflow_runs workflow
+           ON workflow.id = dependency.workflow_run_id
+         JOIN workflow_steps prerequisite
+           ON prerequisite.id = dependency.prerequisite_step_id
+         JOIN workflow_steps dependent
+           ON dependent.id = dependency.dependent_step_id
+         WHERE dependency.workflow_run_id = $1
+           AND (
+             $2::uuid IS NULL
+             OR (
+               workflow.organization_id = $2
+               AND prerequisite.organization_id = $2
+               AND dependent.organization_id = $2
+             )
+           )
+         ORDER BY
+           dependency.prerequisite_step_id ASC,
+           dependency.dependent_step_id ASC
+         LIMIT $3 OFFSET $4",
+    )
+    .bind(workflow_run_id)
+    .bind(organization_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("list admin workflow dependencies", error)
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(AdminWorkflowDependencyRecord {
+                workflow_run_id: row.workflow_run_id,
+                prerequisite_step_id: row.prerequisite_step_id,
+                dependent_step_id: row.dependent_step_id,
+                release_mode: parse_workflow_release_mode(row.release_mode)?,
+                created_at: row.created_at,
+            })
+        })
+        .collect()
 }
 
 pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<JobQueueRecord>> {

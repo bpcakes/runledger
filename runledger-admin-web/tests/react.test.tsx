@@ -141,6 +141,9 @@ describe("RunledgerAdminPanel", () => {
         name: "Workflow dependency pagination",
       }),
     ).toBeTruthy();
+    expect(
+      screen.getByText("some prerequisites hidden", { exact: false }),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: jobId }));
     expect(
       await screen.findByRole("heading", { level: 2, name: `Job ${jobId}` }),

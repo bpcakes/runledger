@@ -535,9 +535,14 @@ pub struct WorkflowStepDto {
     pub started_at: Option<DateTime<Utc>>,
     #[schema(required = true)]
     pub finished_at: Option<DateTime<Utc>>,
-    pub dependency_count_total: i32,
-    pub dependency_count_pending: i32,
-    pub dependency_count_unsatisfied: i32,
+    /// Number of prerequisites visible in the caller's authorization scope.
+    pub visible_dependency_count_total: i32,
+    /// Number of visible prerequisites that have not reached a terminal state.
+    pub visible_dependency_count_pending: i32,
+    /// Number of visible `ON_SUCCESS` prerequisites that failed or were canceled.
+    pub visible_dependency_count_unsatisfied: i32,
+    /// Whether one or more prerequisite steps are outside the caller's scope.
+    pub has_hidden_prerequisites: bool,
     #[schema(required = true)]
     pub last_error_code: Option<String>,
     pub created_at: DateTime<Utc>,

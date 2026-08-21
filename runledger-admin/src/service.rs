@@ -1,13 +1,13 @@
 use runledger_core::jobs::{JobStatus, WorkflowRunStatus};
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminWorkflowSummaryFilter,
-    AdminWorkflowSummaryRecord, JobDefinitionListFilter, JobEventRecord, JobLogRecord,
-    JobQueueRecord, WorkflowRunDbRecord, WorkflowStepDbRecord, WorkflowStepDependencyDbRecord,
+    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminWorkflowDependencyRecord,
+    AdminWorkflowStepRecord, AdminWorkflowSummaryFilter, AdminWorkflowSummaryRecord,
+    JobDefinitionListFilter, JobEventRecord, JobLogRecord, JobQueueRecord, WorkflowRunDbRecord,
     get_admin_job_metrics_page, get_job_by_id, get_workflow_run_by_id, job_exists_in_scope,
-    list_admin_job_summaries, list_admin_workflow_summaries, list_job_definitions, list_job_events,
-    list_job_events_before, list_job_logs, list_job_logs_before,
-    list_workflow_step_dependencies_in_organization_page, list_workflow_steps_in_organization_page,
+    list_admin_job_summaries, list_admin_workflow_dependencies, list_admin_workflow_steps,
+    list_admin_workflow_summaries, list_job_definitions, list_job_events, list_job_events_before,
+    list_job_logs, list_job_logs_before,
 };
 use uuid::Uuid;
 
@@ -283,7 +283,7 @@ impl AdminService {
             .await
             .map_err(|error| storage_error("load workflow run", error))?
             .ok_or_else(AdminApiError::not_found)?;
-        let steps = list_workflow_steps_in_organization_page(
+        let steps = list_admin_workflow_steps(
             &self.pool,
             organization_id,
             workflow_id,
@@ -292,7 +292,7 @@ impl AdminService {
         )
         .await
         .map_err(|error| storage_error("list workflow steps", error))?;
-        let dependencies = list_workflow_step_dependencies_in_organization_page(
+        let dependencies = list_admin_workflow_dependencies(
             &self.pool,
             organization_id,
             workflow_id,
@@ -619,7 +619,7 @@ fn workflow_summary_dto(row: AdminWorkflowSummaryRecord) -> WorkflowSummaryDto {
     }
 }
 
-fn workflow_step_dto(row: WorkflowStepDbRecord, visibility: DataVisibility) -> WorkflowStepDto {
+fn workflow_step_dto(row: AdminWorkflowStepRecord, visibility: DataVisibility) -> WorkflowStepDto {
     WorkflowStepDto {
         id: row.id,
         workflow_run_id: row.workflow_run_id,
@@ -637,9 +637,10 @@ fn workflow_step_dto(row: WorkflowStepDbRecord, visibility: DataVisibility) -> W
         released_at: row.released_at,
         started_at: row.started_at,
         finished_at: row.finished_at,
-        dependency_count_total: row.dependency_count_total,
-        dependency_count_pending: row.dependency_count_pending,
-        dependency_count_unsatisfied: row.dependency_count_unsatisfied,
+        visible_dependency_count_total: row.visible_dependency_count_total,
+        visible_dependency_count_pending: row.visible_dependency_count_pending,
+        visible_dependency_count_unsatisfied: row.visible_dependency_count_unsatisfied,
+        has_hidden_prerequisites: row.has_hidden_prerequisites,
         last_error_code: row.last_error_code,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -661,7 +662,7 @@ fn workflow_step_dto(row: WorkflowStepDbRecord, visibility: DataVisibility) -> W
     }
 }
 
-fn workflow_dependency_dto(row: WorkflowStepDependencyDbRecord) -> WorkflowDependencyDto {
+fn workflow_dependency_dto(row: AdminWorkflowDependencyRecord) -> WorkflowDependencyDto {
     WorkflowDependencyDto {
         workflow_run_id: row.workflow_run_id,
         prerequisite_step_id: row.prerequisite_step_id,

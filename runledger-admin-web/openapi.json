@@ -1793,9 +1793,10 @@
           "released_at",
           "started_at",
           "finished_at",
-          "dependency_count_total",
-          "dependency_count_pending",
-          "dependency_count_unsatisfied",
+          "visible_dependency_count_total",
+          "visible_dependency_count_pending",
+          "visible_dependency_count_unsatisfied",
+          "has_hidden_prerequisites",
           "last_error_code",
           "created_at",
           "updated_at",
@@ -1809,18 +1810,6 @@
             "type": "string",
             "format": "date-time"
           },
-          "dependency_count_pending": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "dependency_count_total": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "dependency_count_unsatisfied": {
-            "type": "integer",
-            "format": "int32"
-          },
           "execution_kind": {
             "type": "string"
           },
@@ -1833,6 +1822,10 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "has_hidden_prerequisites": {
+            "type": "boolean",
+            "description": "Whether one or more prerequisite steps are outside the caller's scope."
           },
           "id": {
             "type": "string",
@@ -1928,6 +1921,21 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "visible_dependency_count_pending": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of visible prerequisites that have not reached a terminal state."
+          },
+          "visible_dependency_count_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of prerequisites visible in the caller's authorization scope."
+          },
+          "visible_dependency_count_unsatisfied": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of visible `ON_SUCCESS` prerequisites that failed or were canceled."
           },
           "workflow_run_id": {
             "type": "string",

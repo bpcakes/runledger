@@ -537,9 +537,12 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
         organization_a.to_string()
     );
     assert!(body["steps"][0].get("payload").is_none());
-    assert_eq!(body["steps"][0]["dependency_count_total"], 0);
-    assert_eq!(body["steps"][0]["dependency_count_pending"], 0);
-    assert_eq!(body["steps"][0]["dependency_count_unsatisfied"], 0);
+    assert_eq!(body["steps"][0]["status"], "BLOCKED");
+    assert_eq!(body["steps"][0]["visible_dependency_count_total"], 0);
+    assert_eq!(body["steps"][0]["visible_dependency_count_pending"], 0);
+    assert_eq!(body["steps"][0]["visible_dependency_count_unsatisfied"], 0);
+    assert_eq!(body["steps"][0]["has_hidden_prerequisites"], true);
+    assert!(body["steps"][0].get("dependency_count_total").is_none());
     assert_eq!(body["steps_page"]["has_more"], false);
     assert_eq!(body["dependencies"], json!([]));
 
@@ -554,9 +557,10 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["steps"].as_array().expect("workflow steps").len(), 1);
-    assert_eq!(body["steps"][0]["dependency_count_total"], 1);
-    assert_eq!(body["steps"][0]["dependency_count_pending"], 1);
-    assert_eq!(body["steps"][0]["dependency_count_unsatisfied"], 0);
+    assert_eq!(body["steps"][0]["visible_dependency_count_total"], 1);
+    assert_eq!(body["steps"][0]["visible_dependency_count_pending"], 1);
+    assert_eq!(body["steps"][0]["visible_dependency_count_unsatisfied"], 0);
+    assert_eq!(body["steps"][0]["has_hidden_prerequisites"], false);
     assert_eq!(body["steps_page"]["has_more"], true);
     assert_eq!(
         body["dependencies"].as_array().expect("dependencies").len(),

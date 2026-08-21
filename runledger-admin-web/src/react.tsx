@@ -951,6 +951,7 @@ function WorkflowDetail({
                 <th scope="col">Step</th>
                 <th scope="col">Kind</th>
                 <th scope="col">Status</th>
+                <th scope="col">Prerequisites</th>
                 <th scope="col">Job</th>
               </tr>
             </thead>
@@ -961,6 +962,13 @@ function WorkflowDetail({
                   <td>{step.execution_kind}</td>
                   <td>
                     <Status value={step.status} />
+                  </td>
+                  <td>
+                    {step.visible_dependency_count_pending} pending /{" "}
+                    {step.visible_dependency_count_total} visible
+                    {step.has_hidden_prerequisites
+                      ? " (some prerequisites hidden)"
+                      : ""}
                   </td>
                   <td>
                     {step.job_id === null ? (

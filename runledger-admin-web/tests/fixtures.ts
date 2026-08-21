@@ -189,9 +189,10 @@ export const workflowResponse: WorkflowResponse = {
     {
       allow_handler_continuation: false,
       created_at: timestamp,
-      dependency_count_pending: 0,
-      dependency_count_total: 0,
-      dependency_count_unsatisfied: 0,
+      has_hidden_prerequisites: true,
+      visible_dependency_count_pending: 0,
+      visible_dependency_count_total: 0,
+      visible_dependency_count_unsatisfied: 0,
       execution_kind: "JOB",
       finished_at: null,
       id: "0198bb4e-5566-7000-8000-000000000003",

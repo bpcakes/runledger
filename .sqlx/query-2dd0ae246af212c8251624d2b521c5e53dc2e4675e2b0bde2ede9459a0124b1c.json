@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n    ws.id,\n    ws.workflow_run_id,\n    ws.step_key,\n    ws.execution_kind::text AS \"execution_kind!\",\n    ws.job_type,\n    ws.organization_id,\n    ws.payload,\n    ws.priority,\n    ws.max_attempts,\n    ws.timeout_seconds,\n    ws.stage,\n    ws.allow_handler_continuation,\n    ws.execution_resource_key,\n    ws.status::text AS \"status!\",\n    ws.job_id,\n    ws.released_at,\n    ws.started_at,\n    ws.finished_at,\n    COALESCE(visible_dependencies.total, 0)::int4 AS \"dependency_count_total!\",\n    COALESCE(visible_dependencies.pending, 0)::int4 AS \"dependency_count_pending!\",\n    COALESCE(visible_dependencies.unsatisfied, 0)::int4 AS \"dependency_count_unsatisfied!\",\n    ws.status_reason,\n    ws.last_error_code,\n    ws.last_error_message,\n    ws.output,\n    ws.created_at,\n    ws.updated_at\nFROM workflow_steps ws\nJOIN workflow_runs wr\n  ON wr.id = ws.workflow_run_id\n AND wr.organization_id = $2\nLEFT JOIN LATERAL (\n    SELECT\n        COUNT(*)::int4 AS total,\n        COUNT(*) FILTER (\n            WHERE prerequisite.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELED')\n        )::int4 AS pending,\n        COUNT(*) FILTER (\n            WHERE dependency.release_mode = 'ON_SUCCESS'\n              AND prerequisite.status IN ('FAILED', 'CANCELED')\n        )::int4 AS unsatisfied\n    FROM workflow_step_dependencies dependency\n    JOIN workflow_steps prerequisite\n      ON prerequisite.id = dependency.prerequisite_step_id\n     AND prerequisite.organization_id = $2\n    WHERE dependency.dependent_step_id = ws.id\n) visible_dependencies ON true\nWHERE ws.workflow_run_id = $1\n  AND ws.organization_id = $2\nORDER BY ws.created_at ASC, ws.id ASC\nLIMIT $3 OFFSET $4\n",
+  "query": "SELECT\n    step.id,\n    step.workflow_run_id,\n    step.step_key,\n    step.execution_kind::text AS \"execution_kind!\",\n    step.job_type,\n    step.organization_id,\n    step.payload,\n    step.priority,\n    step.max_attempts,\n    step.timeout_seconds,\n    step.stage,\n    step.allow_handler_continuation,\n    step.execution_resource_key,\n    step.status::text AS \"status!\",\n    step.job_id,\n    step.released_at,\n    step.started_at,\n    step.finished_at,\n    step.dependency_count_total AS \"visible_dependency_count_total!\",\n    step.dependency_count_pending AS \"visible_dependency_count_pending!\",\n    step.dependency_count_unsatisfied AS \"visible_dependency_count_unsatisfied!\",\n    false AS \"has_hidden_prerequisites!\",\n    step.status_reason,\n    step.last_error_code,\n    step.last_error_message,\n    step.output,\n    step.created_at,\n    step.updated_at\nFROM workflow_steps step\nWHERE step.workflow_run_id = $1\nORDER BY step.created_at ASC, step.id ASC\nLIMIT $2 OFFSET $3\n",
   "describe": {
     "columns": [
       {
@@ -95,53 +95,57 @@
       },
       {
         "ordinal": 18,
-        "name": "dependency_count_total!",
+        "name": "visible_dependency_count_total!",
         "type_info": "Int4"
       },
       {
         "ordinal": 19,
-        "name": "dependency_count_pending!",
+        "name": "visible_dependency_count_pending!",
         "type_info": "Int4"
       },
       {
         "ordinal": 20,
-        "name": "dependency_count_unsatisfied!",
+        "name": "visible_dependency_count_unsatisfied!",
         "type_info": "Int4"
       },
       {
         "ordinal": 21,
+        "name": "has_hidden_prerequisites!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 22,
         "name": "status_reason",
         "type_info": "Text"
       },
       {
-        "ordinal": 22,
+        "ordinal": 23,
         "name": "last_error_code",
         "type_info": "Text"
       },
       {
-        "ordinal": 23,
+        "ordinal": 24,
         "name": "last_error_message",
         "type_info": "Text"
       },
       {
-        "ordinal": 24,
+        "ordinal": 25,
         "name": "output",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 25,
+        "ordinal": 26,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 26,
+        "ordinal": 27,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
         "Uuid",
         "Int8",
         "Int8"
@@ -166,8 +170,9 @@
       true,
       true,
       true,
-      null,
-      null,
+      false,
+      false,
+      false,
       null,
       true,
       true,
@@ -177,5 +182,5 @@
       false
     ]
   },
-  "hash": "93c8929c7218cc2aa4ec835dd44f1ca8a5ed9d7543d98877c728bd5a1f3b0f05"
+  "hash": "2dd0ae246af212c8251624d2b521c5e53dc2e4675e2b0bde2ede9459a0124b1c"
 }

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use runledger_core::jobs::{
-    JobStage, JobStatus, JobTypeName, StepKeyName, WorkflowRunStatus, WorkflowTypeName,
+    JobStage, JobStatus, JobTypeName, StepKeyName, WorkflowDependencyReleaseMode,
+    WorkflowRunStatus, WorkflowStepExecutionKind, WorkflowStepStatus, WorkflowTypeName,
 };
 use serde_json::Value;
 use sqlx::types::Uuid;
@@ -55,6 +56,55 @@ pub struct AdminWorkflowSummaryRecord {
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Authorization-aware workflow step projection for admin detail views.
+///
+/// Dependency counters describe only prerequisites visible in the requested
+/// admin scope. [`Self::has_hidden_prerequisites`] makes an incomplete graph
+/// explicit without disclosing hidden step identifiers or their exact count.
+/// Durable workflow APIs continue to expose [`super::super::workflow_types::WorkflowStepDbRecord`]
+/// with the canonical counters used by the state machine.
+#[derive(Clone, Debug)]
+pub struct AdminWorkflowStepRecord {
+    pub id: Uuid,
+    pub workflow_run_id: Uuid,
+    pub step_key: StepKeyName,
+    pub execution_kind: WorkflowStepExecutionKind,
+    pub job_type: Option<JobTypeName>,
+    pub organization_id: Option<Uuid>,
+    pub payload: Value,
+    pub priority: Option<i32>,
+    pub max_attempts: Option<i32>,
+    pub timeout_seconds: Option<i32>,
+    pub stage: Option<JobStage>,
+    pub allow_handler_continuation: bool,
+    pub execution_resource_key: Option<String>,
+    pub status: WorkflowStepStatus,
+    pub job_id: Option<Uuid>,
+    pub released_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub visible_dependency_count_total: i32,
+    pub visible_dependency_count_pending: i32,
+    pub visible_dependency_count_unsatisfied: i32,
+    pub has_hidden_prerequisites: bool,
+    pub status_reason: Option<String>,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
+    pub output: Option<Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Authorization-filtered workflow dependency projection for admin detail views.
+#[derive(Clone, Debug)]
+pub struct AdminWorkflowDependencyRecord {
+    pub workflow_run_id: Uuid,
+    pub prerequisite_step_id: Uuid,
+    pub dependent_step_id: Uuid,
+    pub release_mode: WorkflowDependencyReleaseMode,
+    pub created_at: DateTime<Utc>,
 }
 
 pub struct AdminJobSummaryFilter<'a> {

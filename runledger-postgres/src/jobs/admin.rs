@@ -10,7 +10,8 @@ pub use payload::{
 };
 pub use read::{
     get_job_by_id, get_job_payload_by_idempotency_key, get_latest_job_payload_for_run,
-    job_exists_in_scope, list_admin_job_summaries, list_admin_workflow_summaries, list_job_events,
+    job_exists_in_scope, list_admin_job_summaries, list_admin_workflow_dependencies,
+    list_admin_workflow_steps, list_admin_workflow_summaries, list_job_events,
     list_job_events_before, list_jobs,
 };
 #[allow(

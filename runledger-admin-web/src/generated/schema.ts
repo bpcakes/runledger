@@ -454,16 +454,12 @@ export interface components {
             readonly allow_handler_continuation: boolean;
             /** Format: date-time */
             readonly created_at: string;
-            /** Format: int32 */
-            readonly dependency_count_pending: number;
-            /** Format: int32 */
-            readonly dependency_count_total: number;
-            /** Format: int32 */
-            readonly dependency_count_unsatisfied: number;
             readonly execution_kind: string;
             readonly execution_resource_key?: string;
             /** Format: date-time */
             readonly finished_at: string | null;
+            /** @description Whether one or more prerequisite steps are outside the caller's scope. */
+            readonly has_hidden_prerequisites: boolean;
             /** Format: uuid */
             readonly id: string;
             /** Format: uuid */
@@ -492,6 +488,21 @@ export interface components {
             readonly timeout_seconds: number | null;
             /** Format: date-time */
             readonly updated_at: string;
+            /**
+             * Format: int32
+             * @description Number of visible prerequisites that have not reached a terminal state.
+             */
+            readonly visible_dependency_count_pending: number;
+            /**
+             * Format: int32
+             * @description Number of prerequisites visible in the caller's authorization scope.
+             */
+            readonly visible_dependency_count_total: number;
+            /**
+             * Format: int32
+             * @description Number of visible `ON_SUCCESS` prerequisites that failed or were canceled.
+             */
+            readonly visible_dependency_count_unsatisfied: number;
             /** Format: uuid */
             readonly workflow_run_id: string;
         };

@@ -79,9 +79,9 @@ const ADMIN_WORKFLOWS_FOR_ORGANIZATION_QUERY: &str =
 const ADMIN_WORKFLOWS_GLOBAL_QUERY: &str =
     include_str!("../src/jobs/admin/queries/list_workflow_summaries_global.sql");
 const WORKFLOW_STEPS_FOR_ORGANIZATION_QUERY: &str =
-    include_str!("../src/jobs/workflows/queries/list_workflow_steps_for_organization.sql");
+    include_str!("../src/jobs/admin/queries/list_workflow_steps_for_organization.sql");
 const WORKFLOW_STEPS_GLOBAL_QUERY: &str =
-    include_str!("../src/jobs/workflows/queries/list_workflow_steps_global.sql");
+    include_str!("../src/jobs/admin/queries/list_workflow_steps_global.sql");
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,

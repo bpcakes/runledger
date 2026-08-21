@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n    ws.id,\n    ws.workflow_run_id,\n    ws.step_key,\n    ws.execution_kind::text AS \"execution_kind!\",\n    ws.job_type,\n    ws.organization_id,\n    ws.payload,\n    ws.priority,\n    ws.max_attempts,\n    ws.timeout_seconds,\n    ws.stage,\n    ws.allow_handler_continuation,\n    ws.execution_resource_key,\n    ws.status::text AS \"status!\",\n    ws.job_id,\n    ws.released_at,\n    ws.started_at,\n    ws.finished_at,\n    ws.dependency_count_total,\n    ws.dependency_count_pending,\n    ws.dependency_count_unsatisfied,\n    ws.status_reason,\n    ws.last_error_code,\n    ws.last_error_message,\n    ws.output,\n    ws.created_at,\n    ws.updated_at\nFROM workflow_steps ws\nWHERE ws.workflow_run_id = $1\nORDER BY ws.created_at ASC, ws.id ASC\nLIMIT $2 OFFSET $3\n",
+  "query": "SELECT\n    step.id,\n    step.workflow_run_id,\n    step.step_key,\n    step.execution_kind::text AS \"execution_kind!\",\n    step.job_type,\n    step.organization_id,\n    step.payload,\n    step.priority,\n    step.max_attempts,\n    step.timeout_seconds,\n    step.stage,\n    step.allow_handler_continuation,\n    step.execution_resource_key,\n    step.status::text AS \"status!\",\n    step.job_id,\n    step.released_at,\n    step.started_at,\n    step.finished_at,\n    COALESCE(prerequisites.visible_total, 0)::int4\n        AS \"visible_dependency_count_total!\",\n    COALESCE(prerequisites.visible_pending, 0)::int4\n        AS \"visible_dependency_count_pending!\",\n    COALESCE(prerequisites.visible_unsatisfied, 0)::int4\n        AS \"visible_dependency_count_unsatisfied!\",\n    COALESCE(prerequisites.has_hidden, false)\n        AS \"has_hidden_prerequisites!\",\n    step.status_reason,\n    step.last_error_code,\n    step.last_error_message,\n    step.output,\n    step.created_at,\n    step.updated_at\nFROM workflow_steps step\nJOIN workflow_runs workflow\n  ON workflow.id = step.workflow_run_id\n AND workflow.organization_id = $2\nLEFT JOIN LATERAL (\n    SELECT\n        COUNT(*) FILTER (\n            WHERE prerequisite.organization_id = $2\n        )::int4 AS visible_total,\n        COUNT(*) FILTER (\n            WHERE prerequisite.organization_id = $2\n              AND prerequisite.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELED')\n        )::int4 AS visible_pending,\n        COUNT(*) FILTER (\n            WHERE prerequisite.organization_id = $2\n              AND dependency.release_mode = 'ON_SUCCESS'\n              AND prerequisite.status IN ('FAILED', 'CANCELED')\n        )::int4 AS visible_unsatisfied,\n        BOOL_OR(prerequisite.organization_id IS DISTINCT FROM $2) AS has_hidden\n    FROM workflow_step_dependencies dependency\n    JOIN workflow_steps prerequisite\n      ON prerequisite.id = dependency.prerequisite_step_id\n    WHERE dependency.dependent_step_id = step.id\n) prerequisites ON true\nWHERE step.workflow_run_id = $1\n  AND step.organization_id = $2\nORDER BY step.created_at ASC, step.id ASC\nLIMIT $3 OFFSET $4\n",
   "describe": {
     "columns": [
       {
@@ -95,52 +95,58 @@
       },
       {
         "ordinal": 18,
-        "name": "dependency_count_total",
+        "name": "visible_dependency_count_total!",
         "type_info": "Int4"
       },
       {
         "ordinal": 19,
-        "name": "dependency_count_pending",
+        "name": "visible_dependency_count_pending!",
         "type_info": "Int4"
       },
       {
         "ordinal": 20,
-        "name": "dependency_count_unsatisfied",
+        "name": "visible_dependency_count_unsatisfied!",
         "type_info": "Int4"
       },
       {
         "ordinal": 21,
+        "name": "has_hidden_prerequisites!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 22,
         "name": "status_reason",
         "type_info": "Text"
       },
       {
-        "ordinal": 22,
+        "ordinal": 23,
         "name": "last_error_code",
         "type_info": "Text"
       },
       {
-        "ordinal": 23,
+        "ordinal": 24,
         "name": "last_error_message",
         "type_info": "Text"
       },
       {
-        "ordinal": 24,
+        "ordinal": 25,
         "name": "output",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 25,
+        "ordinal": 26,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 26,
+        "ordinal": 27,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Uuid",
         "Int8",
         "Int8"
@@ -165,9 +171,10 @@
       true,
       true,
       true,
-      false,
-      false,
-      false,
+      null,
+      null,
+      null,
+      null,
       true,
       true,
       true,
@@ -176,5 +183,5 @@
       false
     ]
   },
-  "hash": "ca625518b075543a9dff3acfe2af93cfa8e975ef20d77b856ae8f1bddf686413"
+  "hash": "48ef7fc336203824ff2b0fc951e0cc4bb20484f0e13b508ebcaaf2cb3ca10470"
 }
