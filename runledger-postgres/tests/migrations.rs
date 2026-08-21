@@ -494,8 +494,8 @@ async fn migrate_recovers_invalid_indexes_left_by_failed_concurrent_builds() {
             failed_build.is_err(),
             "duplicate job ids must make the diagnostic unique index build fail"
         );
-        assert_eq!(
-            sqlx::query_scalar::<_, bool>(
+        assert!(
+            !sqlx::query_scalar::<_, bool>(
                 "SELECT index_state.indisvalid
                  FROM pg_index index_state
                  WHERE index_state.indexrelid = to_regclass($1)",
@@ -504,7 +504,6 @@ async fn migrate_recovers_invalid_indexes_left_by_failed_concurrent_builds() {
             .fetch_one(&harness.pool)
             .await
             .unwrap_or_else(|error| panic!("inspect failed index {index_name}: {error}")),
-            false,
             "PostgreSQL 18 must retain the failed concurrent build as an invalid index"
         );
 

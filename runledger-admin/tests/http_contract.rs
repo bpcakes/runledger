@@ -424,12 +424,24 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     let (status, _, first_metrics_page) =
         get_json(&app, "/metrics?limit=1", Some(all_access)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(first_metrics_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        first_metrics_page["items"]
+            .as_array()
+            .expect("first metrics page items")
+            .len(),
+        1
+    );
     assert_eq!(first_metrics_page["page"]["has_more"], true);
     let (status, _, second_metrics_page) =
         get_json(&app, "/metrics?limit=1&offset=1", Some(all_access)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(second_metrics_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        second_metrics_page["items"]
+            .as_array()
+            .expect("second metrics page items")
+            .len(),
+        1
+    );
     assert_ne!(
         first_metrics_page["items"][0]["job_type"],
         second_metrics_page["items"][0]["job_type"]
