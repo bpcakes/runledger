@@ -66,3 +66,41 @@ pub async fn list_job_logs(
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("list job logs", error))
 }
+
+/// Lists job logs newest-first, optionally continuing before a log id.
+pub async fn list_job_logs_before(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    job_id: Uuid,
+    limit: i64,
+    before_id: Option<i64>,
+) -> Result<Vec<JobLogRecord>> {
+    validate_page_limit(limit)?;
+
+    sqlx::query_as!(
+        JobLogRecord,
+        "SELECT
+            jl.id,
+            jl.job_id,
+            jl.run_number,
+            jl.attempt,
+            jl.level,
+            jl.message,
+            jl.payload,
+            jl.occurred_at
+         FROM job_logs jl
+         JOIN job_queue jq ON jq.id = jl.job_id
+         WHERE jl.job_id = $1
+           AND ($2::uuid IS NULL OR jq.organization_id = $2)
+           AND ($3::bigint IS NULL OR jl.id < $3)
+         ORDER BY jl.id DESC
+         LIMIT $4",
+        job_id,
+        organization_id,
+        before_id,
+        limit,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("list job logs before id", error))
+}

@@ -222,3 +222,59 @@ pub async fn list_job_events(
         })
         .collect::<Result<Vec<_>>>()
 }
+
+/// Lists job events newest-first, optionally continuing before an event id.
+pub async fn list_job_events_before(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    job_id: Uuid,
+    limit: i64,
+    before_id: Option<i64>,
+) -> Result<Vec<JobEventRecord>> {
+    validate_page_limit(limit)?;
+
+    let rows = sqlx::query!(
+        "SELECT
+            je.id,
+            je.job_id,
+            je.run_number,
+            je.attempt,
+            je.event_type::text AS \"event_type!\",
+            je.stage,
+            je.progress_done,
+            je.progress_total,
+            je.payload,
+            je.occurred_at
+         FROM job_events je
+         JOIN job_queue jq ON jq.id = je.job_id
+         WHERE je.job_id = $1
+           AND ($2::uuid IS NULL OR jq.organization_id = $2)
+           AND ($3::bigint IS NULL OR je.id < $3)
+         ORDER BY je.id DESC
+         LIMIT $4",
+        job_id,
+        organization_id,
+        before_id,
+        limit,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("list job events before id", error))?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(JobEventRecord {
+                id: row.id,
+                job_id: row.job_id,
+                run_number: row.run_number,
+                attempt: row.attempt,
+                event_type: parse_job_event_type(row.event_type)?,
+                stage: row.stage.map(parse_job_stage).transpose()?,
+                progress_done: row.progress_done,
+                progress_total: row.progress_total,
+                payload: row.payload,
+                occurred_at: row.occurred_at,
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+}

@@ -202,6 +202,75 @@ pub async fn list_workflow_steps_page(
     rows.into_iter().map(WorkflowStepRow::into_record).collect()
 }
 
+/// Lists workflow steps visible to an exact organization scope.
+///
+/// Unlike [`list_workflow_steps_page`], an organization filter applies to both
+/// the parent run and each step's effective execution organization. `None`
+/// remains the service-wide operator scope.
+pub async fn list_workflow_steps_in_organization_page(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    workflow_run_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WorkflowStepDbRecord>> {
+    validate_pagination(limit, offset)?;
+
+    let rows = sqlx::query_as::<_, WorkflowStepRow>(
+        "SELECT
+            ws.id,
+            ws.workflow_run_id,
+            ws.step_key,
+            ws.execution_kind::text AS execution_kind,
+            ws.job_type,
+            ws.organization_id,
+            ws.payload,
+            ws.priority,
+            ws.max_attempts,
+            ws.timeout_seconds,
+            ws.stage,
+            ws.allow_handler_continuation,
+            ws.execution_resource_key,
+            ws.status::text AS status,
+            ws.job_id,
+            ws.released_at,
+            ws.started_at,
+            ws.finished_at,
+            ws.dependency_count_total,
+            ws.dependency_count_pending,
+            ws.dependency_count_unsatisfied,
+            ws.status_reason,
+            ws.last_error_code,
+            ws.last_error_message,
+            ws.output,
+            ws.created_at,
+            ws.updated_at
+         FROM workflow_steps ws
+         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
+         WHERE ws.workflow_run_id = $1
+           AND (
+             $2::uuid IS NULL
+             OR (wr.organization_id = $2 AND ws.organization_id = $2)
+           )
+         ORDER BY ws.created_at ASC, ws.id ASC
+         LIMIT $3 OFFSET $4",
+    )
+    .bind(workflow_run_id)
+    .bind(organization_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        crate::Error::from_query_sqlx_with_context(
+            "list workflow steps in organization page",
+            error,
+        )
+    })?;
+
+    rows.into_iter().map(WorkflowStepRow::into_record).collect()
+}
+
 pub async fn count_workflow_steps(
     pool: &DbPool,
     organization_id: Option<Uuid>,
@@ -386,6 +455,61 @@ pub async fn list_workflow_step_dependencies_page(
     .await
     .map_err(|error| {
         crate::Error::from_query_sqlx_with_context("list workflow step dependencies page", error)
+    })?;
+
+    rows.into_iter()
+        .map(workflow_step_dependency_db_record_from_lookup_row)
+        .collect()
+}
+
+/// Lists dependencies whose two steps are visible to an exact organization scope.
+///
+/// `None` remains the service-wide operator scope.
+pub async fn list_workflow_step_dependencies_in_organization_page(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    workflow_run_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WorkflowStepDependencyDbRecord>> {
+    validate_pagination(limit, offset)?;
+
+    let rows = sqlx::query_as::<_, WorkflowStepDependencyLookupRow>(
+        "SELECT
+            wsd.workflow_run_id,
+            wsd.prerequisite_step_id,
+            wsd.dependent_step_id,
+            wsd.release_mode::text AS release_mode,
+            wsd.created_at
+         FROM workflow_step_dependencies wsd
+         JOIN workflow_runs wr ON wr.id = wsd.workflow_run_id
+         JOIN workflow_steps prerequisite ON prerequisite.id = wsd.prerequisite_step_id
+         JOIN workflow_steps dependent ON dependent.id = wsd.dependent_step_id
+         WHERE wsd.workflow_run_id = $1
+           AND (
+             $2::uuid IS NULL
+             OR (
+               wr.organization_id = $2
+               AND prerequisite.organization_id = $2
+               AND dependent.organization_id = $2
+             )
+           )
+         ORDER BY
+           wsd.prerequisite_step_id ASC,
+           wsd.dependent_step_id ASC
+         LIMIT $3 OFFSET $4",
+    )
+    .bind(workflow_run_id)
+    .bind(organization_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        crate::Error::from_query_sqlx_with_context(
+            "list workflow step dependencies in organization page",
+            error,
+        )
     })?;
 
     rows.into_iter()

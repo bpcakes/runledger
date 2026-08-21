@@ -38,10 +38,10 @@ pub use admin::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
     compare_and_requeue_job, compare_and_requeue_job_tx, get_job_by_id,
     get_job_continuation_metrics, get_job_metrics, get_job_payload_by_idempotency_key,
-    get_latest_job_payload_for_run, list_job_events, list_jobs, requeue_job,
-    update_job_payload_uuid_array_field,
+    get_latest_job_payload_for_run, list_job_events, list_job_events_before, list_jobs,
+    requeue_job, update_job_payload_uuid_array_field,
 };
-pub use logs::{insert_job_log, list_job_logs};
+pub use logs::{insert_job_log, list_job_logs, list_job_logs_before};
 pub use queue::{
     JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionCatalogSyncReport,
     claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
@@ -115,10 +115,11 @@ pub use workflows::{
     enqueue_workflow_run_tx, get_latest_workflow_run_by_type, get_workflow_run_by_id,
     get_workflow_run_by_type_and_idempotency_key, get_workflow_run_by_type_and_idempotency_key_tx,
     get_workflow_run_id_for_job, list_workflow_runs, list_workflow_step_dependencies,
-    list_workflow_step_dependencies_page, list_workflow_step_keys_for_update_tx,
-    list_workflow_steps, list_workflow_steps_page, recover_workflow_run, recover_workflow_run_tx,
-    retrieve_workflow_run_handle, update_workflow_step_and_pending_job_payload_tx,
-    workflow_run_handle,
+    list_workflow_step_dependencies_in_organization_page, list_workflow_step_dependencies_page,
+    list_workflow_step_keys_for_update_tx, list_workflow_steps,
+    list_workflow_steps_in_organization_page, list_workflow_steps_page, recover_workflow_run,
+    recover_workflow_run_tx, retrieve_workflow_run_handle,
+    update_workflow_step_and_pending_job_payload_tx, workflow_run_handle,
 };
 #[cfg(feature = "test-support")]
 pub mod test_support {

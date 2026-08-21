@@ -23,6 +23,7 @@ package_crate() {
     --no-verify \
     -p "$crate" \
     --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
+    --config "patch.crates-io.runledger-admin.path=\"${ROOT_DIR}/runledger-admin\"" \
     --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
     --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
     --config "patch.crates-io.runledger-test-support.path=\"${ROOT_DIR}/runledger-test-support\"" \
@@ -42,7 +43,7 @@ rm -rf "$VENDOR_DIR" "$TARGET_DIR" "$WORK_DIR"
 mkdir -p "$VENDOR_DIR" "$TARGET_DIR"
 cp -R "$SMOKE_SOURCE_DIR" "$WORK_DIR"
 
-for crate in runledger-core runledger-test-support runledger-postgres runledger-runtime; do
+for crate in runledger-core runledger-test-support runledger-postgres runledger-runtime runledger-admin; do
   package_crate "$crate"
 done
 
@@ -50,17 +51,22 @@ CORE_VERSION="$(crate_version runledger-core)"
 TEST_SUPPORT_VERSION="$(crate_version runledger-test-support)"
 POSTGRES_VERSION="$(crate_version runledger-postgres)"
 RUNTIME_VERSION="$(crate_version runledger-runtime)"
+ADMIN_VERSION="$(crate_version runledger-admin)"
 
 extract_crate runledger-core "$CORE_VERSION"
 extract_crate runledger-test-support "$TEST_SUPPORT_VERSION"
 extract_crate runledger-postgres "$POSTGRES_VERSION"
 extract_crate runledger-runtime "$RUNTIME_VERSION"
+extract_crate runledger-admin "$ADMIN_VERSION"
 
 RELEASE_CORE_VERSION="$CORE_VERSION" \
 RELEASE_TEST_SUPPORT_VERSION="$TEST_SUPPORT_VERSION" \
 RELEASE_POSTGRES_VERSION="$POSTGRES_VERSION" \
 RELEASE_RUNTIME_VERSION="$RUNTIME_VERSION" \
+RELEASE_ADMIN_VERSION="$ADMIN_VERSION" \
 perl -0pi -e '
+  s/^runledger-admin = .+$/runledger-admin = "$ENV{RELEASE_ADMIN_VERSION}"/m
+    or die "failed to pin runledger-admin in $ARGV\n";
   s/^runledger-core = .+$/runledger-core = "$ENV{RELEASE_CORE_VERSION}"/m
     or die "failed to pin runledger-core in $ARGV\n";
   s/^runledger-test-support = .+$/runledger-test-support = "$ENV{RELEASE_TEST_SUPPORT_VERSION}"/m
@@ -74,6 +80,7 @@ perl -0pi -e '
 {
   printf '[patch.crates-io]\n'
   printf 'runledger-core = { path = "%s/runledger-core-%s" }\n' "$VENDOR_DIR" "$CORE_VERSION"
+  printf 'runledger-admin = { path = "%s/runledger-admin-%s" }\n' "$VENDOR_DIR" "$ADMIN_VERSION"
   printf 'runledger-test-support = { path = "%s/runledger-test-support-%s" }\n' "$VENDOR_DIR" "$TEST_SUPPORT_VERSION"
   printf 'runledger-postgres = { path = "%s/runledger-postgres-%s" }\n' "$VENDOR_DIR" "$POSTGRES_VERSION"
   printf 'runledger-runtime = { path = "%s/runledger-runtime-%s" }\n' "$VENDOR_DIR" "$RUNTIME_VERSION"

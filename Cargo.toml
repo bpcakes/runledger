@@ -2,6 +2,7 @@
 resolver = "2"
 
 members = [
+    "runledger-admin",
     "runledger-core",
     "runledger-postgres",
     "runledger-runtime",
@@ -14,6 +15,7 @@ exclude = [
 ]
 
 default-members = [
+    "runledger-admin",
     "runledger-core",
     "runledger-postgres",
     "runledger-runtime",
@@ -36,6 +38,7 @@ large_futures = "deny"
 large_stack_frames = "deny"
 
 [workspace.dependencies]
+runledger-admin = { version = "0.10.1", path = "runledger-admin" }
 runledger-core = { version = "0.10.1", path = "runledger-core" }
 runledger-postgres = { version = "0.10.1", path = "runledger-postgres" }
 runledger-runtime = { version = "0.10.1", path = "runledger-runtime" }

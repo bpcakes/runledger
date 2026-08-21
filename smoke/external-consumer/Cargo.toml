@@ -34,6 +34,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # requirements, patches crates.io to extracted `.crate` archives, and requires
 # this crate's checked-in lockfile to remain valid.
 runledger-core = { path = "../../runledger-core" }
+runledger-admin = { path = "../../runledger-admin" }
 runledger-postgres = { path = "../../runledger-postgres" }
 runledger-runtime = { path = "../../runledger-runtime" }
 runledger-test-support = { path = "../../runledger-test-support" }

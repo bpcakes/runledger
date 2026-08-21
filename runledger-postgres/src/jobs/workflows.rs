@@ -18,7 +18,8 @@ pub use self::read::{
     get_latest_workflow_run_by_type, get_workflow_run_by_id,
     get_workflow_run_by_type_and_idempotency_key, get_workflow_run_by_type_and_idempotency_key_tx,
     get_workflow_run_id_for_job, list_workflow_runs, list_workflow_step_dependencies,
-    list_workflow_step_dependencies_page, list_workflow_steps, list_workflow_steps_page,
+    list_workflow_step_dependencies_in_organization_page, list_workflow_step_dependencies_page,
+    list_workflow_steps, list_workflow_steps_in_organization_page, list_workflow_steps_page,
 };
 pub use self::recovery::{recover_workflow_run, recover_workflow_run_tx};
 pub use self::runtime::{complete_external_workflow_step, complete_external_workflow_step_tx};

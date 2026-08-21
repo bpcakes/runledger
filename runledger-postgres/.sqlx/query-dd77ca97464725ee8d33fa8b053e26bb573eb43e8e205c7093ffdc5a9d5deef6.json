@@ -1,0 +1,67 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            jl.id,\n            jl.job_id,\n            jl.run_number,\n            jl.attempt,\n            jl.level,\n            jl.message,\n            jl.payload,\n            jl.occurred_at\n         FROM job_logs jl\n         JOIN job_queue jq ON jq.id = jl.job_id\n         WHERE jl.job_id = $1\n           AND ($2::uuid IS NULL OR jq.organization_id = $2)\n           AND ($3::bigint IS NULL OR jl.id < $3)\n         ORDER BY jl.id DESC\n         LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "run_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "attempt",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "level",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "occurred_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "dd77ca97464725ee8d33fa8b053e26bb573eb43e8e205c7093ffdc5a9d5deef6"
+}

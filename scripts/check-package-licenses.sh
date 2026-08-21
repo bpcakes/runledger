@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PUBLISHABLE_CRATES=(
+  "runledger-admin"
   "runledger-core"
   "runledger-test-support"
   "runledger-postgres"
@@ -30,6 +31,7 @@ for crate in "${PUBLISHABLE_CRATES[@]}"; do
       --list \
       -p "$crate" \
       --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
+      --config "patch.crates-io.runledger-admin.path=\"${ROOT_DIR}/runledger-admin\"" \
       --config "patch.crates-io.runledger-test-support.path=\"${ROOT_DIR}/runledger-test-support\"" \
       --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
       --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\""

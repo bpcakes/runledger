@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
+use runledger_admin::{AdminAccess, AdminService, DataVisibility};
 use runledger_core::jobs::{
     JobCompletion, JobContext, JobDeadLetterInfo, JobEventType, JobFailure, JobStage, JobStatus,
     JobType,
@@ -53,6 +54,8 @@ const REPLAY_REASON: &str = "prove fresh successful replay from a packaged consu
 #[tokio::test]
 async fn packaged_crates_support_external_consumer_embedding() {
     let harness = PostgresHarness::start().await;
+    let _admin_router = runledger_admin::router(AdminService::new(harness.pool.clone()));
+    let _admin_access = AdminAccess::all(DataVisibility::MetadataOnly);
     runledger_postgres::migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect("apply packaged migrations");
