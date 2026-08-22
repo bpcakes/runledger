@@ -65,12 +65,10 @@ impl App {
         };
         match target {
             FilterTarget::Workflow => {
-                self.bump_fetch_generation();
                 self.workflow_type_filter = value;
                 self.workflows = None;
             }
             FilterTarget::Job => {
-                self.bump_fetch_generation();
                 self.job_type_filter = value;
                 self.jobs = None;
                 self.definitions = None;

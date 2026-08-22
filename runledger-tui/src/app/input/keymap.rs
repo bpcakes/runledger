@@ -37,7 +37,6 @@ impl App {
                 }
             }
             KeyCode::Char('r') | KeyCode::Char('.') => {
-                self.bump_fetch_generation();
                 refresh = true;
             }
             KeyCode::Char('p') => {
@@ -94,7 +93,6 @@ impl App {
             }
             KeyCode::Char('y') => self.copy_selected_identifier(),
             KeyCode::Char('f') if matches!(self.screen, Screen::Queue) => {
-                self.bump_fetch_generation();
                 self.queue_filter = self.queue_filter.next();
                 self.jobs = None;
                 refresh = true;

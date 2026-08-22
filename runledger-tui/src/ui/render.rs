@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, Tabs};
 use runledger_core::jobs::{JobStatus, WorkflowRunStatus, WorkflowStepStatus};
 
+use crate::app::fetch::FetchStatus;
 use crate::app::{App, Screen};
 use crate::scope::Scope;
 
@@ -151,16 +152,16 @@ pub fn workflow_step_status_style(status: WorkflowStepStatus) -> Style {
     }
 }
 
-pub fn draw_top_chrome_underlay(f: &mut Frame, app: &App) {
-    draw_tabs_and_status(f, app);
+pub fn draw_top_chrome_underlay(f: &mut Frame, app: &App, fetch_status: FetchStatus) {
+    draw_tabs_and_status(f, app, fetch_status);
 }
 
-pub fn draw_top_chrome(f: &mut Frame, app: &mut App) {
-    let content_area = draw_tabs_and_status(f, app);
+pub fn draw_top_chrome(f: &mut Frame, app: &mut App, fetch_status: FetchStatus) {
+    let content_area = draw_tabs_and_status(f, app, fetch_status);
     draw_screen_content(f, content_area, app);
 }
 
-fn draw_tabs_and_status(f: &mut Frame, app: &App) -> Rect {
+fn draw_tabs_and_status(f: &mut Frame, app: &App, fetch_status: FetchStatus) -> Rect {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -183,7 +184,7 @@ fn draw_tabs_and_status(f: &mut Frame, app: &App) -> Rect {
     f.render_widget(tabs, chunks[0]);
 
     f.render_widget(
-        Paragraph::new(app.status_line())
+        Paragraph::new(app.status_line(fetch_status))
             .alignment(Alignment::Left)
             .style(if app.last_error.is_some() {
                 Style::new().fg(Color::Red)

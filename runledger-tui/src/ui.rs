@@ -9,17 +9,18 @@ mod workflows;
 use ratatui::Frame;
 use ratatui::layout::Constraint;
 
+use crate::app::fetch::FetchStatus;
 use crate::app::{ActiveInput, App, FilterTarget};
 
-pub fn draw(f: &mut Frame, app: &mut App) {
+pub fn draw(f: &mut Frame, app: &mut App, fetch_status: FetchStatus) {
     if app.show_help {
-        render::draw_top_chrome_underlay(f, app);
+        render::draw_top_chrome_underlay(f, app, fetch_status);
         help::draw(f);
         return;
     }
 
     if !matches!(app.active_input(), ActiveInput::None) {
-        render::draw_top_chrome_underlay(f, app);
+        render::draw_top_chrome_underlay(f, app, fetch_status);
         match app.active_input() {
             ActiveInput::None => {}
             ActiveInput::Organization { text } => draw_org_input(f, text),
@@ -30,7 +31,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    render::draw_top_chrome(f, app);
+    render::draw_top_chrome(f, app, fetch_status);
 }
 
 fn draw_org_input(f: &mut Frame, input: &str) {
