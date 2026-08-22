@@ -41,7 +41,7 @@ pub use admin::{
     get_latest_job_payload_for_run, job_exists_in_scope, list_admin_job_definitions,
     list_admin_job_summaries, list_admin_workflow_dependencies, list_admin_workflow_steps,
     list_admin_workflow_summaries, list_job_events, list_job_events_before, list_jobs, requeue_job,
-    update_job_payload_uuid_array_field,
+    update_job_payload_uuid_array_field, workflow_exists_in_scope,
 };
 pub use logs::{insert_job_log, list_job_logs, list_job_logs_before};
 pub use queue::{

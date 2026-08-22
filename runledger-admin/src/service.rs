@@ -7,7 +7,7 @@ use runledger_postgres::jobs::{
     get_admin_job_metrics_page, get_job_by_id, get_workflow_run_by_id, job_exists_in_scope,
     list_admin_job_definitions, list_admin_job_summaries, list_admin_workflow_dependencies,
     list_admin_workflow_steps, list_admin_workflow_summaries, list_job_events,
-    list_job_events_before, list_job_logs, list_job_logs_before,
+    list_job_events_before, list_job_logs, list_job_logs_before, workflow_exists_in_scope,
 };
 use uuid::Uuid;
 
@@ -434,7 +434,11 @@ impl AdminService {
         access: AdminAccess,
         workflow_id: Uuid,
     ) -> Result<(), AdminApiError> {
-        self.find_workflow(access, workflow_id).await.map(drop)
+        let exists =
+            workflow_exists_in_scope(&self.pool, access.scope().organization_id(), workflow_id)
+                .await
+                .map_err(|error| storage_error("check workflow existence", error))?;
+        exists.then_some(()).ok_or_else(AdminApiError::not_found)
     }
 }
 

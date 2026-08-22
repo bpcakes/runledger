@@ -501,6 +501,29 @@ pub async fn job_exists_in_scope(
     .map_err(|error| Error::from_query_sqlx_with_context("check job existence in scope", error))
 }
 
+/// Reports whether a workflow run is visible within the requested organization scope.
+pub async fn workflow_exists_in_scope(
+    pool: &DbPool,
+    organization_id: Option<Uuid>,
+    workflow_id: Uuid,
+) -> Result<bool> {
+    sqlx::query_scalar!(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM workflow_runs
+            WHERE id = $1
+              AND ($2::uuid IS NULL OR organization_id = $2)
+         ) AS \"exists!\"",
+        workflow_id,
+        organization_id,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("check workflow existence in scope", error)
+    })
+}
+
 pub async fn get_job_payload_by_idempotency_key(
     pool: &DbPool,
     organization_id: Uuid,

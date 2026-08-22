@@ -274,6 +274,8 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
 
     let app = Router::new().nest(BASE, router(AdminService::new(pool.clone())));
     let metadata_access = AdminAccess::organization(organization_a, DataVisibility::MetadataOnly);
+    let foreign_metadata_access =
+        AdminAccess::organization(organization_b, DataVisibility::MetadataOnly);
     let full_access = AdminAccess::organization(organization_a, DataVisibility::Full);
     let definition_access = metadata_access.with_service_wide_definitions();
     let all_access = AdminAccess::all(DataVisibility::MetadataOnly);
@@ -597,6 +599,17 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["items"], json!([]));
+
+    for collection in ["steps", "dependencies"] {
+        let (status, _, body) = get_json(
+            &app,
+            &format!("/workflows/{}/{collection}", workflow_run.id),
+            Some(foreign_metadata_access),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "admin.not_found");
+    }
 
     let (status, _, body) = get_json(
         &app,
