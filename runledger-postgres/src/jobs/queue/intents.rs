@@ -183,6 +183,19 @@ enum IntentPromotionDisposition {
     RetryDeferred,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntentPromotionFailureAction {
+    Conflict {
+        code: &'static str,
+        client_message: &'static str,
+    },
+    RetryDeferred {
+        code: &'static str,
+        client_message: &'static str,
+    },
+    Propagate,
+}
+
 impl JobEnqueueIntentPromotionReport {
     fn record(&mut self, disposition: IntentPromotionDisposition) {
         match disposition {
@@ -789,16 +802,24 @@ async fn promote_job_enqueue_intents_read_committed_tx(
             Ok(disposition) => disposition,
             Err(error) => {
                 rollback_intent_promotion_savepoint(tx).await?;
-                if let Some((code, client_message)) = terminal_intent_failure(&error) {
-                    mark_intent_conflicted_tx(tx, intent_id, code, client_message).await?;
-                    log_query_intent_promotion_failure(intent_id, &error, "conflicted");
-                    IntentPromotionDisposition::Conflicted
-                } else if let Some((code, client_message)) = deferred_intent_failure(&error) {
-                    mark_intent_retry_deferred_tx(tx, intent_id, code, client_message).await?;
-                    log_query_intent_promotion_failure(intent_id, &error, "retry_deferred");
-                    IntentPromotionDisposition::RetryDeferred
-                } else {
-                    return Err(error);
+                match classify_intent_promotion_failure(&error) {
+                    IntentPromotionFailureAction::Conflict {
+                        code,
+                        client_message,
+                    } => {
+                        mark_intent_conflicted_tx(tx, intent_id, code, client_message).await?;
+                        log_query_intent_promotion_failure(intent_id, &error, "conflicted");
+                        IntentPromotionDisposition::Conflicted
+                    }
+                    IntentPromotionFailureAction::RetryDeferred {
+                        code,
+                        client_message,
+                    } => {
+                        mark_intent_retry_deferred_tx(tx, intent_id, code, client_message).await?;
+                        log_query_intent_promotion_failure(intent_id, &error, "retry_deferred");
+                        IntentPromotionDisposition::RetryDeferred
+                    }
+                    IntentPromotionFailureAction::Propagate => return Err(error),
                 }
             }
         };
@@ -943,33 +964,31 @@ async fn rollback_intent_promotion_savepoint(tx: &mut ReadCommittedTx<'_, '_>) -
         .map(|_| ())
 }
 
-fn terminal_intent_failure(error: &Error) -> Option<(&'static str, &'static str)> {
-    let Error::QueryError(error) = error else {
-        return None;
+fn classify_intent_promotion_failure(error: &Error) -> IntentPromotionFailureAction {
+    let error = match error {
+        Error::QueryError(error) => error,
+        Error::ConfigError(_) | Error::ConnectionError(_) | Error::MigrationError(_) => {
+            return IntentPromotionFailureAction::Propagate;
+        }
     };
     // Maintenance invariant: only intrinsically invalid persisted requests are
     // terminal. Drift between redundant columns and the canonical snapshot is
-    // repairable, so it follows the deferred path below. Unknown query failures
+    // repairable, so it follows the deferred path. Unknown query failures
     // also remain retryable so an outage or repairable application policy
     // cannot discard work.
-    matches!(
-        error.code(),
+    match error.code() {
         "job.intent_invalid_persisted_row"
-            | "job.invalid_job_type"
-            | "job.invalid_execution_resource_key"
-            | "job.invalid_stage"
-    )
-    .then(|| (error.code(), error.client_message()))
-}
-
-fn deferred_intent_failure(error: &Error) -> Option<(&'static str, &'static str)> {
-    let Error::QueryError(error) = error else {
-        return None;
-    };
-    // The caller has already rolled back to the row savepoint. A successful
-    // rollback proves the transaction can record backoff metadata; failures
-    // that invalidate the connection or transaction return before this point.
-    Some((error.code(), error.client_message()))
+        | "job.invalid_job_type"
+        | "job.invalid_execution_resource_key"
+        | "job.invalid_stage" => IntentPromotionFailureAction::Conflict {
+            code: error.code(),
+            client_message: error.client_message(),
+        },
+        _ => IntentPromotionFailureAction::RetryDeferred {
+            code: error.code(),
+            client_message: error.client_message(),
+        },
+    }
 }
 
 async fn mark_intent_promoted_tx(
@@ -1475,6 +1494,15 @@ fn intent_snapshot_mismatch_error(intent_id: Uuid) -> Error {
 mod tests {
     use super::*;
 
+    fn promotion_query_error(code: &'static str, client_message: &'static str) -> Error {
+        Error::QueryError(QueryError::from_classified(
+            QueryErrorCategory::Internal,
+            code,
+            client_message,
+            "test intent promotion failure",
+        ))
+    }
+
     #[test]
     fn query_failure_diagnostics_expose_only_sanitized_fields() {
         let error = QueryError::from_sqlx(
@@ -1493,74 +1521,51 @@ mod tests {
     }
 
     #[test]
-    fn disappearing_queue_idempotency_winner_is_deferred_not_terminal() {
-        let error = Error::QueryError(QueryError::from_classified(
-            QueryErrorCategory::Internal,
-            "job.idempotency_conflict_missing_existing",
-            "Job enqueue retry could not be resolved.",
-            "test disappearing idempotency winner",
-        ));
-
-        assert!(deferred_intent_failure(&error).is_some());
-        assert_eq!(terminal_intent_failure(&error), None);
-    }
-
-    #[test]
-    fn unclassified_query_error_is_deferred_after_savepoint_recovery() {
-        let error = Error::QueryError(QueryError::from_classified(
-            QueryErrorCategory::Internal,
-            "job.future_row_error",
-            "Job enqueue intent could not be promoted.",
-            "test future row-level error",
-        ));
-
-        assert_eq!(terminal_intent_failure(&error), None);
-        assert_eq!(
-            deferred_intent_failure(&error),
-            Some((
-                "job.future_row_error",
-                "Job enqueue intent could not be promoted."
-            ))
-        );
-    }
-
-    #[test]
-    fn repairable_snapshot_mismatch_is_deferred_not_terminal() {
-        let error = intent_snapshot_mismatch_error(Uuid::now_v7());
-
-        assert_eq!(terminal_intent_failure(&error), None);
-        assert_eq!(
-            deferred_intent_failure(&error),
-            Some((
-                "job.intent_snapshot_mismatch",
-                "Job enqueue intent request snapshot is inconsistent."
-            ))
-        );
-    }
-
-    #[test]
-    fn invalid_persisted_job_type_is_terminal() {
-        let error = Error::QueryError(QueryError::from_classified(
-            QueryErrorCategory::Internal,
+    fn promotion_failure_action_matrix_is_exhaustive() {
+        for code in [
+            "job.intent_invalid_persisted_row",
             "job.invalid_job_type",
-            "Job type in persisted row is invalid.",
-            "test invalid persisted job type",
-        ));
+            "job.invalid_execution_resource_key",
+            "job.invalid_stage",
+        ] {
+            let error = promotion_query_error(code, "terminal persisted intent");
 
-        assert_eq!(
-            terminal_intent_failure(&error),
-            Some((
-                "job.invalid_job_type",
-                "Job type in persisted row is invalid."
-            ))
-        );
-    }
+            assert_eq!(
+                classify_intent_promotion_failure(&error),
+                IntentPromotionFailureAction::Conflict {
+                    code,
+                    client_message: "terminal persisted intent",
+                },
+                "terminal query error must win over the deferred fallback for {code}"
+            );
+        }
 
-    #[test]
-    fn non_query_errors_remain_batch_fatal() {
-        let error = Error::ConnectionError("test connection failure".to_owned());
+        for code in [
+            "job.idempotency_conflict_missing_existing",
+            "job.intent_snapshot_mismatch",
+            "job.future_row_error",
+        ] {
+            let error = promotion_query_error(code, "repairable intent failure");
 
-        assert_eq!(terminal_intent_failure(&error), None);
-        assert_eq!(deferred_intent_failure(&error), None);
+            assert_eq!(
+                classify_intent_promotion_failure(&error),
+                IntentPromotionFailureAction::RetryDeferred {
+                    code,
+                    client_message: "repairable intent failure",
+                },
+                "query error must remain retryable for {code}"
+            );
+        }
+
+        for error in [
+            Error::ConfigError("test config failure".to_owned()),
+            Error::ConnectionError("test connection failure".to_owned()),
+            Error::MigrationError("test migration failure".to_owned()),
+        ] {
+            assert_eq!(
+                classify_intent_promotion_failure(&error),
+                IntentPromotionFailureAction::Propagate
+            );
+        }
     }
 }
