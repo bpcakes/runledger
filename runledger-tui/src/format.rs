@@ -76,15 +76,16 @@ pub fn format_relative_timestamp(ts: DateTime<Utc>) -> String {
 }
 
 #[must_use]
+/// Truncates to `max_chars` Unicode scalar values and appends an ellipsis.
+///
+/// The limit excludes the ellipsis and does not measure grapheme clusters or
+/// terminal display width.
 pub fn truncate_str(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_owned();
+    if let Some((end, _)) = value.char_indices().nth(max_chars) {
+        return format!("{}…", &value[..end]);
     }
-    let mut end = max_chars;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &value[..end])
+
+    value.to_owned()
 }
 
 /// Pretty-printed payload lines capped for terminal display.
@@ -136,10 +137,19 @@ mod tests {
     }
 
     #[test]
-    fn truncate_str_respects_char_boundaries() {
-        let s = "hello";
-        assert_eq!(truncate_str(s, 10), "hello");
+    fn truncate_str_handles_empty_zero_exact_and_over_limit_ascii() {
+        assert_eq!(truncate_str("", 0), "");
+        assert_eq!(truncate_str("hello", 0), "…");
+        assert_eq!(truncate_str("hello", 5), "hello");
+        assert_eq!(truncate_str("hello", 10), "hello");
         assert_eq!(truncate_str("hello world", 5), "hello…");
+    }
+
+    #[test]
+    fn truncate_str_uses_unicode_scalar_boundaries() {
+        assert_eq!(truncate_str("é猫", 2), "é猫");
+        assert_eq!(truncate_str("é猫café", 2), "é猫…");
+        assert_eq!(truncate_str("e\u{301}x", 1), "e…");
     }
 
     #[test]
