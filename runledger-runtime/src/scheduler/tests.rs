@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::str::FromStr;
 use std::time::Duration as StdDuration;
 
@@ -11,7 +12,8 @@ use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
 
 use super::{
-    compute_next_fire_at_utc, compute_next_fire_at_with_stale_coalescing_utc,
+    SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT, apply_schedule_jitter, compute_next_fire_at_utc,
+    compute_next_fire_at_with_stale_coalescing_utc, first_jittered_fire_after_candidates_utc,
     materialize_claimed_schedules_tx, materialize_due_schedules, materialize_due_schedules_tx,
     run_scheduler_loop,
 };
@@ -32,6 +34,35 @@ fn scheduler_loop_test_config() -> JobsConfig {
         schedule_poll_interval: StdDuration::from_secs(60),
         reaper_retry_delay_ms: 1_000,
     }
+}
+
+fn reference_first_jittered_fire_after_utc(
+    schedule: &Schedule,
+    from: DateTime<Utc>,
+    after: DateTime<Utc>,
+    schedule_id: Uuid,
+    max_jitter_seconds: i32,
+) -> Option<DateTime<Utc>> {
+    reference_first_jittered_fire_after_candidates_utc(
+        schedule
+            .after(&from)
+            .take(SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT),
+        after,
+        schedule_id,
+        max_jitter_seconds,
+    )
+}
+
+fn reference_first_jittered_fire_after_candidates_utc(
+    candidates: impl Iterator<Item = DateTime<Utc>>,
+    after: DateTime<Utc>,
+    schedule_id: Uuid,
+    max_jitter_seconds: i32,
+) -> Option<DateTime<Utc>> {
+    candidates
+        .map(|next| apply_schedule_jitter(schedule_id, next, max_jitter_seconds))
+        .filter(|next| *next > after)
+        .min()
 }
 
 #[test]
@@ -144,6 +175,126 @@ fn compute_next_fire_at_with_stale_coalescing_chooses_earliest_jittered_fire() {
     assert_eq!(
         next, expected,
         "coalescing should pick the earliest actual future fire when jitter reorders cron bases"
+    );
+}
+
+#[test]
+fn bounded_stale_jitter_search_matches_reference_property_matrix() {
+    let base = DateTime::parse_from_rfc3339("2026-02-01T12:00:00Z")
+        .expect("fixed matrix timestamp")
+        .with_timezone(&Utc);
+    let schedule_ids = [
+        Uuid::nil(),
+        Uuid::from_u128(1),
+        Uuid::from_u128(u128::MAX / 3),
+        Uuid::from_u128(u128::MAX),
+    ];
+
+    for gap_seconds in [1, 2, 7, 60] {
+        for schedule_id in schedule_ids {
+            for max_jitter_seconds in [1, 2, 30, 60, 300, 3_600] {
+                for after_offset_seconds in [0, 1, 29, 59, 60, 3_599] {
+                    let after = base + ChronoDuration::seconds(after_offset_seconds);
+                    let from = after - ChronoDuration::seconds(i64::from(max_jitter_seconds) + 1);
+                    let candidates = (1..=512)
+                        .map(|index| from + ChronoDuration::seconds(index * gap_seconds))
+                        .collect::<Vec<_>>();
+
+                    assert_eq!(
+                        first_jittered_fire_after_candidates_utc(
+                            candidates.iter().copied(),
+                            after,
+                            schedule_id,
+                            max_jitter_seconds,
+                        ),
+                        reference_first_jittered_fire_after_candidates_utc(
+                            candidates.into_iter(),
+                            after,
+                            schedule_id,
+                            max_jitter_seconds,
+                        ),
+                        "optimized search diverged for gap={gap_seconds}, schedule_id={schedule_id}, jitter={max_jitter_seconds}, offset={after_offset_seconds}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn maximum_jitter_sparse_backlog_stops_at_the_best_candidate_bound() {
+    let after = DateTime::parse_from_rfc3339("2026-02-01T12:00:00Z")
+        .expect("fixed maximum-jitter timestamp")
+        .with_timezone(&Utc);
+    let max_jitter_seconds = runledger_postgres::jobs::JOB_SCHEDULE_MAX_JITTER_SECONDS;
+    let from = after - ChronoDuration::seconds(i64::from(max_jitter_seconds) + 1);
+    let schedule = Schedule::from_str("0 * * * * * *").expect("per-minute schedule must parse");
+    let scanned = Cell::new(0);
+    let candidates = schedule
+        .after(&from)
+        .take(SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT)
+        .inspect(|_| scanned.set(scanned.get() + 1));
+
+    let actual = first_jittered_fire_after_candidates_utc(
+        candidates,
+        after,
+        Uuid::nil(),
+        max_jitter_seconds,
+    );
+
+    assert_eq!(
+        actual,
+        reference_first_jittered_fire_after_utc(
+            &schedule,
+            from,
+            after,
+            Uuid::nil(),
+            max_jitter_seconds,
+        )
+    );
+    assert!(
+        scanned.get() < SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT / 10,
+        "sparse maximum-jitter backlog should stop near the best candidate, scanned {} of {}",
+        scanned.get(),
+        SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT
+    );
+}
+
+#[test]
+fn maximum_jitter_dense_backlog_retains_the_global_occurrence_cap() {
+    let after = DateTime::parse_from_rfc3339("2026-02-01T12:00:00Z")
+        .expect("fixed dense-backlog timestamp")
+        .with_timezone(&Utc);
+    let max_jitter_seconds = runledger_postgres::jobs::JOB_SCHEDULE_MAX_JITTER_SECONDS;
+    let from = after - ChronoDuration::seconds(i64::from(max_jitter_seconds) + 1);
+    let schedule = Schedule::from_str("*/1 * * * * * *").expect("per-second schedule must parse");
+    let scanned = Cell::new(0);
+    let candidates = schedule
+        .after(&from)
+        .take(SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT)
+        .inspect(|_| scanned.set(scanned.get() + 1));
+
+    let actual = first_jittered_fire_after_candidates_utc(
+        candidates,
+        after,
+        Uuid::nil(),
+        max_jitter_seconds,
+    );
+
+    assert_eq!(
+        actual,
+        reference_first_jittered_fire_after_utc(
+            &schedule,
+            from,
+            after,
+            Uuid::nil(),
+            max_jitter_seconds,
+        )
+    );
+    assert_eq!(
+        scanned.get(),
+        SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT,
+        "the defensive cap must still bound a dense pathological backlog"
     );
 }
 
