@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 
 use runledger_core::jobs::{
     WorkflowDependencyReleaseMode, WorkflowStepExecutionKind, WorkflowStepStatus,
@@ -32,7 +32,7 @@ use super::super::locking::{
 use super::super::release::{
     StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx,
 };
-use super::run_status::recompute_workflow_run_statuses_tx;
+use super::run_status::recompute_workflow_run_status_tx;
 
 fn validate_external_completion_status(terminal_status: WorkflowStepStatus) -> Result<()> {
     if terminal_status.is_terminal() {
@@ -215,7 +215,6 @@ async fn process_linked_workflow_step_terminal_by_job_id_read_committed_tx(
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("mark workflow step terminal", error))?;
 
-    let mut touched_run_ids = BTreeSet::from([step.workflow_run_id]);
     // Job-backed terminal completion already owns the job row. Real cancellation
     // locks job rows before taking the exclusive release lock, so cancellation
     // cannot hold the exclusive lock while also waiting on this job row. If the
@@ -230,12 +229,12 @@ async fn process_linked_workflow_step_terminal_by_job_id_read_committed_tx(
     lock_workflow_run_release_shared_tx(tx, step.workflow_run_id).await?;
     resolve_terminal_step_queue_tx(
         tx,
+        step.workflow_run_id,
         step.id,
         transition.terminal_status,
-        &mut touched_run_ids,
     )
     .await?;
-    recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
+    recompute_workflow_run_status_tx(tx, step.workflow_run_id).await?;
 
     Ok(())
 }
@@ -473,24 +472,23 @@ async fn complete_external_workflow_step_read_committed_tx(
     })?;
 
     let updated = updated.into_record()?;
-    let mut touched_run_ids = BTreeSet::from([updated.workflow_run_id]);
     // External completion already owns the workflow-step row locks. Do not wait
     // on the shared release advisory lock here: cancellation may own the
     // exclusive form while waiting on these same rows. Dependent release goes
     // through try_lock_workflow_run_release_shared_tx, so concurrent
     // cancellation returns workflow.release_conflict before this transaction can
     // release new work.
-    resolve_terminal_step_queue_tx(tx, updated.id, updated.status, &mut touched_run_ids).await?;
-    recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
+    resolve_terminal_step_queue_tx(tx, updated.workflow_run_id, updated.id, updated.status).await?;
+    recompute_workflow_run_status_tx(tx, updated.workflow_run_id).await?;
 
     Ok(updated)
 }
 
 pub(crate) async fn resolve_terminal_step_queue_tx(
     tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
     initial_step_id: Uuid,
     initial_terminal_status: WorkflowStepStatus,
-    touched_run_ids: &mut BTreeSet<Uuid>,
 ) -> Result<()> {
     let mut terminal_queue = VecDeque::from([(initial_step_id, initial_terminal_status)]);
 
@@ -498,7 +496,8 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
         terminal_queue.pop_front()
     {
         let edges = sqlx::query!(
-            "SELECT dependent_step_id, release_mode::text AS \"release_mode!\"
+            "SELECT workflow_run_id, dependent_step_id,
+                    release_mode::text AS \"release_mode!\"
              FROM workflow_step_dependencies
              WHERE prerequisite_step_id = $1",
             prerequisite_step_id,
@@ -510,6 +509,13 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
         })?;
 
         for edge in edges {
+            if edge.workflow_run_id != workflow_run_id {
+                return Err(workflow_internal_state_error(format!(
+                    "workflow dependency edge from prerequisite step {prerequisite_step_id} belongs to run {}, expected {workflow_run_id}",
+                    edge.workflow_run_id,
+                )));
+            }
+
             let dependent_step_id: Uuid = edge.dependent_step_id;
             let release_mode = parse_workflow_release_mode(edge.release_mode)?;
             let dependency_unsatisfied =
@@ -523,6 +529,7 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                         CASE WHEN $2 THEN 1 ELSE 0 END,
                      updated_at = now()
                  WHERE id = $1
+                   AND workflow_run_id = $3
                  RETURNING
                     id,
                     workflow_run_id,
@@ -540,14 +547,20 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                     dependency_count_unsatisfied",
                 dependent_step_id,
                 dependency_unsatisfied,
+                workflow_run_id,
             )
-            .fetch_one(&mut **tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(|error| {
                 Error::from_query_sqlx_with_context(
                     "update workflow step dependency counters",
                     error,
                 )
+            })?
+            .ok_or_else(|| {
+                workflow_internal_state_error(format!(
+                    "workflow dependency edge from prerequisite step {prerequisite_step_id} references dependent step {dependent_step_id} outside expected run {workflow_run_id}",
+                ))
             })?;
 
             let candidate = StepReleaseCandidate::from_decoded_fields(StepReleaseCandidateInit {
@@ -566,8 +579,6 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
             let status = parse_workflow_step_status(row.status)?;
             let dependency_count_pending: i32 = row.dependency_count_pending;
             let dependency_count_unsatisfied: i32 = row.dependency_count_unsatisfied;
-            touched_run_ids.insert(candidate.workflow_run_id());
-
             if dependency_count_pending != 0 {
                 continue;
             }
@@ -591,9 +602,11 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                      output = NULL,
                      updated_at = now()
                  WHERE id = $1
+                   AND workflow_run_id = $2
                    AND status = 'BLOCKED'
-                 RETURNING workflow_run_id",
+                 RETURNING id",
                 candidate.id(),
+                workflow_run_id,
             )
             .fetch_optional(&mut **tx)
             .await
@@ -601,8 +614,7 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                 Error::from_query_sqlx_with_context("cancel blocked workflow step", error)
             })?;
 
-            if let Some(workflow_run_id) = canceled_row {
-                touched_run_ids.insert(workflow_run_id);
+            if canceled_row.is_some() {
                 terminal_queue.push_back((candidate.id(), WorkflowStepStatus::Canceled));
             }
         }

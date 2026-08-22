@@ -15,7 +15,7 @@ use super::errors::{
 };
 use super::read::load_workflow_run_by_id_tx;
 use super::release::enqueue_root_steps_tx;
-use super::runtime::recompute_workflow_run_statuses_tx;
+use super::runtime::recompute_workflow_run_status_tx;
 use super::snapshot::canonical_workflow_enqueue_request;
 use super::steps::{
     WorkflowStepDependencyWriteContext, fetch_job_definition_defaults_tx,
@@ -228,8 +228,7 @@ async fn enqueue_workflow_run_classified_tx_inner(
     .await?;
 
     enqueue_root_steps_tx(tx, workflow_run.id).await?;
-    recompute_workflow_run_statuses_tx(tx, &std::collections::BTreeSet::from([workflow_run.id]))
-        .await?;
+    recompute_workflow_run_status_tx(tx, workflow_run.id).await?;
 
     let workflow_run = load_workflow_run_by_id_tx(
         tx,
