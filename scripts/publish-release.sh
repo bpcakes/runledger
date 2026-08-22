@@ -90,6 +90,37 @@ require_manifest_versions() {
   fi
 }
 
+require_publish_order() {
+  local publish_order
+  publish_order="${PUBLISHABLE_CRATES[*]}"
+
+  RUNLEDGER_PUBLISH_ORDER="$publish_order" node -e '
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { input += chunk; });
+    process.stdin.on("end", () => {
+      const metadata = JSON.parse(input);
+      const order = process.env.RUNLEDGER_PUBLISH_ORDER.split(/\s+/);
+      const positions = new Map(order.map((name, position) => [name, position]));
+      const packages = new Map(metadata.packages.map((pkg) => [pkg.name, pkg]));
+
+      for (const [crate, position] of positions) {
+        const pkg = packages.get(crate);
+        if (pkg === undefined) throw new Error(`publishable crate ${crate} is not in the workspace`);
+        for (const dependency of pkg.dependencies) {
+          const dependencyPosition = positions.get(dependency.name);
+          if (dependencyPosition !== undefined && dependencyPosition >= position) {
+            throw new Error(
+              `${crate} must be published after workspace dependency ${dependency.name}`,
+            );
+          }
+        }
+      }
+    });
+  ' < <(cargo metadata --format-version 1 --no-deps) \
+    || die "publishable crates are not in dependency order"
+}
+
 wait_for_crates_io_index() {
   local crate="$1"
   local version="$2"
@@ -222,15 +253,6 @@ prepare_release_artifacts() {
         '
   )"
 
-  local crate
-  for crate in "${PUBLISHABLE_CRATES[@]}"; do
-    cargo package --locked --no-verify -p "$crate" >/dev/null
-    local archive
-    archive="$(crate_package_archive "$crate" "$version")"
-    [[ -f "$archive" ]] \
-      || die "cargo package did not create the expected archive: ${archive}"
-  done
-
   npm ci --prefix "$ROOT_DIR/runledger-admin-web"
 
   local archive_name
@@ -265,6 +287,22 @@ prepare_release_artifacts() {
     || die "npm package openapi.json must have mode 0644, found ${openapi_mode}"
 
   echo "Prepared release artifacts from commit $(git rev-parse HEAD)."
+}
+
+prepare_crate_artifact() {
+  local crate="$1"
+  local version="$2"
+
+  # Package in publication order. Cargo normalizes path dependencies to
+  # registry dependencies in the archive's Cargo.toml and Cargo.lock, so a
+  # dependent crate cannot be packaged canonically until its same-version
+  # Runledger dependencies have been indexed by crates.io.
+  cargo package --locked --no-verify -p "$crate" >/dev/null
+
+  local archive
+  archive="$(crate_package_archive "$crate" "$version")"
+  [[ -f "$archive" ]] \
+    || die "cargo package did not create the expected archive: ${archive}"
 }
 
 verify_existing_crate_artifact() {
@@ -365,6 +403,7 @@ require_command tar
 require_clean_worktree
 validate_version "$VERSION"
 require_manifest_versions "$VERSION"
+require_publish_order
 require_tag_absent "$TAG"
 
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
@@ -380,12 +419,6 @@ require_remote_tag_absent "$PUBLISH_REMOTE" "$TAG"
 require_dry_run_push "$PUBLISH_REMOTE" "$current_branch" "$TAG"
 prepare_release_artifacts "$VERSION"
 
-for crate in "${PUBLISHABLE_CRATES[@]}"; do
-  if version_exists_on_crates_io "$crate" "$VERSION"; then
-    verify_existing_crate_artifact "$crate" "$VERSION"
-  fi
-done
-
 npm_already_published=false
 npm_status=0
 npm_version_exists "$VERSION" || npm_status=$?
@@ -399,14 +432,25 @@ case "$npm_status" in
 esac
 
 for crate in "${PUBLISHABLE_CRATES[@]}"; do
+  prepare_crate_artifact "$crate" "$VERSION"
+
+  crate_already_published=false
   if version_exists_on_crates_io "$crate" "$VERSION"; then
+    verify_existing_crate_artifact "$crate" "$VERSION"
+    crate_already_published=true
+  fi
+
+  if [[ "$crate_already_published" == true ]]; then
     echo "${crate} ${VERSION} already exists on crates.io and matches this release commit."
   else
-    cargo publish --dry-run -p "$crate"
-    cargo publish -p "$crate"
+    cargo publish --locked --dry-run -p "$crate"
+    cargo publish --locked -p "$crate"
   fi
 
   wait_for_crates_io_index "$crate" "$VERSION"
+  if [[ "$crate_already_published" == false ]]; then
+    verify_existing_crate_artifact "$crate" "$VERSION"
+  fi
 done
 
 if [[ "$npm_already_published" == true ]]; then
@@ -415,6 +459,7 @@ else
   npm publish "$NPM_PACKAGE_ARCHIVE" --access public
 fi
 wait_for_npm_index "$VERSION"
+verify_existing_npm_artifact "$VERSION"
 
 git tag "$TAG"
 
