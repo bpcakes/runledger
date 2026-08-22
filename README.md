@@ -249,6 +249,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | More work after one successful bounded slice | `JobCompletion::continue_now` or `continue_after`; workflow steps must opt in |
 | At most one active workflow for an application key | `WorkflowRunEnqueueBuilder::active_key` and `enqueue_or_get_active_workflow` |
 | Mutual exclusion for jobs sharing one external resource | `enqueue_job_with_execution_resource` or `WorkflowStepEnqueueBuilder::execution_resource` |
+| Cancel a pending or leased job | `cancel_job_with_scope` with an explicit `JobCancellationScope::{Global, Organization, Admin}` capability |
 | Recover a canceled or dead-lettered direct job | `compare_and_requeue_job` with exact observed state |
 | Intentionally repeat a successful direct job | `compare_and_replay_succeeded_job` |
 | Recover a terminal workflow without rewriting history | `recover_workflow_run` |

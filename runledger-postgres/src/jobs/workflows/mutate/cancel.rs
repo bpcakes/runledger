@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use runledger_core::jobs::{WorkflowRunStatus, WorkflowStepStatus};
 use sqlx::types::Uuid;
 
-use crate::jobs::admin::cancel_job_tx;
+use crate::jobs::admin::cancel_job_with_scope_tx;
+use crate::jobs::types::JobCancellationScope;
 use crate::jobs::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowRunDbRecord};
 use crate::{DbTx, Error, Result};
 
@@ -230,8 +231,12 @@ impl<'a> WorkflowCancellationSweep<'a> {
                         step.step_key.as_str()
                     ))
                 })?;
+                let scope = match step.organization_id {
+                    Some(organization_id) => JobCancellationScope::Organization(organization_id),
+                    None => JobCancellationScope::Global,
+                };
                 let canceled =
-                    cancel_job_tx(tx, step.organization_id, job_id, self.metadata.reason).await?;
+                    cancel_job_with_scope_tx(tx, scope, job_id, self.metadata.reason).await?;
                 if canceled.is_none() {
                     return Err(workflow_internal_state_error(format!(
                         "workflow-managed job {job_id} could not be canceled during workflow run cancel"

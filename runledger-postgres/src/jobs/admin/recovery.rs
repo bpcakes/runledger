@@ -20,7 +20,9 @@ use super::super::transaction_isolation::{
     ReadCommittedTx, begin_owned_read_committed_tx, ensure_read_committed_tx,
     finish_owned_transaction,
 };
-use super::super::types::{CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobQueueRecord};
+use super::super::types::{
+    CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobCancellationScope, JobQueueRecord,
+};
 use super::super::workflows::on_terminal;
 use super::read::get_job_by_id;
 
@@ -30,15 +32,58 @@ async fn rollback_and_classify_missing_job_mutation(
     organization_id: Option<Uuid>,
     job_id: Uuid,
 ) -> Result<Error> {
-    if let Err(error) = tx.rollback().await {
-        tracing::warn!(error = %error, "failed to rollback missing job mutation transaction");
-    }
+    rollback_missing_job_mutation(tx).await;
     let exists = get_job_by_id(pool, organization_id, job_id).await?;
     Ok(if exists.is_none() {
         job_not_found_error()
     } else {
         invalid_job_state_error()
     })
+}
+
+async fn rollback_missing_job_mutation(tx: DbTx<'_>) {
+    if let Err(error) = tx.rollback().await {
+        tracing::warn!(error = %error, "failed to rollback missing job mutation transaction");
+    }
+}
+
+async fn rollback_and_classify_missing_job_cancellation(
+    tx: DbTx<'_>,
+    pool: &DbPool,
+    scope: JobCancellationScope,
+    job_id: Uuid,
+) -> Result<Error> {
+    rollback_missing_job_mutation(tx).await;
+    let (is_admin, organization_id) = cancellation_scope_predicate(scope);
+    let exists = sqlx::query_scalar!(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM job_queue
+            WHERE id = $1
+              AND ($2 OR organization_id IS NOT DISTINCT FROM $3)
+         ) AS \"exists!\"",
+        job_id,
+        is_admin,
+        organization_id,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("classify missing job cancellation", error)
+    })?;
+    Ok(if !exists {
+        job_not_found_error()
+    } else {
+        invalid_job_state_error()
+    })
+}
+
+const fn cancellation_scope_predicate(scope: JobCancellationScope) -> (bool, Option<Uuid>) {
+    match scope {
+        JobCancellationScope::Global => (false, None),
+        JobCancellationScope::Organization(organization_id) => (false, Some(organization_id)),
+        JobCancellationScope::Admin => (true, None),
+    }
 }
 
 async fn workflow_managed_job_exists_tx(
@@ -66,9 +111,10 @@ async fn workflow_managed_job_exists_tx(
     Ok(exists)
 }
 
-pub async fn cancel_job(
+/// Cancels a pending or leased job within an explicit authorization scope.
+pub async fn cancel_job_with_scope(
     pool: &DbPool,
-    organization_id: Option<Uuid>,
+    scope: JobCancellationScope,
     job_id: Uuid,
     reason: Option<&str>,
 ) -> Result<JobQueueRecord> {
@@ -76,10 +122,8 @@ pub async fn cancel_job(
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
-    let Some(record) = cancel_job_tx(&mut tx, organization_id, job_id, reason).await? else {
-        return Err(
-            rollback_and_classify_missing_job_mutation(tx, pool, organization_id, job_id).await?,
-        );
+    let Some(record) = cancel_job_with_scope_tx(&mut tx, scope, job_id, reason).await? else {
+        return Err(rollback_and_classify_missing_job_cancellation(tx, pool, scope, job_id).await?);
     };
 
     tx.commit()
@@ -89,12 +133,30 @@ pub async fn cancel_job(
     Ok(record)
 }
 
-pub(crate) async fn cancel_job_tx(
-    tx: &mut DbTx<'_>,
+/// Cancels a pending or leased job using the legacy nullable scope.
+///
+/// `Some(organization_id)` matches that exact organization, while `None` is an
+/// admin wildcard across global and organization-owned jobs.
+pub async fn cancel_job(
+    pool: &DbPool,
     organization_id: Option<Uuid>,
     job_id: Uuid,
     reason: Option<&str>,
+) -> Result<JobQueueRecord> {
+    let scope = match organization_id {
+        Some(organization_id) => JobCancellationScope::Organization(organization_id),
+        None => JobCancellationScope::Admin,
+    };
+    cancel_job_with_scope(pool, scope, job_id, reason).await
+}
+
+pub(crate) async fn cancel_job_with_scope_tx(
+    tx: &mut DbTx<'_>,
+    scope: JobCancellationScope,
+    job_id: Uuid,
+    reason: Option<&str>,
 ) -> Result<Option<JobQueueRecord>> {
+    let (is_admin, organization_id) = cancellation_scope_predicate(scope);
     // Preserve a live lease's original expiry as a cancellation-quiescence
     // marker. Status fencing rejects every subsequent worker write immediately,
     // while compare-and-requeue waits until this marker has passed before it
@@ -107,10 +169,10 @@ pub(crate) async fn cancel_job_tx(
              worker_id = NULL,
              finished_at = now(),
              output = NULL,
-             status_reason = COALESCE($3, 'CANCELED'),
+             status_reason = COALESCE($4, 'CANCELED'),
              updated_at = now()
          WHERE id = $1
-           AND ($2::uuid IS NULL OR organization_id = $2)
+           AND ($2 OR organization_id IS NOT DISTINCT FROM $3)
            AND status IN ('PENDING', 'LEASED')
          RETURNING
             id,
@@ -142,6 +204,7 @@ pub(crate) async fn cancel_job_tx(
             created_at,
             updated_at",
         job_id,
+        is_admin,
         organization_id,
         reason,
     )

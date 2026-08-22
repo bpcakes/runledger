@@ -16,6 +16,9 @@ pub use read::{
     deprecated,
     reason = "deprecated recovery entrypoints remain re-exported for semver compatibility"
 )]
-pub use recovery::{cancel_job, compare_and_requeue_job, compare_and_requeue_job_tx, requeue_job};
+pub use recovery::{
+    cancel_job, cancel_job_with_scope, compare_and_requeue_job, compare_and_requeue_job_tx,
+    requeue_job,
+};
 
-pub(crate) use recovery::cancel_job_tx;
+pub(crate) use recovery::cancel_job_with_scope_tx;

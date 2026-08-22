@@ -36,7 +36,7 @@ mod workflows;
 )]
 pub use admin::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
-    compare_and_requeue_job, compare_and_requeue_job_tx, get_job_by_id,
+    cancel_job_with_scope, compare_and_requeue_job, compare_and_requeue_job_tx, get_job_by_id,
     get_job_continuation_metrics, get_job_metrics, get_job_payload_by_idempotency_key,
     get_latest_job_payload_for_run, list_job_events, list_jobs, requeue_job,
     update_job_payload_uuid_array_field,
@@ -81,9 +81,9 @@ pub use schedules::{
 pub use types::{
     CompareAndRequeueJob, CompareAndRequeueJobOutcome, DecodedJobEventPayload,
     DecodedRequeuedEventPayload, JOB_LIST_PAGE_LIMIT_MAX, JOB_SCHEDULE_MAX_JITTER_SECONDS,
-    JobCompletionUpdate, JobContinuationMetricsRecord, JobContinuationOutcome,
-    JobContinuationUpdate, JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate,
-    JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent,
+    JobCancellationScope, JobCompletionUpdate, JobContinuationMetricsRecord,
+    JobContinuationOutcome, JobContinuationUpdate, JobDefinitionListFilter, JobDefinitionRecord,
+    JobDefinitionUpdate, JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent,
     JobEnqueueIntentDisposition, JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter,
     JobEnqueueIntentMetricsRecord, JobEnqueueIntentOutcome, JobEnqueueIntentPromotionReport,
     JobEnqueueIntentRecord, JobEnqueueIntentStatus, JobEnqueueOutcome, JobEventRecord,
