@@ -52,13 +52,17 @@ export type WorkflowStep = JsonFields<
   "output" | "payload"
 >;
 export type WorkflowDependency = Schemas["WorkflowDependency"];
-export type WorkflowResponse = Omit<
-  Schemas["WorkflowResponse"],
-  "steps" | "workflow"
-> & {
-  readonly steps: readonly WorkflowStep[];
+export type WorkflowResponse = Omit<Schemas["WorkflowResponse"], "workflow"> & {
   readonly workflow: Workflow;
 };
+export type WorkflowStepsResponse = Omit<
+  Schemas["WorkflowStepsResponse"],
+  "items"
+> & {
+  readonly items: readonly WorkflowStep[];
+};
+export type WorkflowDependenciesResponse =
+  Schemas["WorkflowDependenciesResponse"];
 
 export type JobDefinition = Schemas["JobDefinition"];
 export type DefinitionsResponse = Schemas["DefinitionsResponse"];
@@ -88,11 +92,9 @@ export interface WorkflowsParams extends RequestOptions {
   readonly limit?: number;
   readonly offset?: number;
 }
-export interface WorkflowParams extends RequestOptions {
-  readonly stepLimit?: number;
-  readonly stepOffset?: number;
-  readonly dependencyLimit?: number;
-  readonly dependencyOffset?: number;
+export interface WorkflowCollectionParams extends RequestOptions {
+  readonly limit?: number;
+  readonly offset?: number;
 }
 export interface DefinitionsParams extends RequestOptions {
   readonly jobType?: string;
@@ -110,8 +112,16 @@ export interface RunledgerAdminClient {
   workflows(params?: WorkflowsParams): Promise<WorkflowsResponse>;
   workflow(
     workflowId: string,
-    params?: WorkflowParams,
+    options?: RequestOptions,
   ): Promise<WorkflowResponse>;
+  workflowSteps(
+    workflowId: string,
+    params?: WorkflowCollectionParams,
+  ): Promise<WorkflowStepsResponse>;
+  workflowDependencies(
+    workflowId: string,
+    params?: WorkflowCollectionParams,
+  ): Promise<WorkflowDependenciesResponse>;
   definitions(params?: DefinitionsParams): Promise<DefinitionsResponse>;
 }
 
@@ -373,29 +383,41 @@ export function createRunledgerAdminClient(
         }),
         "workflows",
       ),
-    workflow: (workflowId, params = {}) =>
+    workflow: (workflowId, requestOptions) =>
       unwrap<WorkflowResponse>(
         api.GET("/workflows/{workflow_id}", {
+          params: { path: { workflow_id: workflowId } },
+          ...signalOption(requestOptions?.signal),
+        }),
+        "workflow",
+      ),
+    workflowSteps: (workflowId, params = {}) =>
+      unwrap<WorkflowStepsResponse>(
+        api.GET("/workflows/{workflow_id}/steps", {
           params: {
             path: { workflow_id: workflowId },
             query: {
-              ...(params.dependencyLimit === undefined
-                ? {}
-                : { dependency_limit: params.dependencyLimit }),
-              ...(params.dependencyOffset === undefined
-                ? {}
-                : { dependency_offset: params.dependencyOffset }),
-              ...(params.stepLimit === undefined
-                ? {}
-                : { step_limit: params.stepLimit }),
-              ...(params.stepOffset === undefined
-                ? {}
-                : { step_offset: params.stepOffset }),
+              ...(params.limit === undefined ? {} : { limit: params.limit }),
+              ...(params.offset === undefined ? {} : { offset: params.offset }),
             },
           },
           ...signalOption(params.signal),
         }),
-        "workflow",
+        "workflow steps",
+      ),
+    workflowDependencies: (workflowId, params = {}) =>
+      unwrap<WorkflowDependenciesResponse>(
+        api.GET("/workflows/{workflow_id}/dependencies", {
+          params: {
+            path: { workflow_id: workflowId },
+            query: {
+              ...(params.limit === undefined ? {} : { limit: params.limit }),
+              ...(params.offset === undefined ? {} : { offset: params.offset }),
+            },
+          },
+          ...signalOption(params.signal),
+        }),
+        "workflow dependencies",
       ),
     definitions: (params = {}) =>
       unwrap<DefinitionsResponse>(

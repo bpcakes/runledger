@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-const EXPECTED_PATHS: [&str; 9] = [
+const EXPECTED_PATHS: [&str; 11] = [
     "/capabilities",
     "/definitions",
     "/jobs",
@@ -12,6 +12,8 @@ const EXPECTED_PATHS: [&str; 9] = [
     "/metrics",
     "/workflows",
     "/workflows/{workflow_id}",
+    "/workflows/{workflow_id}/dependencies",
+    "/workflows/{workflow_id}/steps",
 ];
 
 #[test]

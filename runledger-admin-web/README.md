@@ -29,6 +29,10 @@ from the backend's OpenAPI 3.1 contract. The raw document is also exported as
 `RunledgerAdminClient` remains the supported application boundary; generated
 library types are intentionally not exported.
 
+Workflow metadata, steps, and dependency edges have separate client methods and
+requests. Paging either graph collection therefore does not refetch the other
+collection or the workflow metadata.
+
 This minimal client performs typed Fetch calls and normalizes Runledger HTTP
 errors. It rejects malformed or empty JSON responses, but it does not perform a
 second full runtime schema validation of successful JSON payloads.

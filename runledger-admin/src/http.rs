@@ -13,7 +13,8 @@ use uuid::Uuid;
 use crate::dto::{
     CapabilitiesDto, DefinitionsQuery, DefinitionsResponse, HistoryQuery, JobEventsResponse,
     JobLogsResponse, JobResponse, JobsQuery, JobsResponse, MetricsQuery, MetricsResponse,
-    WorkflowQuery, WorkflowResponse, WorkflowsQuery, WorkflowsResponse,
+    WorkflowCollectionQuery, WorkflowDependenciesResponse, WorkflowResponse, WorkflowStepsResponse,
+    WorkflowsQuery, WorkflowsResponse,
 };
 use crate::error::ErrorBody;
 use crate::{AdminAccess, AdminApiError, AdminService};
@@ -275,13 +276,10 @@ async fn workflows(
     path = "/workflows/{workflow_id}",
     operation_id = "getAdminWorkflow",
     tag = "Runledger Admin",
-    params(
-        ("workflow_id" = Uuid, Path, description = "Workflow run identifier"),
-        WorkflowQuery
-    ),
+    params(("workflow_id" = Uuid, Path, description = "Workflow run identifier")),
     responses(
-        (status = 200, description = "Workflow detail and paged graph collections", body = WorkflowResponse),
-        (status = 400, description = "Invalid identifier or query", body = ErrorBody),
+        (status = 200, description = "Workflow detail", body = WorkflowResponse),
+        (status = 400, description = "Invalid identifier", body = ErrorBody),
         (status = 401, description = "Admin access was not provided", body = ErrorBody),
         (status = 404, description = "Workflow was not found in the authorized scope", body = ErrorBody),
         (status = 500, description = "Admin data could not be loaded", body = ErrorBody)
@@ -291,11 +289,74 @@ async fn workflow(
     State(service): State<AdminService>,
     access: Option<Extension<AdminAccess>>,
     Path(workflow_id): Path<String>,
-    query: Result<Query<WorkflowQuery>, QueryRejection>,
 ) -> Result<Json<WorkflowResponse>, AdminApiError> {
     Ok(Json(
         service
-            .workflow(
+            .workflow(require_access(access)?, parse_id(&workflow_id)?)
+            .await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/workflows/{workflow_id}/steps",
+    operation_id = "listAdminWorkflowSteps",
+    tag = "Runledger Admin",
+    params(
+        ("workflow_id" = Uuid, Path, description = "Workflow run identifier"),
+        WorkflowCollectionQuery
+    ),
+    responses(
+        (status = 200, description = "Page of workflow steps", body = WorkflowStepsResponse),
+        (status = 400, description = "Invalid identifier or query", body = ErrorBody),
+        (status = 401, description = "Admin access was not provided", body = ErrorBody),
+        (status = 404, description = "Workflow was not found in the authorized scope", body = ErrorBody),
+        (status = 500, description = "Admin data could not be loaded", body = ErrorBody)
+    )
+)]
+async fn workflow_steps(
+    State(service): State<AdminService>,
+    access: Option<Extension<AdminAccess>>,
+    Path(workflow_id): Path<String>,
+    query: Result<Query<WorkflowCollectionQuery>, QueryRejection>,
+) -> Result<Json<WorkflowStepsResponse>, AdminApiError> {
+    Ok(Json(
+        service
+            .workflow_steps(
+                require_access(access)?,
+                parse_id(&workflow_id)?,
+                &require_query(query)?,
+            )
+            .await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/workflows/{workflow_id}/dependencies",
+    operation_id = "listAdminWorkflowDependencies",
+    tag = "Runledger Admin",
+    params(
+        ("workflow_id" = Uuid, Path, description = "Workflow run identifier"),
+        WorkflowCollectionQuery
+    ),
+    responses(
+        (status = 200, description = "Page of workflow dependency edges", body = WorkflowDependenciesResponse),
+        (status = 400, description = "Invalid identifier or query", body = ErrorBody),
+        (status = 401, description = "Admin access was not provided", body = ErrorBody),
+        (status = 404, description = "Workflow was not found in the authorized scope", body = ErrorBody),
+        (status = 500, description = "Admin data could not be loaded", body = ErrorBody)
+    )
+)]
+async fn workflow_dependencies(
+    State(service): State<AdminService>,
+    access: Option<Extension<AdminAccess>>,
+    Path(workflow_id): Path<String>,
+    query: Result<Query<WorkflowCollectionQuery>, QueryRejection>,
+) -> Result<Json<WorkflowDependenciesResponse>, AdminApiError> {
+    Ok(Json(
+        service
+            .workflow_dependencies(
                 require_access(access)?,
                 parse_id(&workflow_id)?,
                 &require_query(query)?,
@@ -356,5 +417,7 @@ define_admin_routes! {
     "/jobs/{job_id}/logs" => job_logs,
     "/workflows" => workflows,
     "/workflows/{workflow_id}" => workflow,
+    "/workflows/{workflow_id}/steps" => workflow_steps,
+    "/workflows/{workflow_id}/dependencies" => workflow_dependencies,
     "/definitions" => definitions,
 }

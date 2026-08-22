@@ -18,7 +18,9 @@ import type {
   MetricsResponse,
   Page,
   RunledgerAdminClient,
+  WorkflowDependenciesResponse,
   WorkflowResponse,
+  WorkflowStepsResponse,
   WorkflowsResponse,
 } from "./client.js";
 
@@ -894,18 +896,37 @@ function WorkflowScreen({
 }) {
   const [stepOffset, setStepOffset] = useState(0);
   const [dependencyOffset, setDependencyOffset] = useState(0);
-  const loader = useCallback(
-    (signal: AbortSignal) =>
-      client.workflow(workflowId, {
-        dependencyLimit: 50,
-        dependencyOffset,
-        signal,
-        stepLimit: 50,
-        stepOffset,
-      }),
-    [client, dependencyOffset, stepOffset, workflowId],
+  const workflowLoader = useCallback(
+    (signal: AbortSignal) => client.workflow(workflowId, { signal }),
+    [client, workflowId],
   );
-  const [state, retry] = useResource(loader, pollIntervalMs);
+  const stepLoader = useCallback(
+    (signal: AbortSignal) =>
+      client.workflowSteps(workflowId, {
+        limit: 50,
+        offset: stepOffset,
+        signal,
+      }),
+    [client, stepOffset, workflowId],
+  );
+  const dependencyLoader = useCallback(
+    (signal: AbortSignal) =>
+      client.workflowDependencies(workflowId, {
+        limit: 50,
+        offset: dependencyOffset,
+        signal,
+      }),
+    [client, dependencyOffset, workflowId],
+  );
+  const [workflowState, retryWorkflow] = useResource(
+    workflowLoader,
+    pollIntervalMs,
+  );
+  const [stepState, retrySteps] = useResource(stepLoader, pollIntervalMs);
+  const [dependencyState, retryDependencies] = useResource(
+    dependencyLoader,
+    pollIntervalMs,
+  );
   return (
     <section aria-labelledby="rla-workflow-heading">
       <BackButton
@@ -913,13 +934,17 @@ function WorkflowScreen({
         onClick={() => onRouteChange({ name: "workflows" })}
       />
       <h2 id="rla-workflow-heading">Workflow {workflowId}</h2>
-      <Resource retry={retry} state={state}>
+      <Resource retry={retryWorkflow} state={workflowState}>
         {(data) => (
           <WorkflowDetail
             data={data}
+            dependencyState={dependencyState}
             onDependencyOffset={setDependencyOffset}
             onRouteChange={onRouteChange}
             onStepOffset={setStepOffset}
+            retryDependencies={retryDependencies}
+            retrySteps={retrySteps}
+            stepState={stepState}
           />
         )}
       </Resource>
@@ -929,14 +954,22 @@ function WorkflowScreen({
 
 function WorkflowDetail({
   data,
+  dependencyState,
   onDependencyOffset,
   onRouteChange,
   onStepOffset,
+  retryDependencies,
+  retrySteps,
+  stepState,
 }: {
   readonly data: WorkflowResponse;
+  readonly dependencyState: ResourceState<WorkflowDependenciesResponse>;
   readonly onDependencyOffset: (offset: number) => void;
   readonly onRouteChange: (route: RunledgerAdminRoute) => void;
   readonly onStepOffset: (offset: number) => void;
+  readonly retryDependencies: () => void;
+  readonly retrySteps: () => void;
+  readonly stepState: ResourceState<WorkflowStepsResponse>;
 }) {
   const workflow = data.workflow;
   return (
@@ -964,87 +997,99 @@ function WorkflowDetail({
       </dl>
       <JsonBlock label="Metadata" value={workflow.metadata} />
       <h3>Steps</h3>
-      {data.steps.length === 0 ? (
-        <p>No workflow steps on this page.</p>
-      ) : (
-        <div className="rla-table-wrap">
-          <table>
-            <caption>Workflow steps</caption>
-            <thead>
-              <tr>
-                <th scope="col">Step</th>
-                <th scope="col">Kind</th>
-                <th scope="col">Status</th>
-                <th scope="col">Prerequisites</th>
-                <th scope="col">Job</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.steps.map((step) => (
-                <tr key={step.id}>
-                  <th scope="row">{step.step_key}</th>
-                  <td>{step.execution_kind}</td>
-                  <td>
-                    <Status value={step.status} />
-                  </td>
-                  <td>
-                    {step.visible_dependency_count_pending} pending /{" "}
-                    {step.visible_dependency_count_total} visible
-                    {step.has_hidden_prerequisites
-                      ? " (some prerequisites hidden)"
-                      : ""}
-                  </td>
-                  <td>
-                    {step.job_id === null ? (
-                      "—"
-                    ) : (
-                      <button
-                        className="rla-link-button"
-                        onClick={() =>
-                          onRouteChange({
-                            name: "job",
-                            jobId: step.job_id ?? "",
-                          })
-                        }
-                        type="button"
-                      >
-                        {step.job_id}
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <Pagination
-        itemCount={data.steps.length}
-        label="Workflow step pagination"
-        onOffset={onStepOffset}
-        page={data.steps_page}
-      />
+      <Resource retry={retrySteps} state={stepState}>
+        {(steps) => (
+          <>
+            {steps.items.length === 0 ? (
+              <p>No workflow steps on this page.</p>
+            ) : (
+              <div className="rla-table-wrap">
+                <table>
+                  <caption>Workflow steps</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Step</th>
+                      <th scope="col">Kind</th>
+                      <th scope="col">Status</th>
+                      <th scope="col">Prerequisites</th>
+                      <th scope="col">Job</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {steps.items.map((step) => (
+                      <tr key={step.id}>
+                        <th scope="row">{step.step_key}</th>
+                        <td>{step.execution_kind}</td>
+                        <td>
+                          <Status value={step.status} />
+                        </td>
+                        <td>
+                          {step.visible_dependency_count_pending} pending /{" "}
+                          {step.visible_dependency_count_total} visible
+                          {step.has_hidden_prerequisites
+                            ? " (some prerequisites hidden)"
+                            : ""}
+                        </td>
+                        <td>
+                          {step.job_id === null ? (
+                            "—"
+                          ) : (
+                            <button
+                              className="rla-link-button"
+                              onClick={() =>
+                                onRouteChange({
+                                  name: "job",
+                                  jobId: step.job_id ?? "",
+                                })
+                              }
+                              type="button"
+                            >
+                              {step.job_id}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <Pagination
+              itemCount={steps.items.length}
+              label="Workflow step pagination"
+              onOffset={onStepOffset}
+              page={steps.page}
+            />
+          </>
+        )}
+      </Resource>
       <h3>Dependencies</h3>
-      {data.dependencies.length === 0 ? (
-        <p>No step dependencies on this page.</p>
-      ) : (
-        <ul>
-          {data.dependencies.map((dependency) => (
-            <li
-              key={`${dependency.prerequisite_step_id}:${dependency.dependent_step_id}`}
-            >
-              {dependency.prerequisite_step_id} → {dependency.dependent_step_id}{" "}
-              ({dependency.release_mode})
-            </li>
-          ))}
-        </ul>
-      )}
-      <Pagination
-        itemCount={data.dependencies.length}
-        label="Workflow dependency pagination"
-        onOffset={onDependencyOffset}
-        page={data.dependencies_page}
-      />
+      <Resource retry={retryDependencies} state={dependencyState}>
+        {(dependencies) => (
+          <>
+            {dependencies.items.length === 0 ? (
+              <p>No step dependencies on this page.</p>
+            ) : (
+              <ul>
+                {dependencies.items.map((dependency) => (
+                  <li
+                    key={`${dependency.prerequisite_step_id}:${dependency.dependent_step_id}`}
+                  >
+                    {dependency.prerequisite_step_id} →{" "}
+                    {dependency.dependent_step_id} ({dependency.release_mode})
+                  </li>
+                ))}
+              </ul>
+            )}
+            <Pagination
+              itemCount={dependencies.items.length}
+              label="Workflow dependency pagination"
+              onOffset={onDependencyOffset}
+              page={dependencies.page}
+            />
+          </>
+        )}
+      </Resource>
     </>
   );
 }

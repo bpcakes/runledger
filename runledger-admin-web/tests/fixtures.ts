@@ -8,7 +8,9 @@ import type {
   JobResponse,
   JobsResponse,
   MetricsResponse,
+  WorkflowDependenciesResponse,
   WorkflowResponse,
+  WorkflowStepsResponse,
   WorkflowSummary,
   WorkflowsResponse,
 } from "../src/client.js";
@@ -178,14 +180,19 @@ export const workflows: WorkflowsResponse = {
   page: { has_more: false, limit: 50, max_offset: 10_000, offset: 0 },
 };
 export const workflowResponse: WorkflowResponse = {
-  dependencies: [],
-  dependencies_page: {
+  workflow,
+};
+export const workflowDependenciesResponse: WorkflowDependenciesResponse = {
+  items: [],
+  page: {
     has_more: false,
     limit: 50,
     max_offset: 10_000,
     offset: 0,
   },
-  steps: [
+};
+export const workflowStepsResponse: WorkflowStepsResponse = {
+  items: [
     {
       allow_handler_continuation: false,
       created_at: timestamp,
@@ -213,13 +220,12 @@ export const workflowResponse: WorkflowResponse = {
       workflow_run_id: workflowId,
     },
   ],
-  steps_page: {
+  page: {
     has_more: false,
     limit: 50,
     max_offset: 10_000,
     offset: 0,
   },
-  workflow,
 };
 
 export const definitions: DefinitionsResponse = {

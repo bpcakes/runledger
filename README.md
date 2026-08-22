@@ -1027,14 +1027,15 @@ request.extensions_mut().insert(AdminAccess::organization(
 
 Do not construct `AdminAccess` from an untrusted query parameter or header.
 `AdminAccess::all` can observe global jobs and every organization;
-`AdminAccess::organization` is restricted to exactly one organization. On a
-workflow detail response, that restriction applies to each step's effective
-execution organization as well as the parent run; a dependency is returned only
-when both of its steps are visible. Global rows are not part of an organization
-scope. Missing access fails with HTTP 401. Metadata-only visibility omits stored
-JSON, idempotency values, worker identifiers, log text, and diagnostic messages
-while listing the omitted field names in `redacted_fields`; full visibility is
-an explicit host grant. Job and workflow list endpoints always return bounded
+`AdminAccess::organization` is restricted to exactly one organization. On the
+workflow step endpoint, that restriction applies to each step's effective
+execution organization as well as the parent run; the dependency endpoint
+returns an edge only when both of its steps are visible. Global rows are not part
+of an organization scope. Missing access fails with HTTP 401. Metadata-only
+visibility omits stored JSON, idempotency values, worker identifiers, log text,
+and diagnostic messages while listing the omitted field names in
+`redacted_fields`; full visibility is an explicit host grant. Job and workflow
+list endpoints always return bounded
 summary shapes; stored JSON, idempotency values, worker identifiers, and
 diagnostic text are fetched only by the corresponding detail endpoint. All
 responses use `Cache-Control: private, no-store`.
@@ -1062,6 +1063,7 @@ The v1 router exposes only `GET` routes:
 /jobs                       /jobs/{id}
 /jobs/{id}/events           /jobs/{id}/logs
 /workflows                  /workflows/{id}
+/workflows/{id}/steps       /workflows/{id}/dependencies
 /definitions
 ```
 

@@ -148,6 +148,38 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/workflows/{workflow_id}/dependencies": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get: operations["listAdminWorkflowDependencies"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/workflows/{workflow_id}/steps": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get: operations["listAdminWorkflowSteps"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -422,6 +454,10 @@ export interface components {
             readonly updated_at: string;
             readonly workflow_type: string;
         };
+        readonly WorkflowDependenciesResponse: {
+            readonly items: readonly components["schemas"]["WorkflowDependency"][];
+            readonly page: components["schemas"]["Page"];
+        };
         readonly WorkflowDependency: {
             /** Format: date-time */
             readonly created_at: string;
@@ -434,10 +470,6 @@ export interface components {
             readonly workflow_run_id: string;
         };
         readonly WorkflowResponse: {
-            readonly dependencies: readonly components["schemas"]["WorkflowDependency"][];
-            readonly dependencies_page: components["schemas"]["Page"];
-            readonly steps: readonly components["schemas"]["WorkflowStep"][];
-            readonly steps_page: components["schemas"]["Page"];
             readonly workflow: components["schemas"]["Workflow"];
         };
         /** @description Safe workflow step representation. */
@@ -496,6 +528,10 @@ export interface components {
             readonly visible_dependency_count_unsatisfied: number;
             /** Format: uuid */
             readonly workflow_run_id: string;
+        };
+        readonly WorkflowStepsResponse: {
+            readonly items: readonly components["schemas"]["WorkflowStep"][];
+            readonly page: components["schemas"]["Page"];
         };
         /** @description Lightweight workflow run representation used by list endpoints. */
         readonly WorkflowSummary: {
@@ -963,11 +999,68 @@ export interface operations {
     };
     readonly getAdminWorkflow: {
         readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                /** @description Workflow run identifier */
+                readonly workflow_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Workflow detail */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["WorkflowResponse"];
+                };
+            };
+            /** @description Invalid identifier */
+            readonly 400: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminErrorResponse"];
+                };
+            };
+            /** @description Admin access was not provided */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminErrorResponse"];
+                };
+            };
+            /** @description Workflow was not found in the authorized scope */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminErrorResponse"];
+                };
+            };
+            /** @description Admin data could not be loaded */
+            readonly 500: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminErrorResponse"];
+                };
+            };
+        };
+    };
+    readonly listAdminWorkflowDependencies: {
+        readonly parameters: {
             readonly query?: {
-                readonly step_limit?: number;
-                readonly step_offset?: number;
-                readonly dependency_limit?: number;
-                readonly dependency_offset?: number;
+                readonly limit?: number;
+                readonly offset?: number;
             };
             readonly header?: never;
             readonly path: {
@@ -978,13 +1071,75 @@ export interface operations {
         };
         readonly requestBody?: never;
         readonly responses: {
-            /** @description Workflow detail and paged graph collections */
+            /** @description Page of workflow dependency edges */
             readonly 200: {
                 headers: {
                     readonly [name: string]: unknown;
                 };
                 content: {
-                    readonly "application/json": components["schemas"]["WorkflowResponse"];
+                    readonly "application/json": components["schemas"]["WorkflowDependenciesResponse"];
+                };
+            };
+            /** @description Invalid identifier or query */
+            readonly 400: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminErrorResponse"];
+                };
+            };
+            /** @description Admin access was not provided */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminErrorResponse"];
+                };
+            };
+            /** @description Workflow was not found in the authorized scope */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminErrorResponse"];
+                };
+            };
+            /** @description Admin data could not be loaded */
+            readonly 500: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AdminErrorResponse"];
+                };
+            };
+        };
+    };
+    readonly listAdminWorkflowSteps: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: number;
+                readonly offset?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                /** @description Workflow run identifier */
+                readonly workflow_id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Page of workflow steps */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["WorkflowStepsResponse"];
                 };
             };
             /** @description Invalid identifier or query */

@@ -163,31 +163,23 @@ impl Default for WorkflowsQuery {
     }
 }
 
-/// Pagination accepted by `GET /workflows/{id}` for the two graph collections.
+/// Pagination accepted by workflow graph collection endpoints.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, IntoParams, PartialEq)]
 #[into_params(parameter_in = Query)]
-pub struct WorkflowQuery {
+pub struct WorkflowCollectionQuery {
     #[serde(default = "default_page_limit")]
     #[param(default = 50, minimum = 1, maximum = 200)]
-    pub step_limit: i64,
+    pub limit: i64,
     #[serde(default)]
     #[param(default = 0, minimum = 0, maximum = 10000)]
-    pub step_offset: i64,
-    #[serde(default = "default_page_limit")]
-    #[param(default = 50, minimum = 1, maximum = 200)]
-    pub dependency_limit: i64,
-    #[serde(default)]
-    #[param(default = 0, minimum = 0, maximum = 10000)]
-    pub dependency_offset: i64,
+    pub offset: i64,
 }
 
-impl Default for WorkflowQuery {
+impl Default for WorkflowCollectionQuery {
     fn default() -> Self {
         Self {
-            step_limit: DEFAULT_PAGE_LIMIT,
-            step_offset: 0,
-            dependency_limit: DEFAULT_PAGE_LIMIT,
-            dependency_offset: 0,
+            limit: DEFAULT_PAGE_LIMIT,
+            offset: 0,
         }
     }
 }
@@ -601,10 +593,18 @@ pub struct WorkflowDependencyDto {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 pub struct WorkflowResponse {
     pub workflow: WorkflowDto,
-    pub steps: Vec<WorkflowStepDto>,
-    pub steps_page: PageDto,
-    pub dependencies: Vec<WorkflowDependencyDto>,
-    pub dependencies_page: PageDto,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+pub struct WorkflowStepsResponse {
+    pub items: Vec<WorkflowStepDto>,
+    pub page: PageDto,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+pub struct WorkflowDependenciesResponse {
+    pub items: Vec<WorkflowDependencyDto>,
+    pub page: PageDto,
 }
 
 /// Registered job definition.

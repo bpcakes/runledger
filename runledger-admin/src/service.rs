@@ -15,9 +15,9 @@ use crate::dto::{
     DefinitionsQuery, DefinitionsResponse, ExactI64, HistoryOrder, HistoryPageDto, HistoryQuery,
     JobDefinitionDto, JobDto, JobEventDto, JobEventsResponse, JobLogDto, JobLogsResponse,
     JobMetricsDto, JobResponse, JobSummaryDto, JobsQuery, JobsResponse, MAX_PAGE_LIMIT,
-    MAX_PAGE_OFFSET, MetricsQuery, MetricsResponse, PageDto, WorkflowDependencyDto, WorkflowDto,
-    WorkflowQuery, WorkflowResponse, WorkflowStepDto, WorkflowSummaryDto, WorkflowsQuery,
-    WorkflowsResponse,
+    MAX_PAGE_OFFSET, MetricsQuery, MetricsResponse, PageDto, WorkflowCollectionQuery,
+    WorkflowDependenciesResponse, WorkflowDependencyDto, WorkflowDto, WorkflowResponse,
+    WorkflowStepDto, WorkflowStepsResponse, WorkflowSummaryDto, WorkflowsQuery, WorkflowsResponse,
 };
 use crate::{AdminAccess, AdminApiError, DataVisibility};
 
@@ -269,62 +269,84 @@ impl AdminService {
         })
     }
 
-    /// Loads a workflow, its steps, and its dependency graph.
+    /// Loads one workflow in the authorized scope.
     pub async fn workflow(
         &self,
         access: AdminAccess,
         workflow_id: Uuid,
-        query: &WorkflowQuery,
     ) -> Result<WorkflowResponse, AdminApiError> {
-        validate_page(query.step_limit, query.step_offset)?;
-        validate_page(query.dependency_limit, query.dependency_offset)?;
+        let workflow = self.find_workflow(access, workflow_id).await?;
+        Ok(WorkflowResponse {
+            workflow: workflow_dto(workflow, access.visibility()),
+        })
+    }
+
+    /// Lists one page of steps for an authorized workflow.
+    pub async fn workflow_steps(
+        &self,
+        access: AdminAccess,
+        workflow_id: Uuid,
+        query: &WorkflowCollectionQuery,
+    ) -> Result<WorkflowStepsResponse, AdminApiError> {
+        validate_page(query.limit, query.offset)?;
+        self.ensure_workflow_exists(access, workflow_id).await?;
         let organization_id = access.scope().organization_id();
-        let workflow = get_workflow_run_by_id(&self.pool, organization_id, workflow_id)
-            .await
-            .map_err(|error| storage_error("load workflow run", error))?
-            .ok_or_else(AdminApiError::not_found)?;
         let steps = list_admin_workflow_steps(
             &self.pool,
             organization_id,
             workflow_id,
-            fetch_limit(query.step_limit),
-            query.step_offset,
+            fetch_limit(query.limit),
+            query.offset,
         )
         .await
         .map_err(|error| storage_error("list workflow steps", error))?;
+        let (steps, has_more) = take_page(steps, query.limit);
+
+        Ok(WorkflowStepsResponse {
+            items: steps
+                .into_iter()
+                .map(|row| workflow_step_dto(row, access.visibility()))
+                .collect(),
+            page: PageDto {
+                limit: query.limit,
+                offset: query.offset,
+                max_offset: MAX_PAGE_OFFSET,
+                has_more,
+            },
+        })
+    }
+
+    /// Lists one page of dependency edges for an authorized workflow.
+    pub async fn workflow_dependencies(
+        &self,
+        access: AdminAccess,
+        workflow_id: Uuid,
+        query: &WorkflowCollectionQuery,
+    ) -> Result<WorkflowDependenciesResponse, AdminApiError> {
+        validate_page(query.limit, query.offset)?;
+        self.ensure_workflow_exists(access, workflow_id).await?;
+        let organization_id = access.scope().organization_id();
         let dependencies = list_admin_workflow_dependencies(
             &self.pool,
             organization_id,
             workflow_id,
-            fetch_limit(query.dependency_limit),
-            query.dependency_offset,
+            fetch_limit(query.limit),
+            query.offset,
         )
         .await
         .map_err(|error| storage_error("list workflow dependencies", error))?;
-        let (steps, steps_has_more) = take_page(steps, query.step_limit);
-        let (dependencies, dependencies_has_more) = take_page(dependencies, query.dependency_limit);
+        let (dependencies, has_more) = take_page(dependencies, query.limit);
 
-        Ok(WorkflowResponse {
-            workflow: workflow_dto(workflow, access.visibility()),
-            steps: steps
-                .into_iter()
-                .map(|row| workflow_step_dto(row, access.visibility()))
-                .collect(),
-            steps_page: PageDto {
-                limit: query.step_limit,
-                offset: query.step_offset,
-                max_offset: MAX_PAGE_OFFSET,
-                has_more: steps_has_more,
-            },
-            dependencies: dependencies
+        Ok(WorkflowDependenciesResponse {
+            items: dependencies
                 .into_iter()
                 .map(workflow_dependency_dto)
                 .collect(),
-            dependencies_page: PageDto {
-                limit: query.dependency_limit,
-                offset: query.dependency_offset,
+            page: PageDto {
+                limit: query.limit,
+                offset: query.offset,
                 max_offset: MAX_PAGE_OFFSET,
-                has_more: dependencies_has_more,
+                has_more,
             },
         })
     }
@@ -394,6 +416,25 @@ impl AdminService {
             .await
             .map_err(|error| storage_error("check job existence", error))?;
         exists.then_some(()).ok_or_else(AdminApiError::not_found)
+    }
+
+    async fn find_workflow(
+        &self,
+        access: AdminAccess,
+        workflow_id: Uuid,
+    ) -> Result<WorkflowRunDbRecord, AdminApiError> {
+        get_workflow_run_by_id(&self.pool, access.scope().organization_id(), workflow_id)
+            .await
+            .map_err(|error| storage_error("load workflow run", error))?
+            .ok_or_else(AdminApiError::not_found)
+    }
+
+    async fn ensure_workflow_exists(
+        &self,
+        access: AdminAccess,
+        workflow_id: Uuid,
+    ) -> Result<(), AdminApiError> {
+        self.find_workflow(access, workflow_id).await.map(drop)
     }
 }
 

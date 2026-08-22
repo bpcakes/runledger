@@ -705,9 +705,81 @@
               "type": "string",
               "format": "uuid"
             }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workflow detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workflow was not found in the authorized scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workflows/{workflow_id}/dependencies": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "listAdminWorkflowDependencies",
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "description": "Workflow run identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           },
           {
-            "name": "step_limit",
+            "name": "limit",
             "in": "query",
             "required": false,
             "schema": {
@@ -719,31 +791,7 @@
             }
           },
           {
-            "name": "step_offset",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64",
-              "default": 0,
-              "maximum": 10000,
-              "minimum": 0
-            }
-          },
-          {
-            "name": "dependency_limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64",
-              "default": 50,
-              "maximum": 200,
-              "minimum": 1
-            }
-          },
-          {
-            "name": "dependency_offset",
+            "name": "offset",
             "in": "query",
             "required": false,
             "schema": {
@@ -757,11 +805,107 @@
         ],
         "responses": {
           "200": {
-            "description": "Workflow detail and paged graph collections",
+            "description": "Page of workflow dependency edges",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WorkflowResponse"
+                  "$ref": "#/components/schemas/WorkflowDependenciesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier or query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin access was not provided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Workflow was not found in the authorized scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Admin data could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workflows/{workflow_id}/steps": {
+      "get": {
+        "tags": [
+          "Runledger Admin"
+        ],
+        "operationId": "listAdminWorkflowSteps",
+        "parameters": [
+          {
+            "name": "workflow_id",
+            "in": "path",
+            "description": "Workflow run identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "maximum": 10000,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of workflow steps",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowStepsResponse"
                 }
               }
             }
@@ -1721,6 +1865,24 @@
           }
         }
       },
+      "WorkflowDependenciesResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowDependency"
+            }
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          }
+        }
+      },
       "WorkflowDependency": {
         "type": "object",
         "required": [
@@ -1755,31 +1917,9 @@
       "WorkflowResponse": {
         "type": "object",
         "required": [
-          "workflow",
-          "steps",
-          "steps_page",
-          "dependencies",
-          "dependencies_page"
+          "workflow"
         ],
         "properties": {
-          "dependencies": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/WorkflowDependency"
-            }
-          },
-          "dependencies_page": {
-            "$ref": "#/components/schemas/Page"
-          },
-          "steps": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/WorkflowStep"
-            }
-          },
-          "steps_page": {
-            "$ref": "#/components/schemas/Page"
-          },
           "workflow": {
             "$ref": "#/components/schemas/Workflow"
           }
@@ -1952,6 +2092,24 @@
           "workflow_run_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "WorkflowStepsResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowStep"
+            }
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
           }
         }
       },

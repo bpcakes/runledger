@@ -16,7 +16,9 @@ import {
   logs,
   metrics,
   workflowId,
+  workflowDependenciesResponse,
   workflowResponse,
+  workflowStepsResponse,
   workflows,
 } from "./fixtures.js";
 
@@ -42,7 +44,11 @@ describe("createRunledgerAdminClient", () => {
       if (url.includes(`/jobs/${jobId}/logs`)) return jsonResponse(logs);
       if (url.endsWith(`/jobs/${jobId}`)) return jsonResponse(jobResponse);
       if (url.includes("/jobs")) return jsonResponse(jobs);
-      if (url.includes(`/workflows/${workflowId}`))
+      if (url.includes(`/workflows/${workflowId}/dependencies`))
+        return jsonResponse(workflowDependenciesResponse);
+      if (url.includes(`/workflows/${workflowId}/steps`))
+        return jsonResponse(workflowStepsResponse);
+      if (url.endsWith(`/workflows/${workflowId}`))
         return jsonResponse(workflowResponse);
       if (url.includes("/workflows")) return jsonResponse(workflows);
       if (url.includes("/definitions")) return jsonResponse(definitions);
@@ -69,10 +75,12 @@ describe("createRunledgerAdminClient", () => {
     });
     await client.jobLogs(jobId);
     await client.workflows({ workflowType: "customer" });
-    await client.workflow(workflowId, { dependencyOffset: 25, stepLimit: 10 });
+    await client.workflow(workflowId);
+    await client.workflowSteps(workflowId, { limit: 10 });
+    await client.workflowDependencies(workflowId, { offset: 25 });
     await client.definitions({ jobType: "import" });
 
-    expect(calls).toHaveLength(9);
+    expect(calls).toHaveLength(11);
     expect(calls[1]?.input).toBe(
       "/custom/runledger/metrics?job_type=jobs.customer",
     );
@@ -82,8 +90,12 @@ describe("createRunledgerAdminClient", () => {
     expect(calls[4]?.input).toBe(
       `/custom/runledger/jobs/${jobId}/events?cursor=9007199254740993&limit=10&order=oldest_first`,
     );
-    expect(calls[7]?.input).toBe(
-      `/custom/runledger/workflows/${workflowId}?dependency_offset=25&step_limit=10`,
+    expect(calls[7]?.input).toBe(`/custom/runledger/workflows/${workflowId}`);
+    expect(calls[8]?.input).toBe(
+      `/custom/runledger/workflows/${workflowId}/steps?limit=10`,
+    );
+    expect(calls[9]?.input).toBe(
+      `/custom/runledger/workflows/${workflowId}/dependencies?offset=25`,
     );
     expect(calls[0]?.init?.credentials).toBe("include");
     const headers = new Headers(calls[0]?.init?.headers);

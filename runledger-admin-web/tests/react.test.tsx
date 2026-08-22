@@ -19,7 +19,9 @@ import {
   jobs,
   logs,
   metrics,
+  workflowDependenciesResponse,
   workflowResponse,
+  workflowStepsResponse,
   workflows,
 } from "./fixtures.js";
 
@@ -32,6 +34,8 @@ const client: RunledgerAdminClient = {
   jobs: async () => jobs,
   metrics: async () => metrics,
   workflow: async () => workflowResponse,
+  workflowDependencies: async () => workflowDependenciesResponse,
+  workflowSteps: async () => workflowStepsResponse,
   workflows: async () => workflows,
 };
 
@@ -236,6 +240,49 @@ describe("RunledgerAdminPanel", () => {
     );
     expect(job).toHaveBeenCalledTimes(1);
     expect(jobLogs).toHaveBeenCalledTimes(1);
+  });
+
+  it("pages workflow steps without refetching metadata or dependencies", async () => {
+    const workflow = vi.fn(client.workflow);
+    const workflowDependencies = vi.fn(client.workflowDependencies);
+    const workflowSteps = vi.fn<RunledgerAdminClient["workflowSteps"]>(
+      async (_workflowId, params) => ({
+        ...workflowStepsResponse,
+        page: {
+          ...workflowStepsResponse.page,
+          has_more: params?.offset === undefined || params.offset === 0,
+          offset: params?.offset ?? 0,
+        },
+      }),
+    );
+    render(
+      <RunledgerAdminPanel
+        client={{
+          ...client,
+          workflow,
+          workflowDependencies,
+          workflowSteps,
+        }}
+        onRouteChange={() => undefined}
+        pollIntervalMs={0}
+        route={{ name: "workflow", workflowId: workflows.items[0]!.id }}
+      />,
+    );
+
+    const pagination = await screen.findByRole("navigation", {
+      name: "Workflow step pagination",
+    });
+    fireEvent.click(
+      pagination.querySelector<HTMLButtonElement>("button:last-child")!,
+    );
+    expect(await screen.findByText("Rows 51–51")).toBeTruthy();
+    expect(workflowSteps).toHaveBeenLastCalledWith(
+      workflows.items[0]!.id,
+      expect.objectContaining({ offset: 50 }),
+    );
+    expect(workflowSteps).toHaveBeenCalledTimes(2);
+    expect(workflow).toHaveBeenCalledTimes(1);
+    expect(workflowDependencies).toHaveBeenCalledTimes(1);
   });
 
   it("waits for each poll to settle before scheduling the next one", async () => {
