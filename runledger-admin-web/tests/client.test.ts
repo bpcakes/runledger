@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  RunledgerAdminConfigurationError,
   RunledgerAdminContractError,
   RunledgerAdminHttpError,
   createRunledgerAdminClient,
@@ -22,6 +23,10 @@ import {
   workflows,
 } from "./fixtures.js";
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
     headers: { "Content-Type": "application/json" },
@@ -30,6 +35,27 @@ function jsonResponse(value: unknown, status = 200): Response {
 }
 
 describe("createRunledgerAdminClient", () => {
+  it("rejects a relative base URL outside a browser without a custom fetch", () => {
+    vi.stubGlobal("location", undefined);
+
+    expect(() => createRunledgerAdminClient()).toThrowError(
+      RunledgerAdminConfigurationError,
+    );
+  });
+
+  it("allows a relative base URL outside a browser with a relative-aware fetch", async () => {
+    vi.stubGlobal("location", undefined);
+    const fetcher = vi.fn<FetchLike>(async () => jsonResponse(capabilities));
+    const client = createRunledgerAdminClient({ fetch: fetcher });
+
+    await client.capabilities();
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/admin/runledger/v1/capabilities",
+      expect.any(Object),
+    );
+  });
+
   it("calls every endpoint through the generated v1 contract", async () => {
     const calls: Array<{
       readonly input: string;

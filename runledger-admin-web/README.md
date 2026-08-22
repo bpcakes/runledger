@@ -23,6 +23,11 @@ const client = createRunledgerAdminClient({
 });
 ```
 
+Relative base URLs use the current browser origin. In Node.js and other
+non-browser runtimes, configure an absolute `baseUrl`. A custom fetch adapter
+may use a relative base URL when that adapter explicitly supports relative
+request URLs.
+
 The client request paths, query parameters, and response types are generated
 from the backend's OpenAPI 3.1 contract. The raw document is also exported as
 `@runledger/admin/openapi.json` for host documentation or other generators.

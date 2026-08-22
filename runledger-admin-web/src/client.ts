@@ -159,6 +159,13 @@ export class RunledgerAdminContractError extends Error {
   }
 }
 
+export class RunledgerAdminConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunledgerAdminConfigurationError";
+  }
+}
+
 interface InternalResult {
   readonly data?: unknown;
   readonly error?: unknown;
@@ -184,16 +191,27 @@ function requestInit(request: Request): RequestInit {
   };
 }
 
-function clientBaseUrl(baseUrl: string): {
+function clientBaseUrl(
+  baseUrl: string,
+  hasCustomFetch: boolean,
+): {
   readonly url: string;
   readonly relative: boolean;
 } {
   try {
     return { relative: false, url: new URL(baseUrl).toString() };
   } catch {
-    const origin = globalThis.location?.origin ?? "http://runledger.invalid";
+    const origin = globalThis.location?.origin;
+    if (origin === undefined && !hasCustomFetch) {
+      throw new RunledgerAdminConfigurationError(
+        "Runledger requires an absolute baseUrl outside a browser. Provide an absolute URL or a custom fetch implementation that accepts relative URLs.",
+      );
+    }
     const path = baseUrl.startsWith("/") ? baseUrl : `/${baseUrl}`;
-    return { relative: true, url: new URL(path, origin).toString() };
+    return {
+      relative: true,
+      url: new URL(path, origin ?? "http://runledger.invalid").toString(),
+    };
   }
 }
 
@@ -261,7 +279,7 @@ export function createRunledgerAdminClient(
   const configuredBaseUrl = (
     options.baseUrl ?? "/api/admin/runledger/v1"
   ).replace(/\/$/, "");
-  const baseUrl = clientBaseUrl(configuredBaseUrl);
+  const baseUrl = clientBaseUrl(configuredBaseUrl, options.fetch !== undefined);
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
   const api = createClient<paths>({
     baseUrl: baseUrl.url,
