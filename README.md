@@ -1504,13 +1504,15 @@ After reviewing and committing the prepared diff:
 ```
 
 Before publishing any crate, the publish script confirms that the release tag
-is absent locally and remotely, requires the same-named remote branch to point
-at the exact local commit, and verifies that commit's completed GitHub Actions
-`CI` run and every job succeeded. It then dry-runs the branch and tag push,
-publishes crates in dependency order, dry-runs each once its workspace
-dependencies are indexed, creates a `v0.10.1` tag, and atomically pushes the
-current branch and tag. The publication preflight requires an authenticated
-GitHub CLI. Set `PUBLISH_REMOTE` to override the git remote for the final push.
+is absent from the selected remote, requires the same-named remote branch to
+point at the exact local commit, and verifies that commit's completed GitHub
+Actions `CI` run and every job succeeded. It then dry-runs the branch and tag
+push, publishes crates in dependency order, and dry-runs each once its
+workspace dependencies are indexed. Finally, it atomically pushes `HEAD` as
+both the current branch and remote `v0.10.1` tag, then creates or reconciles the
+local lightweight tag. A local-only tag left by an older failed release does
+not block a retry. The publication preflight requires an authenticated GitHub
+CLI. Set `PUBLISH_REMOTE` to override the git remote for the final push.
 
 Observable contract changes to call out in release notes for this line:
 
