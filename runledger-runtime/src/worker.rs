@@ -302,16 +302,17 @@ async fn process_claimed_job_with_terminal_observers(
     observers: JobLifecycleObservers,
     terminal_observer_tasks: TerminalObserverTasks,
 ) {
-    ClaimedJobExecution::new(
+    let Some(execution) = ClaimedJobExecution::new(
         pool,
         registry,
         job,
         lease_ttl_seconds,
         observers,
         terminal_observer_tasks,
-    )
-    .execute()
-    .await;
+    ) else {
+        return;
+    };
+    execution.execute().await;
 }
 
 #[cfg(test)]

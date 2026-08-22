@@ -1,6 +1,86 @@
 use super::*;
 
 #[tokio::test]
+async fn claimed_job_without_lease_owner_waits_for_reaper_recovery() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_missing_lease_owner", 8).await;
+    record_postgres_server_version(&pool, "missing claimed-job lease owner regression").await;
+
+    let mut tx = pool.begin().await.expect("begin tx");
+    upsert_job_definition_tx(
+        &mut tx,
+        &JobDefinitionUpsert {
+            job_type: JobType::new("jobs.test.persistence_failure"),
+            version: 1,
+            max_attempts: 1,
+            default_timeout_seconds: 30,
+            default_priority: 100,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert job definition");
+    tx.commit().await.expect("commit tx");
+
+    let job_id = enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new("jobs.test.persistence_failure"),
+            organization_id: None,
+            payload: &json!({"kind":"missing-lease-owner"}),
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: None,
+            stage: Some(runledger_core::jobs::JobStage::Queued),
+        },
+    )
+    .await
+    .expect("enqueue job");
+
+    let mut claimed_job = claim_one_job(&pool, "worker-missing-lease-owner").await;
+    sqlx::query("UPDATE job_queue SET worker_id = NULL WHERE id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .expect("simulate a malformed claimed row without its lease owner");
+    claimed_job.worker_id = None;
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = JobRegistry::new();
+    registry.register(PersistenceFailureHandler { runs: runs.clone() });
+
+    process_claimed_job(pool.clone(), Arc::new(registry), claimed_job, 30).await;
+
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "handler must not execute");
+    let stranded = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load malformed claimed job")
+        .expect("malformed claimed job remains");
+    assert_eq!(stranded.status, JobStatus::Leased);
+    assert_eq!(stranded.worker_id, None);
+    assert_eq!(stranded.stage, runledger_core::jobs::JobStage::Queued);
+
+    expire_job_lease(&pool, job_id).await;
+    assert_eq!(
+        reap_expired_leases(&pool, 1, 1_000)
+            .await
+            .expect("reap malformed expired claim"),
+        1
+    );
+
+    let recovered = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load reaper-recovered job")
+        .expect("reaper-recovered job exists");
+    assert_eq!(recovered.status, JobStatus::Pending);
+    assert_eq!(recovered.attempt, 0);
+    assert_eq!(recovered.worker_id, None);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn process_claimed_job_aborts_when_running_progress_cannot_be_persisted() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_progress_persist_fail", 8).await;
 
