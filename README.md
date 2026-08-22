@@ -1013,9 +1013,17 @@ after authenticating a request, insert an `AdminAccess` extension and nest the
 state-complete router at `/api/admin/runledger/v1`.
 
 ```rust
-use runledger_admin::{AdminAccess, AdminService, DataVisibility};
+use std::time::Duration;
 
-let admin_routes = runledger_admin::router(AdminService::new(pool.clone()));
+use runledger_admin::{AdminAccess, AdminService, DataVisibility};
+use sqlx::postgres::PgPoolOptions;
+
+let admin_pool = PgPoolOptions::new()
+    .max_connections(4)
+    .acquire_timeout(Duration::from_secs(2))
+    .connect(&std::env::var("DATABASE_URL")?)
+    .await?;
+let admin_routes = runledger_admin::router(AdminService::new(admin_pool));
 let app = axum::Router::new().nest("/api/admin/runledger/v1", admin_routes);
 
 // In host authentication middleware, after checking the caller:
@@ -1024,6 +1032,17 @@ request.extensions_mut().insert(AdminAccess::organization(
     DataVisibility::MetadataOnly,
 ));
 ```
+
+`AdminService` accepts a host-owned pool so applications retain control over
+credentials and connection topology. For production polling surfaces, prefer a
+dedicated admin pool with a low, workload-appropriate `max_connections` and a
+bounded acquisition timeout, as above. This isolates admin scans from worker,
+scheduler, and reaper capacity; the value `4` is illustrative and should be
+tuned to expected concurrent admin requests. Passing `worker_pool.clone()` is
+supported for low-volume deployments, but it shares the exact same connection
+budget and should be done only when that budget includes worst-case admin
+concurrency. Admin read statement timeouts bound query execution, while the pool
+acquisition timeout bounds how long a request waits for its own capacity.
 
 Do not construct `AdminAccess` from an untrusted query parameter or header.
 `AdminAccess::all` can observe global jobs and every organization;

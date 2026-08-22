@@ -29,6 +29,11 @@ pub struct AdminService {
 
 impl AdminService {
     /// Creates an admin service over an existing Runledger PostgreSQL pool.
+    ///
+    /// The service uses exactly this pool. Cloning a worker pool does not create
+    /// a separate connection budget; production polling surfaces should
+    /// normally inject a dedicated pool with host-chosen connection and
+    /// acquisition limits so admin reads cannot starve runtime work.
     #[must_use]
     pub const fn new(pool: DbPool) -> Self {
         Self { pool }
