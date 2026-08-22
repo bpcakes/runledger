@@ -446,6 +446,12 @@ export interface components {
             /** Format: uuid */
             readonly organization_id: string | null;
             readonly redacted_fields: readonly string[];
+            /**
+             * @description Workflow-owned declaration of the step whose output becomes the result.
+             *
+             *     This remains visible with the parent run even when the producing step's
+             *     execution organization is outside the caller's graph scope.
+             */
             readonly result_step_key: string | null;
             /** Format: date-time */
             readonly started_at: string;
@@ -543,6 +549,12 @@ export interface components {
             readonly id: string;
             /** Format: uuid */
             readonly organization_id: string | null;
+            /**
+             * @description Workflow-owned declaration of the step whose output becomes the result.
+             *
+             *     This remains visible with the parent run even when the producing step's
+             *     execution organization is outside the caller's graph scope.
+             */
             readonly result_step_key: string | null;
             /** Format: date-time */
             readonly started_at: string;

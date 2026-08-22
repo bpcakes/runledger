@@ -1847,7 +1847,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Workflow-owned declaration of the step whose output becomes the result.\n\nThis remains visible with the parent run even when the producing step's\nexecution organization is outside the caller's graph scope."
           },
           "started_at": {
             "type": "string",
@@ -2154,7 +2155,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Workflow-owned declaration of the step whose output becomes the result.\n\nThis remains visible with the parent run even when the producing step's\nexecution organization is outside the caller's graph scope."
           },
           "started_at": {
             "type": "string",

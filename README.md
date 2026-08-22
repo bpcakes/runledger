@@ -1031,7 +1031,11 @@ Do not construct `AdminAccess` from an untrusted query parameter or header.
 workflow step endpoint, that restriction applies to each step's effective
 execution organization as well as the parent run; the dependency endpoint
 returns an edge only when both of its steps are visible. Global rows are not part
-of an organization scope. Missing access fails with HTTP 401. Metadata-only
+of an organization scope. The declared `result_step_key` and materialized
+workflow result belong to the parent run, so they remain visible to that run's
+organization even when the producing step executes for another organization;
+the producing step's graph row and dependency edges remain scoped normally.
+Missing access fails with HTTP 401. Metadata-only
 visibility omits stored JSON, idempotency values, worker identifiers, log text,
 and diagnostic messages while listing the omitted field names in
 `redacted_fields`; full visibility is an explicit host grant. Job and workflow

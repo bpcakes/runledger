@@ -263,6 +263,7 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     )
     .organization_id(organization_a)
     .idempotency_key("workflow-organization-a-key")
+    .result_step_key(StepKey::new("foreign-import"))
     .step(workflow_step)
     .step(foreign_workflow_step)
     .try_build()
@@ -546,6 +547,7 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     let (status, _, body) = get_json(&app, "/workflows", Some(metadata_access)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(item_ids(&body).contains(&workflow_run.id));
+    assert_eq!(body["items"][0]["result_step_key"], "foreign-import");
 
     let (status, _, body) = get_json(&app, "/workflows", Some(all_full_access)).await;
     assert_eq!(status, StatusCode::OK);
@@ -564,6 +566,7 @@ async fn read_only_contract_is_scoped_redacted_and_postgres_18_backed() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["workflow"].get("metadata").is_none());
+    assert_eq!(body["workflow"]["result_step_key"], "foreign-import");
 
     let (status, _, body) = get_json(
         &app,

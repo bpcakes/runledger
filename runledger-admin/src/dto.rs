@@ -479,6 +479,10 @@ pub struct WorkflowSummaryDto {
     #[schema(required = true)]
     pub organization_id: Option<Uuid>,
     pub status: String,
+    /// Workflow-owned declaration of the step whose output becomes the result.
+    ///
+    /// This remains visible with the parent run even when the producing step's
+    /// execution organization is outside the caller's graph scope.
     #[schema(required = true)]
     pub result_step_key: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -498,6 +502,10 @@ pub struct WorkflowDto {
     #[schema(required = true)]
     pub organization_id: Option<Uuid>,
     pub status: String,
+    /// Workflow-owned declaration of the step whose output becomes the result.
+    ///
+    /// This remains visible with the parent run even when the producing step's
+    /// execution organization is outside the caller's graph scope.
     #[schema(required = true)]
     pub result_step_key: Option<String>,
     pub started_at: DateTime<Utc>,
