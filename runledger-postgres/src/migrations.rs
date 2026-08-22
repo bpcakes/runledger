@@ -4,7 +4,6 @@ use std::fmt;
 use std::hash::BuildHasher;
 use std::time::{Duration, Instant};
 
-use sqlx::Row;
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
 
 use crate::DbPool;
@@ -99,6 +98,20 @@ struct RecoverableConcurrentIndex {
 enum ConcurrentIndexRecovery {
     ApplyMigration,
     RecordExistingIndex,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ConcurrentIndexState {
+    relation_exists: bool,
+    is_valid: Option<bool>,
+    is_unique: Option<bool>,
+    has_only_key_columns: Option<bool>,
+    has_no_predicate: Option<bool>,
+    has_only_default_operator_classes: Option<bool>,
+    has_only_column_default_collations: Option<bool>,
+    access_method: Option<String>,
+    key_options: Option<Vec<i16>>,
+    key_columns: Option<Vec<String>>,
 }
 
 const RECOVERABLE_CONCURRENT_INDEXES: &[RecoverableConcurrentIndex] = &[
@@ -730,7 +743,64 @@ async fn recover_pending_concurrent_index(
     // valid index is adopted only when its complete simple-B-tree shape matches
     // the pending migration. Same-named relations with any other shape remain a
     // hard error instead of being silently blessed by migration bookkeeping.
-    let state = sqlx::query(
+    let state = concurrent_index_state(conn, index.index_name, index.table_name).await?;
+
+    if !state.relation_exists {
+        return Ok(ConcurrentIndexRecovery::ApplyMigration);
+    }
+
+    let Some(is_valid) = state.is_valid else {
+        return Err(concurrent_index_conflict(
+            index,
+            "the name belongs to another relation",
+        ));
+    };
+
+    if is_valid {
+        let expected_key_columns = index
+            .key_columns
+            .iter()
+            .map(|column| (*column).to_owned())
+            .collect::<Vec<_>>();
+        let matches_expected_shape = !state.is_unique.unwrap_or(true)
+            && state.has_only_key_columns.unwrap_or(false)
+            && state.has_no_predicate.unwrap_or(false)
+            && state.has_only_default_operator_classes.unwrap_or(false)
+            && state.has_only_column_default_collations.unwrap_or(false)
+            && state.access_method.as_deref() == Some("btree")
+            && state.key_columns.as_deref() == Some(expected_key_columns.as_slice())
+            && state.key_options.as_deref() == Some(index.key_options);
+        if matches_expected_shape {
+            tracing::warn!(
+                migration_version,
+                index_name = index.index_name,
+                "recording valid index left by interrupted migration bookkeeping"
+            );
+            return Ok(ConcurrentIndexRecovery::RecordExistingIndex);
+        }
+
+        return Err(concurrent_index_conflict(
+            index,
+            &format!("the valid index does not match the pending migration ({state:?})"),
+        ));
+    }
+
+    tracing::warn!(
+        migration_version,
+        index_name = index.index_name,
+        "removing invalid index left by a failed concurrent migration"
+    );
+    sqlx::query(index.drop_sql).execute(&mut **conn).await?;
+
+    Ok(ConcurrentIndexRecovery::ApplyMigration)
+}
+
+async fn concurrent_index_state(
+    conn: &mut sqlx::PgConnection,
+    index_name: &str,
+    table_name: &str,
+) -> Result<ConcurrentIndexState, sqlx::Error> {
+    sqlx::query_as::<_, ConcurrentIndexState>(
         "WITH named_relation AS (
             SELECT to_regclass($1) AS relation_id
          )
@@ -749,9 +819,16 @@ async fn recover_pending_concurrent_index(
             ) AS has_only_default_operator_classes,
             NOT EXISTS (
                 SELECT 1
-                FROM unnest(index_state.indcollation::oid[]) collation_id
-                WHERE collation_id <> 0
-            ) AS has_no_collations,
+                FROM unnest(
+                    index_state.indkey::smallint[],
+                    index_state.indcollation::oid[]
+                ) key_state(attribute_number, collation_id)
+                LEFT JOIN pg_attribute attribute
+                  ON attribute.attrelid = index_state.indrelid
+                 AND attribute.attnum = key_state.attribute_number
+                WHERE attribute.attnum IS NULL
+                   OR key_state.collation_id IS DISTINCT FROM attribute.attcollation
+            ) AS has_only_column_default_collations,
             access_method.amname AS access_method,
             CASE WHEN index_state.indexrelid IS NULL THEN NULL ELSE ARRAY(
                 SELECT key_option
@@ -774,82 +851,10 @@ async fn recover_pending_concurrent_index(
          LEFT JOIN pg_am access_method
            ON access_method.oid = index_relation.relam",
     )
-    .bind(index.index_name)
-    .bind(index.table_name)
-    .fetch_one(&mut **conn)
-    .await?;
-
-    if !state.try_get::<bool, _>("relation_exists")? {
-        return Ok(ConcurrentIndexRecovery::ApplyMigration);
-    }
-
-    let Some(is_valid) = state.try_get::<Option<bool>, _>("is_valid")? else {
-        return Err(concurrent_index_conflict(
-            index,
-            "the name belongs to another relation",
-        ));
-    };
-
-    if is_valid {
-        let actual_key_columns = state.try_get::<Option<Vec<String>>, _>("key_columns")?;
-        let actual_key_options = state.try_get::<Option<Vec<i16>>, _>("key_options")?;
-        let expected_key_columns = index
-            .key_columns
-            .iter()
-            .map(|column| (*column).to_owned())
-            .collect::<Vec<_>>();
-        let matches_expected_shape = !state
-            .try_get::<Option<bool>, _>("is_unique")?
-            .unwrap_or(true)
-            && state
-                .try_get::<Option<bool>, _>("has_only_key_columns")?
-                .unwrap_or(false)
-            && state
-                .try_get::<Option<bool>, _>("has_no_predicate")?
-                .unwrap_or(false)
-            && state
-                .try_get::<Option<bool>, _>("has_only_default_operator_classes")?
-                .unwrap_or(false)
-            && state
-                .try_get::<Option<bool>, _>("has_no_collations")?
-                .unwrap_or(false)
-            && state
-                .try_get::<Option<String>, _>("access_method")?
-                .as_deref()
-                == Some("btree")
-            && actual_key_columns.as_deref() == Some(expected_key_columns.as_slice())
-            && actual_key_options.as_deref() == Some(index.key_options);
-        if matches_expected_shape {
-            tracing::warn!(
-                migration_version,
-                index_name = index.index_name,
-                "recording valid index left by interrupted migration bookkeeping"
-            );
-            return Ok(ConcurrentIndexRecovery::RecordExistingIndex);
-        }
-
-        return Err(concurrent_index_conflict(
-            index,
-            &format!(
-                "the valid index does not match the pending migration (unique={:?}, only_key_columns={:?}, no_predicate={:?}, default_operator_classes={:?}, no_collations={:?}, access_method={:?}, key_columns={actual_key_columns:?}, key_options={actual_key_options:?})",
-                state.try_get::<Option<bool>, _>("is_unique")?,
-                state.try_get::<Option<bool>, _>("has_only_key_columns")?,
-                state.try_get::<Option<bool>, _>("has_no_predicate")?,
-                state.try_get::<Option<bool>, _>("has_only_default_operator_classes")?,
-                state.try_get::<Option<bool>, _>("has_no_collations")?,
-                state.try_get::<Option<String>, _>("access_method")?,
-            ),
-        ));
-    }
-
-    tracing::warn!(
-        migration_version,
-        index_name = index.index_name,
-        "removing invalid index left by a failed concurrent migration"
-    );
-    sqlx::query(index.drop_sql).execute(&mut **conn).await?;
-
-    Ok(ConcurrentIndexRecovery::ApplyMigration)
+    .bind(index_name)
+    .bind(table_name)
+    .fetch_one(conn)
+    .await
 }
 
 fn concurrent_index_conflict(index: &RecoverableConcurrentIndex, detail: &str) -> MigrateError {
@@ -909,9 +914,11 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::Duration;
 
+    use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
+
     use super::{
         MIGRATION_LOCK_RETRY_MAX_INTERVAL, MIGRATOR, MigrationLockBackoff,
-        RECOVERABLE_CONCURRENT_INDEXES,
+        RECOVERABLE_CONCURRENT_INDEXES, concurrent_index_state,
     };
 
     #[test]
@@ -929,6 +936,63 @@ mod tests {
             );
             assert!(delay <= MIGRATION_LOCK_RETRY_MAX_INTERVAL);
         }
+    }
+
+    #[tokio::test]
+    async fn concurrent_index_state_compares_collation_with_the_indexed_column() {
+        let (pool, database) = setup_ephemeral_pool("postgres_concurrent_index_collation", 1).await;
+        let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+            .fetch_one(&pool)
+            .await
+            .expect("read PostgreSQL server_version");
+        eprintln!("concurrent index collation PostgreSQL server_version={server_version}");
+
+        let mut conn = pool
+            .acquire()
+            .await
+            .expect("acquire collation diagnostic connection");
+        sqlx::query("CREATE TABLE collation_recovery_test (value text NOT NULL)")
+            .execute(&mut *conn)
+            .await
+            .expect("create collation diagnostic table");
+        sqlx::query(
+            "CREATE INDEX collation_recovery_default_idx
+             ON collation_recovery_test (value)",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create default-collated index");
+        sqlx::query(
+            "CREATE INDEX collation_recovery_explicit_idx
+             ON collation_recovery_test (value COLLATE \"C\")",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create explicitly collated index");
+
+        let default_state = concurrent_index_state(
+            &mut conn,
+            "collation_recovery_default_idx",
+            "collation_recovery_test",
+        )
+        .await
+        .expect("inspect default-collated index");
+        assert_eq!(default_state.has_only_column_default_collations, Some(true));
+
+        let explicit_state = concurrent_index_state(
+            &mut conn,
+            "collation_recovery_explicit_idx",
+            "collation_recovery_test",
+        )
+        .await
+        .expect("inspect explicitly collated index");
+        assert_eq!(
+            explicit_state.has_only_column_default_collations,
+            Some(false)
+        );
+
+        drop(conn);
+        teardown_ephemeral_pool(pool, database).await;
     }
 
     #[test]
