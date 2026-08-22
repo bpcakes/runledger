@@ -791,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_handle_can_request_shutdown_before_join() {
+    async fn repeated_shutdown_handle_requests_are_observable_before_join() {
         let supervisor = Supervisor::builder(&lazy_pool(), test_config())
             .expect("supervisor builder has runtime")
             .disable_worker()
@@ -803,6 +803,8 @@ mod tests {
         let cloned_shutdown = shutdown.clone();
 
         cloned_shutdown.request_shutdown();
+        shutdown.request_shutdown();
+        supervisor.request_shutdown();
 
         assert!(shutdown.is_shutdown_requested());
         assert!(supervisor.is_shutdown_requested());
