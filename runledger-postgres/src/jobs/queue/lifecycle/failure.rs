@@ -1,5 +1,5 @@
 use chrono::{DateTime, TimeZone, Utc};
-use runledger_core::jobs::{JobDeadLetterReason, JobFailureKind, JobRetryTiming};
+use runledger_core::jobs::{JobDeadLetterReason, JobRetryTiming};
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -86,10 +86,7 @@ fn failure_outcome<'a>(
     max_attempts: i32,
     failure: &'a JobFailureUpdate<'a>,
 ) -> FailureOutcome<'a> {
-    let dead_letter_reason = if matches!(
-        failure.kind,
-        JobFailureKind::Terminal | JobFailureKind::Panicked
-    ) {
+    let dead_letter_reason = if !failure.kind.is_retryable() {
         Some(JobDeadLetterReason::FailureKindNonRetryable)
     } else if attempt >= max_attempts {
         Some(JobDeadLetterReason::AttemptsExhausted)
@@ -352,6 +349,7 @@ mod tests {
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, TimeZone};
+    use runledger_core::jobs::JobFailureKind;
 
     use super::*;
 
@@ -369,6 +367,31 @@ mod tests {
             panic!("expected query error");
         };
         assert_eq!(error.code(), "job.invalid_retry_timing");
+    }
+
+    #[test]
+    fn failure_outcome_uses_core_retry_eligibility() {
+        for (kind, expected_dead_letter_reason) in [
+            (JobFailureKind::Retryable, None),
+            (
+                JobFailureKind::Terminal,
+                Some(JobDeadLetterReason::FailureKindNonRetryable),
+            ),
+            (JobFailureKind::Timeout, None),
+            (JobFailureKind::LeaseExpired, None),
+            (
+                JobFailureKind::Panicked,
+                Some(JobDeadLetterReason::FailureKindNonRetryable),
+            ),
+        ] {
+            let failure = JobFailureUpdate::new(kind, "job.test", "test failure", Some(1));
+
+            assert_eq!(
+                failure_outcome(1, 2, &failure).dead_letter_reason,
+                expected_dead_letter_reason,
+                "unexpected policy for {kind:?}"
+            );
+        }
     }
 
     #[test]

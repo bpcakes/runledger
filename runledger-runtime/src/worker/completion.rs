@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use runledger_core::jobs::{
     JobCompletion, JobCompletionDisposition, JobContext, JobDeadLetterInfo, JobFailure,
-    JobFailureKind,
 };
 use runledger_postgres::QueryErrorKind;
 use runledger_postgres::jobs::{
@@ -86,10 +85,10 @@ fn failure_update<'a>(
     job: &jobs::JobQueueRecord,
     failure: &'a JobFailure,
 ) -> JobFailureUpdate<'a> {
-    let policy_retry_delay_ms = if is_non_retryable_failure_kind(failure.kind) {
-        None
-    } else {
+    let policy_retry_delay_ms = if failure.kind.is_retryable() {
         Some(policy_retry_delay_ms_for_failure(registry, job, failure))
+    } else {
+        None
     };
     let failure_update = JobFailureUpdate::new(
         failure.kind,
@@ -649,10 +648,6 @@ fn is_workflow_release_conflict_error(error: &runledger_postgres::Error) -> bool
         runledger_postgres::Error::QueryError(query_error)
             if query_error.kind() == Some(QueryErrorKind::WorkflowReleaseConflict)
     )
-}
-
-fn is_non_retryable_failure_kind(kind: JobFailureKind) -> bool {
-    matches!(kind, JobFailureKind::Terminal | JobFailureKind::Panicked)
 }
 
 fn policy_retry_delay_ms_for_failure(

@@ -157,6 +157,14 @@ pub enum JobFailureKind {
 
 impl JobFailureKind {
     #[must_use]
+    pub const fn is_retryable(self) -> bool {
+        match self {
+            Self::Retryable | Self::Timeout | Self::LeaseExpired => true,
+            Self::Terminal | Self::Panicked => false,
+        }
+    }
+
+    #[must_use]
     pub const fn as_db_value(self) -> &'static str {
         match self {
             Self::Retryable => "RETRYABLE",
@@ -275,7 +283,7 @@ impl FromStr for WorkflowStepStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{JobStage, WorkflowRunStatus, WorkflowStepStatus};
+    use super::{JobFailureKind, JobStage, WorkflowRunStatus, WorkflowStepStatus};
     use proptest::prelude::*;
 
     #[test]
@@ -291,6 +299,23 @@ mod tests {
     #[test]
     fn parse_workflow_step_status_from_str_rejects_invalid_value() {
         assert!("NOT_A_REAL_STATUS".parse::<WorkflowStepStatus>().is_err());
+    }
+
+    #[test]
+    fn job_failure_kind_retry_eligibility_is_exhaustive() {
+        for (kind, expected) in [
+            (JobFailureKind::Retryable, true),
+            (JobFailureKind::Terminal, false),
+            (JobFailureKind::Timeout, true),
+            (JobFailureKind::LeaseExpired, true),
+            (JobFailureKind::Panicked, false),
+        ] {
+            assert_eq!(
+                kind.is_retryable(),
+                expected,
+                "unexpected policy for {kind:?}"
+            );
+        }
     }
 
     proptest! {
