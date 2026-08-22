@@ -154,6 +154,22 @@ pub async fn list_job_definitions(
 ) -> Result<Vec<JobDefinitionRecord>> {
     validate_pagination(filter.limit, filter.offset)?;
 
+    query_job_definitions(pool, filter).await
+}
+
+pub(in crate::jobs) async fn list_job_definitions_tx(
+    tx: &mut DbTx<'_>,
+    filter: &JobDefinitionListFilter<'_>,
+) -> Result<Vec<JobDefinitionRecord>> {
+    validate_pagination(filter.limit, filter.offset)?;
+
+    query_job_definitions(&mut **tx, filter).await
+}
+
+async fn query_job_definitions<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+    filter: &JobDefinitionListFilter<'_>,
+) -> Result<Vec<JobDefinitionRecord>> {
     let escaped_job_type = filter.job_type.map(escape_ilike_pattern);
 
     let rows = sqlx::query!(
@@ -175,7 +191,7 @@ pub async fn list_job_definitions(
         filter.limit,
         filter.offset,
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("list job definitions", error))?;
 

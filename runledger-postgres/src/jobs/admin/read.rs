@@ -4,6 +4,7 @@ use sqlx::types::Uuid;
 use crate::{DbPool, Error, Result};
 
 use super::super::errors::{escape_ilike_pattern, validate_page_limit, validate_pagination};
+use super::super::queue::list_job_definitions_tx;
 use super::super::row_decode::{
     parse_job_event_type, parse_job_stage, parse_job_status, parse_job_type_name,
     parse_step_key_name, parse_workflow_release_mode, parse_workflow_run_status,
@@ -15,6 +16,7 @@ use super::super::types::{
     AdminWorkflowStepRecord, AdminWorkflowSummaryFilter, AdminWorkflowSummaryRecord,
     JobEventRecord, JobListFilter, JobQueueRecord,
 };
+use super::super::{JobDefinitionListFilter, JobDefinitionRecord};
 use super::read_budget::AdminReadTransaction;
 
 struct AdminJobSummaryRow {
@@ -232,6 +234,7 @@ pub async fn list_admin_workflow_steps(
 ) -> Result<Vec<AdminWorkflowStepRecord>> {
     validate_pagination(limit, offset)?;
 
+    let mut read = AdminReadTransaction::begin(pool).await?;
     let rows = match organization_id {
         Some(organization_id) => {
             sqlx::query_file_as!(
@@ -242,7 +245,7 @@ pub async fn list_admin_workflow_steps(
                 limit,
                 offset,
             )
-            .fetch_all(pool)
+            .fetch_all(&mut **read.as_tx())
             .await
         }
         None => {
@@ -253,11 +256,12 @@ pub async fn list_admin_workflow_steps(
                 limit,
                 offset,
             )
-            .fetch_all(pool)
+            .fetch_all(&mut **read.as_tx())
             .await
         }
     }
     .map_err(|error| Error::from_query_sqlx_with_context("list admin workflow steps", error))?;
+    read.commit().await?;
 
     rows.into_iter().map(admin_workflow_step_record).collect()
 }
@@ -305,6 +309,7 @@ pub async fn list_admin_workflow_dependencies(
 ) -> Result<Vec<AdminWorkflowDependencyRecord>> {
     validate_pagination(limit, offset)?;
 
+    let mut read = AdminReadTransaction::begin(pool).await?;
     let rows = sqlx::query_as!(
         AdminWorkflowDependencyRow,
         r#"SELECT
@@ -338,11 +343,12 @@ pub async fn list_admin_workflow_dependencies(
         limit,
         offset,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut **read.as_tx())
     .await
     .map_err(|error| {
         Error::from_query_sqlx_with_context("list admin workflow dependencies", error)
     })?;
+    read.commit().await?;
 
     rows.into_iter()
         .map(|row| {
@@ -355,6 +361,17 @@ pub async fn list_admin_workflow_dependencies(
             })
         })
         .collect()
+}
+
+/// Lists job definitions through the bounded admin-read policy.
+pub async fn list_admin_job_definitions(
+    pool: &DbPool,
+    filter: &JobDefinitionListFilter<'_>,
+) -> Result<Vec<JobDefinitionRecord>> {
+    let mut read = AdminReadTransaction::begin(pool).await?;
+    let rows = list_job_definitions_tx(read.as_tx(), filter).await?;
+    read.commit().await?;
+    Ok(rows)
 }
 
 pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<JobQueueRecord>> {

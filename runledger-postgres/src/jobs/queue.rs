@@ -13,6 +13,7 @@ mod release;
 pub use self::claim::{
     claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
 };
+pub(in crate::jobs) use self::definitions::list_job_definitions_tx;
 pub use self::definitions::{
     JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionCatalogSyncReport,
     get_job_definition_by_type, insert_job_definition_if_missing_tx, list_job_definitions,

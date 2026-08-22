@@ -5,9 +5,9 @@ use runledger_postgres::jobs::{
     AdminWorkflowStepRecord, AdminWorkflowSummaryFilter, AdminWorkflowSummaryRecord,
     JobDefinitionListFilter, JobEventRecord, JobLogRecord, JobQueueRecord, WorkflowRunDbRecord,
     get_admin_job_metrics_page, get_job_by_id, get_workflow_run_by_id, job_exists_in_scope,
-    list_admin_job_summaries, list_admin_workflow_dependencies, list_admin_workflow_steps,
-    list_admin_workflow_summaries, list_job_definitions, list_job_events, list_job_events_before,
-    list_job_logs, list_job_logs_before,
+    list_admin_job_definitions, list_admin_job_summaries, list_admin_workflow_dependencies,
+    list_admin_workflow_steps, list_admin_workflow_summaries, list_job_events,
+    list_job_events_before, list_job_logs, list_job_logs_before,
 };
 use uuid::Uuid;
 
@@ -340,7 +340,7 @@ impl AdminService {
         }
         validate_page(query.limit, query.offset)?;
         validate_filter(query.job_type.as_deref())?;
-        let rows = list_job_definitions(
+        let rows = list_admin_job_definitions(
             &self.pool,
             &JobDefinitionListFilter {
                 job_type: query.job_type.as_deref(),
