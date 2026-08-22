@@ -37,9 +37,10 @@ use super::super::release::{
 use super::super::runtime::{recompute_workflow_run_statuses_tx, resolve_terminal_step_queue_tx};
 use super::super::snapshot::{canonical_append_request, deserialize_stored_append_request};
 use super::super::steps::{
-    WorkflowStepIdsByKey, dependency_count_total, fetch_job_definition_defaults_tx,
-    insert_workflow_step_dependency_record_tx, insert_workflow_step_record_tx, step_id_for_key,
-    workflow_step_defaults, workflow_step_effective_organization_id,
+    WorkflowStepDependencyWriteContext, WorkflowStepIdsByKey, dependency_count_total,
+    fetch_job_definition_defaults_tx, insert_workflow_step_dependencies_tx,
+    insert_workflow_step_record_tx, workflow_step_defaults,
+    workflow_step_effective_organization_id,
 };
 use super::super::validation::workflow_dag_validation_error;
 use super::idempotency::{
@@ -246,11 +247,12 @@ async fn persist_appended_step_dependencies_and_mutation_tx(
     canonical_request: &JsonValue,
     step_id_by_key: &WorkflowStepIdsByKey,
 ) -> Result<()> {
-    insert_appended_workflow_step_dependencies_tx(
+    insert_workflow_step_dependencies_tx(
         tx,
-        workflow_run_id,
         &input.steps,
+        workflow_run_id,
         step_id_by_key,
+        WorkflowStepDependencyWriteContext::Append,
     )
     .await?;
     insert_workflow_mutation_row_tx(
@@ -395,42 +397,6 @@ async fn resolve_appended_step_state_tx(
             touched_run_ids,
         )
         .await?;
-    }
-
-    Ok(())
-}
-
-async fn insert_appended_workflow_step_dependencies_tx(
-    tx: &mut DbTx<'_>,
-    workflow_run_id: Uuid,
-    steps: &[WorkflowStepEnqueue<'_>],
-    step_id_by_key: &WorkflowStepIdsByKey,
-) -> Result<()> {
-    for step in steps {
-        let dependent_step_id = step_id_for_key(
-            step_id_by_key,
-            step.step_key().as_str(),
-            "missing dependent appended workflow step id",
-        )?;
-        for dependency in step.dependencies() {
-            let prerequisite_step_id = step_id_for_key(
-                step_id_by_key,
-                dependency.prerequisite_step_key.as_str(),
-                "missing appended workflow prerequisite step id",
-            )?;
-            let release_mode = dependency
-                .release_mode
-                .unwrap_or(WorkflowDependencyReleaseMode::OnTerminal)
-                .as_db_value();
-            insert_workflow_step_dependency_record_tx(
-                tx,
-                workflow_run_id,
-                prerequisite_step_id,
-                dependent_step_id,
-                release_mode,
-            )
-            .await?;
-        }
     }
 
     Ok(())
