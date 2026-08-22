@@ -46,6 +46,15 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required"
 }
 
+require_npm_authentication() {
+  local npm_user
+  npm_user="$(npm whoami 2>/dev/null)" \
+    || die "npm authentication is required before publishing; run 'npm login' and retry"
+  [[ -n "$npm_user" ]] \
+    || die "npm authentication check returned an empty username"
+  echo "Authenticated to npm as ${npm_user}."
+}
+
 require_clean_worktree() {
   if [[ -n "$(git status --porcelain)" ]]; then
     die "working tree must be clean before publishing"
@@ -430,6 +439,10 @@ case "$npm_status" in
   1) ;;
   *) die "could not determine whether @runledger/admin ${VERSION} exists on npm" ;;
 esac
+
+if [[ "$npm_already_published" == false ]]; then
+  require_npm_authentication
+fi
 
 for crate in "${PUBLISHABLE_CRATES[@]}"; do
   prepare_crate_artifact "$crate" "$VERSION"
