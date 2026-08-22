@@ -62,7 +62,11 @@ export interface RunledgerAdminPanelProps {
 
 type ResourceState<T> =
   | { readonly status: "loading" }
-  | { readonly status: "ready"; readonly data: T }
+  | {
+      readonly status: "ready";
+      readonly data: T;
+      readonly refreshError?: Error;
+    }
   | { readonly status: "error"; readonly error: Error };
 
 function useResource<T>(
@@ -81,13 +85,15 @@ function useResource<T>(
         if (!controller.signal.aborted) setState({ status: "ready", data });
       } catch (reason: unknown) {
         if (controller.signal.aborted) return;
-        setState({
-          status: "error",
-          error:
-            reason instanceof Error
-              ? reason
-              : new Error("Runledger request failed."),
-        });
+        const error =
+          reason instanceof Error
+            ? reason
+            : new Error("Runledger request failed.");
+        setState((current) =>
+          current.status === "ready"
+            ? { ...current, refreshError: error }
+            : { status: "error", error },
+        );
       } finally {
         if (!controller.signal.aborted && pollIntervalMs > 0) {
           timeout = window.setTimeout(load, pollIntervalMs);
@@ -127,7 +133,19 @@ function Resource<T>({
       </div>
     );
   }
-  return children(state.data);
+  return (
+    <>
+      {state.refreshError === undefined ? null : (
+        <div className="rla-alert" role="alert">
+          <p>
+            Refresh failed: {state.refreshError.message} Showing the last
+            successful data.
+          </p>
+        </div>
+      )}
+      {children(state.data)}
+    </>
+  );
 }
 
 function formatDate(value: string | null): string {

@@ -317,6 +317,36 @@ describe("RunledgerAdminPanel", () => {
     expect(jobsLoader).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the last successful data visible when a background poll fails", async () => {
+    vi.useFakeTimers();
+    const jobsLoader = vi
+      .fn<RunledgerAdminClient["jobs"]>()
+      .mockResolvedValueOnce(jobs)
+      .mockRejectedValueOnce(new Error("temporary network failure"))
+      .mockResolvedValue(jobs);
+    render(
+      <RunledgerAdminPanel
+        client={{ ...client, jobs: jobsLoader }}
+        onRouteChange={() => undefined}
+        pollIntervalMs={100}
+        route={{ name: "jobs" }}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(screen.getByText("jobs.customer.import")).toBeTruthy();
+
+    await act(async () => vi.advanceTimersByTimeAsync(100));
+    expect(screen.getByText("jobs.customer.import")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain(
+      "temporary network failure",
+    );
+
+    await act(async () => vi.advanceTimersByTimeAsync(100));
+    expect(screen.getByText("jobs.customer.import")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("loads list data once when polling is not explicitly enabled", async () => {
     vi.useFakeTimers();
     const jobsLoader = vi.fn(client.jobs);
