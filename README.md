@@ -1456,7 +1456,9 @@ If you change SQL or the schema, refresh the cache before committing:
 2. Point `DATABASE_URL` at it.
 3. Run `./scripts/refresh-sqlx-cache.sh`.
 
-The script regenerates the root `.sqlx/`, syncs it into
+The script prints `server_version` and `server_version_num` and refuses a
+server other than PostgreSQL 18 or one with pending Runledger migrations. It
+then regenerates the root `.sqlx/`, syncs it into
 `runledger-postgres/.sqlx/` and `runledger-runtime/.sqlx/`, syncs the root
 `migrations/` into `runledger-postgres/migrations/`, runs `cargo check
 --workspace`, and confirms the publishable tarballs include their per-crate
