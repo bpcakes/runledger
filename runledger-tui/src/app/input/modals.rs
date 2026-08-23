@@ -41,7 +41,7 @@ impl App {
 
     fn commit_organization_input(&mut self, text: &str) -> bool {
         let trimmed = text.trim();
-        self.scope = if trimmed.is_empty() {
+        let scope = if trimmed.is_empty() {
             Scope::global()
         } else {
             match Uuid::parse_str(trimmed) {
@@ -52,8 +52,7 @@ impl App {
                 }
             }
         };
-        self.invalidate_cache();
-        true
+        self.transition_scope(scope)
     }
 
     fn commit_filter_input(&mut self, target: FilterTarget, text: &str) -> bool {
@@ -64,28 +63,18 @@ impl App {
             Some(trimmed.to_owned())
         };
         match target {
-            FilterTarget::Workflow => {
-                self.workflow_type_filter = value;
-                self.workflows = None;
-            }
-            FilterTarget::Job => {
-                self.job_type_filter = value;
-                self.jobs = None;
-                self.definitions = None;
-            }
+            FilterTarget::Workflow => self.transition_workflow_type_filter(value),
+            FilterTarget::Job => self.transition_job_type_filter(value),
         }
-        true
     }
 
     fn commit_search_input(&mut self, text: &str) -> bool {
         let trimmed = text.trim();
-        self.table_search = if trimmed.is_empty() {
+        let query = if trimmed.is_empty() {
             None
         } else {
             Some(trimmed.to_owned())
         };
-        self.list_selection = 0;
-        self.clamp_selection();
-        false
+        self.transition_table_search(query)
     }
 }

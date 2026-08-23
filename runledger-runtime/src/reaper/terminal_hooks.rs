@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
 
-use futures_util::FutureExt;
 use runledger_core::jobs::{JobContext, JobDeadLetterInfo, JobDeadLetterReason};
 use runledger_postgres::jobs::{ReapedLeaseDisposition, ReapedLeaseRecord};
 use tokio::sync::watch;
@@ -10,15 +8,14 @@ use tokio::task::{Id, JoinSet};
 use tokio::time::{Duration, timeout};
 use tracing::{Instrument, info, info_span, warn};
 
+use crate::dead_letter_hook::{
+    DEAD_LETTER_HOOK_TIMEOUT, DeadLetterHookOutcome, invoke_dead_letter_hook,
+};
 use crate::registry::JobRegistry;
 use crate::shutdown;
 
 const REAPER_WORKER_ID: &str = "reaper";
 const REAPER_TERMINAL_HOOK_MAX_CONCURRENCY: usize = 8;
-#[cfg(test)]
-const TERMINAL_HOOK_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
-const TERMINAL_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(150);
 #[cfg(not(test))]
@@ -118,19 +115,7 @@ where
         );
 
         let hook = async move {
-            match tokio::time::timeout(
-                TERMINAL_HOOK_TIMEOUT,
-                AssertUnwindSafe(handler.on_dead_letter(context, payload, dead_letter))
-                    .catch_unwind(),
-            )
-            .await
-            {
-                Ok(Ok(())) => HookOutcome::Completed,
-                Ok(Err(panic_payload)) => {
-                    HookOutcome::Panicked(panic_payload_message(&*panic_payload))
-                }
-                Err(_) => HookOutcome::TimedOut,
-            }
+            invoke_dead_letter_hook(handler.on_dead_letter(context, payload, dead_letter)).await
         }
         .instrument(hook_span);
         fanout.spawn_hook(hook, hook_meta);
@@ -158,13 +143,6 @@ impl TerminalHookFanoutResult {
 }
 
 #[derive(Debug)]
-enum HookOutcome {
-    Completed,
-    TimedOut,
-    Panicked(String),
-}
-
-#[derive(Debug)]
 struct HookMetadata {
     job_id: String,
     job_type: String,
@@ -173,7 +151,7 @@ struct HookMetadata {
 }
 
 struct TerminalHookFanout {
-    in_flight: JoinSet<HookOutcome>,
+    in_flight: JoinSet<DeadLetterHookOutcome>,
     metadata: HashMap<Id, HookMetadata>,
     started_hook_count: usize,
     skipped_hook_count: usize,
@@ -252,7 +230,7 @@ impl TerminalHookFanout {
 
     fn spawn_hook<F>(&mut self, hook: F, hook_meta: HookMetadata)
     where
-        F: Future<Output = HookOutcome> + Send + 'static,
+        F: Future<Output = DeadLetterHookOutcome> + Send + 'static,
     {
         let abort_handle = self.in_flight.spawn(hook);
         self.metadata.insert(abort_handle.id(), hook_meta);
@@ -393,29 +371,29 @@ impl TerminalHookFanout {
 
     fn handle_next_hook_result(&mut self, result: HookJoinResult) {
         match result {
-            Ok((id, HookOutcome::Completed)) => {
+            Ok((id, DeadLetterHookOutcome::Completed)) => {
                 if self.metadata.remove(&id).is_none() {
                     warn!("terminal failure hook completed; metadata missing in reaper loop");
                 }
             }
-            Ok((id, HookOutcome::TimedOut)) => {
+            Ok((id, DeadLetterHookOutcome::TimedOut)) => {
                 if let Some(meta) = self.metadata.remove(&id) {
                     warn!(
                         job_id = meta.job_id,
                         job_type = meta.job_type,
                         run_number = meta.run_number,
                         attempt = meta.attempt,
-                        timeout_ms = TERMINAL_HOOK_TIMEOUT.as_millis(),
+                        timeout_ms = DEAD_LETTER_HOOK_TIMEOUT.as_millis(),
                         "terminal failure hook timed out; continuing reaper loop"
                     );
                 } else {
                     warn!(
-                        timeout_ms = TERMINAL_HOOK_TIMEOUT.as_millis(),
+                        timeout_ms = DEAD_LETTER_HOOK_TIMEOUT.as_millis(),
                         "terminal failure hook timed out; metadata missing in reaper loop"
                     );
                 }
             }
-            Ok((id, HookOutcome::Panicked(panic_message))) => {
+            Ok((id, DeadLetterHookOutcome::Panicked(panic_message))) => {
                 if let Some(meta) = self.metadata.remove(&id) {
                     warn!(
                         job_id = meta.job_id,
@@ -484,22 +462,10 @@ impl TerminalHookFanout {
     }
 }
 
-type HookJoinResult = std::result::Result<(Id, HookOutcome), tokio::task::JoinError>;
+type HookJoinResult = std::result::Result<(Id, DeadLetterHookOutcome), tokio::task::JoinError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HookWaitOutcome {
     HookCompleted,
     ShutdownRequested,
-}
-
-fn panic_payload_message(panic_payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = panic_payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-
-    if let Some(message) = panic_payload.downcast_ref::<&'static str>() {
-        return (*message).to_string();
-    }
-
-    "non-string panic payload".to_string()
 }

@@ -342,13 +342,45 @@ impl App {
         }
     }
 
-    pub(super) fn invalidate_cache(&mut self) {
+    fn invalidate_cache(&mut self) {
         self.dashboard = None;
         self.jobs = None;
         self.job_detail = None;
         self.workflows = None;
         self.workflow_detail = None;
         self.definitions = None;
+    }
+
+    fn transition_scope(&mut self, scope: Scope) -> bool {
+        self.scope = scope;
+        self.invalidate_cache();
+        true
+    }
+
+    fn transition_queue_status_filter(&mut self, filter: QueueStatusFilter) -> bool {
+        self.queue_filter = filter;
+        self.jobs = None;
+        true
+    }
+
+    fn transition_job_type_filter(&mut self, filter: Option<String>) -> bool {
+        self.job_type_filter = filter;
+        self.jobs = None;
+        self.definitions = None;
+        true
+    }
+
+    fn transition_workflow_type_filter(&mut self, filter: Option<String>) -> bool {
+        self.workflow_type_filter = filter;
+        self.workflows = None;
+        true
+    }
+
+    fn transition_table_search(&mut self, query: Option<String>) -> bool {
+        self.table_search = query;
+        self.list_selection = 0;
+        self.clamp_selection();
+        false
     }
 
     pub fn push_job_detail(&mut self, job_id: Uuid) {
@@ -690,6 +722,28 @@ mod tests {
         }
     }
 
+    fn seed_all_caches(app: &mut App) {
+        let job_id = Uuid::new_v4();
+        app.dashboard = Some(DashboardData {
+            metrics: Vec::new(),
+            continuation_metrics: std::collections::BTreeMap::new(),
+            failed_workflows: 0,
+            external_waits: 0,
+        });
+        app.jobs = Some(JobsData { jobs: Vec::new() });
+        app.job_detail = Some(JobDetailData {
+            job: job_record_with_payload(job_id, serde_json::json!({})),
+            events: Vec::new(),
+            logs: Vec::new(),
+            workflow_run_id: None,
+        });
+        app.workflows = Some(WorkflowsData { runs: Vec::new() });
+        app.workflow_detail = Some(workflow_detail_with_step(None));
+        app.definitions = Some(DefinitionsData {
+            definitions: Vec::new(),
+        });
+    }
+
     fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
@@ -822,6 +876,154 @@ mod tests {
         assert!(!app.handle_key(key(crossterm::event::KeyCode::Enter)));
         assert_eq!(app.config.refresh_ms, 5_000);
         assert_eq!(app.active_input(), &ActiveInput::None);
+    }
+
+    #[test]
+    fn scope_transition_invalidates_every_cache_without_moving_selection() {
+        let mut app = App::new(test_config());
+        seed_all_caches(&mut app);
+        app.list_selection = 7;
+        let scope = Scope::for_org(Uuid::new_v4());
+
+        assert!(app.transition_scope(scope));
+
+        assert_eq!(app.scope, scope);
+        assert!(app.dashboard.is_none());
+        assert!(app.jobs.is_none());
+        assert!(app.job_detail.is_none());
+        assert!(app.workflows.is_none());
+        assert!(app.workflow_detail.is_none());
+        assert!(app.definitions.is_none());
+        assert_eq!(app.list_selection, 7);
+    }
+
+    #[test]
+    fn queue_status_transition_invalidates_only_jobs_and_preserves_selection() {
+        let mut app = App::new(test_config());
+        seed_all_caches(&mut app);
+        app.list_selection = 7;
+
+        assert!(app.transition_queue_status_filter(QueueStatusFilter::Pending));
+
+        assert_eq!(app.queue_filter, QueueStatusFilter::Pending);
+        assert!(app.jobs.is_none());
+        assert!(app.dashboard.is_some());
+        assert!(app.job_detail.is_some());
+        assert!(app.workflows.is_some());
+        assert!(app.workflow_detail.is_some());
+        assert!(app.definitions.is_some());
+        assert_eq!(app.list_selection, 7);
+    }
+
+    #[test]
+    fn job_type_transition_invalidates_jobs_and_definitions_and_preserves_selection() {
+        let mut app = App::new(test_config());
+        seed_all_caches(&mut app);
+        app.list_selection = 7;
+
+        assert!(app.transition_job_type_filter(Some("jobs.filtered".to_owned())));
+
+        assert_eq!(app.job_type_filter.as_deref(), Some("jobs.filtered"));
+        assert!(app.jobs.is_none());
+        assert!(app.definitions.is_none());
+        assert!(app.dashboard.is_some());
+        assert!(app.job_detail.is_some());
+        assert!(app.workflows.is_some());
+        assert!(app.workflow_detail.is_some());
+        assert_eq!(app.list_selection, 7);
+    }
+
+    #[test]
+    fn workflow_type_transition_invalidates_only_workflows_and_preserves_selection() {
+        let mut app = App::new(test_config());
+        seed_all_caches(&mut app);
+        app.list_selection = 7;
+
+        assert!(app.transition_workflow_type_filter(Some("workflows.filtered".to_owned())));
+
+        assert_eq!(
+            app.workflow_type_filter.as_deref(),
+            Some("workflows.filtered")
+        );
+        assert!(app.workflows.is_none());
+        assert!(app.dashboard.is_some());
+        assert!(app.jobs.is_some());
+        assert!(app.job_detail.is_some());
+        assert!(app.workflow_detail.is_some());
+        assert!(app.definitions.is_some());
+        assert_eq!(app.list_selection, 7);
+    }
+
+    #[test]
+    fn table_search_transition_reuses_caches_and_resets_selection_without_refresh() {
+        let mut app = App::new(test_config());
+        seed_all_caches(&mut app);
+        app.list_selection = 7;
+
+        assert!(!app.transition_table_search(Some("needle".to_owned())));
+
+        assert_eq!(app.table_search.as_deref(), Some("needle"));
+        assert!(app.dashboard.is_some());
+        assert!(app.jobs.is_some());
+        assert!(app.job_detail.is_some());
+        assert!(app.workflows.is_some());
+        assert!(app.workflow_detail.is_some());
+        assert!(app.definitions.is_some());
+        assert_eq!(app.list_selection, 0);
+    }
+
+    #[test]
+    fn dashboard_job_type_activation_invalidates_shared_caches_and_preserves_queue_selection() {
+        let target_job_type = "jobs.dashboard.target";
+        let mut app = App::new(test_config());
+        app.dashboard = Some(DashboardData {
+            metrics: vec![job_metrics(target_job_type)],
+            continuation_metrics: std::collections::BTreeMap::new(),
+            failed_workflows: 0,
+            external_waits: 0,
+        });
+        app.jobs = Some(JobsData {
+            jobs: (0..3)
+                .map(|index| {
+                    job_record_with_payload(Uuid::new_v4(), serde_json::json!({ "index": index }))
+                })
+                .collect(),
+        });
+        app.definitions = Some(DefinitionsData {
+            definitions: Vec::new(),
+        });
+        app.top_view_states[1] = ViewState {
+            list_selection: 2,
+            ..ViewState::default()
+        };
+
+        assert!(app.handle_key(key(crossterm::event::KeyCode::Enter)));
+
+        assert_eq!(app.screen, Screen::Queue);
+        assert_eq!(app.job_type_filter.as_deref(), Some(target_job_type));
+        assert_eq!(app.queue_filter, QueueStatusFilter::All);
+        assert!(app.jobs.is_none());
+        assert!(app.definitions.is_none());
+        assert_eq!(app.list_selection, 2);
+    }
+
+    #[test]
+    fn clearing_definition_job_type_filter_invalidates_queue_and_definition_caches() {
+        let mut app = App::new(test_config());
+        app.screen = Screen::Definitions;
+        app.job_type_filter = Some("jobs.filtered".to_owned());
+        app.jobs = Some(JobsData { jobs: Vec::new() });
+        app.definitions = Some(DefinitionsData {
+            definitions: Vec::new(),
+        });
+        app.list_selection = 7;
+
+        assert!(app.handle_key(key(crossterm::event::KeyCode::Char('c'))));
+
+        assert!(app.job_type_filter.is_none());
+        assert!(app.jobs.is_none());
+        assert!(app.definitions.is_none());
+        assert_eq!(app.list_selection, 0);
     }
 
     #[test]

@@ -6,34 +6,26 @@ use super::super::{App, Screen, TopScreen, format_duration_short};
 impl App {
     pub(in crate::app::input) fn clear_context_filters(&mut self) -> bool {
         let mut refresh = false;
-        self.table_search = None;
+        self.transition_table_search(None);
         match self.screen {
             Screen::Queue | Screen::JobDetail { .. } => {
                 if self.queue_filter != QueueStatusFilter::All || self.job_type_filter.is_some() {
-                    self.queue_filter = QueueStatusFilter::All;
-                    self.job_type_filter = None;
-                    self.jobs = None;
-                    self.definitions = None;
-                    refresh = true;
+                    self.transition_queue_status_filter(QueueStatusFilter::All);
+                    refresh = self.transition_job_type_filter(None);
                 }
             }
             Screen::Workflows | Screen::WorkflowDetail { .. } => {
                 if self.workflow_type_filter.is_some() {
-                    self.workflow_type_filter = None;
-                    self.workflows = None;
-                    refresh = true;
+                    refresh = self.transition_workflow_type_filter(None);
                 }
             }
             Screen::Definitions => {
                 if self.job_type_filter.is_some() {
-                    self.job_type_filter = None;
-                    self.definitions = None;
-                    refresh = true;
+                    refresh = self.transition_job_type_filter(None);
                 }
             }
             Screen::Dashboard => {}
         }
-        self.list_selection = 0;
         self.notice = Some("Cleared filters".to_owned());
         refresh
     }
@@ -43,20 +35,18 @@ impl App {
         match parts.as_slice() {
             [] => false,
             ["scope", "global"] => {
-                self.scope = Scope::global();
-                self.invalidate_cache();
+                let refresh = self.transition_scope(Scope::global());
                 self.notice = Some("Scope set to global".to_owned());
-                true
+                refresh
             }
             ["filter", "status", status] => {
                 let Some(filter) = QueueStatusFilter::from_command(status) else {
                     self.notice = Some(format!("Unknown status filter: {status}"));
                     return false;
                 };
-                self.queue_filter = filter;
-                self.jobs = None;
+                let refresh = self.transition_queue_status_filter(filter);
                 self.navigate_top(TopScreen::Queue);
-                true
+                refresh
             }
             ["refresh", value] => {
                 if let Some(ms) = parse_refresh_ms(value) {

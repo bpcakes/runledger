@@ -78,9 +78,9 @@ impl App {
         match &self.screen {
             Screen::Dashboard => {
                 if let Some(job_type) = self.selected_dashboard_job_type() {
-                    self.job_type_filter = Some(job_type);
-                    self.queue_filter = QueueStatusFilter::All;
                     self.navigate_top(TopScreen::Queue);
+                    self.transition_job_type_filter(Some(job_type));
+                    self.transition_queue_status_filter(QueueStatusFilter::All);
                 }
             }
             Screen::Queue => {

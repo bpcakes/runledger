@@ -3,6 +3,7 @@ use super::*;
 #[tokio::test]
 async fn process_claimed_job_survives_terminal_failure_hook_panic() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_terminal_hook_panic", 8).await;
+    record_postgres_server_version(&pool, "worker terminal-hook panic policy").await;
 
     let mut tx = pool.begin().await.expect("begin tx");
     upsert_job_definition_tx(
@@ -64,6 +65,7 @@ async fn process_claimed_job_survives_terminal_failure_hook_panic() {
 #[tokio::test]
 async fn process_claimed_job_survives_terminal_failure_hook_timeout() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_terminal_hook_hang", 8).await;
+    record_postgres_server_version(&pool, "worker terminal-hook timeout policy").await;
 
     let mut tx = pool.begin().await.expect("begin tx");
     upsert_job_definition_tx(

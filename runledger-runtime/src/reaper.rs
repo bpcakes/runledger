@@ -225,6 +225,7 @@ mod tests {
     use super::{ReaperNotificationFanoutResult, notify_reaped_lease_side_effects};
 
     struct HangingTerminalHookHandler;
+    struct PanickingTerminalHookHandler;
     struct CountingHangingTerminalHookHandler {
         started: Arc<AtomicUsize>,
     }
@@ -289,6 +290,30 @@ mod tests {
             _dead_letter: JobDeadLetterInfo,
         ) {
             pending::<()>().await;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl JobHandler for PanickingTerminalHookHandler {
+        fn job_type(&self) -> JobType<'static> {
+            JobType::new("jobs.test.reaper.hook.panic")
+        }
+
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::success())
+        }
+
+        async fn on_dead_letter(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+            _dead_letter: JobDeadLetterInfo,
+        ) {
+            panic!("panic from reaper terminal failure hook");
         }
     }
 
@@ -559,6 +584,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reaped_observer_task_owner_reclaims_completed_capacity() {
+        let observer = RecordingObserver::default();
+        let observers = JobLifecycleObservers::from_observer(observer.clone());
+        let jobs = [
+            reaped_lease_record("jobs.test.reaper.observer.reclaim.first"),
+            reaped_lease_record("jobs.test.reaper.observer.reclaim.second"),
+        ];
+        let mut tasks = ReapedObserverTasks::owned_with_max_concurrency(1);
+
+        tasks.spawn_batch(&observers, &jobs[..1]);
+        wait_for_reaped_count(&observer, 1, Duration::from_millis(500)).await;
+        timeout(Duration::from_millis(500), async {
+            while tasks.in_flight_count() != 0 {
+                tasks.drain_finished();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completed reaped observer task should be drained");
+
+        tasks.spawn_batch(&observers, &jobs[1..]);
+        wait_for_reaped_count(&observer, 2, Duration::from_millis(500)).await;
+        tasks.abort_for_shutdown().await;
+
+        assert_eq!(
+            observer
+                .reaped
+                .lock()
+                .expect("reaped events lock should not be poisoned")
+                .len(),
+            2,
+            "completed observer tasks must release capacity for later batches"
+        );
+    }
+
+    #[tokio::test]
     async fn notify_observers_starts_multiple_reaped_callbacks_without_serial_timeout() {
         let started = Arc::new(Notify::new());
         let started_count = Arc::new(AtomicUsize::new(0));
@@ -707,6 +768,28 @@ mod tests {
         )
         .await
         .expect("notification pass should return even when terminal hook hangs");
+
+        assert_eq!(result, TerminalHookFanoutResult::Completed { started: 1 });
+    }
+
+    #[tokio::test]
+    async fn notify_handlers_survives_terminal_hook_panic() {
+        let mut registry = JobRegistry::new();
+        registry.register(PanickingTerminalHookHandler);
+
+        let jobs = vec![terminal_reaped_lease_record(
+            Uuid::now_v7(),
+            runledger_core::jobs::JobTypeName::from_static("jobs.test.reaper.hook.panic"),
+            json!({ "kind": "hook-panic" }),
+        )];
+
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let result = timeout(
+            Duration::from_secs(2),
+            notify_handlers_of_terminal_lease_expirations(&registry, &jobs, &mut shutdown_rx),
+        )
+        .await
+        .expect("notification pass should return when terminal hook panics");
 
         assert_eq!(result, TerminalHookFanoutResult::Completed { started: 1 });
     }

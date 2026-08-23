@@ -90,6 +90,7 @@
 
 pub mod catalog;
 pub mod config;
+mod dead_letter_hook;
 pub mod error;
 pub mod intent_promoter;
 pub mod observer;

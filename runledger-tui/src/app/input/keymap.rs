@@ -93,9 +93,7 @@ impl App {
             }
             KeyCode::Char('y') => self.copy_selected_identifier(),
             KeyCode::Char('f') if matches!(self.screen, Screen::Queue) => {
-                self.queue_filter = self.queue_filter.next();
-                self.jobs = None;
-                refresh = true;
+                refresh = self.transition_queue_status_filter(self.queue_filter.next());
             }
             KeyCode::Char('1') => {
                 self.navigate_top(TopScreen::Dashboard);
