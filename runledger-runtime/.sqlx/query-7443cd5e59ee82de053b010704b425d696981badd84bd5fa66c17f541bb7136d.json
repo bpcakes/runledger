@@ -1,0 +1,143 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                    id,\n                    job_type,\n                    organization_id,\n                    status::text AS \"status!\",\n                    priority,\n                    run_number,\n                    attempt,\n                    max_attempts,\n                    timeout_seconds,\n                    next_run_at,\n                    lease_expires_at,\n                    last_heartbeat_at,\n                    started_at,\n                    finished_at,\n                    stage,\n                    progress_done,\n                    progress_total,\n                    progress_pct::float8 AS progress_pct,\n                    last_error_code,\n                    created_at,\n                    updated_at\n                 FROM job_queue\n                 WHERE id = $1\n                   AND ($2::uuid IS NULL OR organization_id = $2)\n                 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "run_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "attempt",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "next_run_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "lease_expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "last_heartbeat_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "progress_done",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 16,
+        "name": "progress_total",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 17,
+        "name": "progress_pct",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 18,
+        "name": "last_error_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 19,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 20,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      null,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "7443cd5e59ee82de053b010704b425d696981badd84bd5fa66c17f541bb7136d"
+}

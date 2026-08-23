@@ -1,13 +1,15 @@
 use runledger_core::jobs::{JobStatus, WorkflowRunStatus};
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminWorkflowDependencyRecord,
-    AdminWorkflowStepRecord, AdminWorkflowSummaryFilter, AdminWorkflowSummaryRecord,
-    JobDefinitionListFilter, JobEventRecord, JobLogRecord, JobQueueRecord, WorkflowRunDbRecord,
-    get_admin_job_metrics_page, get_job_by_id, get_workflow_run_by_id, job_exists_in_scope,
-    list_admin_job_definitions, list_admin_job_summaries, list_admin_workflow_dependencies,
-    list_admin_workflow_steps, list_admin_workflow_summaries, list_job_events,
-    list_job_events_before, list_job_logs, list_job_logs_before, workflow_exists_in_scope,
+    AdminDataProjection, AdminJobEventRecord, AdminJobLogRecord, AdminJobRecord,
+    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminSensitiveData,
+    AdminWorkflowDependencyRecord, AdminWorkflowRecord, AdminWorkflowStepRecord,
+    AdminWorkflowSummaryFilter, AdminWorkflowSummaryRecord, JobDefinitionListFilter,
+    get_admin_job_by_id, get_admin_job_metrics_page, get_admin_workflow_by_id, job_exists_in_scope,
+    list_admin_job_definitions, list_admin_job_events, list_admin_job_events_before,
+    list_admin_job_logs, list_admin_job_logs_before, list_admin_job_summaries,
+    list_admin_workflow_dependencies, list_admin_workflow_steps, list_admin_workflow_summaries,
+    workflow_exists_in_scope,
 };
 use uuid::Uuid;
 
@@ -128,9 +130,7 @@ impl AdminService {
         job_id: Uuid,
     ) -> Result<JobResponse, AdminApiError> {
         let row = self.find_job(access, job_id).await?;
-        Ok(JobResponse {
-            job: job_dto(row, access.visibility()),
-        })
+        Ok(JobResponse { job: job_dto(row) })
     }
 
     /// Lists events for one authorized job.
@@ -144,22 +144,24 @@ impl AdminService {
         self.ensure_job_exists(access, job_id).await?;
         let rows = match query.order {
             HistoryOrder::NewestFirst => {
-                list_job_events_before(
+                list_admin_job_events_before(
                     &self.pool,
                     access.scope().organization_id(),
                     job_id,
                     fetch_limit(query.limit),
                     cursor,
+                    projection(access.visibility()),
                 )
                 .await
             }
             HistoryOrder::OldestFirst => {
-                list_job_events(
+                list_admin_job_events(
                     &self.pool,
                     access.scope().organization_id(),
                     job_id,
                     fetch_limit(query.limit),
                     cursor,
+                    projection(access.visibility()),
                 )
                 .await
             }
@@ -173,10 +175,7 @@ impl AdminService {
                 .to_string()
         });
         Ok(JobEventsResponse {
-            items: rows
-                .into_iter()
-                .map(|row| job_event_dto(row, access.visibility()))
-                .collect(),
+            items: rows.into_iter().map(job_event_dto).collect(),
             page: HistoryPageDto {
                 limit: query.limit,
                 cursor: query.cursor.clone(),
@@ -198,22 +197,24 @@ impl AdminService {
         self.ensure_job_exists(access, job_id).await?;
         let rows = match query.order {
             HistoryOrder::NewestFirst => {
-                list_job_logs_before(
+                list_admin_job_logs_before(
                     &self.pool,
                     access.scope().organization_id(),
                     job_id,
                     fetch_limit(query.limit),
                     cursor,
+                    projection(access.visibility()),
                 )
                 .await
             }
             HistoryOrder::OldestFirst => {
-                list_job_logs(
+                list_admin_job_logs(
                     &self.pool,
                     access.scope().organization_id(),
                     job_id,
                     fetch_limit(query.limit),
                     cursor,
+                    projection(access.visibility()),
                 )
                 .await
             }
@@ -227,10 +228,7 @@ impl AdminService {
                 .to_string()
         });
         Ok(JobLogsResponse {
-            items: rows
-                .into_iter()
-                .map(|row| job_log_dto(row, access.visibility()))
-                .collect(),
+            items: rows.into_iter().map(job_log_dto).collect(),
             page: HistoryPageDto {
                 limit: query.limit,
                 cursor: query.cursor.clone(),
@@ -282,7 +280,7 @@ impl AdminService {
     ) -> Result<WorkflowResponse, AdminApiError> {
         let workflow = self.find_workflow(access, workflow_id).await?;
         Ok(WorkflowResponse {
-            workflow: workflow_dto(workflow, access.visibility()),
+            workflow: workflow_dto(workflow),
         })
     }
 
@@ -302,16 +300,14 @@ impl AdminService {
             workflow_id,
             fetch_limit(query.limit),
             query.offset,
+            projection(access.visibility()),
         )
         .await
         .map_err(|error| storage_error("list workflow steps", error))?;
         let (steps, has_more) = take_page(steps, query.limit);
 
         Ok(WorkflowStepsResponse {
-            items: steps
-                .into_iter()
-                .map(|row| workflow_step_dto(row, access.visibility()))
-                .collect(),
+            items: steps.into_iter().map(workflow_step_dto).collect(),
             page: PageDto {
                 limit: query.limit,
                 offset: query.offset,
@@ -405,11 +401,16 @@ impl AdminService {
         &self,
         access: AdminAccess,
         job_id: Uuid,
-    ) -> Result<JobQueueRecord, AdminApiError> {
-        get_job_by_id(&self.pool, access.scope().organization_id(), job_id)
-            .await
-            .map_err(|error| storage_error("load job", error))?
-            .ok_or_else(AdminApiError::not_found)
+    ) -> Result<AdminJobRecord, AdminApiError> {
+        get_admin_job_by_id(
+            &self.pool,
+            access.scope().organization_id(),
+            job_id,
+            projection(access.visibility()),
+        )
+        .await
+        .map_err(|error| storage_error("load job", error))?
+        .ok_or_else(AdminApiError::not_found)
     }
 
     async fn ensure_job_exists(
@@ -427,11 +428,16 @@ impl AdminService {
         &self,
         access: AdminAccess,
         workflow_id: Uuid,
-    ) -> Result<WorkflowRunDbRecord, AdminApiError> {
-        get_workflow_run_by_id(&self.pool, access.scope().organization_id(), workflow_id)
-            .await
-            .map_err(|error| storage_error("load workflow run", error))?
-            .ok_or_else(AdminApiError::not_found)
+    ) -> Result<AdminWorkflowRecord, AdminApiError> {
+        get_admin_workflow_by_id(
+            &self.pool,
+            access.scope().organization_id(),
+            workflow_id,
+            projection(access.visibility()),
+        )
+        .await
+        .map_err(|error| storage_error("load workflow run", error))?
+        .ok_or_else(AdminApiError::not_found)
     }
 
     async fn ensure_workflow_exists(
@@ -517,27 +523,58 @@ fn parse_workflow_status(status: Option<&str>) -> Result<Option<WorkflowRunStatu
         .transpose()
 }
 
-fn redacted(visibility: DataVisibility, fields: &[&str]) -> Vec<String> {
-    if visibility == DataVisibility::MetadataOnly {
-        fields.iter().map(|field| (*field).to_owned()).collect()
-    } else {
-        Vec::new()
+const fn projection(visibility: DataVisibility) -> AdminDataProjection {
+    match visibility {
+        DataVisibility::MetadataOnly => AdminDataProjection::MetadataOnly,
+        DataVisibility::Full => AdminDataProjection::Full,
     }
 }
 
-fn full<T>(visibility: DataVisibility, value: T) -> Option<T> {
-    (visibility == DataVisibility::Full).then_some(value)
+fn redacted(fields: &[&str]) -> Vec<String> {
+    fields.iter().map(|field| (*field).to_owned()).collect()
 }
 
-fn full_optional<T>(visibility: DataVisibility, value: Option<T>) -> Option<T> {
-    if visibility == DataVisibility::Full {
-        value
-    } else {
-        None
-    }
-}
-
-fn job_dto(row: JobQueueRecord, visibility: DataVisibility) -> JobDto {
+fn job_dto(row: AdminJobRecord) -> JobDto {
+    let (
+        payload,
+        checkpoint,
+        output,
+        idempotency_key,
+        worker_id,
+        status_reason,
+        last_error_message,
+        redacted_fields,
+    ) = match row.sensitive {
+        AdminSensitiveData::Redacted => (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            redacted(&[
+                "payload",
+                "checkpoint",
+                "output",
+                "idempotency_key",
+                "worker_id",
+                "status_reason",
+                "last_error_message",
+            ]),
+        ),
+        AdminSensitiveData::Full(sensitive) => (
+            Some(sensitive.payload),
+            sensitive.checkpoint,
+            sensitive.output,
+            sensitive.idempotency_key,
+            sensitive.worker_id,
+            sensitive.status_reason,
+            sensitive.last_error_message,
+            Vec::new(),
+        ),
+    };
+    let row = row.summary;
     JobDto {
         id: row.id,
         job_type: row.job_type.as_str().to_owned(),
@@ -560,25 +597,14 @@ fn job_dto(row: JobQueueRecord, visibility: DataVisibility) -> JobDto {
         last_error_code: row.last_error_code,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        payload: full(visibility, row.payload),
-        checkpoint: full_optional(visibility, row.checkpoint),
-        output: full_optional(visibility, row.output),
-        idempotency_key: full_optional(visibility, row.idempotency_key),
-        worker_id: full_optional(visibility, row.worker_id),
-        status_reason: full_optional(visibility, row.status_reason),
-        last_error_message: full_optional(visibility, row.last_error_message),
-        redacted_fields: redacted(
-            visibility,
-            &[
-                "payload",
-                "checkpoint",
-                "output",
-                "idempotency_key",
-                "worker_id",
-                "status_reason",
-                "last_error_message",
-            ],
-        ),
+        payload,
+        checkpoint,
+        output,
+        idempotency_key,
+        worker_id,
+        status_reason,
+        last_error_message,
+        redacted_fields,
     }
 }
 
@@ -608,7 +634,11 @@ fn job_summary_dto(row: AdminJobSummaryRecord) -> JobSummaryDto {
     }
 }
 
-fn job_event_dto(row: JobEventRecord, visibility: DataVisibility) -> JobEventDto {
+fn job_event_dto(row: AdminJobEventRecord) -> JobEventDto {
+    let (payload, redacted_fields) = match row.sensitive {
+        AdminSensitiveData::Redacted => (None, redacted(&["payload"])),
+        AdminSensitiveData::Full(sensitive) => (Some(sensitive.payload), Vec::new()),
+    };
     JobEventDto {
         id: row.id.to_string(),
         job_id: row.job_id,
@@ -619,12 +649,18 @@ fn job_event_dto(row: JobEventRecord, visibility: DataVisibility) -> JobEventDto
         progress_done: row.progress_done.map(ExactI64::from),
         progress_total: row.progress_total.map(ExactI64::from),
         occurred_at: row.occurred_at,
-        payload: full(visibility, row.payload),
-        redacted_fields: redacted(visibility, &["payload"]),
+        payload,
+        redacted_fields,
     }
 }
 
-fn job_log_dto(row: JobLogRecord, visibility: DataVisibility) -> JobLogDto {
+fn job_log_dto(row: AdminJobLogRecord) -> JobLogDto {
+    let (message, payload, redacted_fields) = match row.sensitive {
+        AdminSensitiveData::Redacted => (None, None, redacted(&["message", "payload"])),
+        AdminSensitiveData::Full(sensitive) => {
+            (Some(sensitive.message), Some(sensitive.payload), Vec::new())
+        }
+    };
     JobLogDto {
         id: row.id.to_string(),
         job_id: row.job_id,
@@ -632,13 +668,22 @@ fn job_log_dto(row: JobLogRecord, visibility: DataVisibility) -> JobLogDto {
         attempt: row.attempt,
         level: row.level,
         occurred_at: row.occurred_at,
-        message: full(visibility, row.message),
-        payload: full(visibility, row.payload),
-        redacted_fields: redacted(visibility, &["message", "payload"]),
+        message,
+        payload,
+        redacted_fields,
     }
 }
 
-fn workflow_dto(row: WorkflowRunDbRecord, visibility: DataVisibility) -> WorkflowDto {
+fn workflow_dto(row: AdminWorkflowRecord) -> WorkflowDto {
+    let (idempotency_key, metadata, redacted_fields) = match row.sensitive {
+        AdminSensitiveData::Redacted => (None, None, redacted(&["idempotency_key", "metadata"])),
+        AdminSensitiveData::Full(sensitive) => (
+            sensitive.idempotency_key,
+            Some(sensitive.metadata),
+            Vec::new(),
+        ),
+    };
+    let row = row.summary;
     WorkflowDto {
         id: row.id,
         workflow_type: row.workflow_type.as_str().to_owned(),
@@ -649,9 +694,9 @@ fn workflow_dto(row: WorkflowRunDbRecord, visibility: DataVisibility) -> Workflo
         finished_at: row.finished_at,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        idempotency_key: full_optional(visibility, row.idempotency_key),
-        metadata: full(visibility, row.metadata),
-        redacted_fields: redacted(visibility, &["idempotency_key", "metadata"]),
+        idempotency_key,
+        metadata,
+        redacted_fields,
     }
 }
 
@@ -669,7 +714,38 @@ fn workflow_summary_dto(row: AdminWorkflowSummaryRecord) -> WorkflowSummaryDto {
     }
 }
 
-fn workflow_step_dto(row: AdminWorkflowStepRecord, visibility: DataVisibility) -> WorkflowStepDto {
+fn workflow_step_dto(row: AdminWorkflowStepRecord) -> WorkflowStepDto {
+    let (
+        payload,
+        execution_resource_key,
+        status_reason,
+        last_error_message,
+        output,
+        redacted_fields,
+    ) = match row.sensitive {
+        AdminSensitiveData::Redacted => (
+            None,
+            None,
+            None,
+            None,
+            None,
+            redacted(&[
+                "payload",
+                "execution_resource_key",
+                "status_reason",
+                "last_error_message",
+                "output",
+            ]),
+        ),
+        AdminSensitiveData::Full(sensitive) => (
+            Some(sensitive.payload),
+            sensitive.execution_resource_key,
+            sensitive.status_reason,
+            sensitive.last_error_message,
+            sensitive.output,
+            Vec::new(),
+        ),
+    };
     WorkflowStepDto {
         id: row.id,
         workflow_run_id: row.workflow_run_id,
@@ -694,21 +770,12 @@ fn workflow_step_dto(row: AdminWorkflowStepRecord, visibility: DataVisibility) -
         last_error_code: row.last_error_code,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        payload: full(visibility, row.payload),
-        execution_resource_key: full_optional(visibility, row.execution_resource_key),
-        status_reason: full_optional(visibility, row.status_reason),
-        last_error_message: full_optional(visibility, row.last_error_message),
-        output: full_optional(visibility, row.output),
-        redacted_fields: redacted(
-            visibility,
-            &[
-                "payload",
-                "execution_resource_key",
-                "status_reason",
-                "last_error_message",
-                "output",
-            ],
-        ),
+        payload,
+        execution_resource_key,
+        status_reason,
+        last_error_message,
+        output,
+        redacted_fields,
     }
 }
 

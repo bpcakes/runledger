@@ -1,6 +1,9 @@
 pub use self::admin::{
-    AdminJobMetricsRecord, AdminJobSummaryFilter, AdminJobSummaryRecord,
-    AdminWorkflowDependencyRecord, AdminWorkflowStepRecord, AdminWorkflowSummaryFilter,
+    AdminDataProjection, AdminJobEventRecord, AdminJobEventSensitiveRecord, AdminJobLogRecord,
+    AdminJobLogSensitiveRecord, AdminJobMetricsRecord, AdminJobRecord, AdminJobSensitiveRecord,
+    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminSensitiveData,
+    AdminWorkflowDependencyRecord, AdminWorkflowRecord, AdminWorkflowSensitiveRecord,
+    AdminWorkflowStepRecord, AdminWorkflowStepSensitiveRecord, AdminWorkflowSummaryFilter,
     AdminWorkflowSummaryRecord, JOB_LIST_PAGE_LIMIT_MAX, JobCancellationScope,
     JobContinuationMetricsRecord, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
 };

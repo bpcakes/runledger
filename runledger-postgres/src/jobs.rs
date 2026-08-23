@@ -37,9 +37,11 @@ mod workflows;
 pub use admin::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
     cancel_job_with_scope, compare_and_requeue_job, compare_and_requeue_job_tx,
-    get_admin_job_metrics_page, get_job_by_id, get_job_continuation_metrics, get_job_metrics,
-    get_job_payload_by_idempotency_key, get_latest_job_payload_for_run, job_exists_in_scope,
-    list_admin_job_definitions, list_admin_job_summaries, list_admin_workflow_dependencies,
+    get_admin_job_by_id, get_admin_job_metrics_page, get_admin_workflow_by_id, get_job_by_id,
+    get_job_continuation_metrics, get_job_metrics, get_job_payload_by_idempotency_key,
+    get_latest_job_payload_for_run, job_exists_in_scope, list_admin_job_definitions,
+    list_admin_job_events, list_admin_job_events_before, list_admin_job_logs,
+    list_admin_job_logs_before, list_admin_job_summaries, list_admin_workflow_dependencies,
     list_admin_workflow_steps, list_admin_workflow_summaries, list_job_events,
     list_job_events_before, list_jobs, requeue_job, update_job_payload_uuid_array_field,
     workflow_exists_in_scope,
@@ -92,8 +94,11 @@ pub use schedules::{
     reason = "the deprecated stage-bearing progress input remains re-exported during migration"
 )]
 pub use types::{
-    AdminJobMetricsRecord, AdminJobSummaryFilter, AdminJobSummaryRecord,
-    AdminWorkflowDependencyRecord, AdminWorkflowStepRecord, AdminWorkflowSummaryFilter,
+    AdminDataProjection, AdminJobEventRecord, AdminJobEventSensitiveRecord, AdminJobLogRecord,
+    AdminJobLogSensitiveRecord, AdminJobMetricsRecord, AdminJobRecord, AdminJobSensitiveRecord,
+    AdminJobSummaryFilter, AdminJobSummaryRecord, AdminSensitiveData,
+    AdminWorkflowDependencyRecord, AdminWorkflowRecord, AdminWorkflowSensitiveRecord,
+    AdminWorkflowStepRecord, AdminWorkflowStepSensitiveRecord, AdminWorkflowSummaryFilter,
     AdminWorkflowSummaryRecord, CompareAndRequeueJob, CompareAndRequeueJobOutcome,
     DecodedJobEventPayload, DecodedRequeuedEventPayload, JOB_LIST_PAGE_LIMIT_MAX,
     JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCancellationScope, JobCompletionUpdate,

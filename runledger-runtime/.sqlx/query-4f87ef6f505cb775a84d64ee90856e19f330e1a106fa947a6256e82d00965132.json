@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                    je.id,\n                    je.job_id,\n                    je.run_number,\n                    je.attempt,\n                    je.event_type::text AS \"event_type!\",\n                    je.stage,\n                    je.progress_done,\n                    je.progress_total,\n                    je.occurred_at\n                 FROM job_events je\n                 JOIN job_queue jq ON jq.id = je.job_id\n                 WHERE je.job_id = $1\n                   AND ($2::uuid IS NULL OR jq.organization_id = $2)\n                   AND ($3::bigint IS NULL OR je.id < $3)\n                 ORDER BY je.id DESC\n                 LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "run_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "attempt",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "event_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "progress_done",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "progress_total",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "occurred_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "4f87ef6f505cb775a84d64ee90856e19f330e1a106fa947a6256e82d00965132"
+}

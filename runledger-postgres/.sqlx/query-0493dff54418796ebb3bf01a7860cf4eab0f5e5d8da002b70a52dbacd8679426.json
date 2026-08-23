@@ -1,0 +1,157 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n    step.id,\n    step.workflow_run_id,\n    step.step_key,\n    step.execution_kind::text AS \"execution_kind!\",\n    step.job_type,\n    step.organization_id,\n    step.priority,\n    step.max_attempts,\n    step.timeout_seconds,\n    step.stage,\n    step.allow_handler_continuation,\n    step.status::text AS \"status!\",\n    step.job_id,\n    step.released_at,\n    step.started_at,\n    step.finished_at,\n    COALESCE(prerequisites.visible_total, 0)::int4\n        AS \"visible_dependency_count_total!\",\n    COALESCE(prerequisites.visible_pending, 0)::int4\n        AS \"visible_dependency_count_pending!\",\n    COALESCE(prerequisites.visible_unsatisfied, 0)::int4\n        AS \"visible_dependency_count_unsatisfied!\",\n    COALESCE(prerequisites.has_hidden, false)\n        AS \"has_hidden_prerequisites!\",\n    step.last_error_code,\n    step.created_at,\n    step.updated_at\nFROM workflow_steps step\nJOIN workflow_runs workflow\n  ON workflow.id = step.workflow_run_id\n AND workflow.organization_id = $2\nLEFT JOIN LATERAL (\n    SELECT\n        COUNT(*) FILTER (\n            WHERE prerequisite.organization_id = $2\n        )::int4 AS visible_total,\n        COUNT(*) FILTER (\n            WHERE prerequisite.organization_id = $2\n              AND prerequisite.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELED')\n        )::int4 AS visible_pending,\n        COUNT(*) FILTER (\n            WHERE prerequisite.organization_id = $2\n              AND dependency.release_mode = 'ON_SUCCESS'\n              AND prerequisite.status IN ('FAILED', 'CANCELED')\n        )::int4 AS visible_unsatisfied,\n        BOOL_OR(prerequisite.organization_id IS DISTINCT FROM $2) AS has_hidden\n    FROM workflow_step_dependencies dependency\n    JOIN workflow_steps prerequisite\n      ON prerequisite.id = dependency.prerequisite_step_id\n    WHERE dependency.dependent_step_id = step.id\n) prerequisites ON true\nWHERE step.workflow_run_id = $1\n  AND step.organization_id = $2\nORDER BY step.created_at ASC, step.id ASC\nLIMIT $3 OFFSET $4\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "workflow_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "step_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "execution_kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "job_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "timeout_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "allow_handler_continuation",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 13,
+        "name": "released_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "visible_dependency_count_total!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 17,
+        "name": "visible_dependency_count_pending!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 18,
+        "name": "visible_dependency_count_unsatisfied!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 19,
+        "name": "has_hidden_prerequisites!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 20,
+        "name": "last_error_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 22,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      null,
+      true,
+      true,
+      true,
+      true,
+      null,
+      null,
+      null,
+      null,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "0493dff54418796ebb3bf01a7860cf4eab0f5e5d8da002b70a52dbacd8679426"
+}
