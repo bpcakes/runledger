@@ -173,16 +173,11 @@ fn failure_completion_post_commit_effects(
     }
 }
 
-async fn notify_failure_observer(
-    completion: CompletionContext<'_, '_>,
-    observation: CompletionObservation<'_>,
-    event: JobFailedEvent,
-) {
+async fn notify_failure_observer(observation: CompletionObservation<'_>, event: JobFailedEvent) {
     observation
         .running_notification
         .spawn_terminal_observer(
             observation.terminal_observer_tasks,
-            completion.job,
             observation.observers.clone(),
             TerminalJobObserverEvent::Failed(event),
         )
@@ -220,7 +215,6 @@ async fn notify_dead_letter_after_handler_failure(
 }
 
 async fn handle_completion_persist_failure(
-    completion: CompletionContext<'_, '_>,
     observation: CompletionObservation<'_>,
     operation: JobCompletionPersistenceOperation,
     error: runledger_postgres::Error,
@@ -254,7 +248,6 @@ async fn handle_completion_persist_failure(
         .running_notification
         .spawn_terminal_observer(
             observation.terminal_observer_tasks,
-            completion.job,
             observation.observers.clone(),
             terminal_event,
         )
@@ -316,7 +309,6 @@ async fn complete_job_success_after_handler(
 
             let release_conflict = is_workflow_release_conflict_error(&error);
             handle_completion_persist_failure(
-                completion_context,
                 observation,
                 JobCompletionPersistenceOperation::Success,
                 error,
@@ -336,7 +328,6 @@ async fn complete_job_success_after_handler(
                 .running_notification
                 .spawn_terminal_observer(
                     observation.terminal_observer_tasks,
-                    completion_context.job,
                     observation.observers.clone(),
                     TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
                         job: ObservedJob {
@@ -391,7 +382,6 @@ async fn complete_job_continuation_after_handler(
             }
 
             handle_completion_persist_failure(
-                completion_context,
                 observation,
                 JobCompletionPersistenceOperation::Continuation,
                 error,
@@ -435,7 +425,6 @@ async fn complete_job_continuation_after_handler(
                 .running_notification
                 .spawn_terminal_observer(
                     observation.terminal_observer_tasks,
-                    completion_context.job,
                     observation.observers.clone(),
                     TerminalJobObserverEvent::Continued(JobContinuedEvent {
                         job: observation.observed_job,
@@ -493,7 +482,7 @@ pub(super) async fn complete_job_failure_after_handler(
                     checkpoint,
                     has_unknown_disposition: _,
                 } = effects;
-                notify_failure_observer(completion_context, observation, observer_event).await;
+                notify_failure_observer(observation, observer_event).await;
 
                 if let Some(dead_letter) = dead_letter {
                     notify_dead_letter_after_handler_failure(
@@ -525,7 +514,6 @@ pub(super) async fn complete_job_failure_after_handler(
 
                 let release_conflict = is_workflow_release_conflict_error(&error);
                 handle_completion_persist_failure(
-                    completion_context,
                     observation,
                     JobCompletionPersistenceOperation::Failure,
                     error,

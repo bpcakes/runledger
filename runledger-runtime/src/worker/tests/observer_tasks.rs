@@ -1,5 +1,56 @@
 use super::*;
 
+#[test]
+fn every_terminal_event_exposes_its_embedded_observed_job_identity() {
+    let job = observer_task_observed_job();
+    let failure = JobFailure::retryable("job.test.observer", "observer identity test");
+    let now = Utc::now();
+    let events = [
+        TerminalJobObserverEvent::Continued(JobContinuedEvent {
+            job: job.clone(),
+            duration: Duration::from_millis(1),
+            next_run_number: 2,
+            next_run_at: now,
+            progress_done: None,
+            progress_total: None,
+        }),
+        TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
+            job: job.clone(),
+            duration: Duration::from_millis(1),
+            progress_done: None,
+            progress_total: None,
+        }),
+        TerminalJobObserverEvent::Failed(JobFailedEvent {
+            job: job.clone(),
+            duration: Duration::from_millis(1),
+            failure: failure.clone(),
+            disposition: JobFailureDisposition::Unknown,
+        }),
+        TerminalJobObserverEvent::CompletionPersistFailed(JobCompletionPersistFailedEvent {
+            job: job.clone(),
+            duration: Duration::from_millis(1),
+            operation: JobCompletionPersistenceOperation::Success,
+            error: "observer identity test".to_owned(),
+        }),
+        TerminalJobObserverEvent::LeaseLost(JobLeaseLostEvent {
+            job: job.clone(),
+            duration: Duration::from_millis(1),
+            failure,
+        }),
+    ];
+
+    for event in events {
+        let event_job = event.job();
+        assert_eq!(event_job.job_id, job.job_id);
+        assert_eq!(event_job.job_type, job.job_type);
+        assert_eq!(event_job.organization_id, job.organization_id);
+        assert_eq!(event_job.run_number, job.run_number);
+        assert_eq!(event_job.attempt, job.attempt);
+        assert_eq!(event_job.max_attempts, job.max_attempts);
+        assert_eq!(event_job.worker_id, job.worker_id);
+    }
+}
+
 #[tokio::test]
 async fn observer_task_owner_drops_newest_terminal_task_at_cap() {
     let tasks = TerminalObserverTasks::owned_with_max_concurrency(2);
@@ -224,12 +275,9 @@ async fn empty_lifecycle_observers_skip_running_and_terminal_tasks() {
         "empty observers should not create a running observer task"
     );
     assert_eq!(tasks.in_flight_count().await, 0);
-
-    let queue_record = observer_task_queue_record();
     running_notification
         .spawn_terminal_observer(
             &tasks,
-            &queue_record,
             observers,
             TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
                 job: observed_job,
@@ -272,7 +320,6 @@ async fn finished_running_observer_is_reaped_before_terminal_task_admission() {
     running_notification
         .spawn_terminal_observer(
             &tasks,
-            &observer_task_queue_record(),
             observers,
             TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
                 job: observed_job,
@@ -336,7 +383,6 @@ async fn terminal_observer_rejection_does_not_abort_same_job_running_observer() 
     running_notification
         .spawn_terminal_observer(
             &tasks,
-            &observer_task_queue_record(),
             observers,
             TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
                 job: observed_job,
@@ -400,7 +446,6 @@ async fn terminal_observer_waits_for_running_observer_for_same_job() {
     running_notification
         .spawn_terminal_observer(
             &tasks,
-            &observer_task_queue_record(),
             observers,
             TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
                 job: observed_job,
@@ -459,7 +504,6 @@ async fn terminal_observer_shutdown_waits_for_same_job_running_observer() {
     running_notification
         .spawn_terminal_observer(
             &tasks,
-            &observer_task_queue_record(),
             observers,
             TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
                 job: observed_job,
@@ -548,7 +592,6 @@ async fn terminal_observer_shutdown_delivers_after_multiple_hanging_observer_cal
     running_notification
         .spawn_terminal_observer(
             &tasks,
-            &observer_task_queue_record(),
             observers,
             TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
                 job: observed_job,
