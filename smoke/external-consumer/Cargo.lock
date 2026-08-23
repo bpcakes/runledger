@@ -1918,7 +1918,6 @@ dependencies = [
  "runledger-test-support",
  "serde_json",
  "sqlx",
- "testcontainers",
  "tokio",
 ]
 
