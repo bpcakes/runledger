@@ -16,11 +16,11 @@ impl App {
                 return;
             }
             let next = if delta.is_positive() {
-                self.detail_scroll.saturating_add(1)
+                self.job_detail_viewport.scroll.saturating_add(1)
             } else {
-                self.detail_scroll.saturating_sub(1)
+                self.job_detail_viewport.scroll.saturating_sub(1)
             };
-            self.detail_scroll = next.min(max_scroll);
+            self.job_detail_viewport.scroll = next.min(max_scroll);
             return;
         }
 
@@ -42,7 +42,7 @@ impl App {
             (&self.screen, self.job_detail_pane),
             (Screen::JobDetail { .. }, JobDetailPane::Payload)
         ) {
-            self.detail_scroll = 0;
+            self.job_detail_viewport.scroll = 0;
         } else {
             self.list_selection = 0;
         }
@@ -53,7 +53,7 @@ impl App {
             (&self.screen, self.job_detail_pane),
             (Screen::JobDetail { .. }, JobDetailPane::Payload)
         ) {
-            self.detail_scroll = self.payload_scroll_max();
+            self.job_detail_viewport.scroll = self.payload_scroll_max();
             return;
         }
         let len = self.list_len();
@@ -71,7 +71,7 @@ impl App {
         } else {
             crate::format::job_payload_lines(&detail.job.payload)
         };
-        crate::format::job_payload_scroll_max(lines.len(), self.payload_visible_rows)
+        crate::format::job_payload_scroll_max(lines.len(), self.job_detail_viewport.visible_rows)
     }
 
     pub(in crate::app::input) fn activate_selection(&mut self) {

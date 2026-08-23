@@ -3,16 +3,6 @@ use crossterm::event::{KeyCode, KeyEvent};
 use super::super::{ActiveInput, App, FilterTarget, JobDetailPane, Screen, TopScreen};
 
 impl App {
-    pub fn update_payload_visible_rows(&mut self, visible_rows: usize) {
-        self.payload_visible_rows = visible_rows.max(1);
-        if matches!(
-            (&self.screen, self.job_detail_pane),
-            (Screen::JobDetail { .. }, JobDetailPane::Payload)
-        ) {
-            self.detail_scroll = self.detail_scroll.min(self.payload_scroll_max());
-        }
-    }
-
     /// Returns true when a data refresh should be scheduled.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if !matches!(self.active_input(), ActiveInput::None) {
@@ -156,7 +146,7 @@ impl App {
                 ) =>
             {
                 self.payload_raw = !self.payload_raw;
-                self.detail_scroll = 0;
+                self.job_detail_viewport.scroll = 0;
                 self.notice = Some(if self.payload_raw {
                     "Payload raw mode".to_owned()
                 } else {
@@ -167,14 +157,14 @@ impl App {
                 if matches!(self.screen, Screen::JobDetail { .. }) =>
             {
                 self.job_detail_pane = self.job_detail_pane.next();
-                self.detail_scroll = 0;
+                self.job_detail_viewport.scroll = 0;
                 self.list_selection = 0;
             }
             KeyCode::Char('[') | KeyCode::Left
                 if matches!(self.screen, Screen::JobDetail { .. }) =>
             {
                 self.job_detail_pane = self.job_detail_pane.prev();
-                self.detail_scroll = 0;
+                self.job_detail_viewport.scroll = 0;
                 self.list_selection = 0;
             }
             KeyCode::Char('l') | KeyCode::Enter => {

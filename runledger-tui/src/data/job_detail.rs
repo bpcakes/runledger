@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::pg_error;
 use crate::scope::Scope;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct JobDetailData {
     pub job: JobQueueRecord,
     pub events: Vec<JobEventRecord>,

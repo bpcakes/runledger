@@ -42,6 +42,35 @@ pub enum JobDetailPane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobDetailViewport {
+    pub scroll: usize,
+    pub visible_rows: usize,
+}
+
+impl Default for JobDetailViewport {
+    fn default() -> Self {
+        Self {
+            scroll: 0,
+            visible_rows: 1,
+        }
+    }
+}
+
+impl JobDetailViewport {
+    #[must_use]
+    pub(crate) fn resized(self, visible_rows: usize, line_count: usize) -> Self {
+        let visible_rows = visible_rows.max(1);
+        Self {
+            scroll: self.scroll.min(crate::format::job_payload_scroll_max(
+                line_count,
+                visible_rows,
+            )),
+            visible_rows,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FilterTarget {
     Job,
     Workflow,
@@ -75,7 +104,7 @@ impl ActiveInput {
 #[derive(Debug, Clone, Copy)]
 pub struct ViewState {
     pub list_selection: usize,
-    pub detail_scroll: usize,
+    pub job_detail_viewport: JobDetailViewport,
     pub job_detail_pane: JobDetailPane,
 }
 
@@ -83,7 +112,7 @@ impl Default for ViewState {
     fn default() -> Self {
         Self {
             list_selection: 0,
-            detail_scroll: 0,
+            job_detail_viewport: JobDetailViewport::default(),
             job_detail_pane: JobDetailPane::Summary,
         }
     }
@@ -102,8 +131,7 @@ pub struct App {
     pub screen_stack: Vec<ScreenFrame>,
     pub top_view_states: [ViewState; 4],
     pub list_selection: usize,
-    pub detail_scroll: usize,
-    pub payload_visible_rows: usize,
+    pub job_detail_viewport: JobDetailViewport,
     pub payload_raw: bool,
     pub payload_wrap: bool,
     pub queue_filter: QueueStatusFilter,
@@ -137,8 +165,7 @@ impl App {
             screen_stack: Vec::new(),
             top_view_states: [ViewState::default(); Self::TOP_SCREEN_COUNT],
             list_selection: 0,
-            detail_scroll: 0,
-            payload_visible_rows: 1,
+            job_detail_viewport: JobDetailViewport::default(),
             payload_raw: false,
             payload_wrap: false,
             queue_filter: QueueStatusFilter::All,
@@ -201,14 +228,14 @@ impl App {
     fn capture_view_state(&self) -> ViewState {
         ViewState {
             list_selection: self.list_selection,
-            detail_scroll: self.detail_scroll,
+            job_detail_viewport: self.job_detail_viewport,
             job_detail_pane: self.job_detail_pane,
         }
     }
 
     fn restore_view_state(&mut self, state: ViewState) {
         self.list_selection = state.list_selection;
-        self.detail_scroll = state.detail_scroll;
+        self.job_detail_viewport = state.job_detail_viewport;
         self.job_detail_pane = state.job_detail_pane;
         self.clamp_selection();
     }
@@ -391,7 +418,7 @@ impl App {
         self.screen = Screen::JobDetail { job_id };
         self.job_detail = None;
         self.list_selection = 0;
-        self.detail_scroll = 0;
+        self.job_detail_viewport = JobDetailViewport::default();
         self.job_detail_pane = JobDetailPane::Summary;
     }
 
@@ -1307,17 +1334,17 @@ mod tests {
             workflow_run_id: None,
         });
 
-        app.update_payload_visible_rows(8);
+        app.job_detail_viewport.visible_rows = 8;
         let max_scroll = app.payload_scroll_max();
         assert!(max_scroll > 0);
 
         for _ in 0..(max_scroll + 10) {
             app.move_selection(1);
         }
-        assert_eq!(app.detail_scroll, max_scroll);
+        assert_eq!(app.job_detail_viewport.scroll, max_scroll);
 
         app.move_selection(-1);
-        assert_eq!(app.detail_scroll, max_scroll - 1);
+        assert_eq!(app.job_detail_viewport.scroll, max_scroll - 1);
     }
 
     #[test]

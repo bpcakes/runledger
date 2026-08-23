@@ -218,9 +218,10 @@ fn draw_screen_content(f: &mut Frame, area: Rect, app: &mut App) {
             }
         }
         Screen::JobDetail { job_id } => {
-            if let Some(data) = app.job_detail.clone() {
+            if let Some(data) = &app.job_detail {
                 if data.job.id == *job_id {
-                    super::job_detail::draw(f, area, app, &data);
+                    app.job_detail_viewport =
+                        super::job_detail::draw(f, area, app, data, app.job_detail_viewport);
                 } else {
                     draw_loading(f, area, &app.last_error);
                 }

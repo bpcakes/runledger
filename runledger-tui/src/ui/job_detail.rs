@@ -8,7 +8,7 @@ use runledger_postgres::jobs::{
     SuccessfulReplayEnqueuedEventPayload,
 };
 
-use crate::app::{App, JobDetailPane};
+use crate::app::{App, JobDetailPane, JobDetailViewport};
 use crate::data::JobDetailData;
 use crate::format::{
     format_optional_timestamp, format_timestamp, job_payload_lines, job_payload_raw_lines,
@@ -19,7 +19,14 @@ use crate::ui::render::{
     job_status_style, scope_banner, table_cell,
 };
 
-pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &mut App, data: &JobDetailData) {
+#[must_use]
+pub fn draw(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    app: &App,
+    data: &JobDetailData,
+    viewport: JobDetailViewport,
+) -> JobDetailViewport {
     let job = &data.job;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -54,10 +61,19 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &mut App, data: &Jo
     f.render_widget(tabs, chunks[2]);
 
     match app.job_detail_pane {
-        JobDetailPane::Summary => draw_summary(f, chunks[3], data),
-        JobDetailPane::Events => draw_events(f, chunks[3], app, data),
-        JobDetailPane::Logs => draw_logs(f, chunks[3], app, data),
-        JobDetailPane::Payload => draw_payload(f, chunks[3], app, data),
+        JobDetailPane::Summary => {
+            draw_summary(f, chunks[3], data);
+            viewport
+        }
+        JobDetailPane::Events => {
+            draw_events(f, chunks[3], app, data);
+            viewport
+        }
+        JobDetailPane::Logs => {
+            draw_logs(f, chunks[3], app, data);
+            viewport
+        }
+        JobDetailPane::Payload => draw_payload(f, chunks[3], app, data, viewport),
     }
 }
 
@@ -343,14 +359,19 @@ fn draw_logs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobDe
     );
 }
 
-fn draw_payload(f: &mut Frame, area: ratatui::layout::Rect, app: &mut App, data: &JobDetailData) {
+fn draw_payload(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    app: &App,
+    data: &JobDetailData,
+    viewport: JobDetailViewport,
+) -> JobDetailViewport {
     let lines = if app.payload_raw {
         job_payload_raw_lines(&data.job.payload)
     } else {
         job_payload_lines(&data.job.payload)
     };
     let visible_rows = usize::from(area.height.saturating_sub(2));
-    app.update_payload_visible_rows(visible_rows);
     let searched: Vec<_> = lines
         .iter()
         .filter(|line| {
@@ -358,14 +379,10 @@ fn draw_payload(f: &mut Frame, area: ratatui::layout::Rect, app: &mut App, data:
                 .is_none_or(|q| line.to_ascii_lowercase().contains(&q.to_ascii_lowercase()))
         })
         .collect();
-    app.detail_scroll = app.detail_scroll.min(crate::format::job_payload_scroll_max(
-        searched.len(),
-        app.payload_visible_rows,
-    ));
-    let scroll = app.detail_scroll;
+    let viewport = viewport.resized(visible_rows, searched.len());
     let visible: Vec<Line> = searched
         .into_iter()
-        .skip(scroll)
+        .skip(viewport.scroll)
         .map(|l| Line::from(l.as_str()))
         .collect();
     let title = if app.payload_raw {
@@ -379,6 +396,7 @@ fn draw_payload(f: &mut Frame, area: ratatui::layout::Rect, app: &mut App, data:
         block = block.wrap(Wrap { trim: false });
     }
     f.render_widget(block, area);
+    viewport
 }
 
 fn draw_fact_column(
@@ -411,12 +429,18 @@ fn draw_fact_column(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use chrono::Utc;
-    use runledger_core::jobs::JobEventType;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use runledger_core::jobs::{JobEventType, JobStage, JobStatus, JobTypeName};
+    use runledger_postgres::jobs::JobQueueRecord;
     use serde_json::Value;
     use uuid::Uuid;
 
     use super::*;
+    use crate::config::Config;
 
     fn event_record(event_type: JobEventType, payload: Value) -> JobEventRecord {
         JobEventRecord {
@@ -431,6 +455,117 @@ mod tests {
             payload,
             occurred_at: Utc::now(),
         }
+    }
+
+    fn payload_app() -> App {
+        let mut app = App::new(Config {
+            database_url: "postgres://example/runledger".to_owned(),
+            org: None,
+            refresh_ms: 2_000,
+            limit: 100,
+            skip_schema_check: false,
+        });
+        app.job_detail_pane = JobDetailPane::Payload;
+        app
+    }
+
+    fn job_detail(payload: Value) -> JobDetailData {
+        let now = Utc::now();
+        JobDetailData {
+            job: JobQueueRecord {
+                id: Uuid::new_v4(),
+                job_type: JobTypeName::new("jobs.test").expect("valid job type"),
+                organization_id: None,
+                payload,
+                status: JobStatus::Pending,
+                priority: 0,
+                run_number: 1,
+                attempt: 0,
+                max_attempts: 3,
+                timeout_seconds: 300,
+                next_run_at: now,
+                lease_expires_at: None,
+                last_heartbeat_at: None,
+                worker_id: None,
+                started_at: None,
+                finished_at: None,
+                stage: JobStage::Queued,
+                progress_done: None,
+                progress_total: None,
+                progress_pct: None,
+                checkpoint: None,
+                output: None,
+                idempotency_key: None,
+                status_reason: None,
+                last_error_code: None,
+                last_error_message: None,
+                created_at: now,
+                updated_at: now,
+            },
+            events: Vec::new(),
+            logs: Vec::new(),
+            workflow_run_id: None,
+        }
+    }
+
+    fn render_payload(
+        app: &App,
+        data: &JobDetailData,
+        viewport: JobDetailViewport,
+        height: u16,
+    ) -> JobDetailViewport {
+        let backend = TestBackend::new(80, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let rendered_viewport = Cell::new(viewport);
+        terminal
+            .draw(|frame| {
+                rendered_viewport.set(draw_payload(frame, frame.area(), app, data, viewport));
+            })
+            .expect("render payload");
+        rendered_viewport.get()
+    }
+
+    #[test]
+    fn repeated_payload_rendering_reuses_immutable_detail_and_returns_viewport() {
+        let app = payload_app();
+        let data = job_detail(serde_json::json!({
+            "lines": (0..30).collect::<Vec<_>>()
+        }));
+        let original_payload = data.job.payload.clone();
+        let requested = JobDetailViewport {
+            scroll: 5,
+            visible_rows: 1,
+        };
+
+        let first = render_payload(&app, &data, requested, 8);
+        let second = render_payload(&app, &data, first, 8);
+
+        assert_eq!(first, second);
+        assert_eq!(first.visible_rows, 6);
+        assert_eq!(first.scroll, 5);
+        assert_eq!(data.job.payload, original_payload);
+    }
+
+    #[test]
+    fn payload_viewport_clamps_after_resize_and_detail_replacement() {
+        let app = payload_app();
+        let long_detail = job_detail(serde_json::json!({
+            "lines": (0..30).collect::<Vec<_>>()
+        }));
+        let short_detail = job_detail(serde_json::json!({"done": true}));
+        let requested = JobDetailViewport {
+            scroll: usize::MAX,
+            visible_rows: 1,
+        };
+
+        let small = render_payload(&app, &long_detail, requested, 6);
+        let large = render_payload(&app, &long_detail, small, 16);
+        let replaced = render_payload(&app, &short_detail, large, 16);
+
+        assert_eq!(small.visible_rows, 4);
+        assert_eq!(large.visible_rows, 14);
+        assert!(small.scroll > large.scroll);
+        assert_eq!(replaced.scroll, 0);
     }
 
     #[test]
