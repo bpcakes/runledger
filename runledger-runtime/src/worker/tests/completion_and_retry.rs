@@ -454,14 +454,13 @@ async fn process_claimed_job_success_observer_reports_committed_coalesced_progre
         .worker_id
         .clone()
         .expect("claimed job has worker id");
-    update_job_progress(
+    update_job_ordinary_progress(
         &pool,
         claimed_job.id,
         claimed_job.run_number,
         claimed_job.attempt,
         &worker_id,
-        &JobProgressUpdate {
-            stage: None,
+        &JobOrdinaryProgressUpdate {
             progress_done: Some(5),
             progress_total: Some(10),
             checkpoint: None,

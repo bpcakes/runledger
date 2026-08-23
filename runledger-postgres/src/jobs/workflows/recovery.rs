@@ -163,7 +163,7 @@ impl RecoveryBlueprint {
         })?;
 
         let mut steps_by_key = BTreeMap::new();
-        for step in std::mem::take(&mut initial.steps) {
+        for step in initial.take_steps() {
             insert_recovery_step(&mut steps_by_key, step)?;
         }
         for mutation in mutations {
@@ -177,7 +177,7 @@ impl RecoveryBlueprint {
                 deserialize_recovery_append_snapshot(mutation.request).map_err(|error| {
                     unsafe_recovery_snapshot_error(format!("invalid append snapshot: {error}"))
                 })?;
-            for step in append.steps {
+            for step in append.into_steps() {
                 insert_recovery_step(&mut steps_by_key, step)?;
             }
         }

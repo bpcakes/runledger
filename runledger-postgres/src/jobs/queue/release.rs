@@ -2,8 +2,10 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, DbTx, Error, Result};
 
-use super::super::errors::lease_owner_mismatch_error;
-use super::super::errors::unstarted_claim_release_not_applicable_error;
+use super::super::errors::{
+    lease_owner_mismatch_error, unstarted_claim_release_not_applicable_error,
+};
+use super::super::types::JobLeaseIdentity;
 use super::super::workflows::on_claim_released;
 use super::attempts::ATTEMPT_CLAIM_ORIGIN_WORKER_PRESTART;
 use super::events::{
@@ -12,20 +14,29 @@ use super::events::{
 };
 
 #[derive(Clone, Copy)]
-pub(crate) struct UnstartedClaimIdentity<'a> {
+pub(super) struct UnstartedClaimIdentity<'a> {
     pub job_id: Uuid,
     pub run_number: i32,
     pub attempt: i32,
     pub worker_id: Option<&'a str>,
 }
 
-impl UnstartedClaimIdentity<'_> {
+impl<'a> UnstartedClaimIdentity<'a> {
+    const fn from_live_lease(identity: JobLeaseIdentity<'a>) -> Self {
+        Self {
+            job_id: identity.job_id,
+            run_number: identity.run_number,
+            attempt: identity.attempt,
+            worker_id: Some(identity.worker_id),
+        }
+    }
+
     const fn should_reset_started_at(self) -> bool {
         self.attempt == 1
     }
 }
 
-pub(crate) enum TryReleaseUnstartedClaimResult {
+pub(super) enum TryReleaseUnstartedClaimResult {
     Released,
     NotApplicable,
 }
@@ -139,7 +150,7 @@ async fn delete_attempt_row_tx(
     Ok(())
 }
 
-pub(crate) async fn try_release_unstarted_job_claim_tx(
+pub(super) async fn try_release_unstarted_job_claim_tx(
     tx: &mut DbTx<'_>,
     identity: UnstartedClaimIdentity<'_>,
     reason: &str,
@@ -170,12 +181,14 @@ pub(crate) async fn try_release_unstarted_job_claim_tx(
     Ok(TryReleaseUnstartedClaimResult::Released)
 }
 
-pub(crate) async fn release_unstarted_job_claim_tx(
+async fn release_unstarted_job_claim_tx(
     tx: &mut DbTx<'_>,
-    identity: UnstartedClaimIdentity<'_>,
+    identity: JobLeaseIdentity<'_>,
     reason: &str,
     retry_delay_ms: i32,
 ) -> Result<()> {
+    let identity = UnstartedClaimIdentity::from_live_lease(identity);
+
     if matches!(
         try_release_unstarted_job_claim_tx(tx, identity, reason, retry_delay_ms).await?,
         TryReleaseUnstartedClaimResult::Released
@@ -186,12 +199,13 @@ pub(crate) async fn release_unstarted_job_claim_tx(
     Err(classify_unstarted_release_not_applicable_tx(tx, identity).await?)
 }
 
+/// Releases an exact live worker lease before execution has started.
+///
+/// Expired-lease recovery may have no worker id, so it remains on the
+/// reaper-only nullable identity path.
 pub async fn release_unstarted_job_claim(
     pool: &DbPool,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
-    worker_id: &str,
+    identity: JobLeaseIdentity<'_>,
     reason: &str,
     retry_delay_ms: i32,
 ) -> Result<()> {
@@ -200,18 +214,7 @@ pub async fn release_unstarted_job_claim(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
-    release_unstarted_job_claim_tx(
-        &mut tx,
-        UnstartedClaimIdentity {
-            job_id,
-            run_number,
-            attempt,
-            worker_id: Some(worker_id),
-        },
-        reason,
-        retry_delay_ms,
-    )
-    .await?;
+    release_unstarted_job_claim_tx(&mut tx, identity, reason, retry_delay_ms).await?;
 
     tx.commit()
         .await

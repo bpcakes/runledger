@@ -106,17 +106,94 @@ impl RetryTimingSource {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct ResolvedRetryTiming {
-    pub(super) policy_retry_delay_ms: i32,
-    pub(super) requested_retry_not_before: Option<DateTime<Utc>>,
-    pub(super) next_run_at: DateTime<Utc>,
-    pub(super) source: RetryTimingSource,
+/// The durable outcome of reconciling policy backoff with an optional handler
+/// lower bound. The variants deliberately encode the audit relationship:
+/// policy-only retries have no handler timestamp, policy-won retries retain a
+/// superseded handler timestamp, and handler-won retries use that timestamp as
+/// their effective schedule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ResolvedRetryTiming {
+    PolicyOnly {
+        policy_retry_delay_ms: i32,
+        effective_next_run_at: DateTime<Utc>,
+    },
+    PolicyWonOverHandlerHint {
+        policy_retry_delay_ms: i32,
+        requested_retry_not_before: DateTime<Utc>,
+        effective_next_run_at: DateTime<Utc>,
+    },
+    HandlerHintWon {
+        policy_retry_delay_ms: i32,
+        requested_retry_not_before: DateTime<Utc>,
+    },
 }
 
 impl ResolvedRetryTiming {
-    pub(super) const fn next_run_at(self) -> DateTime<Utc> {
-        self.next_run_at
+    pub(super) const fn policy_retry_delay_ms(self) -> i32 {
+        match self {
+            Self::PolicyOnly {
+                policy_retry_delay_ms,
+                ..
+            }
+            | Self::PolicyWonOverHandlerHint {
+                policy_retry_delay_ms,
+                ..
+            }
+            | Self::HandlerHintWon {
+                policy_retry_delay_ms,
+                ..
+            } => policy_retry_delay_ms,
+        }
+    }
+
+    pub(super) const fn requested_retry_not_before(self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::PolicyOnly { .. } => None,
+            Self::PolicyWonOverHandlerHint {
+                requested_retry_not_before,
+                ..
+            }
+            | Self::HandlerHintWon {
+                requested_retry_not_before,
+                ..
+            } => Some(requested_retry_not_before),
+        }
+    }
+
+    pub(super) const fn effective_next_run_at(self) -> DateTime<Utc> {
+        match self {
+            Self::PolicyOnly {
+                effective_next_run_at,
+                ..
+            }
+            | Self::PolicyWonOverHandlerHint {
+                effective_next_run_at,
+                ..
+            } => effective_next_run_at,
+            Self::HandlerHintWon {
+                requested_retry_not_before,
+                ..
+            } => requested_retry_not_before,
+        }
+    }
+
+    pub(super) const fn source(self) -> RetryTimingSource {
+        match self {
+            Self::PolicyOnly { .. } | Self::PolicyWonOverHandlerHint { .. } => {
+                RetryTimingSource::Policy
+            }
+            Self::HandlerHintWon { .. } => RetryTimingSource::HandlerNotBefore,
+        }
+    }
+
+    pub(super) const fn handler_hint_won_not_before(self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::HandlerHintWon {
+                requested_retry_not_before,
+                ..
+            } => Some(requested_retry_not_before),
+            Self::PolicyOnly { .. } | Self::PolicyWonOverHandlerHint { .. } => None,
+        }
     }
 }
 
@@ -168,8 +245,13 @@ impl<'a> HandlerFailureTransition<'a> {
         tx: &mut DbTx<'_>,
         retry_timing: ResolvedRetryTiming,
     ) -> Result<()> {
-        mark_handler_retryable_queue(tx, self.lease, self.failure, retry_timing.next_run_at())
-            .await?;
+        mark_handler_retryable_queue(
+            tx,
+            self.lease,
+            self.failure,
+            retry_timing.effective_next_run_at(),
+        )
+        .await?;
         finish_handler_retry_attempt(tx, self.lease, self.failure, retry_timing).await?;
         insert_handler_failed_event(tx, self.lease, self.failure, "insert failed event retry")
             .await?;
@@ -181,6 +263,7 @@ impl<'a> HandlerFailureTransition<'a> {
 #[derive(Clone, Copy)]
 pub(super) struct ExpiredLeaseTransition<'a> {
     identity: FailureIdentity,
+    failure: FailureDetails<'a>,
     dead_letter: DeadLetterSnapshot<'a>,
     started_without_renewal_heartbeat: bool,
 }
@@ -188,42 +271,50 @@ pub(super) struct ExpiredLeaseTransition<'a> {
 impl<'a> ExpiredLeaseTransition<'a> {
     pub(super) const fn new(
         identity: FailureIdentity,
+        failure: FailureDetails<'a>,
         dead_letter: DeadLetterSnapshot<'a>,
         started_without_renewal_heartbeat: bool,
     ) -> Self {
         Self {
             identity,
+            failure,
             dead_letter,
             started_without_renewal_heartbeat,
         }
     }
 
     pub(super) async fn apply_terminal(self, tx: &mut DbTx<'_>) -> Result<()> {
-        mark_expired_dead_lettered_queue(tx, self.identity).await?;
+        mark_expired_dead_lettered_queue(tx, self.identity, self.failure).await?;
         finish_failed_attempt_terminal(
             tx,
             self.identity,
-            LEASE_EXPIRED_FAILURE,
+            self.failure,
             "reap update dead lettered attempt",
         )
         .await?;
         upsert_dead_letter(
             tx,
             self.identity,
-            LEASE_EXPIRED_FAILURE,
+            self.failure,
             self.dead_letter,
             "reap insert dead letter row",
         )
         .await?;
-        insert_expired_failed_event(tx, self.identity, self.started_without_renewal_heartbeat)
-            .await?;
-        insert_expired_dead_lettered_event(
+        insert_expired_failed_event(
             tx,
             self.identity,
+            self.failure,
             self.started_without_renewal_heartbeat,
         )
         .await?;
-        notify_workflow_terminal(tx, self.identity.job_id, LEASE_EXPIRED_FAILURE).await
+        insert_expired_dead_lettered_event(
+            tx,
+            self.identity,
+            self.failure,
+            self.started_without_renewal_heartbeat,
+        )
+        .await?;
+        notify_workflow_terminal(tx, self.identity.job_id, self.failure).await
     }
 
     pub(super) async fn apply_retry(
@@ -231,19 +322,26 @@ impl<'a> ExpiredLeaseTransition<'a> {
         tx: &mut DbTx<'_>,
         retry_delay_ms: i32,
     ) -> Result<DateTime<Utc>> {
-        let next_run_at = mark_expired_retryable_queue(tx, self.identity, retry_delay_ms).await?;
-        finish_expired_retry_attempt(tx, self.identity, retry_delay_ms).await?;
-        insert_expired_failed_event(tx, self.identity, self.started_without_renewal_heartbeat)
-            .await?;
+        let next_run_at =
+            mark_expired_retryable_queue(tx, self.identity, self.failure, retry_delay_ms).await?;
+        finish_expired_retry_attempt(tx, self.identity, self.failure, retry_delay_ms).await?;
+        insert_expired_failed_event(
+            tx,
+            self.identity,
+            self.failure,
+            self.started_without_renewal_heartbeat,
+        )
+        .await?;
         insert_expired_retry_scheduled_event(
             tx,
             self.identity,
+            self.failure,
             retry_delay_ms,
             next_run_at,
             self.started_without_renewal_heartbeat,
         )
         .await?;
-        notify_workflow_retry(tx, self.identity.job_id, LEASE_EXPIRED_FAILURE).await?;
+        notify_workflow_retry(tx, self.identity.job_id, self.failure).await?;
         Ok(next_run_at)
     }
 }
@@ -288,6 +386,7 @@ async fn mark_handler_dead_lettered_queue(
 async fn mark_expired_dead_lettered_queue(
     tx: &mut DbTx<'_>,
     identity: FailureIdentity,
+    failure: FailureDetails<'_>,
 ) -> Result<()> {
     sqlx::query!(
         "UPDATE job_queue
@@ -297,14 +396,17 @@ async fn mark_expired_dead_lettered_queue(
              worker_id = NULL,
              finished_at = now(),
              output = NULL,
-             status_reason = 'LEASE_EXPIRED',
-             last_error_code = 'job.lease_expired',
-             last_error_message = 'Job lease expired before completion.',
+             status_reason = $3,
+             last_error_code = $4,
+             last_error_message = $5,
              updated_at = now()
          WHERE id = $1
            AND run_number = $2",
         identity.job_id,
         identity.run_number,
+        failure.kind_db_value,
+        failure.code,
+        failure.message,
     )
     .execute(&mut **tx)
     .await
@@ -420,6 +522,7 @@ async fn insert_handler_failed_event(
 async fn insert_expired_failed_event(
     tx: &mut DbTx<'_>,
     identity: FailureIdentity,
+    failure: FailureDetails<'_>,
     started_without_renewal_heartbeat: bool,
 ) -> Result<()> {
     sqlx::query!(
@@ -430,15 +533,18 @@ async fn insert_expired_failed_event(
             $3,
             'FAILED',
             jsonb_build_object(
-                'kind', 'LEASE_EXPIRED',
-                'error_code', 'job.lease_expired',
-                'error_message', 'Job lease expired before completion.',
-                'started_without_renewal_heartbeat', $4::bool
+                'kind', $4::text,
+                'error_code', $5::text,
+                'error_message', $6::text,
+                'started_without_renewal_heartbeat', $7::bool
             )
          )",
         identity.job_id,
         identity.run_number,
         identity.attempt,
+        failure.kind_db_value,
+        failure.code,
+        failure.message,
         started_without_renewal_heartbeat,
     )
     .execute(&mut **tx)
@@ -477,6 +583,7 @@ async fn insert_handler_dead_lettered_event(
 async fn insert_expired_dead_lettered_event(
     tx: &mut DbTx<'_>,
     identity: FailureIdentity,
+    failure: FailureDetails<'_>,
     started_without_renewal_heartbeat: bool,
 ) -> Result<()> {
     sqlx::query!(
@@ -487,14 +594,16 @@ async fn insert_expired_dead_lettered_event(
             $3,
             'DEAD_LETTERED',
             jsonb_build_object(
-                'kind', 'LEASE_EXPIRED',
-                'error_code', 'job.lease_expired',
-                'started_without_renewal_heartbeat', $4::bool
+                'kind', $4::text,
+                'error_code', $5::text,
+                'started_without_renewal_heartbeat', $6::bool
             )
          )",
         identity.job_id,
         identity.run_number,
         identity.attempt,
+        failure.kind_db_value,
+        failure.code,
         started_without_renewal_heartbeat,
     )
     .execute(&mut **tx)
@@ -544,6 +653,7 @@ async fn mark_handler_retryable_queue(
 async fn mark_expired_retryable_queue(
     tx: &mut DbTx<'_>,
     identity: FailureIdentity,
+    failure: FailureDetails<'_>,
     retry_delay_ms: i32,
 ) -> Result<DateTime<Utc>> {
     sqlx::query_scalar!(
@@ -554,9 +664,9 @@ async fn mark_expired_retryable_queue(
              worker_id = NULL,
              next_run_at = now() + ($2::bigint * interval '1 millisecond'),
              output = NULL,
-             status_reason = 'LEASE_EXPIRED',
-             last_error_code = 'job.lease_expired',
-             last_error_message = 'Job lease expired before completion.',
+             status_reason = $4,
+             last_error_code = $5,
+             last_error_message = $6,
              updated_at = now()
          WHERE id = $1
            AND run_number = $3
@@ -564,6 +674,9 @@ async fn mark_expired_retryable_queue(
         identity.job_id,
         i64::from(retry_delay_ms),
         identity.run_number,
+        failure.kind_db_value,
+        failure.code,
+        failure.message,
     )
     .fetch_one(&mut **tx)
     .await
@@ -595,10 +708,10 @@ async fn finish_handler_retry_attempt(
         failure.kind_db_value,
         failure.code,
         failure.message,
-        retry_timing.policy_retry_delay_ms,
-        retry_timing.requested_retry_not_before,
-        retry_timing.next_run_at,
-        retry_timing.source.as_db_value(),
+        retry_timing.policy_retry_delay_ms(),
+        retry_timing.requested_retry_not_before(),
+        retry_timing.effective_next_run_at(),
+        retry_timing.source().as_db_value(),
     )
     .execute(&mut **tx)
     .await
@@ -610,21 +723,25 @@ async fn finish_handler_retry_attempt(
 async fn finish_expired_retry_attempt(
     tx: &mut DbTx<'_>,
     identity: FailureIdentity,
+    failure: FailureDetails<'_>,
     retry_delay_ms: i32,
 ) -> Result<()> {
     sqlx::query!(
         "UPDATE job_attempts
          SET finished_at = now(),
-             outcome = 'LEASE_EXPIRED',
-             error_code = 'job.lease_expired',
-             error_message = 'Job lease expired before completion.',
-             retry_delay_ms = $4
+             outcome = $4::text::job_failure_kind,
+             error_code = $5,
+             error_message = $6,
+             retry_delay_ms = $7
          WHERE job_id = $1
            AND run_number = $2
            AND attempt = $3",
         identity.job_id,
         identity.run_number,
         identity.attempt,
+        failure.kind_db_value,
+        failure.code,
+        failure.message,
         retry_delay_ms,
     )
     .execute(&mut **tx)
@@ -662,10 +779,10 @@ async fn insert_handler_retry_scheduled_event(
         identity.job_id,
         identity.run_number,
         identity.attempt,
-        retry_timing.policy_retry_delay_ms,
-        retry_timing.requested_retry_not_before,
-        retry_timing.next_run_at,
-        retry_timing.source.as_db_value(),
+        retry_timing.policy_retry_delay_ms(),
+        retry_timing.requested_retry_not_before(),
+        retry_timing.effective_next_run_at(),
+        retry_timing.source().as_db_value(),
     )
     .execute(&mut **tx)
     .await
@@ -677,6 +794,7 @@ async fn insert_handler_retry_scheduled_event(
 async fn insert_expired_retry_scheduled_event(
     tx: &mut DbTx<'_>,
     identity: FailureIdentity,
+    failure: FailureDetails<'_>,
     retry_delay_ms: i32,
     next_run_at: DateTime<Utc>,
     started_without_renewal_heartbeat: bool,
@@ -689,15 +807,16 @@ async fn insert_expired_retry_scheduled_event(
             $3,
             'RETRY_SCHEDULED',
             jsonb_build_object(
-                'kind', 'LEASE_EXPIRED',
-                'retry_delay_ms', $4::int4,
-                'next_run_at', $5::timestamptz,
-                'started_without_renewal_heartbeat', $6::bool
+                'kind', $4::text,
+                'retry_delay_ms', $5::int4,
+                'next_run_at', $6::timestamptz,
+                'started_without_renewal_heartbeat', $7::bool
             )
          )",
         identity.job_id,
         identity.run_number,
         identity.attempt,
+        failure.kind_db_value,
         retry_delay_ms,
         next_run_at,
         started_without_renewal_heartbeat,

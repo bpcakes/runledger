@@ -21,6 +21,27 @@ const JOB_TYPE_A: &str = "jobs.test.workflow_recovery.a";
 const JOB_TYPE_B: &str = "jobs.test.workflow_recovery.b";
 const WORKFLOW_TYPE: &str = "workflow.test.recovery";
 
+async fn record_postgres_server_version(pool: &DbPool, diagnostic: &str) {
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "{diagnostic} PostgreSQL server_version={server_version}, \
+         server_version_num={server_version_num}"
+    );
+    assert_eq!(
+        server_version_num / 10_000,
+        18,
+        "workflow recovery regression must run on PostgreSQL 18"
+    );
+}
+
 async fn register_definitions(pool: &DbPool) {
     register_definitions_with_defaults(pool, 1, 3, 60, 100).await;
 }
@@ -557,6 +578,7 @@ async fn legacy_source_without_canonical_snapshot_is_rejected() {
 #[tokio::test]
 async fn recovery_fails_closed_on_unknown_snapshot_fields_and_mutation_kinds() {
     let (pool, database) = setup_ephemeral_pool("workflow_recovery_fail_closed", 8).await;
+    record_postgres_server_version(&pool, "workflow recovery strict snapshot schema").await;
     register_definitions(&pool).await;
     let (source_run_id, source_step_id, _) = terminal_source_with_append_history(&pool).await;
 

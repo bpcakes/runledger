@@ -176,12 +176,25 @@ fn event_timestamp(payload: &Value, key: &str) -> DateTime<Utc> {
         .unwrap_or_else(|| panic!("event {key} should be an RFC 3339 timestamp"))
 }
 
-async fn record_postgres_server_version(pool: &DbPool) {
+async fn record_postgres_18_server_version(pool: &DbPool) {
     let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
         .fetch_one(pool)
         .await
         .expect("load PostgreSQL server version");
-    eprintln!("retry timing regression PostgreSQL server_version={server_version}");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(pool)
+            .await
+            .expect("load PostgreSQL server version number");
+    eprintln!(
+        "retry timing regression PostgreSQL server_version={server_version}, \
+         server_version_num={server_version_num}"
+    );
+    assert_eq!(
+        server_version_num / 10_000,
+        18,
+        "retry timing regression must run on PostgreSQL 18"
+    );
 }
 
 fn assert_invalid_retry_delay_error(error: Error) {
@@ -346,7 +359,7 @@ async fn retryable_failure_rejects_invalid_retry_timing_without_mutating_lease()
 #[tokio::test]
 async fn terminal_panicked_and_exhausted_failures_ignore_invalid_retry_timing() {
     let (pool, database) = setup_ephemeral_pool("postgres_retry_timing_ignored", 4).await;
-    record_postgres_server_version(&pool).await;
+    record_postgres_18_server_version(&pool).await;
     register_job_definition(&pool).await;
 
     let cases = [
@@ -443,6 +456,7 @@ async fn terminal_panicked_and_exhausted_failures_ignore_invalid_retry_timing() 
 #[tokio::test]
 async fn shorter_handler_retry_hint_is_audited_while_policy_backoff_wins() {
     let (pool, database) = setup_ephemeral_pool("postgres_retry_timing_relative", 4).await;
+    record_postgres_18_server_version(&pool).await;
     register_job_definition(&pool).await;
     let job_id = enqueue_test_job(&pool, "relative_retry_timing").await;
     let job = claim_one_job(&pool, "worker-relative-retry-timing").await;
@@ -477,10 +491,12 @@ async fn shorter_handler_retry_hint_is_audited_while_policy_backoff_wins() {
 
     let attempt = load_attempt_mutation_snapshot(&pool, job.id, job.run_number, job.attempt).await;
     assert_eq!(attempt.retry_delay_ms, Some(1_000));
-    assert!(attempt.requested_retry_not_before.is_some());
+    let requested_retry_not_before = attempt
+        .requested_retry_not_before
+        .expect("handler hint should be retained for audit");
     assert_eq!(attempt.effective_next_run_at, Some(next_run_at));
     assert_eq!(attempt.retry_timing_source.as_deref(), Some("POLICY"));
-    assert!(attempt.requested_retry_not_before < attempt.effective_next_run_at);
+    assert!(requested_retry_not_before < next_run_at);
 
     let event = list_job_events(&pool, None, job_id, 10, None)
         .await
@@ -503,6 +519,94 @@ async fn shorter_handler_retry_hint_is_audited_while_policy_backoff_wins() {
         event.payload.get("retry_delay_ms").and_then(Value::as_i64),
         Some(1_000)
     );
+    assert_eq!(
+        event_timestamp(&event.payload, "requested_retry_not_before"),
+        requested_retry_not_before
+    );
+    assert_eq!(
+        event_timestamp(&event.payload, "requested_retry_at"),
+        requested_retry_not_before
+    );
+    assert_eq!(
+        event_timestamp(&event.payload, "effective_next_run_at"),
+        next_run_at
+    );
+    assert_eq!(event_timestamp(&event.payload, "next_run_at"), next_run_at);
+    assert_eq!(
+        event
+            .payload
+            .get("retry_timing_source")
+            .and_then(Value::as_str),
+        Some("POLICY")
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn policy_only_retry_persists_coherent_attempt_and_event() {
+    let (pool, database) = setup_ephemeral_pool("postgres_retry_timing_policy_only", 4).await;
+    record_postgres_18_server_version(&pool).await;
+    register_job_definition(&pool).await;
+    let job_id = enqueue_test_job(&pool, "policy_only_retry_timing").await;
+    let job = claim_one_job(&pool, "worker-policy-only-retry-timing").await;
+    let worker_id = job.worker_id.clone().expect("claimed job has worker id");
+
+    let outcome = complete_job_failure_with_outcome(
+        &pool,
+        job.id,
+        job.run_number,
+        job.attempt,
+        &worker_id,
+        &JobFailureUpdate::new(
+            JobFailureKind::Retryable,
+            "job.test.policy_only_retry_timing",
+            "retry with policy backoff only",
+            Some(1_000),
+        ),
+    )
+    .await
+    .expect("persist policy-only retry timing");
+
+    let JobFailureCompletionDisposition::RetryScheduled {
+        retry_delay_ms,
+        next_run_at,
+    } = outcome.disposition
+    else {
+        panic!("expected policy-only retry disposition");
+    };
+    assert_eq!(retry_delay_ms, 1_000);
+    assert_eq!(load_job(&pool, job_id).await.next_run_at, next_run_at);
+
+    let attempt = load_attempt_mutation_snapshot(&pool, job.id, job.run_number, job.attempt).await;
+    assert_eq!(attempt.retry_delay_ms, Some(1_000));
+    assert_eq!(attempt.requested_retry_not_before, None);
+    assert_eq!(attempt.effective_next_run_at, Some(next_run_at));
+    assert_eq!(attempt.retry_timing_source.as_deref(), Some("POLICY"));
+
+    let event = list_job_events(&pool, None, job_id, 10, None)
+        .await
+        .expect("list policy-only retry events")
+        .into_iter()
+        .find(|event| event.event_type == JobEventType::RetryScheduled)
+        .expect("policy-only retry event exists");
+    assert_event_payload_keys(
+        &event.payload,
+        &[
+            "effective_next_run_at",
+            "next_run_at",
+            "retry_delay_ms",
+            "retry_timing_source",
+        ],
+    );
+    assert_eq!(
+        event.payload.get("retry_delay_ms").and_then(Value::as_i64),
+        Some(1_000)
+    );
+    assert_eq!(
+        event_timestamp(&event.payload, "effective_next_run_at"),
+        next_run_at
+    );
     assert_eq!(event_timestamp(&event.payload, "next_run_at"), next_run_at);
     assert_eq!(
         event
@@ -518,6 +622,7 @@ async fn shorter_handler_retry_hint_is_audited_while_policy_backoff_wins() {
 #[tokio::test]
 async fn absolute_retry_timing_preserves_provider_reset_time_without_a_delay_limit() {
     let (pool, database) = setup_ephemeral_pool("postgres_retry_timing_absolute", 4).await;
+    record_postgres_18_server_version(&pool).await;
     register_job_definition(&pool).await;
     let job_id = enqueue_test_job(&pool, "absolute_retry_timing").await;
     let job = claim_one_job(&pool, "worker-absolute-retry-timing").await;
@@ -594,6 +699,10 @@ async fn absolute_retry_timing_preserves_provider_reset_time_without_a_delay_lim
     );
     assert_eq!(
         event_timestamp(&event.payload, "requested_retry_at"),
+        persisted_retry_at
+    );
+    assert_eq!(
+        event_timestamp(&event.payload, "effective_next_run_at"),
         persisted_retry_at
     );
     assert_eq!(

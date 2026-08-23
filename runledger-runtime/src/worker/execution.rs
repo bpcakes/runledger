@@ -5,7 +5,7 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 use runledger_core::jobs::{JobCompletion, JobContext, JobFailure};
 use runledger_postgres::QueryErrorKind;
-use runledger_postgres::jobs::{self, JobLeaseIdentity, JobProgressUpdate};
+use runledger_postgres::jobs::{self, JobLeaseIdentity, JobRunningUpdate};
 use tokio::time::{Duration, Instant, MissedTickBehavior, sleep_until};
 use tracing::{Instrument, info, info_span, warn};
 
@@ -89,7 +89,7 @@ impl ClaimedJobExecution {
             let context = self.context();
             let observed_job = self.observed_job();
 
-            if !self.mark_job_running_or_abort(&context).await {
+            if !self.mark_job_running_or_abort().await {
                 return;
             }
             let mut running_notification =
@@ -207,34 +207,25 @@ impl ClaimedJobExecution {
         );
     }
 
-    async fn mark_job_running_or_abort(&self, context: &JobContext) -> bool {
-        let running_progress = JobProgressUpdate {
-            stage: Some(runledger_core::jobs::JobStage::Running),
+    async fn mark_job_running_or_abort(&self) -> bool {
+        let running_update = JobRunningUpdate {
             progress_done: None,
             progress_total: None,
             checkpoint: None,
         };
 
-        let Err(source) = jobs::update_job_progress_for_lease(
-            &self.pool,
-            self.lease_identity(),
-            &running_progress,
-        )
-        .await
+        let Err(source) =
+            jobs::mark_job_running_for_lease(&self.pool, self.lease_identity(), &running_update)
+                .await
         else {
             return true;
         };
 
-        self.handle_running_progress_persist_failure(context, source)
-            .await;
+        self.handle_running_progress_persist_failure(source).await;
         false
     }
 
-    async fn handle_running_progress_persist_failure(
-        &self,
-        context: &JobContext,
-        source: runledger_postgres::Error,
-    ) {
+    async fn handle_running_progress_persist_failure(&self, source: runledger_postgres::Error) {
         let lease_owner_mismatch = is_lease_owner_mismatch_error(&source);
         let error = WorkerError::SetRunningProgress {
             job_id: self.job.id,
@@ -254,10 +245,7 @@ impl ClaimedJobExecution {
 
         match jobs::release_unstarted_job_claim(
             &self.pool,
-            self.job.id,
-            self.job.run_number,
-            self.job.attempt,
-            &context.worker_id,
+            self.lease_identity(),
             RUNNING_PROGRESS_PERSIST_FAILED_REASON,
             UNSTARTED_CLAIM_RETRY_DELAY_MS,
         )

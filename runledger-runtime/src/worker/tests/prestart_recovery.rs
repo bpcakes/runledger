@@ -149,6 +149,7 @@ async fn process_claimed_job_aborts_when_running_progress_cannot_be_persisted() 
 #[tokio::test]
 async fn release_unstarted_claim_reports_not_applicable_after_running_persists() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_release_not_applicable", 8).await;
+    record_postgres_server_version(&pool, "unstarted-claim release after running persists").await;
 
     let mut tx = pool.begin().await.expect("begin tx");
     upsert_job_definition_tx(
@@ -184,7 +185,7 @@ async fn release_unstarted_claim_reports_not_applicable_after_running_persists()
     .expect("enqueue job");
 
     let claimed_job = claim_one_job(&pool, "worker-release-not-applicable").await;
-    update_job_progress(
+    mark_job_running(
         &pool,
         claimed_job.id,
         claimed_job.run_number,
@@ -193,8 +194,7 @@ async fn release_unstarted_claim_reports_not_applicable_after_running_persists()
             .worker_id
             .as_deref()
             .expect("worker id is set on claimed job"),
-        &JobProgressUpdate {
-            stage: Some(runledger_core::jobs::JobStage::Running),
+        &JobRunningUpdate {
             progress_done: None,
             progress_total: None,
             checkpoint: None,
@@ -205,10 +205,12 @@ async fn release_unstarted_claim_reports_not_applicable_after_running_persists()
 
     let error = release_unstarted_job_claim(
         &pool,
-        job_id,
-        claimed_job.run_number,
-        claimed_job.attempt,
-        "worker-release-not-applicable",
+        JobLeaseIdentity::new(
+            job_id,
+            claimed_job.run_number,
+            claimed_job.attempt,
+            "worker-release-not-applicable",
+        ),
         "TEST_NOT_APPLICABLE",
         0,
     )
@@ -224,8 +226,9 @@ async fn release_unstarted_claim_reports_not_applicable_after_running_persists()
 }
 
 #[tokio::test]
-async fn release_unstarted_claim_reports_owner_mismatch_for_other_worker() {
+async fn strict_unstarted_claim_release_reports_identity_mismatch() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_release_owner_mismatch", 8).await;
+    record_postgres_server_version(&pool, "strict unstarted-claim identity mismatch").await;
 
     let mut tx = pool.begin().await.expect("begin tx");
     upsert_job_definition_tx(
@@ -273,10 +276,12 @@ async fn release_unstarted_claim_reports_owner_mismatch_for_other_worker() {
 
     let error = release_unstarted_job_claim(
         &pool,
-        job_id,
-        claimed_job.run_number,
-        claimed_job.attempt,
-        "worker-release-owner-a",
+        JobLeaseIdentity::new(
+            job_id,
+            claimed_job.run_number,
+            claimed_job.attempt,
+            "worker-release-owner-a",
+        ),
         "TEST_OWNER_MISMATCH",
         0,
     )
@@ -284,6 +289,99 @@ async fn release_unstarted_claim_reports_owner_mismatch_for_other_worker() {
     .expect_err("release should fail when another worker owns the lease");
 
     assert_eq!(query_error_code(&error), Some("job.lease_owner_mismatch"));
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load identity-mismatched job")
+        .expect("identity-mismatched job exists");
+    assert_eq!(persisted.status, JobStatus::Leased);
+    assert_eq!(persisted.attempt, claimed_job.attempt);
+    assert_eq!(
+        persisted.worker_id.as_deref(),
+        Some("worker-release-owner-b")
+    );
+    assert!(
+        list_job_events(&pool, None, job_id, 20, None)
+            .await
+            .expect("list identity-mismatched job events")
+            .iter()
+            .all(|event| event.event_type != JobEventType::Requeued),
+        "a rejected strict release must not write a requeue audit event"
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn strict_unstarted_claim_release_rejects_a_stale_attempt_identity() {
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_release_stale_attempt", 8).await;
+    record_postgres_server_version(&pool, "strict unstarted-claim stale attempt").await;
+
+    let (job_id, first_claim) = enqueue_and_claim_job(
+        &pool,
+        JobType::new("jobs.test.release_stale_attempt"),
+        3,
+        json!({"kind": "release-stale-attempt"}),
+        "worker-release-stale-attempt",
+    )
+    .await;
+    let worker_id = first_claim
+        .worker_id
+        .clone()
+        .expect("claimed job has worker id");
+    let stale_identity = JobLeaseIdentity::new(
+        first_claim.id,
+        first_claim.run_number,
+        first_claim.attempt,
+        &worker_id,
+    );
+
+    complete_job_failure(
+        &pool,
+        stale_identity.job_id,
+        stale_identity.run_number,
+        stale_identity.attempt,
+        stale_identity.worker_id,
+        &JobFailureUpdate::new(
+            JobFailureKind::Retryable,
+            "job.test.release_stale_attempt",
+            "create a newer lease attempt",
+            Some(1),
+        ),
+    )
+    .await
+    .expect("complete first attempt with a retry");
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let current_claim = claim_one_job(&pool, "worker-release-stale-attempt").await;
+    assert_eq!(current_claim.id, job_id);
+    assert_eq!(current_claim.attempt, stale_identity.attempt + 1);
+
+    let error = release_unstarted_job_claim(&pool, stale_identity, "TEST_STALE_ATTEMPT", 0)
+        .await
+        .expect_err("a stale lease identity must not release the newer attempt");
+
+    assert_eq!(
+        query_error_code(&error),
+        Some("job.unstarted_claim_release_not_applicable")
+    );
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load newer lease attempt")
+        .expect("newer lease attempt exists");
+    assert_eq!(persisted.status, JobStatus::Leased);
+    assert_eq!(persisted.attempt, current_claim.attempt);
+    assert_eq!(
+        persisted.worker_id.as_deref(),
+        Some("worker-release-stale-attempt")
+    );
+    assert!(
+        list_job_events(&pool, None, job_id, 20, None)
+            .await
+            .expect("list stale-attempt job events")
+            .iter()
+            .all(|event| event.event_type != JobEventType::Requeued),
+        "a stale strict release must not write a requeue audit event"
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }

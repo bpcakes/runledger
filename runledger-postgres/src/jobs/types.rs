@@ -26,10 +26,15 @@ pub use self::events::{
     DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord,
     SuccessfulReplayEnqueuedEventPayload,
 };
+#[allow(
+    deprecated,
+    reason = "the deprecated stage-bearing progress input remains publicly available during migration"
+)]
 pub use self::lifecycle::{
     JobCompletionUpdate, JobContinuationOutcome, JobContinuationUpdate,
     JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
-    JobLeaseIdentity, JobProgressUpdate, JobSuccessCompletionOutcome,
+    JobLeaseIdentity, JobOrdinaryProgressUpdate, JobProgressUpdate, JobRunningUpdate,
+    JobSuccessCompletionOutcome,
 };
 pub use self::reaper::{
     ReapExpiredLeaseCleanupError, ReapExpiredLeaseCleanupOperation, ReapExpiredLeaseDeferredError,

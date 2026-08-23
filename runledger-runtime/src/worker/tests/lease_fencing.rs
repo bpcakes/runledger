@@ -41,7 +41,7 @@ async fn expired_lease_rejects_worker_lifecycle_updates() {
     )
     .await;
     expire_job_lease(&pool, progress_job_id).await;
-    let progress_error = update_job_progress(
+    let progress_error = mark_job_running(
         &pool,
         progress_claim.id,
         progress_claim.run_number,
@@ -50,8 +50,7 @@ async fn expired_lease_rejects_worker_lifecycle_updates() {
             .worker_id
             .as_deref()
             .expect("claimed job has worker id"),
-        &JobProgressUpdate {
-            stage: Some(runledger_core::jobs::JobStage::Running),
+        &JobRunningUpdate {
             progress_done: None,
             progress_total: None,
             checkpoint: None,
@@ -483,14 +482,13 @@ async fn process_claimed_job_terminally_fails_stale_partial_success_progress_wit
         .worker_id
         .clone()
         .expect("claimed job has worker id");
-    update_job_progress(
+    update_job_ordinary_progress(
         &pool,
         claimed_job.id,
         claimed_job.run_number,
         claimed_job.attempt,
         &worker_id,
-        &JobProgressUpdate {
-            stage: None,
+        &JobOrdinaryProgressUpdate {
             progress_done: Some(5),
             progress_total: Some(10),
             checkpoint: None,
@@ -576,14 +574,13 @@ async fn stale_partial_continuation_progress_reports_the_continuation_path() {
         .worker_id
         .clone()
         .expect("claimed job has worker id");
-    update_job_progress(
+    update_job_ordinary_progress(
         &pool,
         claimed_job.id,
         claimed_job.run_number,
         claimed_job.attempt,
         &worker_id,
-        &JobProgressUpdate {
-            stage: None,
+        &JobOrdinaryProgressUpdate {
             progress_done: Some(5),
             progress_total: Some(10),
             checkpoint: None,
