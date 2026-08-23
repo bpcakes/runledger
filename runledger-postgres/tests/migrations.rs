@@ -633,7 +633,7 @@ async fn raw_version_missing_strands_session_lock_until_pool_close_but_safe_path
         .expect("apply current migrations before raw compatibility check");
 
     let _migration_connection_budget = acquire_test_db_connection_budget(2).await;
-    let database_url = harness.database.url.clone();
+    let database_url = harness.database.url().to_owned();
     let raw_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)

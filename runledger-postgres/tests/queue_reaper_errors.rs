@@ -248,7 +248,7 @@ async fn expired_lease_reaper_reports_deferred_row_error_and_continues_batch() {
 
     let reaper_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect(&database.url)
+        .connect(database.url())
         .await
         .expect("connect reaper pool");
     sqlx::query("SET lock_timeout = '100ms'")

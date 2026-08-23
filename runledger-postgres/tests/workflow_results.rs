@@ -546,7 +546,7 @@ async fn workflow_handle_initial_lookup_timeout_runs_final_probe() {
         setup_ephemeral_pool("workflow_handle_final_probe_initial_lookup", 1).await;
     let side_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect(&database.url)
+        .connect(database.url())
         .await
         .expect("connect side pool");
     let job_type = JobType::new("jobs.test.workflow_final_probe_initial_lookup");
