@@ -4,11 +4,12 @@ use chrono::{Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{JobStage, JobStatus, JobType};
 use runledger_postgres::jobs::{
     JobDefinitionUpdate, JobEnqueue, JobEnqueueIntent, JobEnqueueIntentDisposition,
-    JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentStatus,
-    delete_promoted_job_enqueue_intents_before, delete_promoted_job_enqueue_intents_for_jobs_tx,
-    enqueue_job, get_job_by_id, get_job_enqueue_intent_by_id, get_job_enqueue_intent_metrics,
-    list_job_enqueue_intents, list_job_events, promote_job_enqueue_intents_for_types,
-    record_job_enqueue_intent, record_job_enqueue_intent_tx, update_job_definition,
+    JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentState,
+    JobEnqueueIntentStatus, delete_promoted_job_enqueue_intents_before,
+    delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, get_job_by_id,
+    get_job_enqueue_intent_by_id, get_job_enqueue_intent_metrics, list_job_enqueue_intents,
+    list_job_events, promote_job_enqueue_intents_for_types, record_job_enqueue_intent,
+    record_job_enqueue_intent_tx, update_job_definition,
 };
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::json;
@@ -55,8 +56,8 @@ async fn records_without_definition_and_enforces_strict_transactional_idempotenc
         .await
         .expect("record intent before definition");
     assert_eq!(inserted.disposition, JobEnqueueIntentDisposition::Inserted);
-    assert_eq!(inserted.status, JobEnqueueIntentStatus::Pending);
-    assert_eq!(inserted.promoted_job_id, None);
+    assert_eq!(inserted.status(), JobEnqueueIntentStatus::Pending);
+    assert_eq!(inserted.promoted_job_id(), None);
     tx.commit().await.expect("commit application transaction");
 
     assert_eq!(
@@ -142,7 +143,7 @@ async fn jsonb_numeric_normalization_preserves_idempotency_and_promotion() {
             .await
             .expect("load normalized JSONB intent")
             .expect("normalized JSONB intent exists")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Promoted
     );
 
@@ -253,7 +254,7 @@ async fn validates_inputs_and_does_not_wait_on_job_definition_locks() {
         .expect("intent recording must not wait on job_definitions")
         .expect("record task must not panic")
         .expect("record intent while definitions are locked");
-    assert_eq!(outcome.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(outcome.status(), JobEnqueueIntentStatus::Pending);
     lock_tx.rollback().await.expect("release definition lock");
 
     teardown_ephemeral_pool(pool, database).await;
@@ -303,6 +304,64 @@ async fn database_rejects_unicode_blank_intent_keys_and_stages() {
             .expect("constraint failure must be a database error");
         assert_eq!(database_error.constraint(), Some(expected_constraint));
     }
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn database_rejects_impossible_enqueue_intent_lifecycle_shapes() {
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_state_constraint", 2).await;
+    record_postgres_server_version(&pool, "intent lifecycle state rejection").await;
+    let payload = json!({"event": "state-constraint"});
+    let outcome = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, "state-constraint"),
+    )
+    .await
+    .expect("record initial pending intent");
+
+    for update in [
+        "UPDATE job_enqueue_intents
+         SET promotion_attempts = 1
+         WHERE id = $1",
+        "UPDATE job_enqueue_intents
+         SET status = 'PROMOTED',
+             promotion_attempts = 1,
+             last_attempted_at = now()
+         WHERE id = $1",
+        "UPDATE job_enqueue_intents
+         SET status = 'CONFLICTED',
+             promotion_attempts = 1,
+             last_attempted_at = now(),
+             conflicted_at = now()
+         WHERE id = $1",
+        "UPDATE job_enqueue_intents
+         SET promotion_attempts = 1,
+             last_attempted_at = now(),
+             last_error_code = '',
+             last_error_message = 'message'
+         WHERE id = $1",
+    ] {
+        let error = sqlx::query(update)
+            .bind(outcome.intent_id)
+            .execute(&pool)
+            .await
+            .expect_err("database must reject impossible intent lifecycle shape");
+        assert_eq!(
+            error
+                .as_database_error()
+                .expect("state rejection must be a database error")
+                .constraint(),
+            Some("chk_job_enqueue_intents_state_fields")
+        );
+    }
+
+    let record = get_job_enqueue_intent_by_id(&pool, None, outcome.intent_id)
+        .await
+        .expect("decode intent after rejected updates")
+        .expect("intent remains present");
+    assert_eq!(record.state, JobEnqueueIntentState::InitialPending);
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -405,7 +464,7 @@ async fn concurrent_uncommitted_recorders_converge_after_unique_key_wait() {
         .expect("record the existing intent");
     assert_eq!(second.intent_id, first.intent_id);
     assert_eq!(second.disposition, JobEnqueueIntentDisposition::Existing);
-    assert_eq!(second.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(second.status(), JobEnqueueIntentStatus::Pending);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM job_enqueue_intents
@@ -480,11 +539,18 @@ async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
         .await
         .expect("load promoted intent")
         .expect("promoted intent exists");
-    assert_eq!(promoted.status, JobEnqueueIntentStatus::Promoted);
+    assert_eq!(promoted.status(), JobEnqueueIntentStatus::Promoted);
+    assert!(matches!(
+        &promoted.state,
+        JobEnqueueIntentState::Promoted {
+            promotion_attempts: 1,
+            ..
+        }
+    ));
     assert_eq!(promoted.enqueue_request_version, 1);
-    assert_eq!(promoted.promotion_attempts, 1);
-    assert!(promoted.last_attempted_at.is_some());
-    let job_id = promoted.promoted_job_id.expect("promoted job id");
+    assert_eq!(promoted.promotion_attempts(), 1);
+    assert!(promoted.last_attempted_at().is_some());
+    let job_id = promoted.promoted_job_id().expect("promoted job id");
     let job = get_job_by_id(&pool, Some(organization_id), job_id)
         .await
         .expect("load promoted job")
@@ -653,7 +719,7 @@ async fn intent_metrics_are_bounded_and_page_in_stable_job_type_order() {
         )
         .await
         .expect("record organization-scoped metrics intent");
-        assert_eq!(outcome.status, JobEnqueueIntentStatus::Pending);
+        assert_eq!(outcome.status(), JobEnqueueIntentStatus::Pending);
     }
     let global = record_job_enqueue_intent(
         &pool,
@@ -665,7 +731,7 @@ async fn intent_metrics_are_bounded_and_page_in_stable_job_type_order() {
     )
     .await
     .expect("record out-of-scope global metrics intent");
-    assert_eq!(global.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(global.status(), JobEnqueueIntentStatus::Pending);
 
     let first_page = get_job_enqueue_intent_metrics(
         &pool,
@@ -780,7 +846,7 @@ async fn intent_metrics_bound_conflicts_to_the_recent_operational_window() {
             .await
             .expect("load aged conflicted evidence")
             .expect("aged conflicted evidence remains available")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Conflicted
     );
 
@@ -837,7 +903,7 @@ async fn recording_retries_when_a_conflicting_intent_disappears_before_lookup() 
         .expect("retry after conflicting intent disappears");
     assert_eq!(retried.disposition, JobEnqueueIntentDisposition::Inserted);
     assert_ne!(retried.intent_id, original.intent_id);
-    assert_eq!(retried.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(retried.status(), JobEnqueueIntentStatus::Pending);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM job_enqueue_intents
@@ -886,7 +952,7 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
             .await
             .expect("load pending intent")
             .expect("pending intent exists")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Pending
     );
 
@@ -973,8 +1039,8 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
         .await
         .expect("load equivalent intent")
         .expect("equivalent intent exists");
-    assert_eq!(equivalent.status, JobEnqueueIntentStatus::Promoted);
-    assert_eq!(equivalent.promoted_job_id, Some(existing_job_id));
+    assert_eq!(equivalent.status(), JobEnqueueIntentStatus::Promoted);
+    assert_eq!(equivalent.promoted_job_id(), Some(existing_job_id));
     let delete_error = sqlx::query("DELETE FROM job_queue WHERE id = $1")
         .bind(existing_job_id)
         .execute(&pool)
@@ -1060,9 +1126,16 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
         .await
         .expect("load conflicted intent")
         .expect("conflicted intent exists");
-    assert_eq!(conflicted.status, JobEnqueueIntentStatus::Conflicted);
+    assert_eq!(conflicted.status(), JobEnqueueIntentStatus::Conflicted);
+    assert!(matches!(
+        &conflicted.state,
+        JobEnqueueIntentState::Conflicted {
+            promotion_attempts: 1,
+            ..
+        }
+    ));
     assert_eq!(
-        conflicted.last_error_code.as_deref(),
+        conflicted.promotion_error().map(|error| error.code()),
         Some("job.idempotency_conflict")
     );
 
@@ -1154,14 +1227,14 @@ async fn retention_delete_wait_is_bounded_while_holding_fence() {
         .await
         .expect("load promoted intent")
         .expect("promoted intent exists");
-    let promoted_job_id = promoted.promoted_job_id.expect("promoted intent job id");
+    let promoted_job_id = promoted.promoted_job_id().expect("promoted intent job id");
 
     let mut recorder_tx = pool.begin().await.expect("begin duplicate recorder");
     let duplicate = record_job_enqueue_intent_tx(&mut recorder_tx, &intent)
         .await
         .expect("record duplicate while retaining its intent row lock");
     assert_eq!(duplicate.disposition, JobEnqueueIntentDisposition::Existing);
-    assert_eq!(duplicate.status, JobEnqueueIntentStatus::Promoted);
+    assert_eq!(duplicate.status(), JobEnqueueIntentStatus::Promoted);
 
     let mut retention_tx = pool.begin().await.expect("begin bounded retention delete");
     let started = Instant::now();
@@ -1195,7 +1268,7 @@ async fn retention_delete_wait_is_bounded_while_holding_fence() {
             .await
             .expect("load intent after bounded retention delete")
             .expect("intent remains after bounded retention delete")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Promoted
     );
 
@@ -1226,14 +1299,14 @@ async fn intent_first_recorder_and_retention_share_one_lock_order() {
         .await
         .expect("load promoted intent for deadlock characterization")
         .expect("promoted intent exists for deadlock characterization")
-        .promoted_job_id
+        .promoted_job_id()
         .expect("promoted intent has a job id");
 
     let mut recorder_tx = pool.begin().await.expect("begin duplicate recorder");
     let duplicate = record_job_enqueue_intent_tx(&mut recorder_tx, &intent)
         .await
         .expect("duplicate recorder holds the promoted intent row");
-    assert_eq!(duplicate.status, JobEnqueueIntentStatus::Promoted);
+    assert_eq!(duplicate.status(), JobEnqueueIntentStatus::Promoted);
 
     let retention_pool = pool.clone();
     let retention = tokio::spawn(async move {
@@ -1488,9 +1561,9 @@ async fn retention_cleanup_serializes_concurrent_promotion() {
         .await
         .expect("load serialized retention-race intent")
         .expect("serialized retention-race intent exists");
-    assert_eq!(promoted.status, JobEnqueueIntentStatus::Promoted);
+    assert_eq!(promoted.status(), JobEnqueueIntentStatus::Promoted);
     assert_ne!(
-        promoted.promoted_job_id.expect("replacement job id"),
+        promoted.promoted_job_id().expect("replacement job id"),
         old_job_id
     );
 
@@ -1539,7 +1612,7 @@ async fn promotion_retention_fence_wait_is_bounded() {
             .await
             .expect("load intent after promotion fence timeout")
             .expect("intent remains after promotion fence timeout")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Pending
     );
 
@@ -1589,7 +1662,7 @@ async fn retention_fence_budget_covers_total_promotion_critical_section() {
     )
     .await
     .expect("record intent before delayed promotion");
-    assert_eq!(recorded.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(recorded.status(), JobEnqueueIntentStatus::Pending);
 
     sqlx::query(
         "CREATE TABLE intent_promotion_timeout_observations (
@@ -1790,7 +1863,7 @@ async fn promotion_transaction_timeout_terminates_and_rolls_back_the_session() {
             .await
             .expect("load intent after transaction timeout")
             .expect("intent remains after transaction timeout")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Pending
     );
 
@@ -1896,8 +1969,8 @@ async fn promotion_row_lock_wait_is_bounded_while_holding_retention_fence() {
         .await
         .expect("load intent after bounded row-lock wait")
         .expect("intent remains after bounded row-lock wait");
-    assert_eq!(pending.status, JobEnqueueIntentStatus::Pending);
-    assert_eq!(pending.promotion_attempts, 1);
+    assert_eq!(pending.status(), JobEnqueueIntentStatus::Pending);
+    assert_eq!(pending.promotion_attempts(), 1);
 
     blocker_tx
         .rollback()
@@ -2162,7 +2235,7 @@ async fn concurrent_promoters_create_one_job() {
             .await
             .expect("load concurrent intent")
             .expect("concurrent intent exists")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Promoted
     );
 
@@ -2231,7 +2304,7 @@ async fn invalid_persisted_stage_conflicts_without_starving_valid_intent() {
             .await
             .expect("load healthy intent")
             .expect("healthy intent remains")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Promoted
     );
 
@@ -2282,19 +2355,26 @@ async fn snapshot_drift_defers_without_starving_and_promotes_after_repair() {
         .await
         .expect("load poison intent")
         .expect("poison intent exists");
-    assert_eq!(poison.status, JobEnqueueIntentStatus::Pending);
-    assert_eq!(poison.promotion_attempts, 1);
-    assert!(poison.last_attempted_at.is_some());
+    assert_eq!(poison.status(), JobEnqueueIntentStatus::Pending);
+    assert!(matches!(
+        &poison.state,
+        JobEnqueueIntentState::RetryPending {
+            promotion_attempts: 1,
+            ..
+        }
+    ));
+    assert_eq!(poison.promotion_attempts(), 1);
+    assert!(poison.last_attempted_at().is_some());
     assert_eq!(
-        poison.last_error_code.as_deref(),
+        poison.promotion_error().map(|error| error.code()),
         Some("job.intent_snapshot_mismatch")
     );
     let healthy = get_job_enqueue_intent_by_id(&pool, None, healthy.intent_id)
         .await
         .expect("load healthy intent")
         .expect("healthy intent exists");
-    assert_eq!(healthy.status, JobEnqueueIntentStatus::Promoted);
-    assert!(poison.next_promotion_at > poison.last_attempted_at.expect("attempt timestamp"));
+    assert_eq!(healthy.status(), JobEnqueueIntentStatus::Promoted);
+    assert!(poison.next_promotion_at > poison.last_attempted_at().expect("attempt timestamp"));
 
     sqlx::query(
         "UPDATE job_enqueue_intents
@@ -2316,9 +2396,9 @@ async fn snapshot_drift_defers_without_starving_and_promotes_after_repair() {
         .await
         .expect("reload repaired intent")
         .expect("repaired intent exists");
-    assert_eq!(poison.status, JobEnqueueIntentStatus::Promoted);
-    assert_eq!(poison.promotion_attempts, 2);
-    assert!(poison.last_error_code.is_none());
+    assert_eq!(poison.status(), JobEnqueueIntentStatus::Promoted);
+    assert_eq!(poison.promotion_attempts(), 2);
+    assert!(poison.promotion_error().is_none());
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -2424,14 +2504,14 @@ async fn worker_version_skips_newer_snapshot_versions_without_mutating_them() {
         .await
         .expect("load newer-version intent")
         .expect("newer-version intent exists");
-    assert_eq!(newer.status, JobEnqueueIntentStatus::Pending);
-    assert_eq!(newer.promotion_attempts, 0);
+    assert_eq!(newer.status(), JobEnqueueIntentStatus::Pending);
+    assert_eq!(newer.promotion_attempts(), 0);
     assert_eq!(
         get_job_enqueue_intent_by_id(&pool, None, healthy.intent_id)
             .await
             .expect("load current-version intent")
             .expect("current-version intent exists")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Promoted
     );
 
@@ -2452,7 +2532,7 @@ async fn promotion_caps_savepoint_batch_below_postgres_subtransaction_cache() {
         )
         .await
         .expect("record bounded promotion intent");
-        assert_eq!(outcome.status, JobEnqueueIntentStatus::Pending);
+        assert_eq!(outcome.status(), JobEnqueueIntentStatus::Pending);
     }
 
     sqlx::query("UPDATE job_enqueue_intents SET enqueue_request = '{}'::jsonb")
@@ -2543,7 +2623,7 @@ async fn definition_disabled_after_eligibility_leaves_intent_pending() {
             .await
             .expect("load race intent")
             .expect("race intent exists")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Pending
     );
 
@@ -2625,15 +2705,15 @@ async fn enqueue_event_failure_defers_only_failed_intent_and_rolls_back_its_job(
         .await
         .expect("load deferred intent")
         .expect("deferred intent remains");
-    assert_eq!(failing.status, JobEnqueueIntentStatus::Pending);
-    assert_eq!(failing.promotion_attempts, 1);
+    assert_eq!(failing.status(), JobEnqueueIntentStatus::Pending);
+    assert_eq!(failing.promotion_attempts(), 1);
     assert!(
         failing.next_promotion_at
             > failing
-                .last_attempted_at
+                .last_attempted_at()
                 .expect("deferred intent records its attempt time")
     );
-    assert!(failing.last_error_code.is_some());
+    assert!(failing.promotion_error().is_some());
     let metrics = get_job_enqueue_intent_metrics(
         &pool,
         &JobEnqueueIntentMetricsFilter::new(10, 0).with_job_type(JobType::new(JOB_TYPE)),
@@ -2647,7 +2727,7 @@ async fn enqueue_event_failure_defers_only_failed_intent_and_rolls_back_its_job(
             .await
             .expect("load healthy intent")
             .expect("healthy intent remains")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Promoted
     );
 
@@ -2675,9 +2755,9 @@ async fn enqueue_event_failure_defers_only_failed_intent_and_rolls_back_its_job(
         .await
         .expect("load recovered intent")
         .expect("recovered intent remains");
-    assert_eq!(failing.status, JobEnqueueIntentStatus::Promoted);
-    assert_eq!(failing.promotion_attempts, 2);
-    assert!(failing.last_error_code.is_none());
+    assert_eq!(failing.status(), JobEnqueueIntentStatus::Promoted);
+    assert_eq!(failing.promotion_attempts(), 2);
+    assert!(failing.promotion_error().is_none());
 
     teardown_ephemeral_pool(pool, database).await;
 }

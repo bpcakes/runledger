@@ -25,8 +25,8 @@ use super::super::transaction_settings::{
 use super::super::types::{
     JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentDisposition,
     JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentMetricsRecord,
-    JobEnqueueIntentOutcome, JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord,
-    JobEnqueueIntentStatus,
+    JobEnqueueIntentOutcome, JobEnqueueIntentOutcomeState, JobEnqueueIntentPromotionReport,
+    JobEnqueueIntentRecord, JobEnqueueIntentStatus,
 };
 use super::enqueue::{
     IntentEnqueueResolution, JOB_ENQUEUE_REQUEST_VERSION, canonical_job_enqueue_request_v1,
@@ -1397,10 +1397,18 @@ fn intent_outcome(
     row: &JobEnqueueIntentOutcomeRow,
     disposition: JobEnqueueIntentDisposition,
 ) -> Result<JobEnqueueIntentOutcome> {
+    let state = match (parse_intent_status(&row.status)?, row.promoted_job_id) {
+        (JobEnqueueIntentStatus::Pending, None) => JobEnqueueIntentOutcomeState::Pending,
+        (JobEnqueueIntentStatus::Promoted, Some(job_id)) => {
+            JobEnqueueIntentOutcomeState::Promoted { job_id }
+        }
+        (JobEnqueueIntentStatus::Conflicted, None) => JobEnqueueIntentOutcomeState::Conflicted,
+        _ => return Err(invalid_intent_row_error()),
+    };
+
     Ok(JobEnqueueIntentOutcome {
         intent_id: row.id,
-        status: parse_intent_status(&row.status)?,
-        promoted_job_id: row.promoted_job_id,
+        state,
         disposition,
     })
 }
@@ -1564,6 +1572,70 @@ mod tests {
                 classify_intent_promotion_failure(&error),
                 IntentPromotionFailureAction::Propagate
             );
+        }
+    }
+
+    #[test]
+    fn decodes_and_serializes_every_enqueue_intent_outcome_state() {
+        let intent_id = Uuid::now_v7();
+        let job_id = Uuid::now_v7();
+
+        for (status, promoted_job_id, expected_state) in [
+            ("PENDING", None, serde_json::json!({"state": "pending"})),
+            (
+                "PROMOTED",
+                Some(job_id),
+                serde_json::json!({"state": "promoted", "job_id": job_id}),
+            ),
+            (
+                "CONFLICTED",
+                None,
+                serde_json::json!({"state": "conflicted"}),
+            ),
+        ] {
+            let outcome = intent_outcome(
+                &JobEnqueueIntentOutcomeRow {
+                    id: intent_id,
+                    status: status.into(),
+                    promoted_job_id,
+                    enqueue_request_matches: true,
+                },
+                JobEnqueueIntentDisposition::Existing,
+            )
+            .expect("decode valid intent outcome state");
+
+            assert_eq!(
+                serde_json::to_value(outcome.state).expect("serialize intent outcome state"),
+                expected_state
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_impossible_enqueue_intent_outcome_rows() {
+        let intent_id = Uuid::now_v7();
+        let job_id = Uuid::now_v7();
+
+        for (status, promoted_job_id) in [
+            ("PENDING", Some(job_id)),
+            ("PROMOTED", None),
+            ("CONFLICTED", Some(job_id)),
+            ("UNKNOWN", None),
+        ] {
+            let error = intent_outcome(
+                &JobEnqueueIntentOutcomeRow {
+                    id: intent_id,
+                    status: status.into(),
+                    promoted_job_id,
+                    enqueue_request_matches: true,
+                },
+                JobEnqueueIntentDisposition::Existing,
+            )
+            .expect_err("impossible outcome row must be rejected");
+            let Error::QueryError(error) = error else {
+                panic!("expected query error");
+            };
+            assert_eq!(error.code(), "job.intent_invalid_persisted_row");
         }
     }
 }

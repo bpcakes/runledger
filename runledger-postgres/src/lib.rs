@@ -128,7 +128,7 @@
 //! let mut tx = pool.begin().await?;
 //! // Persist the application's business/audit mutation with this same `tx`.
 //! let outcome = record_job_enqueue_intent_tx(&mut tx, &intent).await?;
-//! if outcome.status == JobEnqueueIntentStatus::Conflicted {
+//! if outcome.status() == JobEnqueueIntentStatus::Conflicted {
 //!     return Err("the existing durable handoff is conflicted".into());
 //! }
 //! tx.commit().await?;
@@ -361,8 +361,9 @@ pub mod prelude {
         JobContinuationUpdate, JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate,
         JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent,
         JobEnqueueIntentDisposition, JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter,
-        JobEnqueueIntentMetricsRecord, JobEnqueueIntentOutcome, JobEnqueueIntentPromotionReport,
-        JobEnqueueIntentRecord, JobEnqueueIntentStatus, JobEnqueueOutcome, JobEventRecord,
+        JobEnqueueIntentMetricsRecord, JobEnqueueIntentOutcome, JobEnqueueIntentOutcomeState,
+        JobEnqueueIntentPromotionError, JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord,
+        JobEnqueueIntentState, JobEnqueueIntentStatus, JobEnqueueOutcome, JobEventRecord,
         JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
         JobLeaseIdentity, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
         JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, JobProgressUpdate,
