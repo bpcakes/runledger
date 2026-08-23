@@ -91,7 +91,8 @@ pub use types::{
     JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,
     JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentDisposition,
     JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentMetricsRecord,
-    JobEnqueueIntentOutcome, JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord,
+    JobEnqueueIntentOutcome, JobEnqueueIntentOutcomeState, JobEnqueueIntentPromotionError,
+    JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord, JobEnqueueIntentState,
     JobEnqueueIntentStatus, JobEnqueueOutcome, JobEventRecord, JobFailureCompletionDisposition,
     JobFailureCompletionOutcome, JobFailureUpdate, JobLeaseIdentity, JobListFilter, JobLogRecord,
     JobLogRecordInput, JobMetricsRecord, JobProgressUpdate, JobQueueRecord, JobRequeueStatePolicy,
@@ -106,10 +107,10 @@ pub use types::{
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,
     CompleteExternalWorkflowStepInput, DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT,
-    EnqueueActiveWorkflowOutcome, WorkflowRecoveryDisposition, WorkflowRecoveryMode,
-    WorkflowRecoveryOutcome, WorkflowRecoveryRequest, WorkflowRunCountFilter, WorkflowRunDbRecord,
-    WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunHandleScope, WorkflowRunListFilter,
-    WorkflowRunResultRecord, WorkflowRunWaitOptions, WorkflowStepDbRecord,
+    EnqueueActiveWorkflowOutcome, ExternalWorkflowStepTerminalOutcome, WorkflowRecoveryDisposition,
+    WorkflowRecoveryMode, WorkflowRecoveryOutcome, WorkflowRecoveryRequest, WorkflowRunCountFilter,
+    WorkflowRunDbRecord, WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunHandleScope,
+    WorkflowRunListFilter, WorkflowRunResultRecord, WorkflowRunWaitOptions, WorkflowStepDbRecord,
     WorkflowStepDependencyDbRecord,
 };
 pub use workflows::{

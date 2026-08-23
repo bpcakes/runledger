@@ -6,11 +6,11 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::jobs::test_support::workflow_run_release_lock_key;
 use runledger_postgres::jobs::{
-    CompleteExternalWorkflowStepInput, JobContinuationUpdate, JobFailureUpdate, JobQueueRecord,
-    WorkflowRunDbRecord, WorkflowStepDbRecord, cancel_workflow_run_tx, claim_jobs_for_types,
-    complete_external_workflow_step_tx, complete_job_continuation_with_outcome,
-    complete_job_failure, complete_job_success, enqueue_workflow_run, get_job_by_id,
-    list_workflow_steps,
+    CompleteExternalWorkflowStepInput, ExternalWorkflowStepTerminalOutcome, JobContinuationUpdate,
+    JobFailureUpdate, JobQueueRecord, WorkflowRunDbRecord, WorkflowStepDbRecord,
+    cancel_workflow_run_tx, claim_jobs_for_types, complete_external_workflow_step_tx,
+    complete_job_continuation_with_outcome, complete_job_failure, complete_job_success,
+    enqueue_workflow_run, get_job_by_id, list_workflow_steps,
 };
 use serde_json::json;
 use sqlx::types::Uuid;
@@ -214,11 +214,10 @@ async fn external_workflow_completion_rejects_non_read_committed_transaction() {
             workflow_run_id: run.id,
             organization_id: None,
             step_key: StepKey::new("gate"),
-            terminal_status: WorkflowStepStatus::Succeeded,
+            outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
-            output: None,
         },
     )
     .await
@@ -638,11 +637,10 @@ async fn workflow_step_release_proceeds_while_another_release_holds_shared_lock(
             workflow_run_id: run.id,
             organization_id: None,
             step_key: StepKey::new("gate"),
-            terminal_status: WorkflowStepStatus::Succeeded,
+            outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
-            output: None,
         },
     )
     .await
@@ -706,11 +704,10 @@ async fn job_completion_waits_for_release_lock_and_releases_after_rollback() {
             workflow_run_id: run.id,
             organization_id: None,
             step_key: StepKey::new("gate"),
-            terminal_status: WorkflowStepStatus::Succeeded,
+            outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
-            output: None,
         },
     )
     .await
@@ -926,11 +923,10 @@ async fn external_completion_release_conflict_can_be_committed_without_partial_m
             workflow_run_id: run.id,
             organization_id: None,
             step_key: StepKey::new("gate"),
-            terminal_status: WorkflowStepStatus::Succeeded,
+            outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
-            output: None,
         },
     )
     .await
@@ -1003,11 +999,10 @@ async fn job_completion_after_cancel_commit_does_not_reenqueue_dependents() {
             workflow_run_id: run.id,
             organization_id: None,
             step_key: StepKey::new("gate"),
-            terminal_status: WorkflowStepStatus::Succeeded,
+            outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
-            output: None,
         },
     )
     .await
@@ -1210,11 +1205,10 @@ async fn external_completion_waits_for_ordered_step_locks_before_locking_gate() 
                 workflow_run_id: run_id,
                 organization_id: None,
                 step_key: StepKey::new("gate"),
-                terminal_status: WorkflowStepStatus::Succeeded,
+                outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
                 status_reason: None,
                 last_error_code: None,
                 last_error_message: None,
-                output: None,
             },
         )
         .await;
@@ -1331,11 +1325,10 @@ async fn external_completion_conflicts_when_cancel_waits_on_step_rows() {
             workflow_run_id: run_id,
             organization_id: None,
             step_key: StepKey::new("gate"),
-            terminal_status: WorkflowStepStatus::Succeeded,
+            outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
-            output: None,
         },
     )
     .await

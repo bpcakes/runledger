@@ -2,6 +2,7 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use runledger_core::jobs::{JobStage, JobStatus, JobType, JobTypeName};
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
@@ -180,11 +181,40 @@ pub enum JobEnqueueIntentDisposition {
     Existing,
 }
 
+/// Lifecycle state observed by an enqueue-intent record call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum JobEnqueueIntentOutcomeState {
+    Pending,
+    Promoted { job_id: Uuid },
+    Conflicted,
+}
+
+impl JobEnqueueIntentOutcomeState {
+    #[must_use]
+    pub const fn status(self) -> JobEnqueueIntentStatus {
+        match self {
+            Self::Pending => JobEnqueueIntentStatus::Pending,
+            Self::Promoted { .. } => JobEnqueueIntentStatus::Promoted,
+            Self::Conflicted => JobEnqueueIntentStatus::Conflicted,
+        }
+    }
+
+    #[must_use]
+    pub const fn promoted_job_id(self) -> Option<Uuid> {
+        match self {
+            Self::Promoted { job_id } => Some(job_id),
+            Self::Pending | Self::Conflicted => None,
+        }
+    }
+}
+
 /// Point-in-time state observed by an intent record call.
 ///
 /// An existing intent is protected from deletion while a caller-owned record
 /// transaction remains open, but promotion may still update its non-key
-/// lifecycle fields. `status` can therefore change after it is read, including
+/// lifecycle fields. `state` can therefore change after it is read, including
 /// before the caller transaction ends. Monitor intent metrics and use the read
 /// APIs when current lifecycle state is required.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,9 +222,143 @@ pub enum JobEnqueueIntentDisposition {
 #[non_exhaustive]
 pub struct JobEnqueueIntentOutcome {
     pub intent_id: Uuid,
-    pub status: JobEnqueueIntentStatus,
-    pub promoted_job_id: Option<Uuid>,
+    pub state: JobEnqueueIntentOutcomeState,
     pub disposition: JobEnqueueIntentDisposition,
+}
+
+impl JobEnqueueIntentOutcome {
+    #[must_use]
+    pub const fn status(&self) -> JobEnqueueIntentStatus {
+        self.state.status()
+    }
+
+    #[must_use]
+    pub const fn promoted_job_id(&self) -> Option<Uuid> {
+        self.state.promoted_job_id()
+    }
+}
+
+/// Stable error metadata from an enqueue-intent promotion attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct JobEnqueueIntentPromotionError {
+    code: String,
+    message: String,
+}
+
+impl JobEnqueueIntentPromotionError {
+    pub(crate) fn new(code: String, message: String) -> Self {
+        Self { code, message }
+    }
+
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Correlated lifecycle fields decoded from one persisted enqueue-intent row.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum JobEnqueueIntentState {
+    InitialPending,
+    RetryPending {
+        promotion_attempts: i32,
+        last_attempted_at: DateTime<Utc>,
+        error: JobEnqueueIntentPromotionError,
+    },
+    Promoted {
+        promotion_attempts: i32,
+        last_attempted_at: DateTime<Utc>,
+        job_id: Uuid,
+        promoted_at: DateTime<Utc>,
+    },
+    Conflicted {
+        promotion_attempts: i32,
+        last_attempted_at: DateTime<Utc>,
+        conflicted_at: DateTime<Utc>,
+        error: JobEnqueueIntentPromotionError,
+    },
+}
+
+impl JobEnqueueIntentState {
+    #[must_use]
+    pub const fn status(&self) -> JobEnqueueIntentStatus {
+        match self {
+            Self::InitialPending | Self::RetryPending { .. } => JobEnqueueIntentStatus::Pending,
+            Self::Promoted { .. } => JobEnqueueIntentStatus::Promoted,
+            Self::Conflicted { .. } => JobEnqueueIntentStatus::Conflicted,
+        }
+    }
+
+    #[must_use]
+    pub const fn promotion_attempts(&self) -> i32 {
+        match self {
+            Self::InitialPending => 0,
+            Self::RetryPending {
+                promotion_attempts, ..
+            }
+            | Self::Promoted {
+                promotion_attempts, ..
+            }
+            | Self::Conflicted {
+                promotion_attempts, ..
+            } => *promotion_attempts,
+        }
+    }
+
+    #[must_use]
+    pub const fn last_attempted_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::InitialPending => None,
+            Self::RetryPending {
+                last_attempted_at, ..
+            }
+            | Self::Promoted {
+                last_attempted_at, ..
+            }
+            | Self::Conflicted {
+                last_attempted_at, ..
+            } => Some(*last_attempted_at),
+        }
+    }
+
+    #[must_use]
+    pub const fn promoted_job_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Promoted { job_id, .. } => Some(*job_id),
+            Self::InitialPending | Self::RetryPending { .. } | Self::Conflicted { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn promoted_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Promoted { promoted_at, .. } => Some(*promoted_at),
+            Self::InitialPending | Self::RetryPending { .. } | Self::Conflicted { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn conflicted_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Conflicted { conflicted_at, .. } => Some(*conflicted_at),
+            Self::InitialPending | Self::RetryPending { .. } | Self::Promoted { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn promotion_error(&self) -> Option<&JobEnqueueIntentPromotionError> {
+        match self {
+            Self::RetryPending { error, .. } | Self::Conflicted { error, .. } => Some(error),
+            Self::InitialPending | Self::Promoted { .. } => None,
+        }
+    }
 }
 
 /// Persisted enqueue intent returned by lookup and list APIs.
@@ -213,17 +377,47 @@ pub struct JobEnqueueIntentRecord {
     pub stage: JobStage,
     pub enqueue_request_version: i16,
     pub execution_resource_key: Option<String>,
-    pub promotion_attempts: i32,
     pub next_promotion_at: DateTime<Utc>,
-    pub last_attempted_at: Option<DateTime<Utc>>,
-    pub status: JobEnqueueIntentStatus,
-    pub promoted_job_id: Option<Uuid>,
-    pub promoted_at: Option<DateTime<Utc>>,
-    pub conflicted_at: Option<DateTime<Utc>>,
-    pub last_error_code: Option<String>,
-    pub last_error_message: Option<String>,
+    pub state: JobEnqueueIntentState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl JobEnqueueIntentRecord {
+    #[must_use]
+    pub const fn status(&self) -> JobEnqueueIntentStatus {
+        self.state.status()
+    }
+
+    #[must_use]
+    pub const fn promotion_attempts(&self) -> i32 {
+        self.state.promotion_attempts()
+    }
+
+    #[must_use]
+    pub const fn last_attempted_at(&self) -> Option<DateTime<Utc>> {
+        self.state.last_attempted_at()
+    }
+
+    #[must_use]
+    pub const fn promoted_job_id(&self) -> Option<Uuid> {
+        self.state.promoted_job_id()
+    }
+
+    #[must_use]
+    pub const fn promoted_at(&self) -> Option<DateTime<Utc>> {
+        self.state.promoted_at()
+    }
+
+    #[must_use]
+    pub const fn conflicted_at(&self) -> Option<DateTime<Utc>> {
+        self.state.conflicted_at()
+    }
+
+    #[must_use]
+    pub const fn promotion_error(&self) -> Option<&JobEnqueueIntentPromotionError> {
+        self.state.promotion_error()
+    }
 }
 
 /// Bounded filters for listing durable enqueue intents.

@@ -9,7 +9,9 @@ use super::row_decode::{
     parse_workflow_run_status, parse_workflow_step_execution_kind, parse_workflow_step_status,
     parse_workflow_type_name,
 };
-use super::types::{JobEnqueueIntentRecord, JobEnqueueIntentStatus, JobQueueRecord};
+use super::types::{
+    JobEnqueueIntentPromotionError, JobEnqueueIntentRecord, JobEnqueueIntentState, JobQueueRecord,
+};
 use super::workflow_types::{WorkflowRunDbRecord, WorkflowStepDbRecord};
 
 #[derive(sqlx::FromRow)]
@@ -138,45 +140,351 @@ pub(in crate::jobs) struct JobEnqueueIntentRecordRow {
     pub(in crate::jobs) updated_at: DateTime<Utc>,
 }
 
+struct JobEnqueueIntentStateRow {
+    promotion_attempts: i32,
+    last_attempted_at: Option<DateTime<Utc>>,
+    status: String,
+    promoted_job_id: Option<Uuid>,
+    promoted_at: Option<DateTime<Utc>>,
+    conflicted_at: Option<DateTime<Utc>>,
+    last_error_code: Option<String>,
+    last_error_message: Option<String>,
+}
+
+impl JobEnqueueIntentStateRow {
+    fn into_state(self) -> Result<JobEnqueueIntentState> {
+        let Self {
+            promotion_attempts,
+            last_attempted_at,
+            status,
+            promoted_job_id,
+            promoted_at,
+            conflicted_at,
+            last_error_code,
+            last_error_message,
+        } = self;
+
+        match status.as_str() {
+            "PENDING"
+                if promotion_attempts == 0
+                    && last_attempted_at.is_none()
+                    && promoted_job_id.is_none()
+                    && promoted_at.is_none()
+                    && conflicted_at.is_none()
+                    && last_error_code.is_none()
+                    && last_error_message.is_none() =>
+            {
+                Ok(JobEnqueueIntentState::InitialPending)
+            }
+            "PENDING" if promotion_attempts > 0 => {
+                let (Some(last_attempted_at), None, None, None, Some(code), Some(message)) = (
+                    last_attempted_at,
+                    promoted_job_id,
+                    promoted_at,
+                    conflicted_at,
+                    last_error_code,
+                    last_error_message,
+                ) else {
+                    return Err(invalid_job_enqueue_intent_state_error(status));
+                };
+                let error = decode_job_enqueue_intent_promotion_error(code, message, &status)?;
+
+                Ok(JobEnqueueIntentState::RetryPending {
+                    promotion_attempts,
+                    last_attempted_at,
+                    error,
+                })
+            }
+            "PROMOTED" if promotion_attempts > 0 => {
+                let (Some(last_attempted_at), Some(job_id), Some(promoted_at), None, None, None) = (
+                    last_attempted_at,
+                    promoted_job_id,
+                    promoted_at,
+                    conflicted_at,
+                    last_error_code,
+                    last_error_message,
+                ) else {
+                    return Err(invalid_job_enqueue_intent_state_error(status));
+                };
+
+                Ok(JobEnqueueIntentState::Promoted {
+                    promotion_attempts,
+                    last_attempted_at,
+                    job_id,
+                    promoted_at,
+                })
+            }
+            "CONFLICTED" if promotion_attempts > 0 => {
+                let (
+                    Some(last_attempted_at),
+                    None,
+                    None,
+                    Some(conflicted_at),
+                    Some(code),
+                    Some(message),
+                ) = (
+                    last_attempted_at,
+                    promoted_job_id,
+                    promoted_at,
+                    conflicted_at,
+                    last_error_code,
+                    last_error_message,
+                )
+                else {
+                    return Err(invalid_job_enqueue_intent_state_error(status));
+                };
+                let error = decode_job_enqueue_intent_promotion_error(code, message, &status)?;
+
+                Ok(JobEnqueueIntentState::Conflicted {
+                    promotion_attempts,
+                    last_attempted_at,
+                    conflicted_at,
+                    error,
+                })
+            }
+            _ => Err(invalid_job_enqueue_intent_state_error(status)),
+        }
+    }
+}
+
+fn decode_job_enqueue_intent_promotion_error(
+    code: String,
+    message: String,
+    status: &str,
+) -> Result<JobEnqueueIntentPromotionError> {
+    if code.trim().is_empty() || message.trim().is_empty() {
+        return Err(invalid_job_enqueue_intent_state_error(status));
+    }
+
+    Ok(JobEnqueueIntentPromotionError::new(code, message))
+}
+
+fn invalid_job_enqueue_intent_state_error(status: impl AsRef<str>) -> crate::Error {
+    crate::Error::QueryError(crate::QueryError::from_classified(
+        crate::QueryErrorCategory::Internal,
+        "job.intent_invalid_persisted_row",
+        "Job enqueue intent contains invalid persisted state.",
+        format!(
+            "job enqueue intent persisted lifecycle fields do not match status {}",
+            status.as_ref()
+        ),
+    ))
+}
+
 impl JobEnqueueIntentRecordRow {
     pub(in crate::jobs) fn into_record(self) -> Result<JobEnqueueIntentRecord> {
-        let status = self
-            .status
-            .parse::<JobEnqueueIntentStatus>()
-            .map_err(|()| {
-                crate::Error::QueryError(crate::QueryError::from_classified(
-                    crate::QueryErrorCategory::Internal,
-                    "job.intent_invalid_status",
-                    "Job enqueue intent status in persisted row is invalid.",
-                    "invalid job enqueue intent status in row",
-                ))
-            })?;
+        let Self {
+            id,
+            job_type,
+            organization_id,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            next_run_at,
+            idempotency_key,
+            stage,
+            enqueue_request_version,
+            execution_resource_key,
+            promotion_attempts,
+            next_promotion_at,
+            last_attempted_at,
+            status,
+            promoted_job_id,
+            promoted_at,
+            conflicted_at,
+            last_error_code,
+            last_error_message,
+            created_at,
+            updated_at,
+        } = self;
+        let state = JobEnqueueIntentStateRow {
+            promotion_attempts,
+            last_attempted_at,
+            status,
+            promoted_job_id,
+            promoted_at,
+            conflicted_at,
+            last_error_code,
+            last_error_message,
+        }
+        .into_state()?;
 
         Ok(JobEnqueueIntentRecord {
-            id: self.id,
-            job_type: parse_job_type_name(self.job_type)?,
-            organization_id: self.organization_id,
-            payload: self.payload,
-            priority: self.priority,
-            max_attempts: self.max_attempts,
-            timeout_seconds: self.timeout_seconds,
-            next_run_at: self.next_run_at,
-            idempotency_key: self.idempotency_key,
-            stage: parse_job_stage(self.stage)?,
-            enqueue_request_version: self.enqueue_request_version,
-            execution_resource_key: self.execution_resource_key,
-            promotion_attempts: self.promotion_attempts,
-            next_promotion_at: self.next_promotion_at,
-            last_attempted_at: self.last_attempted_at,
-            status,
-            promoted_job_id: self.promoted_job_id,
-            promoted_at: self.promoted_at,
-            conflicted_at: self.conflicted_at,
-            last_error_code: self.last_error_code,
-            last_error_message: self.last_error_message,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            id,
+            job_type: parse_job_type_name(job_type)?,
+            organization_id,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            next_run_at,
+            idempotency_key,
+            stage: parse_job_stage(stage)?,
+            enqueue_request_version,
+            execution_resource_key,
+            next_promotion_at,
+            state,
+            created_at,
+            updated_at,
         })
+    }
+}
+
+#[cfg(test)]
+mod enqueue_intent_state_tests {
+    use super::*;
+
+    fn initial_pending_row() -> JobEnqueueIntentStateRow {
+        JobEnqueueIntentStateRow {
+            promotion_attempts: 0,
+            last_attempted_at: None,
+            status: "PENDING".into(),
+            promoted_job_id: None,
+            promoted_at: None,
+            conflicted_at: None,
+            last_error_code: None,
+            last_error_message: None,
+        }
+    }
+
+    fn assert_invalid(row: JobEnqueueIntentStateRow) {
+        let error = row.into_state().expect_err("row must be rejected");
+        let crate::Error::QueryError(error) = error else {
+            panic!("expected query error");
+        };
+        assert_eq!(error.code(), "job.intent_invalid_persisted_row");
+    }
+
+    #[test]
+    fn decodes_and_serializes_every_enqueue_intent_state() {
+        let attempted_at = Utc::now();
+        let terminal_at = attempted_at + chrono::Duration::seconds(1);
+        let job_id = Uuid::now_v7();
+
+        let initial = initial_pending_row()
+            .into_state()
+            .expect("decode initial pending state");
+        assert_eq!(
+            serde_json::to_value(initial).expect("serialize initial pending state"),
+            serde_json::json!({"state": "initial_pending"})
+        );
+
+        let retry = JobEnqueueIntentStateRow {
+            promotion_attempts: 1,
+            last_attempted_at: Some(attempted_at),
+            status: "PENDING".into(),
+            promoted_job_id: None,
+            promoted_at: None,
+            conflicted_at: None,
+            last_error_code: Some("job.definition_not_found".into()),
+            last_error_message: Some("definition unavailable".into()),
+        }
+        .into_state()
+        .expect("decode retry pending state");
+        assert_eq!(
+            serde_json::to_value(retry).expect("serialize retry pending state"),
+            serde_json::json!({
+                "state": "retry_pending",
+                "promotion_attempts": 1,
+                "last_attempted_at": attempted_at,
+                "error": {
+                    "code": "job.definition_not_found",
+                    "message": "definition unavailable"
+                }
+            })
+        );
+
+        let promoted = JobEnqueueIntentStateRow {
+            promotion_attempts: 2,
+            last_attempted_at: Some(attempted_at),
+            status: "PROMOTED".into(),
+            promoted_job_id: Some(job_id),
+            promoted_at: Some(terminal_at),
+            conflicted_at: None,
+            last_error_code: None,
+            last_error_message: None,
+        }
+        .into_state()
+        .expect("decode promoted state");
+        assert_eq!(
+            serde_json::to_value(promoted).expect("serialize promoted state"),
+            serde_json::json!({
+                "state": "promoted",
+                "promotion_attempts": 2,
+                "last_attempted_at": attempted_at,
+                "job_id": job_id,
+                "promoted_at": terminal_at
+            })
+        );
+
+        let conflicted = JobEnqueueIntentStateRow {
+            promotion_attempts: 3,
+            last_attempted_at: Some(attempted_at),
+            status: "CONFLICTED".into(),
+            promoted_job_id: None,
+            promoted_at: None,
+            conflicted_at: Some(terminal_at),
+            last_error_code: Some("job.intent_idempotency_conflict".into()),
+            last_error_message: Some("request differs".into()),
+        }
+        .into_state()
+        .expect("decode conflicted state");
+        assert_eq!(
+            serde_json::to_value(conflicted).expect("serialize conflicted state"),
+            serde_json::json!({
+                "state": "conflicted",
+                "promotion_attempts": 3,
+                "last_attempted_at": attempted_at,
+                "conflicted_at": terminal_at,
+                "error": {
+                    "code": "job.intent_idempotency_conflict",
+                    "message": "request differs"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_impossible_enqueue_intent_state_rows() {
+        let timestamp = Utc::now();
+
+        let mut unknown = initial_pending_row();
+        unknown.status = "UNKNOWN".into();
+        assert_invalid(unknown);
+
+        let mut attempted_initial = initial_pending_row();
+        attempted_initial.last_attempted_at = Some(timestamp);
+        assert_invalid(attempted_initial);
+
+        let mut incomplete_retry = initial_pending_row();
+        incomplete_retry.promotion_attempts = 1;
+        incomplete_retry.last_attempted_at = Some(timestamp);
+        assert_invalid(incomplete_retry);
+
+        let mut incomplete_promoted = initial_pending_row();
+        incomplete_promoted.status = "PROMOTED".into();
+        incomplete_promoted.promotion_attempts = 1;
+        incomplete_promoted.last_attempted_at = Some(timestamp);
+        assert_invalid(incomplete_promoted);
+
+        let mut crossed_terminal_fields = initial_pending_row();
+        crossed_terminal_fields.status = "CONFLICTED".into();
+        crossed_terminal_fields.promotion_attempts = 1;
+        crossed_terminal_fields.last_attempted_at = Some(timestamp);
+        crossed_terminal_fields.promoted_job_id = Some(Uuid::now_v7());
+        crossed_terminal_fields.promoted_at = Some(timestamp);
+        crossed_terminal_fields.conflicted_at = Some(timestamp);
+        crossed_terminal_fields.last_error_code = Some("code".into());
+        crossed_terminal_fields.last_error_message = Some("message".into());
+        assert_invalid(crossed_terminal_fields);
+
+        let mut blank_error = initial_pending_row();
+        blank_error.promotion_attempts = 1;
+        blank_error.last_attempted_at = Some(timestamp);
+        blank_error.last_error_code = Some(" ".into());
+        blank_error.last_error_message = Some("message".into());
+        assert_invalid(blank_error);
     }
 }
 

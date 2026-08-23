@@ -82,6 +82,7 @@ const WORKFLOW_STEPS_FOR_ORGANIZATION_QUERY: &str =
     include_str!("../src/jobs/admin/queries/list_workflow_steps_for_organization.sql");
 const WORKFLOW_STEPS_GLOBAL_QUERY: &str =
     include_str!("../src/jobs/admin/queries/list_workflow_steps_global.sql");
+const CONTINUATION_METRICS_CTE_MIGRATION_VERSION: i64 = 202608230001;
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,
@@ -109,6 +110,9 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     ADMIN_JOBS_ORG_CREATED_INDEX_MIGRATION_VERSION,
     ADMIN_WORKFLOWS_CREATED_INDEX_MIGRATION_VERSION,
     ADMIN_WORKFLOWS_ORG_CREATED_INDEX_MIGRATION_VERSION,
+    // Refactors only the continuation metrics view query; its columns and
+    // result semantics are unchanged.
+    CONTINUATION_METRICS_CTE_MIGRATION_VERSION,
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 
@@ -1260,7 +1264,14 @@ async fn continuation_metrics_require_well_typed_v0_6_or_v0_7_payloads() {
         .fetch_one(&harness.pool)
         .await
         .expect("read exact PostgreSQL version for continuation metrics regression");
-    eprintln!("continuation metrics regression PostgreSQL server_version={server_version}");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(&harness.pool)
+            .await
+            .expect("read PostgreSQL numeric version for continuation metrics regression");
+    eprintln!(
+        "continuation metrics regression PostgreSQL server_version={server_version}, server_version_num={server_version_num}"
+    );
 
     migrate_after_idempotency_cutover(&harness.pool)
         .await
@@ -1430,6 +1441,83 @@ JOIN payload_cases USING (case_name)
         load_continuation_metrics(&harness.pool, JOB_TYPE).await,
         (2, 2, 2),
         "only genuine kindless v0.6 and discriminated v0.7 continuation events count"
+    );
+
+    let factored_view_definition = continuation_metrics_view_definition(&harness.pool).await;
+    assert!(
+        factored_view_definition.contains("valid_continuation_events AS NOT MATERIALIZED"),
+        "forward migration must keep the shared validity predicate in a local NOT MATERIALIZED CTE: {factored_view_definition}"
+    );
+
+    let custom_plan = explain_continuation_metrics_plan(&harness.pool, PlanCacheMode::Custom).await;
+    let generic_plan =
+        explain_continuation_metrics_plan(&harness.pool, PlanCacheMode::Generic).await;
+    assert_eq!(
+        continuation_plan_node_types(&custom_plan),
+        continuation_plan_node_types(&generic_plan),
+        "PostgreSQL 18 custom and generic plans must retain the same operator shape"
+    );
+    for (mode, plan) in [("custom", &custom_plan), ("generic", &generic_plan)] {
+        eprintln!(
+            "continuation metrics {mode} EXPLAIN ANALYZE node_types={:?}, planning_time_ms={}, execution_time_ms={}",
+            continuation_plan_node_types(plan),
+            plan[0]["Planning Time"],
+            plan[0]["Execution Time"]
+        );
+        assert_eq!(
+            plan[0]["Plan"]["Actual Rows"].as_f64(),
+            Some(1.0),
+            "{mode} EXPLAIN ANALYZE must return the seeded metrics row"
+        );
+        assert!(
+            !plan.to_string().contains("CTE Scan"),
+            "{mode} plan must inline the NOT MATERIALIZED CTE: {plan}"
+        );
+    }
+
+    let cte_down_migration = MIGRATOR
+        .iter()
+        .find(|migration| {
+            migration.migration_type.is_down_migration()
+                && migration.version == CONTINUATION_METRICS_CTE_MIGRATION_VERSION
+        })
+        .expect("continuation metrics CTE down migration exists");
+    let mut conn = harness
+        .pool
+        .acquire()
+        .await
+        .expect("acquire continuation metrics CTE revert connection");
+    (*conn)
+        .revert(cte_down_migration)
+        .await
+        .expect("restore the duplicated strict continuation metrics predicate");
+    drop(conn);
+
+    assert_eq!(
+        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        (2, 2, 2),
+        "CTE down migration must preserve strict continuation metric results"
+    );
+    assert!(
+        !continuation_metrics_view_definition(&harness.pool)
+            .await
+            .contains("valid_continuation_events"),
+        "CTE down migration must restore the prior duplicated view definition"
+    );
+
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("reapply continuation metrics CTE migration");
+    assert_eq!(
+        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        (2, 2, 2),
+        "reapplying the CTE migration must preserve strict continuation metric results"
+    );
+    assert!(
+        continuation_metrics_view_definition(&harness.pool)
+            .await
+            .contains("valid_continuation_events AS NOT MATERIALIZED"),
+        "reapplying the CTE migration must restore the local NOT MATERIALIZED CTE"
     );
 
     let down_migration = MIGRATOR
@@ -1926,6 +2014,82 @@ async fn load_continuation_metrics(pool: &PgPool, job_type: &str) -> (i64, i64, 
     .fetch_one(pool)
     .await
     .expect("load continuation metrics")
+}
+
+async fn continuation_metrics_view_definition(pool: &PgPool) -> String {
+    sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_viewdef('job_continuation_metrics_rollup'::regclass, true)",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("load continuation metrics view definition")
+}
+
+#[derive(Clone, Copy)]
+enum PlanCacheMode {
+    Custom,
+    Generic,
+}
+
+async fn explain_continuation_metrics_plan(pool: &PgPool, mode: PlanCacheMode) -> Value {
+    let mut conn = pool
+        .acquire()
+        .await
+        .expect("acquire continuation metrics plan connection");
+    let set_plan_cache_mode = match mode {
+        PlanCacheMode::Custom => "SET plan_cache_mode = force_custom_plan",
+        PlanCacheMode::Generic => "SET plan_cache_mode = force_generic_plan",
+    };
+    sqlx::query(set_plan_cache_mode)
+        .execute(&mut *conn)
+        .await
+        .expect("set continuation metrics plan cache mode");
+    sqlx::query(
+        "PREPARE runledger_continuation_metrics_plan(text) AS
+         SELECT continued_24h, active_continued_count, max_active_run_number
+         FROM job_continuation_metrics_rollup
+         WHERE organization_id IS NULL
+           AND job_type = $1",
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("prepare continuation metrics plan probe");
+    let plan = sqlx::query_scalar::<_, Value>(
+        "EXPLAIN (ANALYZE, FORMAT JSON)
+         EXECUTE runledger_continuation_metrics_plan(
+             'jobs.test.continuation_payload_validation'
+         )",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("explain continuation metrics prepared statement");
+    sqlx::query("DEALLOCATE runledger_continuation_metrics_plan")
+        .execute(&mut *conn)
+        .await
+        .expect("deallocate continuation metrics plan probe");
+    sqlx::query("RESET plan_cache_mode")
+        .execute(&mut *conn)
+        .await
+        .expect("reset continuation metrics plan cache mode");
+
+    plan
+}
+
+fn continuation_plan_node_types(plan: &Value) -> Vec<String> {
+    fn collect(node: &Value, node_types: &mut Vec<String>) {
+        if let Some(node_type) = node["Node Type"].as_str() {
+            node_types.push(node_type.to_owned());
+        }
+        if let Some(children) = node["Plans"].as_array() {
+            for child in children {
+                collect(child, node_types);
+            }
+        }
+    }
+
+    let mut node_types = Vec::new();
+    collect(&plan[0]["Plan"], &mut node_types);
+    node_types
 }
 
 async fn advisory_lock_count_for_backend(pool: &PgPool, backend_pid: i32) -> i64 {

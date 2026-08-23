@@ -1076,11 +1076,13 @@ async fn wait_for_promoted_intent(
             .await
             .expect("load enqueue intent")
             .expect("enqueue intent should exist");
-        if intent.status == JobEnqueueIntentStatus::Promoted {
-            return intent.promoted_job_id.expect("promoted intent has job id");
+        if intent.status() == JobEnqueueIntentStatus::Promoted {
+            return intent
+                .promoted_job_id()
+                .expect("promoted intent has job id");
         }
 
-        assert_eq!(intent.status, JobEnqueueIntentStatus::Pending);
+        assert_eq!(intent.status(), JobEnqueueIntentStatus::Pending);
         assert!(
             Instant::now() < deadline,
             "timed out waiting for enqueue intent {intent_id} to be promoted"

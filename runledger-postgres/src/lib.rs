@@ -128,7 +128,7 @@
 //! let mut tx = pool.begin().await?;
 //! // Persist the application's business/audit mutation with this same `tx`.
 //! let outcome = record_job_enqueue_intent_tx(&mut tx, &intent).await?;
-//! if outcome.status == JobEnqueueIntentStatus::Conflicted {
+//! if outcome.status() == JobEnqueueIntentStatus::Conflicted {
 //!     return Err("the existing durable handoff is conflicted".into());
 //! }
 //! tx.commit().await?;
@@ -249,11 +249,10 @@
 //!     workflow_run_id,
 //!     organization_id: None,
 //!     step_key: StepKey::new("approval"),
-//!     terminal_status: WorkflowStepStatus::Succeeded,
+//!     outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
 //!     status_reason: Some("approved"),
 //!     last_error_code: None,
 //!     last_error_message: None,
-//!     output: None,
 //! };
 //!
 //! let _step = complete_external_workflow_step(&pool, &input).await?;
@@ -359,17 +358,18 @@ pub mod prelude {
         CompareAndReplaySucceededJobOutcome, CompareAndRequeueJob, CompareAndRequeueJobOutcome,
         CompleteExternalWorkflowStepInput, DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT,
         DecodedJobEventPayload, DecodedRequeuedEventPayload, EnqueueActiveWorkflowOutcome,
-        JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCancellationScope, JobCompletionUpdate,
-        JobContinuationMetricsRecord, JobContinuationOutcome, JobContinuationUpdate,
-        JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate, JobDefinitionUpsert,
-        JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentDisposition,
-        JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentMetricsRecord,
-        JobEnqueueIntentOutcome, JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord,
-        JobEnqueueIntentStatus, JobEnqueueOutcome, JobEventRecord, JobFailureCompletionDisposition,
-        JobFailureCompletionOutcome, JobFailureUpdate, JobLeaseIdentity, JobListFilter,
-        JobLogRecord, JobLogRecordInput, JobMetricsRecord, JobPayloadUuidArrayFieldUpdate,
-        JobPayloadUuidArrayFieldUpdateRejection, JobProgressUpdate, JobQueueRecord,
-        JobRequeueStatePolicy, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
+        ExternalWorkflowStepTerminalOutcome, JOB_SCHEDULE_MAX_JITTER_SECONDS, JobCancellationScope,
+        JobCompletionUpdate, JobContinuationMetricsRecord, JobContinuationOutcome,
+        JobContinuationUpdate, JobDefinitionListFilter, JobDefinitionRecord, JobDefinitionUpdate,
+        JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent,
+        JobEnqueueIntentDisposition, JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter,
+        JobEnqueueIntentMetricsRecord, JobEnqueueIntentOutcome, JobEnqueueIntentOutcomeState,
+        JobEnqueueIntentPromotionError, JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord,
+        JobEnqueueIntentState, JobEnqueueIntentStatus, JobEnqueueOutcome, JobEventRecord,
+        JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
+        JobLeaseIdentity, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
+        JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, JobProgressUpdate,
+        JobQueueRecord, JobRequeueStatePolicy, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
         JobRuntimeConfigUpsert, JobScheduleRecord, JobScheduleUpsert, JobScope,
         JobSuccessCompletionOutcome, NonRequeueableJobStatusError, ReapExpiredLeaseCleanupError,
         ReapExpiredLeaseCleanupOperation, ReapExpiredLeaseDeferredError,

@@ -242,11 +242,11 @@ async fn worker_promotes_registered_intents_and_leaves_unregistered_types_pendin
         .await
         .expect("load registered intent")
         .expect("registered intent exists");
-    assert_eq!(registered.status, JobEnqueueIntentStatus::Promoted);
+    assert_eq!(registered.status(), JobEnqueueIntentStatus::Promoted);
     let job = get_job_by_id(
         &pool,
         None,
-        registered.promoted_job_id.expect("promoted job id"),
+        registered.promoted_job_id().expect("promoted job id"),
     )
     .await
     .expect("load promoted job")
@@ -257,7 +257,7 @@ async fn worker_promotes_registered_intents_and_leaves_unregistered_types_pendin
         .await
         .expect("load unregistered intent")
         .expect("unregistered intent exists");
-    assert_eq!(unregistered.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(unregistered.status(), JobEnqueueIntentStatus::Pending);
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -291,7 +291,7 @@ async fn full_intent_batches_drain_without_poll_interval_delay() {
         )
         .await
         .expect("record full-batch intent");
-        assert_eq!(outcome.status, JobEnqueueIntentStatus::Pending);
+        assert_eq!(outcome.status(), JobEnqueueIntentStatus::Pending);
     }
 
     let mut registry = JobRegistry::new();
@@ -385,7 +385,7 @@ async fn contended_intent_promotion_does_not_delay_existing_job_claims() {
     )
     .await
     .expect("record intent for contended promotion");
-    assert_eq!(blocked_intent.status, JobEnqueueIntentStatus::Pending);
+    assert_eq!(blocked_intent.status(), JobEnqueueIntentStatus::Pending);
 
     let mut lock_tx = pool.begin().await.expect("begin intent table lock");
     sqlx::query("LOCK TABLE job_enqueue_intents IN ACCESS EXCLUSIVE MODE")
@@ -545,7 +545,7 @@ async fn shutdown_cancels_a_lock_blocked_intent_promotion_pass() {
             .await
             .expect("load intent after canceled promotion")
             .expect("intent must remain durable")
-            .status,
+            .status(),
         JobEnqueueIntentStatus::Pending
     );
 
@@ -644,13 +644,13 @@ async fn intent_promoter_runs_while_worker_is_saturated_and_shutdown_interrupts_
         .await
         .expect("load saturated intent")
         .expect("saturated intent exists");
-    assert_eq!(saturated_intent.status, JobEnqueueIntentStatus::Promoted);
+    assert_eq!(saturated_intent.status(), JobEnqueueIntentStatus::Promoted);
     assert_eq!(
         get_job_by_id(
             &pool,
             None,
             saturated_intent
-                .promoted_job_id
+                .promoted_job_id()
                 .expect("promoted intent links its queued job"),
         )
         .await

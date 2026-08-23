@@ -8,11 +8,11 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::test_support::workflow_run_release_lock_key;
 use runledger_postgres::jobs::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, CompleteExternalWorkflowStepInput,
-    JobEnqueue, JobProgressUpdate, append_workflow_steps, append_workflow_steps_tx,
-    claim_jobs_for_types, complete_external_workflow_step, complete_job_success, enqueue_job,
-    enqueue_job_tx, enqueue_workflow_run, enqueue_workflow_run_tx,
-    get_workflow_run_by_type_and_idempotency_key, list_job_events, list_workflow_steps,
-    update_job_progress, update_workflow_step_and_pending_job_payload_tx,
+    ExternalWorkflowStepTerminalOutcome, JobEnqueue, JobProgressUpdate, append_workflow_steps,
+    append_workflow_steps_tx, claim_jobs_for_types, complete_external_workflow_step,
+    complete_job_success, enqueue_job, enqueue_job_tx, enqueue_workflow_run,
+    enqueue_workflow_run_tx, get_workflow_run_by_type_and_idempotency_key, list_job_events,
+    list_workflow_steps, update_job_progress, update_workflow_step_and_pending_job_payload_tx,
 };
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
@@ -1443,11 +1443,10 @@ async fn append_workflow_steps_identical_retry_after_closed_window_is_already_ap
             workflow_run_id: run.id,
             organization_id: None,
             step_key: StepKey::new("gate"),
-            terminal_status: WorkflowStepStatus::Succeeded,
+            outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
-            output: None,
         },
     )
     .await

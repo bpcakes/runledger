@@ -5,12 +5,12 @@ use runledger_core::jobs::{
     WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
 };
 use runledger_postgres::jobs::{
-    CompleteExternalWorkflowStepInput, DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT, JobCompletionUpdate,
-    JobDefinitionUpsert, JobFailureUpdate, WorkflowRunHandleError, WorkflowRunHandleScope,
-    WorkflowRunWaitOptions, cancel_workflow_run_tx, claim_jobs_for_types,
-    complete_external_workflow_step, complete_job_failure, complete_job_success,
-    enqueue_workflow_run_handle, list_workflow_steps, retrieve_workflow_run_handle,
-    upsert_job_definition_tx, workflow_run_handle,
+    CompleteExternalWorkflowStepInput, DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT,
+    ExternalWorkflowStepTerminalOutcome, JobCompletionUpdate, JobDefinitionUpsert,
+    JobFailureUpdate, WorkflowRunHandleError, WorkflowRunHandleScope, WorkflowRunWaitOptions,
+    cancel_workflow_run_tx, claim_jobs_for_types, complete_external_workflow_step,
+    complete_job_failure, complete_job_success, enqueue_workflow_run_handle, list_workflow_steps,
+    retrieve_workflow_run_handle, upsert_job_definition_tx, workflow_run_handle,
 };
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::{Value, json};
@@ -873,17 +873,24 @@ async fn external_result_output_is_idempotent_and_conflicts_on_change() {
         workflow_run_id: handle.workflow_run_id,
         organization_id: None,
         step_key: StepKey::new("approval"),
-        terminal_status: WorkflowStepStatus::Succeeded,
+        outcome: ExternalWorkflowStepTerminalOutcome::Succeeded {
+            output: Some(&output),
+        },
         status_reason: Some("approved"),
-        last_error_code: None,
-        last_error_message: None,
-        output: Some(&output),
+        last_error_code: Some("approval.recorded"),
+        last_error_message: Some("Approval was recorded with prior warning metadata."),
     };
     let first = complete_external_workflow_step(&pool, &input)
         .await
         .expect("first external completion succeeds");
     assert_eq!(first.status, WorkflowStepStatus::Succeeded);
     assert_eq!(first.output.as_ref(), Some(&output));
+    assert_eq!(first.status_reason.as_deref(), Some("approved"));
+    assert_eq!(first.last_error_code.as_deref(), Some("approval.recorded"));
+    assert_eq!(
+        first.last_error_message.as_deref(),
+        Some("Approval was recorded with prior warning metadata.")
+    );
 
     let steps = list_workflow_steps(&pool, None, handle.workflow_run_id)
         .await
@@ -902,16 +909,50 @@ async fn external_result_output_is_idempotent_and_conflicts_on_change() {
         workflow_run_id: handle.workflow_run_id,
         organization_id: None,
         step_key: StepKey::new("approval"),
-        terminal_status: WorkflowStepStatus::Succeeded,
+        outcome: ExternalWorkflowStepTerminalOutcome::Succeeded {
+            output: Some(&output),
+        },
         status_reason: Some("approved-later"),
-        last_error_code: None,
-        last_error_message: None,
-        output: Some(&output),
+        last_error_code: Some("approval.recorded"),
+        last_error_message: Some("Approval was recorded with prior warning metadata."),
     };
-    assert_external_completion_metadata_conflict(
+    assert_external_completion_conflict(
         &pool,
         &conflicting_metadata,
         "changed successful status reason should conflict",
+    )
+    .await;
+
+    let changed_error_code = CompleteExternalWorkflowStepInput {
+        last_error_code: Some("approval.changed"),
+        ..input
+    };
+    assert_external_completion_conflict(
+        &pool,
+        &changed_error_code,
+        "changed successful error code should conflict",
+    )
+    .await;
+
+    let changed_error_message = CompleteExternalWorkflowStepInput {
+        last_error_message: Some("Changed successful metadata."),
+        ..input
+    };
+    assert_external_completion_conflict(
+        &pool,
+        &changed_error_message,
+        "changed successful error message should conflict",
+    )
+    .await;
+
+    let changed_outcome = CompleteExternalWorkflowStepInput {
+        outcome: ExternalWorkflowStepTerminalOutcome::Failed,
+        ..input
+    };
+    assert_external_completion_conflict(
+        &pool,
+        &changed_outcome,
+        "changed successful terminal outcome should conflict",
     )
     .await;
 
@@ -919,11 +960,12 @@ async fn external_result_output_is_idempotent_and_conflicts_on_change() {
         workflow_run_id: handle.workflow_run_id,
         organization_id: None,
         step_key: StepKey::new("approval"),
-        terminal_status: WorkflowStepStatus::Succeeded,
+        outcome: ExternalWorkflowStepTerminalOutcome::Succeeded {
+            output: Some(&changed_output),
+        },
         status_reason: Some("approved"),
-        last_error_code: None,
-        last_error_message: None,
-        output: Some(&changed_output),
+        last_error_code: Some("approval.recorded"),
+        last_error_message: Some("Approval was recorded with prior warning metadata."),
     };
     let error = complete_external_workflow_step(&pool, &conflicting)
         .await
@@ -971,18 +1013,21 @@ async fn external_result_output_idempotency_uses_jsonb_semantics() {
         workflow_run_id: handle.workflow_run_id,
         organization_id: None,
         step_key: StepKey::new("approval"),
-        terminal_status: WorkflowStepStatus::Succeeded,
+        outcome: ExternalWorkflowStepTerminalOutcome::Succeeded {
+            output: Some(&output),
+        },
         status_reason: Some("approved"),
         last_error_code: None,
         last_error_message: None,
-        output: Some(&output),
     };
     complete_external_workflow_step(&pool, &input)
         .await
         .expect("first external completion succeeds");
 
     let equivalent_retry = CompleteExternalWorkflowStepInput {
-        output: Some(&equivalent_output),
+        outcome: ExternalWorkflowStepTerminalOutcome::Succeeded {
+            output: Some(&equivalent_output),
+        },
         ..input
     };
     complete_external_workflow_step(&pool, &equivalent_retry)
@@ -1022,11 +1067,10 @@ async fn external_failed_completion_metadata_is_idempotent_and_conflicts_on_chan
         workflow_run_id: handle.workflow_run_id,
         organization_id: None,
         step_key: StepKey::new("approval"),
-        terminal_status: WorkflowStepStatus::Failed,
+        outcome: ExternalWorkflowStepTerminalOutcome::Failed,
         status_reason: Some("approval.rejected"),
         last_error_code: Some("approval.rejected"),
         last_error_message: Some("Approval was rejected."),
-        output: None,
     };
     let first = complete_external_workflow_step(&pool, &input)
         .await
@@ -1048,7 +1092,7 @@ async fn external_failed_completion_metadata_is_idempotent_and_conflicts_on_chan
         status_reason: Some("approval.denied"),
         ..input
     };
-    assert_external_completion_metadata_conflict(
+    assert_external_completion_conflict(
         &pool,
         &changed_reason,
         "changed failed status reason should conflict",
@@ -1059,7 +1103,7 @@ async fn external_failed_completion_metadata_is_idempotent_and_conflicts_on_chan
         last_error_code: Some("approval.denied"),
         ..input
     };
-    assert_external_completion_metadata_conflict(
+    assert_external_completion_conflict(
         &pool,
         &changed_error_code,
         "changed failed error code should conflict",
@@ -1070,10 +1114,21 @@ async fn external_failed_completion_metadata_is_idempotent_and_conflicts_on_chan
         last_error_message: Some("Approval was denied."),
         ..input
     };
-    assert_external_completion_metadata_conflict(
+    assert_external_completion_conflict(
         &pool,
         &changed_error_message,
         "changed failed error message should conflict",
+    )
+    .await;
+
+    let changed_outcome = CompleteExternalWorkflowStepInput {
+        outcome: ExternalWorkflowStepTerminalOutcome::Canceled,
+        ..input
+    };
+    assert_external_completion_conflict(
+        &pool,
+        &changed_outcome,
+        "changed failed terminal outcome should conflict",
     )
     .await;
 
@@ -1104,11 +1159,10 @@ async fn external_canceled_completion_metadata_is_idempotent_and_conflicts_on_ch
         workflow_run_id: handle.workflow_run_id,
         organization_id: None,
         step_key: StepKey::new("approval"),
-        terminal_status: WorkflowStepStatus::Canceled,
+        outcome: ExternalWorkflowStepTerminalOutcome::Canceled,
         status_reason: Some("approval.canceled"),
         last_error_code: Some("approval.canceled"),
         last_error_message: Some("Approval was canceled."),
-        output: None,
     };
     let first = complete_external_workflow_step(&pool, &input)
         .await
@@ -1130,7 +1184,7 @@ async fn external_canceled_completion_metadata_is_idempotent_and_conflicts_on_ch
         status_reason: Some("approval.aborted"),
         ..input
     };
-    assert_external_completion_metadata_conflict(
+    assert_external_completion_conflict(
         &pool,
         &changed_reason,
         "changed canceled status reason should conflict",
@@ -1141,7 +1195,7 @@ async fn external_canceled_completion_metadata_is_idempotent_and_conflicts_on_ch
         last_error_code: Some("approval.aborted"),
         ..input
     };
-    assert_external_completion_metadata_conflict(
+    assert_external_completion_conflict(
         &pool,
         &changed_error_code,
         "changed canceled error code should conflict",
@@ -1152,10 +1206,21 @@ async fn external_canceled_completion_metadata_is_idempotent_and_conflicts_on_ch
         last_error_message: Some("Approval was aborted."),
         ..input
     };
-    assert_external_completion_metadata_conflict(
+    assert_external_completion_conflict(
         &pool,
         &changed_error_message,
         "changed canceled error message should conflict",
+    )
+    .await;
+
+    let changed_outcome = CompleteExternalWorkflowStepInput {
+        outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
+        ..input
+    };
+    assert_external_completion_conflict(
+        &pool,
+        &changed_outcome,
+        "changed canceled terminal outcome should conflict",
     )
     .await;
 
@@ -1257,7 +1322,7 @@ fn query_error_code(error: &runledger_postgres::Error) -> Option<&'static str> {
     }
 }
 
-async fn assert_external_completion_metadata_conflict(
+async fn assert_external_completion_conflict(
     pool: &PgPool,
     input: &CompleteExternalWorkflowStepInput<'_>,
     message: &str,

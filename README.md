@@ -484,8 +484,10 @@ External workflow steps can also provide result output when completed
 successfully:
 
 ```rust
-use runledger_core::jobs::{StepKey, WorkflowStepStatus};
-use runledger_postgres::jobs::CompleteExternalWorkflowStepInput;
+use runledger_core::jobs::StepKey;
+use runledger_postgres::jobs::{
+    CompleteExternalWorkflowStepInput, ExternalWorkflowStepTerminalOutcome,
+};
 
 let approval_output = serde_json::json!({ "approved_by": "ops" });
 
@@ -495,19 +497,19 @@ runledger_postgres::jobs::complete_external_workflow_step(
         workflow_run_id,
         organization_id: None,
         step_key: StepKey::new("approval"),
-        terminal_status: WorkflowStepStatus::Succeeded,
+        outcome: ExternalWorkflowStepTerminalOutcome::Succeeded {
+            output: Some(&approval_output),
+        },
         status_reason: Some("approved"),
         last_error_code: None,
         last_error_message: None,
-        output: Some(&approval_output),
     },
 )
 .await?;
 ```
 
-`output` is valid only with `WorkflowStepStatus::Succeeded`; failed or canceled
-external completions must pass `None`. Retrying completion for an already
-terminal external step is idempotent only when the terminal status,
+Only the `Succeeded` outcome can carry `output`. Retrying completion for an already
+terminal external step is idempotent only when the terminal outcome,
 `status_reason`, `last_error_code`, and `last_error_message` match; changed
 metadata returns `workflow.external_step_conflicting_completion_retry`. For
 successful completions, output must also match, or Runledger returns

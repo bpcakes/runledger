@@ -42,11 +42,8 @@ pub(in crate::jobs::workflows) fn workflow_active_key_api_required_error() -> Er
 }
 
 pub(in crate::jobs::workflows) fn workflow_release_conflict_error(workflow_run_id: Uuid) -> Error {
-    Error::QueryError(QueryError::from_classified_with_kind(
-        QueryErrorCategory::Conflict,
+    Error::QueryError(QueryError::from_kind(
         QueryErrorKind::WorkflowReleaseConflict,
-        "workflow.release_conflict",
-        "Workflow step release conflicted with another workflow mutation.",
         format!("workflow run {workflow_run_id} is locked for an exclusive mutation"),
     ))
 }
@@ -55,11 +52,8 @@ pub(in crate::jobs::workflows) fn workflow_release_conflict_timeout_error(
     workflow_run_id: Uuid,
     source: sqlx::Error,
 ) -> Error {
-    Error::QueryError(QueryError::from_classified_sqlx_with_kind(
-        QueryErrorCategory::Conflict,
+    Error::QueryError(QueryError::from_sqlx_with_kind(
         QueryErrorKind::WorkflowReleaseConflict,
-        "workflow.release_conflict",
-        "Workflow step release conflicted with another workflow mutation.",
         format!("workflow run {workflow_run_id} timed out acquiring shared release advisory lock"),
         source,
     ))
@@ -113,34 +107,6 @@ pub(in crate::jobs::workflows) fn workflow_external_completion_conflict_error(
             "workflow step '{step_key}' was already completed as {} and cannot be retried as {}",
             current_status.as_db_value(),
             requested_status.as_db_value()
-        ),
-    ))
-}
-
-pub(in crate::jobs::workflows) fn workflow_external_completion_invalid_status_error(
-    status: WorkflowStepStatus,
-) -> Error {
-    Error::QueryError(QueryError::from_classified(
-        QueryErrorCategory::Validation,
-        "workflow.external_step_invalid_terminal_status",
-        "External workflow step completion status is invalid.",
-        format!(
-            "external workflow step completion requires SUCCEEDED, FAILED, or CANCELED; got {}",
-            status.as_db_value()
-        ),
-    ))
-}
-
-pub(in crate::jobs::workflows) fn workflow_external_completion_output_invalid_error(
-    status: WorkflowStepStatus,
-) -> Error {
-    Error::QueryError(QueryError::from_classified(
-        QueryErrorCategory::Validation,
-        "workflow.external_step_output_invalid_status",
-        "External workflow step output can only be supplied with a successful completion.",
-        format!(
-            "external workflow step output requires SUCCEEDED terminal status; got {}",
-            status.as_db_value()
         ),
     ))
 }

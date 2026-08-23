@@ -18,10 +18,9 @@ use super::super::super::workflow_types::{
     CompleteExternalWorkflowStepInput, WorkflowStepDbRecord,
 };
 use super::super::errors::{
-    workflow_external_completion_conflict_error, workflow_external_completion_invalid_status_error,
+    workflow_external_completion_conflict_error,
     workflow_external_completion_metadata_conflict_error,
-    workflow_external_completion_output_conflict_error,
-    workflow_external_completion_output_invalid_error, workflow_external_step_not_external_error,
+    workflow_external_completion_output_conflict_error, workflow_external_step_not_external_error,
     workflow_external_step_not_found_error, workflow_external_step_not_waiting_error,
     workflow_internal_state_error, workflow_release_conflict_error,
 };
@@ -33,29 +32,6 @@ use super::super::release::{
     StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx,
 };
 use super::run_status::recompute_workflow_run_status_tx;
-
-fn validate_external_completion_status(terminal_status: WorkflowStepStatus) -> Result<()> {
-    if terminal_status.is_terminal() {
-        return Ok(());
-    }
-
-    Err(workflow_external_completion_invalid_status_error(
-        terminal_status,
-    ))
-}
-
-fn validate_external_completion_output(
-    terminal_status: WorkflowStepStatus,
-    output: Option<&Value>,
-) -> Result<()> {
-    if output.is_none() || terminal_status == WorkflowStepStatus::Succeeded {
-        return Ok(());
-    }
-
-    Err(workflow_external_completion_output_invalid_error(
-        terminal_status,
-    ))
-}
 
 fn validate_terminal_transition_status(terminal_status: WorkflowStepStatus) -> Result<()> {
     if !terminal_status.is_terminal() {
@@ -303,8 +279,6 @@ pub async fn complete_external_workflow_step_tx(
     tx: &mut DbTx<'_>,
     input: &CompleteExternalWorkflowStepInput<'_>,
 ) -> Result<WorkflowStepDbRecord> {
-    validate_external_completion_status(input.terminal_status)?;
-    validate_external_completion_output(input.terminal_status, input.output)?;
     let mut read_committed_tx = ensure_read_committed_tx(
         tx,
         "workflow external step completion",
@@ -321,6 +295,8 @@ async fn complete_external_workflow_step_read_committed_tx(
     input: &CompleteExternalWorkflowStepInput<'_>,
 ) -> Result<WorkflowStepDbRecord> {
     let tx = tx.as_tx();
+    let terminal_status = input.outcome.status();
+    let output = input.outcome.output();
 
     lock_workflow_step_rows_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;
 
@@ -380,9 +356,9 @@ async fn complete_external_workflow_step_read_committed_tx(
     }
 
     if step.status.is_terminal() {
-        if step.status == input.terminal_status {
+        if step.status == terminal_status {
             if step.status == WorkflowStepStatus::Succeeded
-                && !jsonb_values_match_tx(tx, stored_output.as_ref(), input.output).await?
+                && !jsonb_values_match_tx(tx, stored_output.as_ref(), output).await?
             {
                 return Err(workflow_external_completion_output_conflict_error(
                     step.step_key.as_str(),
@@ -401,7 +377,7 @@ async fn complete_external_workflow_step_read_committed_tx(
         return Err(workflow_external_completion_conflict_error(
             step.step_key.as_str(),
             step.status,
-            input.terminal_status,
+            terminal_status,
         ));
     }
 
@@ -459,11 +435,11 @@ async fn complete_external_workflow_step_read_committed_tx(
             created_at,
             updated_at",
         step.id,
-        input.terminal_status.as_db_value(),
+        terminal_status.as_db_value(),
         input.status_reason,
         input.last_error_code,
         input.last_error_message,
-        input.output,
+        output,
     )
     .fetch_one(&mut **tx)
     .await
