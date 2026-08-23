@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE workflow_steps\n                 SET dependency_count_pending = dependency_count_pending - 1,\n                     dependency_count_unsatisfied = dependency_count_unsatisfied +\n                        CASE WHEN $2 THEN 1 ELSE 0 END,\n                     updated_at = now()\n                 WHERE id = $1\n                   AND workflow_run_id = $3\n                 RETURNING\n                    id,\n                    workflow_run_id,\n                    execution_kind::text AS \"execution_kind!\",\n                    job_type,\n                    organization_id,\n                    payload,\n                    priority,\n                    max_attempts,\n                    timeout_seconds,\n                    stage,\n                    execution_resource_key,\n                    status::text AS \"status!\",\n                    dependency_count_pending,\n                    dependency_count_unsatisfied",
+  "query": "WITH dependency_updates AS (\n                SELECT dependent_step_id, dependency_unsatisfied\n                FROM unnest($1::uuid[], $2::boolean[])\n                    AS direct_dependents(dependent_step_id, dependency_unsatisfied)\n             )\n             UPDATE workflow_steps AS ws\n             SET dependency_count_pending = ws.dependency_count_pending - 1,\n                 dependency_count_unsatisfied = ws.dependency_count_unsatisfied +\n                    CASE WHEN dependency_updates.dependency_unsatisfied THEN 1 ELSE 0 END,\n                 updated_at = now()\n             FROM dependency_updates\n             WHERE ws.id = dependency_updates.dependent_step_id\n               AND ws.workflow_run_id = $3\n             RETURNING\n                ws.id,\n                ws.workflow_run_id,\n                ws.execution_kind::text AS \"execution_kind!\",\n                ws.job_type,\n                ws.organization_id,\n                ws.payload,\n                ws.priority,\n                ws.max_attempts,\n                ws.timeout_seconds,\n                ws.stage,\n                ws.execution_resource_key,\n                ws.status::text AS \"status!\",\n                ws.dependency_count_pending,\n                ws.dependency_count_unsatisfied",
   "describe": {
     "columns": [
       {
@@ -76,8 +76,8 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Bool",
+        "UuidArray",
+        "BoolArray",
         "Uuid"
       ]
     },
@@ -98,5 +98,5 @@
       false
     ]
   },
-  "hash": "f79af29f659a7715ea5ba1b94def6fc47d89f0a2a2349530662cdf326e922cd9"
+  "hash": "1ebbc119a0b111fd4d82785e510b98a6a8d0a3de8c32e9bc5433f3df5fdb1bd8"
 }
