@@ -2,6 +2,7 @@ mod catalog_sync;
 mod claim;
 mod crud;
 mod locking;
+mod persistence;
 mod row;
 mod validation;
 

@@ -21,7 +21,7 @@ use super::super::workflow_types::{
 use super::enqueue::{enqueue_or_get_active_workflow_tx, enqueue_workflow_run_tx};
 use super::read::load_workflow_run_by_id_tx;
 use super::snapshot::{
-    RecoveryEnqueueSnapshot, StoredCanonicalWorkflowDependency, StoredCanonicalWorkflowStep,
+    StoredCanonicalWorkflowDependency, StoredCanonicalWorkflowStep,
     deserialize_recovery_append_snapshot, deserialize_recovery_enqueue_snapshot,
 };
 
@@ -62,9 +62,15 @@ struct RecoverySourceStepState {
 struct RecoveryBlueprint {
     workflow_type: String,
     organization_id: Option<Uuid>,
-    initial: RecoveryEnqueueSnapshot,
-    steps: Vec<StoredCanonicalWorkflowStep>,
-    source_step_state: BTreeMap<String, RecoverySourceStepState>,
+    metadata: Value,
+    active_key: Option<String>,
+    result_step_key: Option<String>,
+    steps: Vec<RecoveryStep>,
+}
+
+struct RecoveryStep {
+    canonical: StoredCanonicalWorkflowStep,
+    source_state: RecoverySourceStepState,
 }
 
 #[derive(Debug)]
@@ -145,10 +151,12 @@ impl RecoveryBlueprint {
         let enqueue_request = enqueue_request.ok_or_else(|| {
             recovery_snapshot_missing_error(source_run_id, "canonical enqueue request")
         })?;
-        let mut initial =
-            deserialize_recovery_enqueue_snapshot(enqueue_request).map_err(|error| {
-                unsafe_recovery_snapshot_error(format!("invalid enqueue snapshot: {error}"))
-            })?;
+        let (metadata, active_key, result_step_key, initial_steps) =
+            deserialize_recovery_enqueue_snapshot(enqueue_request)
+                .map_err(|error| {
+                    unsafe_recovery_snapshot_error(format!("invalid enqueue snapshot: {error}"))
+                })?
+                .into_parts();
         let mutations = sqlx::query_as::<_, RecoveryMutationRow>(
             "SELECT mutation_kind, request
              FROM workflow_run_mutations
@@ -163,7 +171,7 @@ impl RecoveryBlueprint {
         })?;
 
         let mut steps_by_key = BTreeMap::new();
-        for step in initial.take_steps() {
+        for step in initial_steps {
             insert_recovery_step(&mut steps_by_key, step)?;
         }
         for mutation in mutations {
@@ -185,15 +193,19 @@ impl RecoveryBlueprint {
         Ok(Self {
             workflow_type,
             organization_id,
-            initial,
-            steps: steps_by_key.into_values().collect(),
-            source_step_state: load_recovery_source_step_state_tx(tx, source_run_id).await?,
+            metadata,
+            active_key,
+            result_step_key,
+            steps: pair_recovery_steps(
+                steps_by_key,
+                load_recovery_source_step_state_tx(tx, source_run_id).await?,
+            )?,
         })
     }
 
     async fn enqueue_tx(&self, tx: &mut DbTx<'_>) -> Result<WorkflowRunDbRecord> {
         let enqueue = self.build_enqueue()?;
-        if self.initial.active_key.is_some() {
+        if self.active_key.is_some() {
             match enqueue_or_get_active_workflow_tx(tx, &enqueue).await? {
                 EnqueueActiveWorkflowOutcome::Inserted(run) => Ok(run),
                 EnqueueActiveWorkflowOutcome::ExistingActive(run) => {
@@ -211,24 +223,37 @@ impl RecoveryBlueprint {
     }
 
     fn build_enqueue(&self) -> Result<runledger_core::jobs::WorkflowRunEnqueue<'_>> {
-        // This is a load-bearing reconstruction invariant: every path that
-        // adds workflow steps must also append its canonical request to
-        // workflow_run_mutations. The supported append API does so atomically.
-        if self.source_step_state.len() != self.steps.len() {
-            return Err(unsafe_recovery_snapshot_error(format!(
-                "reconstructed {} workflow steps but source run stores {}",
-                self.steps.len(),
-                self.source_step_state.len()
-            )));
-        }
-
-        let mut replay_steps = Vec::<WorkflowStepEnqueue<'_>>::with_capacity(self.steps.len());
-        for step in &self.steps {
-            let validated_step = validate_recovery_step(step, &self.source_step_state)?;
+        let Self {
+            workflow_type,
+            organization_id,
+            metadata,
+            active_key,
+            result_step_key,
+            steps,
+        } = self;
+        let mut replay_steps = Vec::<WorkflowStepEnqueue<'_>>::with_capacity(steps.len());
+        for step in steps {
+            let validated_step = validate_recovery_step(step)?;
             replay_steps.push(build_recovery_step_enqueue(validated_step)?);
         }
 
-        build_recovery_run_enqueue(self, replay_steps)
+        let mut builder =
+            WorkflowRunEnqueueBuilder::new(WorkflowType::new(workflow_type), metadata);
+        if let Some(organization_id) = organization_id {
+            builder = builder.organization_id(*organization_id);
+        }
+        if let Some(active_key) = active_key.as_deref() {
+            builder = builder.active_key(active_key);
+        }
+        if let Some(result_step_key) = result_step_key.as_deref() {
+            builder = builder.result_step_key(StepKey::new(result_step_key));
+        }
+        for step in replay_steps {
+            builder = builder.step(step);
+        }
+        builder
+            .try_build()
+            .map_err(|error| unsafe_recovery_snapshot_error(error.to_string()))
     }
 }
 
@@ -386,9 +411,12 @@ async fn insert_recovery_lineage_tx(
 }
 
 fn validate_recovery_step<'a>(
-    step: &'a StoredCanonicalWorkflowStep,
-    source_step_state: &'a BTreeMap<String, RecoverySourceStepState>,
+    recovery_step: &'a RecoveryStep,
 ) -> Result<ValidatedRecoveryStep<'a>> {
+    let RecoveryStep {
+        canonical: step,
+        source_state,
+    } = recovery_step;
     let execution_kind = WorkflowStepExecutionKind::from_db_value(&step.execution_kind)
         .ok_or_else(|| {
             unsafe_recovery_snapshot_error(format!(
@@ -396,12 +424,6 @@ fn validate_recovery_step<'a>(
                 step.step_key
             ))
         })?;
-    let source_state = source_step_state.get(&step.step_key).ok_or_else(|| {
-        unsafe_recovery_snapshot_error(format!(
-            "reconstructed step {} is missing from the source run",
-            step.step_key
-        ))
-    })?;
     let source_execution_kind = WorkflowStepExecutionKind::from_db_value(
         &source_state.execution_kind,
     )
@@ -564,31 +586,6 @@ fn build_recovery_step_enqueue<'a>(
         .map_err(|error| unsafe_recovery_snapshot_error(error.to_string()))
 }
 
-fn build_recovery_run_enqueue<'a>(
-    blueprint: &'a RecoveryBlueprint,
-    replay_steps: Vec<WorkflowStepEnqueue<'a>>,
-) -> Result<runledger_core::jobs::WorkflowRunEnqueue<'a>> {
-    let mut builder = WorkflowRunEnqueueBuilder::new(
-        WorkflowType::new(&blueprint.workflow_type),
-        &blueprint.initial.metadata,
-    );
-    if let Some(organization_id) = blueprint.organization_id {
-        builder = builder.organization_id(organization_id);
-    }
-    if let Some(active_key) = blueprint.initial.active_key.as_deref() {
-        builder = builder.active_key(active_key);
-    }
-    if let Some(result_step_key) = blueprint.initial.result_step_key.as_deref() {
-        builder = builder.result_step_key(StepKey::new(result_step_key));
-    }
-    for step in replay_steps {
-        builder = builder.step(step);
-    }
-    builder
-        .try_build()
-        .map_err(|error| unsafe_recovery_snapshot_error(error.to_string()))
-}
-
 fn resolved_source_step_setting(
     step: &StoredCanonicalWorkflowStep,
     field: &str,
@@ -608,6 +605,42 @@ fn resolved_source_step_setting(
         )));
     }
     Ok(source_value)
+}
+
+fn pair_recovery_steps(
+    steps_by_key: BTreeMap<String, StoredCanonicalWorkflowStep>,
+    mut source_step_state_by_key: BTreeMap<String, RecoverySourceStepState>,
+) -> Result<Vec<RecoveryStep>> {
+    // This is a load-bearing reconstruction invariant: every path that adds
+    // workflow steps must also append its canonical request to
+    // workflow_run_mutations. The supported append API does so atomically.
+    // Keep this length check before key lookup so corrupted snapshots retain
+    // the established error precedence.
+    if source_step_state_by_key.len() != steps_by_key.len() {
+        return Err(unsafe_recovery_snapshot_error(format!(
+            "reconstructed {} workflow steps but source run stores {}",
+            steps_by_key.len(),
+            source_step_state_by_key.len()
+        )));
+    }
+
+    steps_by_key
+        .into_values()
+        .map(|canonical| {
+            let source_state = source_step_state_by_key
+                .remove(&canonical.step_key)
+                .ok_or_else(|| {
+                    unsafe_recovery_snapshot_error(format!(
+                        "reconstructed step {} is missing from the source run",
+                        canonical.step_key
+                    ))
+                })?;
+            Ok(RecoveryStep {
+                canonical,
+                source_state,
+            })
+        })
+        .collect()
 }
 
 async fn load_recovery_source_step_state_tx(
@@ -810,9 +843,161 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Error, RecoverySourceStepState, StoredCanonicalWorkflowDependency,
-        StoredCanonicalWorkflowStep, validate_recovery_step,
+        Error, RecoverySourceStepState, RecoveryStep, StoredCanonicalWorkflowDependency,
+        StoredCanonicalWorkflowStep, deserialize_recovery_enqueue_snapshot, pair_recovery_steps,
+        validate_recovery_step,
     };
+
+    fn canonical_step(step_key: &str) -> StoredCanonicalWorkflowStep {
+        StoredCanonicalWorkflowStep {
+            step_key: step_key.to_owned(),
+            execution_kind: "JOB".to_owned(),
+            job_type: Some("jobs.test.recovery.child".to_owned()),
+            organization_id: None,
+            payload: json!({"source": "snapshot"}),
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            stage: None,
+            allow_handler_continuation: false,
+            execution_resource_key: None,
+            dependencies: Vec::new(),
+        }
+    }
+
+    fn source_step_state(step_key: &str) -> RecoverySourceStepState {
+        RecoverySourceStepState {
+            step_key: step_key.to_owned(),
+            execution_kind: "JOB".to_owned(),
+            payload: json!({"source": step_key}),
+            priority: Some(100),
+            max_attempts: Some(3),
+            timeout_seconds: Some(60),
+            allow_handler_continuation: false,
+            execution_resource_key: None,
+        }
+    }
+
+    fn assert_unsafe_snapshot_error(error: Error, expected_detail: &str) {
+        let Error::QueryError(error) = error else {
+            panic!("expected unsafe recovery snapshot error");
+        };
+        assert_eq!(error.code(), "workflow.recovery_snapshot_unsafe");
+        assert_eq!(error.internal_message(), expected_detail);
+    }
+
+    #[test]
+    fn recovery_step_pairing_rejects_missing_source_steps_before_key_lookup() {
+        let steps_by_key = BTreeMap::from([
+            ("a".to_owned(), canonical_step("a")),
+            ("b".to_owned(), canonical_step("b")),
+        ]);
+        let source_step_state_by_key = BTreeMap::from([("a".to_owned(), source_step_state("a"))]);
+
+        let error = pair_recovery_steps(steps_by_key, source_step_state_by_key)
+            .err()
+            .expect("missing source state must fail before key lookup");
+        assert_unsafe_snapshot_error(
+            error,
+            "reconstructed 2 workflow steps but source run stores 1",
+        );
+    }
+
+    #[test]
+    fn recovery_step_pairing_rejects_extra_source_steps_before_key_lookup() {
+        let steps_by_key = BTreeMap::from([("a".to_owned(), canonical_step("a"))]);
+        let source_step_state_by_key = BTreeMap::from([
+            ("a".to_owned(), source_step_state("a")),
+            ("b".to_owned(), source_step_state("b")),
+        ]);
+
+        let error = pair_recovery_steps(steps_by_key, source_step_state_by_key)
+            .err()
+            .expect("extra source state must fail before key lookup");
+        assert_unsafe_snapshot_error(
+            error,
+            "reconstructed 1 workflow steps but source run stores 2",
+        );
+    }
+
+    #[test]
+    fn recovery_step_pairing_rejects_mismatched_keys_after_equal_length_check() {
+        let steps_by_key = BTreeMap::from([("a".to_owned(), canonical_step("a"))]);
+        let source_step_state_by_key = BTreeMap::from([("b".to_owned(), source_step_state("b"))]);
+
+        let error = pair_recovery_steps(steps_by_key, source_step_state_by_key)
+            .err()
+            .expect("mismatched keys must fail after the equal-length check");
+        assert_unsafe_snapshot_error(error, "reconstructed step a is missing from the source run");
+    }
+
+    #[test]
+    fn recovery_step_pairing_orders_pairs_by_canonical_step_key() {
+        let steps_by_key = BTreeMap::from([
+            ("z".to_owned(), canonical_step("z")),
+            ("a".to_owned(), canonical_step("a")),
+            ("m".to_owned(), canonical_step("m")),
+        ]);
+        let source_step_state_by_key = BTreeMap::from([
+            ("m".to_owned(), source_step_state("m")),
+            ("z".to_owned(), source_step_state("z")),
+            ("a".to_owned(), source_step_state("a")),
+        ]);
+
+        let steps = pair_recovery_steps(steps_by_key, source_step_state_by_key)
+            .expect("pair recovery steps in deterministic order");
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.canonical.step_key.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "m", "z"]
+        );
+        assert!(
+            steps.iter().all(|step| {
+                step.source_state.payload["source"] == json!(step.canonical.step_key)
+            })
+        );
+    }
+
+    #[test]
+    fn recovery_step_pairing_accepts_legacy_snapshot_optional_fields() {
+        let legacy_snapshot = json!({
+            "metadata": {"source": "legacy"},
+            "steps": [{
+                "step_key": "legacy",
+                "execution_kind": "JOB",
+                "job_type": "jobs.test.recovery.legacy",
+                "payload": {"source": "legacy snapshot"},
+                "priority": null,
+                "max_attempts": null,
+                "timeout_seconds": null,
+                "dependencies": [],
+            }],
+        });
+        let (metadata, active_key, result_step_key, initial_steps) =
+            deserialize_recovery_enqueue_snapshot(legacy_snapshot)
+                .expect("recovery decoder must accept historical optional fields")
+                .into_parts();
+        assert_eq!(metadata, json!({"source": "legacy"}));
+        assert!(active_key.is_none());
+        assert!(result_step_key.is_none());
+
+        let steps_by_key = initial_steps
+            .into_iter()
+            .map(|step| (step.step_key.clone(), step))
+            .collect();
+        let steps = pair_recovery_steps(
+            steps_by_key,
+            BTreeMap::from([("legacy".to_owned(), source_step_state("legacy"))]),
+        )
+        .expect("pair legacy snapshot step with source state");
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].canonical.organization_id.is_none());
+        assert!(steps[0].canonical.stage.is_none());
+        assert!(!steps[0].canonical.allow_handler_continuation);
+        assert!(steps[0].canonical.execution_resource_key.is_none());
+    }
 
     #[test]
     fn recovery_step_validation_preserves_stage_before_dependency_error_precedence() {
@@ -833,26 +1018,13 @@ mod tests {
                 release_mode: "FUTURE_RELEASE_MODE".to_owned(),
             }],
         };
-        let source_state = BTreeMap::from([(
-            "child".to_owned(),
-            RecoverySourceStepState {
-                step_key: "child".to_owned(),
-                execution_kind: "JOB".to_owned(),
-                payload: json!({"source": "current"}),
-                priority: Some(100),
-                max_attempts: Some(3),
-                timeout_seconds: Some(60),
-                allow_handler_continuation: false,
-                execution_resource_key: None,
-            },
-        )]);
-
-        let error = validate_recovery_step(&step, &source_state)
-            .expect_err("invalid stage must precede the later release-mode validation");
-        let Error::QueryError(error) = error else {
-            panic!("expected unsafe recovery snapshot error");
+        let recovery_step = RecoveryStep {
+            canonical: step,
+            source_state: source_step_state("child"),
         };
-        assert_eq!(error.code(), "workflow.recovery_snapshot_unsafe");
-        assert_eq!(error.internal_message(), "unknown stage for step child");
+
+        let error = validate_recovery_step(&recovery_step)
+            .expect_err("invalid stage must precede the later release-mode validation");
+        assert_unsafe_snapshot_error(error, "unknown stage for step child");
     }
 }

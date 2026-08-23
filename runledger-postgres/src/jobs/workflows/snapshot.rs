@@ -135,11 +135,26 @@ struct RecoveryCanonicalWorkflowDependency {
 }
 
 impl RecoveryEnqueueSnapshot {
-    pub(super) fn take_steps(&mut self) -> Vec<StoredCanonicalWorkflowStep> {
-        std::mem::take(&mut self.steps)
-            .into_iter()
-            .map(Into::into)
-            .collect()
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        JsonValue,
+        Option<String>,
+        Option<String>,
+        Vec<StoredCanonicalWorkflowStep>,
+    ) {
+        let Self {
+            metadata,
+            active_key,
+            result_step_key,
+            steps,
+        } = self;
+        (
+            metadata,
+            active_key,
+            result_step_key,
+            steps.into_iter().map(Into::into).collect(),
+        )
     }
 }
 

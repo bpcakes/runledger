@@ -86,16 +86,14 @@ pub(in crate::jobs::workflows) async fn insert_workflow_step_record_tx(
     workflow_run_id: Uuid,
     organization_id: Option<Uuid>,
     step: &WorkflowStepEnqueue<'_>,
-    defaults: Option<&JobDefinitionDefaults>,
+    defaults_by_job_type: &DefaultsByJobType,
     dependency_count_pending: i32,
     dependency_count_unsatisfied: i32,
 ) -> Result<Uuid> {
     let dependency_count_total = dependency_count_total(step)?;
     let (job_type, priority, max_attempts, timeout_seconds, stage) = match step.execution() {
         WorkflowStepExecution::Job(execution) => {
-            let defaults = defaults.ok_or_else(|| {
-                workflow_internal_state_error("missing job definition defaults for job step")
-            })?;
+            let defaults = workflow_step_defaults(defaults_by_job_type, execution)?;
 
             (
                 Some(execution.job_type().as_str()),
@@ -180,18 +178,12 @@ pub(in crate::jobs::workflows) async fn insert_workflow_steps_tx(
 ) -> Result<WorkflowStepIdsByKey> {
     let mut step_id_by_key = WorkflowStepIdsByKey::new();
     for step in payload.steps() {
-        let defaults = match step.execution() {
-            WorkflowStepExecution::Job(execution) => {
-                Some(workflow_step_defaults(defaults_by_job_type, execution)?)
-            }
-            WorkflowStepExecution::External => None,
-        };
         let step_id = insert_workflow_step_record_tx(
             tx,
             workflow_run_id,
             workflow_step_effective_organization_id(payload.organization_id(), step),
             step,
-            defaults,
+            defaults_by_job_type,
             dependency_count_total(step)?,
             0,
         )

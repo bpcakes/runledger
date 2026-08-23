@@ -296,6 +296,128 @@ async fn dependency_writes_preserve_edge_orientation_and_release_modes_for_appen
 }
 
 #[tokio::test]
+async fn append_resolves_only_immediately_ready_steps_and_cancels_born_unsatisfied_steps() {
+    let (pool, database) = setup_ephemeral_pool("workflow_append_ready_state", 8).await;
+    record_postgres_server_version(&pool, "workflow append ready-state regression").await;
+
+    let payload = json!({"kind": "append-ready-state"});
+    let metadata = json!({"source": "append-ready-state"});
+    let append_window =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("append-window"), &payload)
+            .try_build()
+            .expect("build append window");
+    let pending_prerequisite =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("pending-prerequisite"), &payload)
+            .try_build()
+            .expect("build pending prerequisite");
+    let failed_prerequisite =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("failed-prerequisite"), &payload)
+            .try_build()
+            .expect("build failed prerequisite");
+    let workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.append_ready_state"),
+        &metadata,
+    )
+    .step(append_window)
+    .step(pending_prerequisite)
+    .step(failed_prerequisite)
+    .try_build()
+    .expect("build append ready-state workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue append ready-state workflow");
+
+    complete_external_workflow_step(
+        &pool,
+        &CompleteExternalWorkflowStepInput {
+            workflow_run_id: run.id,
+            organization_id: None,
+            step_key: StepKey::new("failed-prerequisite"),
+            outcome: ExternalWorkflowStepTerminalOutcome::Failed,
+            status_reason: Some("make appended on-success dependent unsatisfied"),
+            last_error_code: Some("workflow.test.append_ready_state"),
+            last_error_message: Some("append ready-state fixture failure"),
+        },
+    )
+    .await
+    .expect("fail append ready-state prerequisite");
+
+    let ready_second =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("ready-second"), &payload)
+            .try_build()
+            .expect("build second ready appended step");
+    let pending = WorkflowStepEnqueueBuilder::new_external(StepKey::new("pending"), &payload)
+        .depends_on_terminal(&[StepKey::new("pending-prerequisite")])
+        .try_build()
+        .expect("build pending appended step");
+    let born_unsatisfied =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("born-unsatisfied"), &payload)
+            .depends_on_success(&[StepKey::new("failed-prerequisite")])
+            .try_build()
+            .expect("build born-unsatisfied appended step");
+    let ready_first =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("ready-first"), &payload)
+            .try_build()
+            .expect("build first ready appended step");
+    let mutation_metadata = json!({});
+    let append_result = append_workflow_steps(
+        &pool,
+        &AppendWorkflowStepsInput {
+            workflow_run_id: run.id,
+            organization_id: None,
+            mutation_key: "append-ready-state",
+            mutation_metadata: &mutation_metadata,
+            append_window_step_key: StepKey::new("append-window"),
+            steps: vec![ready_second, pending, born_unsatisfied, ready_first],
+        },
+    )
+    .await
+    .expect("append mixed ready, pending, and unsatisfied steps");
+    assert_eq!(
+        append_result
+            .appended_steps
+            .iter()
+            .map(|step| step.step_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ready-second", "pending", "born-unsatisfied", "ready-first"],
+        "append results preserve append-input order"
+    );
+
+    let appended_steps = list_workflow_steps(&pool, None, run.id)
+        .await
+        .expect("load mixed appended steps")
+        .into_iter()
+        .map(|step| (step.step_key.as_str().to_owned(), step))
+        .collect::<BTreeMap<_, _>>();
+    for ready_step_key in ["ready-second", "ready-first"] {
+        let ready_step = appended_steps
+            .get(ready_step_key)
+            .expect("ready appended step exists");
+        assert_eq!(ready_step.status, WorkflowStepStatus::WaitingForExternal);
+        assert_eq!(ready_step.dependency_count_pending, 0);
+        assert_eq!(ready_step.dependency_count_unsatisfied, 0);
+    }
+    let pending_step = appended_steps
+        .get("pending")
+        .expect("pending appended step exists");
+    assert_eq!(pending_step.status, WorkflowStepStatus::Blocked);
+    assert_eq!(pending_step.dependency_count_pending, 1);
+    assert_eq!(pending_step.dependency_count_unsatisfied, 0);
+    let born_unsatisfied_step = appended_steps
+        .get("born-unsatisfied")
+        .expect("born-unsatisfied appended step exists");
+    assert_eq!(born_unsatisfied_step.status, WorkflowStepStatus::Canceled);
+    assert_eq!(born_unsatisfied_step.dependency_count_pending, 0);
+    assert_eq!(born_unsatisfied_step.dependency_count_unsatisfied, 1);
+    assert_eq!(
+        born_unsatisfied_step.last_error_code.as_deref(),
+        Some("workflow.dependency_unsatisfied")
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn malformed_cross_run_dependencies_fail_closed_before_dependent_mutation() {
     let (pool, database) = setup_ephemeral_pool("workflow_cross_run_rejection", 8).await;
     record_postgres_server_version(&pool, "workflow cross-run rejection").await;

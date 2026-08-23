@@ -1,7 +1,8 @@
 use chrono::{TimeZone, Utc};
 use runledger_core::jobs::WorkflowType;
 use runledger_postgres::jobs::{
-    WorkflowRunListFilter, get_latest_workflow_run_by_type, list_workflow_runs,
+    WorkflowRunReadListFilter, WorkflowRunReadScope, get_latest_workflow_run_by_type_with_scope,
+    list_workflow_runs_with_scope,
 };
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::json;
@@ -41,10 +42,10 @@ async fn workflow_run_reads_break_created_at_ties_by_id_desc() {
     .await
     .expect("insert tied workflow runs");
 
-    let runs = list_workflow_runs(
+    let runs = list_workflow_runs_with_scope(
         &pool,
-        &WorkflowRunListFilter {
-            organization_id: None,
+        &WorkflowRunReadListFilter {
+            scope: WorkflowRunReadScope::Global,
             status: None,
             workflow_type: Some(workflow_type),
             limit: 2,
@@ -58,10 +59,10 @@ async fn workflow_run_reads_break_created_at_ties_by_id_desc() {
         vec![newer_id, older_id]
     );
 
-    let second_page = list_workflow_runs(
+    let second_page = list_workflow_runs_with_scope(
         &pool,
-        &WorkflowRunListFilter {
-            organization_id: None,
+        &WorkflowRunReadListFilter {
+            scope: WorkflowRunReadScope::Global,
             status: None,
             workflow_type: Some(workflow_type),
             limit: 1,
@@ -72,10 +73,14 @@ async fn workflow_run_reads_break_created_at_ties_by_id_desc() {
     .expect("list workflow runs second page");
     assert_eq!(second_page[0].id, older_id);
 
-    let latest = get_latest_workflow_run_by_type(&pool, None, WorkflowType::new(workflow_type))
-        .await
-        .expect("load latest workflow run")
-        .expect("latest workflow run exists");
+    let latest = get_latest_workflow_run_by_type_with_scope(
+        &pool,
+        WorkflowRunReadScope::Global,
+        WorkflowType::new(workflow_type),
+    )
+    .await
+    .expect("load latest workflow run")
+    .expect("latest workflow run exists");
     assert_eq!(latest.id, newer_id);
 
     teardown_ephemeral_pool(pool, database).await;

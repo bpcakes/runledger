@@ -48,9 +48,12 @@ Use `runledger_postgres::jobs::set_job_schedule_active` to pause or resume a
 schedule, and `runledger_postgres::jobs::set_job_schedule_next_fire_at` to
 retime the schedule cursor.
 
-Use `runledger_postgres::jobs::count_workflow_runs` with
-`runledger_postgres::jobs::WorkflowRunCountFilter` for workflow status counters
-instead of fetching pages of runs just to count them.
+Use `runledger_postgres::jobs::count_workflow_runs_with_scope` with
+`runledger_postgres::jobs::WorkflowRunReadCountFilter` for workflow status
+counters instead of fetching pages of runs just to count them. Set
+`WorkflowRunReadScope::Global` for exact global rows,
+`WorkflowRunReadScope::Organization(id)` for one tenant, or `Admin` only for a
+trusted all-tenant surface.
 
 ## Durable Transactional Handoff
 

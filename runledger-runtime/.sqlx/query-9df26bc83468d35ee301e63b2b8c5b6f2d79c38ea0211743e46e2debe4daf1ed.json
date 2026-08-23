@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            id,\n            workflow_run_id,\n            execution_kind::text AS \"execution_kind!\",\n            job_type,\n            organization_id,\n            payload,\n            priority,\n            max_attempts,\n            timeout_seconds,\n            stage,\n            execution_resource_key,\n            dependency_count_pending,\n            dependency_count_unsatisfied\n         FROM workflow_steps\n         WHERE workflow_run_id = $1\n           AND id = ANY($2::uuid[])\n         FOR UPDATE",
+  "query": "SELECT\n            id,\n            workflow_run_id,\n            execution_kind::text AS \"execution_kind!\",\n            job_type,\n            organization_id,\n            payload,\n            priority,\n            max_attempts,\n            timeout_seconds,\n            stage,\n            execution_resource_key,\n            dependency_count_unsatisfied\n         FROM workflow_steps\n         WHERE workflow_run_id = $1\n           AND id = ANY($2::uuid[])\n           AND dependency_count_pending = 0\n         ORDER BY array_position($2::uuid[], id)\n         FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -60,11 +60,6 @@
       },
       {
         "ordinal": 11,
-        "name": "dependency_count_pending",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 12,
         "name": "dependency_count_unsatisfied",
         "type_info": "Int4"
       }
@@ -87,9 +82,8 @@
       true,
       true,
       true,
-      false,
       false
     ]
   },
-  "hash": "3d459ecf32b180a48f9399cea410512234c864cc5ed60956a7a84001c0f7dd8a"
+  "hash": "9df26bc83468d35ee301e63b2b8c5b6f2d79c38ea0211743e46e2debe4daf1ed"
 }

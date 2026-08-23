@@ -184,6 +184,13 @@ pub struct WorkflowStepDependencyDbRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// Legacy workflow-run list filter with nullable admin visibility.
+///
+/// `None` for `organization_id` retains its historical meaning: the caller can
+/// inspect global and organization-owned runs. Prefer
+/// [`WorkflowRunReadListFilter`] for new code so the visibility decision is
+/// explicit.
+#[derive(Debug, Clone)]
 pub struct WorkflowRunListFilter<'a> {
     pub organization_id: Option<Uuid>,
     pub status: Option<WorkflowRunStatus>,
@@ -192,8 +199,71 @@ pub struct WorkflowRunListFilter<'a> {
     pub offset: i64,
 }
 
+/// Legacy workflow-run count filter with nullable admin visibility.
+///
+/// `None` for `organization_id` retains its historical meaning: the caller can
+/// inspect global and organization-owned runs. Prefer
+/// [`WorkflowRunReadCountFilter`] for new code so the visibility decision is
+/// explicit.
+#[derive(Debug, Clone)]
 pub struct WorkflowRunCountFilter<'a> {
     pub organization_id: Option<Uuid>,
+    pub status: Option<WorkflowRunStatus>,
+    pub workflow_type: Option<&'a str>,
+}
+
+/// Explicit visibility capability for workflow reads.
+///
+/// This is intentionally a read capability, not a mutation or cancellation
+/// capability. `Global` matches only rows whose `organization_id` is `NULL`,
+/// `Organization` matches one exact organization, and `Admin` may inspect both
+/// global and organization-owned rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowRunReadScope {
+    /// Match only a workflow run whose `organization_id` is `NULL`.
+    Global,
+    /// Match only workflow runs owned by this exact organization.
+    Organization(Uuid),
+    /// Match workflow runs regardless of organization ownership.
+    Admin,
+}
+
+impl WorkflowRunReadScope {
+    /// Returns the exact organization for [`Self::Organization`].
+    ///
+    /// This returns `None` for both [`Self::Global`] and [`Self::Admin`]; match
+    /// on the scope when those two visibility capabilities must remain distinct.
+    #[must_use]
+    pub const fn organization_id(self) -> Option<Uuid> {
+        match self {
+            Self::Organization(organization_id) => Some(organization_id),
+            Self::Global | Self::Admin => None,
+        }
+    }
+
+    pub(in crate::jobs) const fn visibility_predicate(self) -> (bool, Option<Uuid>) {
+        match self {
+            Self::Global => (false, None),
+            Self::Organization(organization_id) => (false, Some(organization_id)),
+            Self::Admin => (true, None),
+        }
+    }
+}
+
+/// Explicit-scope input for listing workflow runs.
+#[derive(Debug, Clone)]
+pub struct WorkflowRunReadListFilter<'a> {
+    pub scope: WorkflowRunReadScope,
+    pub status: Option<WorkflowRunStatus>,
+    pub workflow_type: Option<&'a str>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// Explicit-scope input for counting workflow runs.
+#[derive(Debug, Clone)]
+pub struct WorkflowRunReadCountFilter<'a> {
+    pub scope: WorkflowRunReadScope,
     pub status: Option<WorkflowRunStatus>,
     pub workflow_type: Option<&'a str>,
 }
@@ -255,27 +325,16 @@ pub struct AppendWorkflowStepsResult {
     pub outcome: AppendWorkflowStepsOutcome,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowRunHandleScope {
-    Organization(Uuid),
-    Global,
-    Admin,
-}
-
-impl WorkflowRunHandleScope {
-    #[must_use]
-    pub const fn organization_id(self) -> Option<Uuid> {
-        match self {
-            Self::Organization(organization_id) => Some(organization_id),
-            Self::Global | Self::Admin => None,
-        }
-    }
-}
+/// Compatibility alias for the former handle-only scope name.
+///
+/// Handles now use [`WorkflowRunReadScope`] so their status, run, and result
+/// reads share the same visibility model as the public workflow read APIs.
+pub type WorkflowRunHandleScope = WorkflowRunReadScope;
 
 #[derive(Clone)]
 pub struct WorkflowRunHandle {
     pub workflow_run_id: Uuid,
-    pub scope: WorkflowRunHandleScope,
+    pub scope: WorkflowRunReadScope,
     pub(crate) pool: crate::DbPool,
 }
 

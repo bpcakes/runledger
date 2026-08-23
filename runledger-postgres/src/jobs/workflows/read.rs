@@ -7,7 +7,8 @@ use super::super::errors::validate_pagination;
 use super::super::row_decode::parse_workflow_release_mode;
 use super::super::rows::{WorkflowRunRow, WorkflowStepRow};
 use super::super::workflow_types::{
-    WorkflowRunCountFilter, WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowStepDbRecord,
+    WorkflowRunCountFilter, WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowRunReadCountFilter,
+    WorkflowRunReadListFilter, WorkflowRunReadScope, WorkflowStepDbRecord,
     WorkflowStepDependencyDbRecord,
 };
 
@@ -32,18 +33,44 @@ fn workflow_step_dependency_db_record_from_lookup_row(
     })
 }
 
+const fn legacy_workflow_read_scope(organization_id: Option<Uuid>) -> WorkflowRunReadScope {
+    match organization_id {
+        Some(organization_id) => WorkflowRunReadScope::Organization(organization_id),
+        None => WorkflowRunReadScope::Admin,
+    }
+}
+
+/// Loads a workflow run using the legacy nullable visibility scope.
+///
+/// `None` retains its historical admin visibility across global and
+/// organization-owned workflow runs. Prefer
+/// [`get_workflow_run_by_id_with_scope`] for new code.
 pub async fn get_workflow_run_by_id(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     workflow_run_id: Uuid,
 ) -> Result<Option<WorkflowRunDbRecord>> {
-    let row = sqlx::query_as!(
-        WorkflowRunRow,
+    get_workflow_run_by_id_with_scope(
+        pool,
+        legacy_workflow_read_scope(organization_id),
+        workflow_run_id,
+    )
+    .await
+}
+
+/// Loads a workflow run within an explicit read-visibility scope.
+pub async fn get_workflow_run_by_id_with_scope(
+    pool: &DbPool,
+    scope: WorkflowRunReadScope,
+    workflow_run_id: Uuid,
+) -> Result<Option<WorkflowRunDbRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
+    let row = sqlx::query_as::<_, WorkflowRunRow>(
         "SELECT
             id,
             workflow_type,
             organization_id,
-            status::text AS \"status!\",
+            status::text AS status,
             idempotency_key,
             result_step_key,
             metadata,
@@ -53,11 +80,12 @@ pub async fn get_workflow_run_by_id(
             updated_at
          FROM workflow_runs
          WHERE id = $1
-           AND ($2::uuid IS NULL OR organization_id = $2)
+           AND ($2::bool OR organization_id IS NOT DISTINCT FROM $3::uuid)
          LIMIT 1",
-        workflow_run_id,
-        organization_id,
     )
+    .bind(workflow_run_id)
+    .bind(is_admin)
+    .bind(organization_id)
     .fetch_optional(pool)
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context("get workflow run by id", error))?;
@@ -95,11 +123,31 @@ pub(in crate::jobs::workflows) async fn load_workflow_run_by_id_tx(
     run_row.into_record()
 }
 
+/// Lists workflow steps using the legacy nullable visibility scope.
+///
+/// `None` retains its historical admin visibility across global and
+/// organization-owned workflow runs. Prefer [`list_workflow_steps_with_scope`]
+/// for new code.
 pub async fn list_workflow_steps(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     workflow_run_id: Uuid,
 ) -> Result<Vec<WorkflowStepDbRecord>> {
+    list_workflow_steps_with_scope(
+        pool,
+        legacy_workflow_read_scope(organization_id),
+        workflow_run_id,
+    )
+    .await
+}
+
+/// Lists workflow steps within an explicit read-visibility scope.
+pub async fn list_workflow_steps_with_scope(
+    pool: &DbPool,
+    scope: WorkflowRunReadScope,
+    workflow_run_id: Uuid,
+) -> Result<Vec<WorkflowStepDbRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     let rows = sqlx::query_as::<_, WorkflowStepRow>(
         "SELECT
             ws.id,
@@ -132,10 +180,11 @@ pub async fn list_workflow_steps(
          FROM workflow_steps ws
          JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
          WHERE ws.workflow_run_id = $1
-           AND ($2::uuid IS NULL OR wr.organization_id = $2)
+           AND ($2::bool OR wr.organization_id IS NOT DISTINCT FROM $3::uuid)
          ORDER BY ws.created_at ASC, ws.id ASC",
     )
     .bind(workflow_run_id)
+    .bind(is_admin)
     .bind(organization_id)
     .fetch_all(pool)
     .await
@@ -144,6 +193,11 @@ pub async fn list_workflow_steps(
     rows.into_iter().map(WorkflowStepRow::into_record).collect()
 }
 
+/// Lists a page of workflow steps using the legacy nullable visibility scope.
+///
+/// `None` retains its historical admin visibility across global and
+/// organization-owned workflow runs. Prefer
+/// [`list_workflow_steps_page_with_scope`] for new code.
 pub async fn list_workflow_steps_page(
     pool: &DbPool,
     organization_id: Option<Uuid>,
@@ -151,8 +205,27 @@ pub async fn list_workflow_steps_page(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<WorkflowStepDbRecord>> {
+    list_workflow_steps_page_with_scope(
+        pool,
+        legacy_workflow_read_scope(organization_id),
+        workflow_run_id,
+        limit,
+        offset,
+    )
+    .await
+}
+
+/// Lists a page of workflow steps within an explicit read-visibility scope.
+pub async fn list_workflow_steps_page_with_scope(
+    pool: &DbPool,
+    scope: WorkflowRunReadScope,
+    workflow_run_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WorkflowStepDbRecord>> {
     validate_pagination(limit, offset)?;
 
+    let (is_admin, organization_id) = scope.visibility_predicate();
     let rows = sqlx::query_as::<_, WorkflowStepRow>(
         "SELECT
             ws.id,
@@ -185,11 +258,12 @@ pub async fn list_workflow_steps_page(
          FROM workflow_steps ws
          JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
          WHERE ws.workflow_run_id = $1
-           AND ($2::uuid IS NULL OR wr.organization_id = $2)
+           AND ($2::bool OR wr.organization_id IS NOT DISTINCT FROM $3::uuid)
          ORDER BY ws.created_at ASC, ws.id ASC
-         LIMIT $3 OFFSET $4",
+         LIMIT $4 OFFSET $5",
     )
     .bind(workflow_run_id)
+    .bind(is_admin)
     .bind(organization_id)
     .bind(limit)
     .bind(offset)
@@ -202,31 +276,74 @@ pub async fn list_workflow_steps_page(
     rows.into_iter().map(WorkflowStepRow::into_record).collect()
 }
 
+/// Counts workflow steps using the legacy nullable visibility scope.
+///
+/// `None` retains its historical admin visibility across global and
+/// organization-owned workflow runs. Prefer [`count_workflow_steps_with_scope`]
+/// for new code.
 pub async fn count_workflow_steps(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     workflow_run_id: Uuid,
 ) -> Result<i64> {
+    count_workflow_steps_with_scope(
+        pool,
+        legacy_workflow_read_scope(organization_id),
+        workflow_run_id,
+    )
+    .await
+}
+
+/// Counts workflow steps within an explicit read-visibility scope.
+pub async fn count_workflow_steps_with_scope(
+    pool: &DbPool,
+    scope: WorkflowRunReadScope,
+    workflow_run_id: Uuid,
+) -> Result<i64> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint
          FROM workflow_steps ws
          JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
          WHERE ws.workflow_run_id = $1
-           AND ($2::uuid IS NULL OR wr.organization_id = $2)",
+           AND ($2::bool OR wr.organization_id IS NOT DISTINCT FROM $3::uuid)",
     )
     .bind(workflow_run_id)
+    .bind(is_admin)
     .bind(organization_id)
     .fetch_one(pool)
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context("count workflow steps", error))
 }
 
+/// Lists workflow runs using the legacy nullable visibility filter.
+///
+/// `filter.organization_id = None` retains its historical admin visibility
+/// across global and organization-owned workflow runs. Prefer
+/// [`list_workflow_runs_with_scope`] with [`WorkflowRunReadListFilter`] for
+/// new code.
 pub async fn list_workflow_runs(
     pool: &DbPool,
     filter: &WorkflowRunListFilter<'_>,
 ) -> Result<Vec<WorkflowRunDbRecord>> {
+    let scoped_filter = WorkflowRunReadListFilter {
+        scope: legacy_workflow_read_scope(filter.organization_id),
+        status: filter.status,
+        workflow_type: filter.workflow_type,
+        limit: filter.limit,
+        offset: filter.offset,
+    };
+    list_workflow_runs_with_scope(pool, &scoped_filter).await
+}
+
+/// Lists workflow runs within an explicit read-visibility scope.
+pub async fn list_workflow_runs_with_scope(
+    pool: &DbPool,
+    filter: &WorkflowRunReadListFilter<'_>,
+) -> Result<Vec<WorkflowRunDbRecord>> {
     validate_pagination(filter.limit, filter.offset)?;
 
+    let (is_admin, organization_id) = filter.scope.visibility_predicate();
     let status_text = filter.status.map(|status| status.as_db_value());
 
     let rows = sqlx::query_as::<_, WorkflowRunRow>(
@@ -243,13 +360,14 @@ pub async fn list_workflow_runs(
             created_at,
             updated_at
          FROM workflow_runs
-         WHERE ($1::uuid IS NULL OR organization_id = $1)
-           AND ($2::text IS NULL OR status = $2::text::workflow_run_status)
-           AND ($3::text IS NULL OR workflow_type ILIKE '%' || $3 || '%')
+         WHERE ($1::bool OR organization_id IS NOT DISTINCT FROM $2::uuid)
+           AND ($3::text IS NULL OR status = $3::text::workflow_run_status)
+           AND ($4::text IS NULL OR workflow_type ILIKE '%' || $4 || '%')
          ORDER BY created_at DESC, id DESC
-         LIMIT $4 OFFSET $5",
+         LIMIT $5 OFFSET $6",
     )
-    .bind(filter.organization_id)
+    .bind(is_admin)
+    .bind(organization_id)
     .bind(status_text)
     .bind(filter.workflow_type)
     .bind(filter.limit)
@@ -261,19 +379,40 @@ pub async fn list_workflow_runs(
     rows.into_iter().map(WorkflowRunRow::into_record).collect()
 }
 
+/// Counts workflow runs using the legacy nullable visibility filter.
+///
+/// `filter.organization_id = None` retains its historical admin visibility
+/// across global and organization-owned workflow runs. Prefer
+/// [`count_workflow_runs_with_scope`] with [`WorkflowRunReadCountFilter`] for
+/// new code.
 pub async fn count_workflow_runs(
     pool: &DbPool,
     filter: &WorkflowRunCountFilter<'_>,
 ) -> Result<i64> {
+    let scoped_filter = WorkflowRunReadCountFilter {
+        scope: legacy_workflow_read_scope(filter.organization_id),
+        status: filter.status,
+        workflow_type: filter.workflow_type,
+    };
+    count_workflow_runs_with_scope(pool, &scoped_filter).await
+}
+
+/// Counts workflow runs within an explicit read-visibility scope.
+pub async fn count_workflow_runs_with_scope(
+    pool: &DbPool,
+    filter: &WorkflowRunReadCountFilter<'_>,
+) -> Result<i64> {
+    let (is_admin, organization_id) = filter.scope.visibility_predicate();
     let status_text = filter.status.map(|status| status.as_db_value());
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint
          FROM workflow_runs
-         WHERE ($1::uuid IS NULL OR organization_id = $1)
-           AND ($2::text IS NULL OR status = $2::text::workflow_run_status)
-           AND ($3::text IS NULL OR workflow_type ILIKE '%' || $3 || '%')",
+         WHERE ($1::bool OR organization_id IS NOT DISTINCT FROM $2::uuid)
+           AND ($3::text IS NULL OR status = $3::text::workflow_run_status)
+           AND ($4::text IS NULL OR workflow_type ILIKE '%' || $4 || '%')",
     )
-    .bind(filter.organization_id)
+    .bind(is_admin)
+    .bind(organization_id)
     .bind(status_text)
     .bind(filter.workflow_type)
     .fetch_one(pool)
@@ -281,11 +420,31 @@ pub async fn count_workflow_runs(
     .map_err(|error| crate::Error::from_query_sqlx_with_context("count workflow runs", error))
 }
 
+/// Loads the latest workflow run using the legacy nullable visibility scope.
+///
+/// `None` retains its historical admin visibility across global and
+/// organization-owned workflow runs. Prefer
+/// [`get_latest_workflow_run_by_type_with_scope`] for new code.
 pub async fn get_latest_workflow_run_by_type(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     workflow_type: WorkflowType<'_>,
 ) -> Result<Option<WorkflowRunDbRecord>> {
+    get_latest_workflow_run_by_type_with_scope(
+        pool,
+        legacy_workflow_read_scope(organization_id),
+        workflow_type,
+    )
+    .await
+}
+
+/// Loads the latest workflow run within an explicit read-visibility scope.
+pub async fn get_latest_workflow_run_by_type_with_scope(
+    pool: &DbPool,
+    scope: WorkflowRunReadScope,
+    workflow_type: WorkflowType<'_>,
+) -> Result<Option<WorkflowRunDbRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     let row = sqlx::query_as::<_, WorkflowRunRow>(
         "SELECT
             id,
@@ -300,11 +459,12 @@ pub async fn get_latest_workflow_run_by_type(
             created_at,
             updated_at
          FROM workflow_runs
-         WHERE ($1::uuid IS NULL OR organization_id = $1)
-           AND workflow_type = $2
+         WHERE ($1::bool OR organization_id IS NOT DISTINCT FROM $2::uuid)
+           AND workflow_type = $3
          ORDER BY created_at DESC, id DESC
          LIMIT 1",
     )
+    .bind(is_admin)
     .bind(organization_id)
     .bind(workflow_type.as_str())
     .fetch_optional(pool)
@@ -320,11 +480,31 @@ pub async fn get_latest_workflow_run_by_type(
     Ok(Some(row.into_record()?))
 }
 
+/// Lists workflow step dependencies using the legacy nullable visibility scope.
+///
+/// `None` retains its historical admin visibility across global and
+/// organization-owned workflow runs. Prefer
+/// [`list_workflow_step_dependencies_with_scope`] for new code.
 pub async fn list_workflow_step_dependencies(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     workflow_run_id: Uuid,
 ) -> Result<Vec<WorkflowStepDependencyDbRecord>> {
+    list_workflow_step_dependencies_with_scope(
+        pool,
+        legacy_workflow_read_scope(organization_id),
+        workflow_run_id,
+    )
+    .await
+}
+
+/// Lists workflow step dependencies within an explicit read-visibility scope.
+pub async fn list_workflow_step_dependencies_with_scope(
+    pool: &DbPool,
+    scope: WorkflowRunReadScope,
+    workflow_run_id: Uuid,
+) -> Result<Vec<WorkflowStepDependencyDbRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     let rows = sqlx::query_as::<_, WorkflowStepDependencyLookupRow>(
         "SELECT
             wsd.workflow_run_id,
@@ -335,12 +515,13 @@ pub async fn list_workflow_step_dependencies(
          FROM workflow_step_dependencies wsd
          JOIN workflow_runs wr ON wr.id = wsd.workflow_run_id
          WHERE wsd.workflow_run_id = $1
-           AND ($2::uuid IS NULL OR wr.organization_id = $2)
+           AND ($2::bool OR wr.organization_id IS NOT DISTINCT FROM $3::uuid)
          ORDER BY
            wsd.prerequisite_step_id ASC,
            wsd.dependent_step_id ASC",
     )
     .bind(workflow_run_id)
+    .bind(is_admin)
     .bind(organization_id)
     .fetch_all(pool)
     .await
@@ -353,6 +534,12 @@ pub async fn list_workflow_step_dependencies(
         .collect()
 }
 
+/// Lists a page of workflow step dependencies using the legacy nullable
+/// visibility scope.
+///
+/// `None` retains its historical admin visibility across global and
+/// organization-owned workflow runs. Prefer
+/// [`list_workflow_step_dependencies_page_with_scope`] for new code.
 pub async fn list_workflow_step_dependencies_page(
     pool: &DbPool,
     organization_id: Option<Uuid>,
@@ -360,8 +547,28 @@ pub async fn list_workflow_step_dependencies_page(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<WorkflowStepDependencyDbRecord>> {
+    list_workflow_step_dependencies_page_with_scope(
+        pool,
+        legacy_workflow_read_scope(organization_id),
+        workflow_run_id,
+        limit,
+        offset,
+    )
+    .await
+}
+
+/// Lists a page of workflow step dependencies within an explicit
+/// read-visibility scope.
+pub async fn list_workflow_step_dependencies_page_with_scope(
+    pool: &DbPool,
+    scope: WorkflowRunReadScope,
+    workflow_run_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WorkflowStepDependencyDbRecord>> {
     validate_pagination(limit, offset)?;
 
+    let (is_admin, organization_id) = scope.visibility_predicate();
     let rows = sqlx::query_as::<_, WorkflowStepDependencyLookupRow>(
         "SELECT
             wsd.workflow_run_id,
@@ -372,13 +579,14 @@ pub async fn list_workflow_step_dependencies_page(
          FROM workflow_step_dependencies wsd
          JOIN workflow_runs wr ON wr.id = wsd.workflow_run_id
          WHERE wsd.workflow_run_id = $1
-           AND ($2::uuid IS NULL OR wr.organization_id = $2)
+           AND ($2::bool OR wr.organization_id IS NOT DISTINCT FROM $3::uuid)
          ORDER BY
            wsd.prerequisite_step_id ASC,
            wsd.dependent_step_id ASC
-         LIMIT $3 OFFSET $4",
+         LIMIT $4 OFFSET $5",
     )
     .bind(workflow_run_id)
+    .bind(is_admin)
     .bind(organization_id)
     .bind(limit)
     .bind(offset)
@@ -393,19 +601,41 @@ pub async fn list_workflow_step_dependencies_page(
         .collect()
 }
 
+/// Counts workflow step dependencies using the legacy nullable visibility
+/// scope.
+///
+/// `None` retains its historical admin visibility across global and
+/// organization-owned workflow runs. Prefer
+/// [`count_workflow_step_dependencies_with_scope`] for new code.
 pub async fn count_workflow_step_dependencies(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     workflow_run_id: Uuid,
 ) -> Result<i64> {
+    count_workflow_step_dependencies_with_scope(
+        pool,
+        legacy_workflow_read_scope(organization_id),
+        workflow_run_id,
+    )
+    .await
+}
+
+/// Counts workflow step dependencies within an explicit read-visibility scope.
+pub async fn count_workflow_step_dependencies_with_scope(
+    pool: &DbPool,
+    scope: WorkflowRunReadScope,
+    workflow_run_id: Uuid,
+) -> Result<i64> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint
          FROM workflow_step_dependencies wsd
          JOIN workflow_runs wr ON wr.id = wsd.workflow_run_id
          WHERE wsd.workflow_run_id = $1
-           AND ($2::uuid IS NULL OR wr.organization_id = $2)",
+           AND ($2::bool OR wr.organization_id IS NOT DISTINCT FROM $3::uuid)",
     )
     .bind(workflow_run_id)
+    .bind(is_admin)
     .bind(organization_id)
     .fetch_one(pool)
     .await

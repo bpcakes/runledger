@@ -7,11 +7,13 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::{
     JOB_LIST_PAGE_LIMIT_MAX, JobDefinitionListFilter, JobDefinitionUpsert,
     JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobListFilter,
-    JobRuntimeConfigListFilter, WorkflowRunListFilter, count_workflow_step_dependencies,
-    count_workflow_steps, enqueue_workflow_run, get_job_enqueue_intent_metrics,
-    list_job_definitions, list_job_enqueue_intents, list_job_events, list_job_logs,
-    list_job_runtime_configs, list_jobs, list_workflow_runs, list_workflow_step_dependencies_page,
-    list_workflow_steps, list_workflow_steps_page, upsert_job_definition_tx,
+    JobRuntimeConfigListFilter, WorkflowRunListFilter, WorkflowRunReadListFilter,
+    WorkflowRunReadScope, count_workflow_step_dependencies, count_workflow_steps,
+    enqueue_workflow_run, get_job_enqueue_intent_metrics, list_job_definitions,
+    list_job_enqueue_intents, list_job_events, list_job_logs, list_job_runtime_configs, list_jobs,
+    list_workflow_runs, list_workflow_runs_with_scope, list_workflow_step_dependencies_page,
+    list_workflow_step_dependencies_page_with_scope, list_workflow_steps, list_workflow_steps_page,
+    list_workflow_steps_page_with_scope, upsert_job_definition_tx,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -144,6 +146,19 @@ async fn invalid_pagination_rejects_before_database_access() {
         .await,
     );
     assert_invalid_pagination(
+        list_workflow_runs_with_scope(
+            &pool,
+            &WorkflowRunReadListFilter {
+                scope: WorkflowRunReadScope::Admin,
+                status: None,
+                workflow_type: None,
+                limit: 0,
+                offset: 0,
+            },
+        )
+        .await,
+    );
+    assert_invalid_pagination(
         list_workflow_runs(
             &pool,
             &WorkflowRunListFilter {
@@ -267,12 +282,25 @@ async fn invalid_pagination_rejects_before_database_access() {
 
     assert_invalid_pagination(list_workflow_steps_page(&pool, None, job_id, 0, 0).await);
     assert_invalid_pagination(
+        list_workflow_steps_page_with_scope(&pool, WorkflowRunReadScope::Admin, job_id, 0, 0).await,
+    );
+    assert_invalid_pagination(
         list_workflow_steps_page(&pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, 0).await,
     );
     assert_invalid_pagination(list_workflow_steps_page(&pool, None, job_id, 1, -1).await);
 
     assert_invalid_pagination(
         list_workflow_step_dependencies_page(&pool, None, job_id, 0, 0).await,
+    );
+    assert_invalid_pagination(
+        list_workflow_step_dependencies_page_with_scope(
+            &pool,
+            WorkflowRunReadScope::Admin,
+            job_id,
+            0,
+            0,
+        )
+        .await,
     );
     assert_invalid_pagination(
         list_workflow_step_dependencies_page(&pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, 0)

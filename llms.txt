@@ -45,8 +45,11 @@ can be imported together.
 
 Use `set_job_schedule_active` to pause/resume schedules and
 `set_job_schedule_next_fire_at` to retime a schedule cursor.
-Use `runledger_postgres::jobs::count_workflow_runs` with
-`runledger_postgres::jobs::WorkflowRunCountFilter` for workflow counters.
+Use `runledger_postgres::jobs::count_workflow_runs_with_scope` with
+`runledger_postgres::jobs::WorkflowRunReadCountFilter` for workflow counters.
+Use `WorkflowRunReadScope::Global` for exact global rows,
+`Organization(id)` for one tenant, and `Admin` only for trusted all-tenant
+surfaces.
 
 For transactional handoff before a job definition exists, record a strictly
 idempotent `JobEnqueueIntent` in the application's `READ COMMITTED` transaction.

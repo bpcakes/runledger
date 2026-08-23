@@ -457,7 +457,7 @@ let result = handle.get_result(Default::default()).await?;
 ```
 
 The handle is scoped when created or retrieved: organization workflows use
-`WorkflowRunHandleScope::Organization`, global workflows use `Global`, and
+`WorkflowRunReadScope::Organization`, global workflows use `Global`, and
 trusted operator surfaces can use `Admin`. Use `get_status` for a cheap status
 probe, `get_run` to load the scoped run record, and `get_result` to wait for or
 read the declared result. Notifications wake waiters quickly, but polling
@@ -979,11 +979,14 @@ These examples and integration references are compile-checked:
 
 The `runledger_postgres::jobs` admin surface exposes job/workflow detail, list,
 and count helpers for operator UIs and service-owned dashboards. Use
-`list_workflow_runs` with `WorkflowRunListFilter` when rendering workflow tables,
-and `count_workflow_runs` with `WorkflowRunCountFilter` for status counters such
-as failed workflows or runs waiting for external completion. These helpers use
-the same optional organization scope and workflow-type substring filtering as
-the TUI.
+`list_workflow_runs_with_scope` with `WorkflowRunReadListFilter` when rendering
+workflow tables, and `count_workflow_runs_with_scope` with
+`WorkflowRunReadCountFilter` for status counters such as failed workflows or
+runs waiting for external completion. Set `WorkflowRunReadScope::Global` for
+exact global rows, `Organization(id)` for one tenant, or `Admin` only for a
+trusted all-tenant surface. The legacy nullable read helpers remain available:
+their `None` scope retains the historical admin wildcard. These helpers use the
+same workflow-type substring filtering as the TUI.
 
 Use `get_job_continuation_metrics` for continuation canaries and runaway-loop
 alerts. Each `JobContinuationMetricsRecord` reports the prior 24 hours' successful
