@@ -189,16 +189,21 @@ pub struct JobCatalog {
 
 #[derive(Clone)]
 pub(super) struct CatalogJob {
-    pub(super) job_type: JobType<'static>,
     pub(super) handler: Arc<dyn JobHandler>,
     pub(super) definition_overrides: JobCatalogDefinitionOverrides,
     pub(super) retry_delay_overrides: BTreeMap<&'static str, i32>,
 }
 
+impl CatalogJob {
+    pub(super) fn job_type(&self) -> JobType<'static> {
+        self.handler.job_type()
+    }
+}
+
 impl fmt::Debug for CatalogJob {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CatalogJob")
-            .field("job_type", &self.job_type)
+            .field("job_type", &self.job_type())
             .field("definition_overrides", &self.definition_overrides)
             .field("retry_delay_overrides", &self.retry_delay_overrides)
             .finish_non_exhaustive()

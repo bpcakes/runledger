@@ -24,7 +24,8 @@ pub enum CatalogError {
         #[source]
         source: IdentifierValidationError,
     },
-    /// The declared catalog job type did not match the handler's job type.
+    /// The declared catalog job type passed to a deprecated registration method
+    /// did not match the handler's job type.
     #[error("job type {declared} does not match handler job type {handler}")]
     HandlerJobTypeMismatch {
         /// Job type declared at the catalog registration site.

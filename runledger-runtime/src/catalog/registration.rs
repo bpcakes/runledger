@@ -31,11 +31,43 @@ impl JobCatalog {
         self
     }
 
-    /// Registers a handler after validating declared and handler job types match.
+    /// Registers a handler using the job type returned by the handler.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError`] when the handler job type is invalid or duplicated.
+    pub fn try_handler<H>(self, handler: H) -> Result<Self, CatalogError>
+    where
+        H: JobHandler + 'static,
+    {
+        let handler_type = Self::validate_handler_job_type(&handler)?;
+        self.insert_handler(handler_type, Arc::new(handler))
+    }
+
+    /// Registers a handler using the job type returned by the handler, panicking
+    /// when validation fails.
+    #[must_use]
+    pub fn handler<H>(self, handler: H) -> Self
+    where
+        H: JobHandler + 'static,
+    {
+        self.try_handler(handler).unwrap_or_else(|error| {
+            panic!("invalid job catalog handler registration: {error}");
+        })
+    }
+
+    /// Registers a handler after validating that the declared job type matches
+    /// the handler-provided identity.
+    ///
+    /// New code should use [`Self::try_handler`], which has no parallel declared
+    /// identity.
     ///
     /// # Errors
     /// Returns [`CatalogError`] when job types are blank, mismatched, or duplicated.
-    pub fn try_job<H>(mut self, job_type: &'static str, handler: H) -> Result<Self, CatalogError>
+    #[deprecated(
+        since = "0.11.0",
+        note = "use JobCatalog::try_handler(handler); the handler now supplies the catalog identity"
+    )]
+    pub fn try_job<H>(self, job_type: &'static str, handler: H) -> Result<Self, CatalogError>
     where
         H: JobHandler + 'static,
     {
@@ -48,43 +80,83 @@ impl JobCatalog {
             });
         }
 
-        let key = JobTypeName::new(job_type).map_err(|source| CatalogError::InvalidJobType {
-            job_type: job_type.to_owned(),
-            source,
-        })?;
-        if self.jobs.contains_key(&key) {
-            return Err(CatalogError::DuplicateJobType {
-                job_type: job_type.to_owned(),
-            });
-        }
-
-        self.jobs.insert(
-            key,
-            CatalogJob {
-                job_type: declared,
-                handler: Arc::new(handler),
-                definition_overrides: JobCatalogDefinitionOverrides::new(),
-                retry_delay_overrides: BTreeMap::new(),
-            },
-        );
-        Ok(self)
+        self.insert_handler(handler_type, Arc::new(handler))
     }
 
-    /// Registers a handler, panicking when validation fails.
+    /// Registers a handler after validating a redundant declared job type,
+    /// panicking when validation fails.
+    ///
+    /// New code should use [`Self::handler`], which has no parallel declared
+    /// identity.
     #[must_use]
+    #[deprecated(
+        since = "0.11.0",
+        note = "use JobCatalog::handler(handler); the handler now supplies the catalog identity"
+    )]
     pub fn job<H>(self, job_type: &'static str, handler: H) -> Self
     where
         H: JobHandler + 'static,
     {
+        #[allow(
+            deprecated,
+            reason = "compatibility wrapper delegates to legacy validation"
+        )]
         self.try_job(job_type, handler).unwrap_or_else(|error| {
             panic!("invalid job catalog registration for {job_type:?}: {error}");
         })
     }
 
-    /// Registers a handler with job-specific definition overrides.
+    /// Registers a handler with job-specific definition overrides, using the
+    /// job type returned by the handler.
     ///
     /// # Errors
-    /// Returns [`CatalogError`] when job types are blank, mismatched, or duplicated.
+    /// Returns [`CatalogError`] when the handler job type or overrides are
+    /// invalid, or when the job type is duplicated.
+    pub fn try_handler_with_definition_overrides<H>(
+        self,
+        handler: H,
+        overrides: JobCatalogDefinitionOverrides,
+    ) -> Result<Self, CatalogError>
+    where
+        H: JobHandler + 'static,
+    {
+        let job_type = Self::validate_handler_job_type(&handler)?;
+        self.insert_handler(job_type, Arc::new(handler))?
+            .try_definition_overrides(job_type.as_str(), overrides)
+    }
+
+    /// Registers a handler with job-specific definition overrides using the
+    /// handler-provided identity, panicking when validation fails.
+    #[must_use]
+    pub fn handler_with_definition_overrides<H>(
+        self,
+        handler: H,
+        overrides: JobCatalogDefinitionOverrides,
+    ) -> Self
+    where
+        H: JobHandler + 'static,
+    {
+        self.try_handler_with_definition_overrides(handler, overrides)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "invalid job catalog handler registration with definition overrides: {error}"
+                );
+            })
+    }
+
+    /// Registers a handler with job-specific definition overrides after
+    /// validating a redundant declared job type.
+    ///
+    /// New code should use [`Self::try_handler_with_definition_overrides`],
+    /// which has no parallel declared identity.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError`] when job types are blank, mismatched, or
+    /// duplicated, or when the overrides are invalid.
+    #[deprecated(
+        since = "0.11.0",
+        note = "use JobCatalog::try_handler_with_definition_overrides(handler, overrides); the handler now supplies the catalog identity"
+    )]
     pub fn try_job_with_definition_overrides<H>(
         self,
         job_type: &'static str,
@@ -94,13 +166,25 @@ impl JobCatalog {
     where
         H: JobHandler + 'static,
     {
+        #[allow(
+            deprecated,
+            reason = "compatibility wrapper preserves mismatch diagnostics"
+        )]
         self.try_job(job_type, handler)?
             .try_definition_overrides(job_type, overrides)
     }
 
-    /// Registers a handler with job-specific definition overrides, panicking
-    /// when validation fails.
+    /// Registers a handler with job-specific definition overrides after
+    /// validating a redundant declared job type, panicking when validation
+    /// fails.
+    ///
+    /// New code should use [`Self::handler_with_definition_overrides`], which
+    /// has no parallel declared identity.
     #[must_use]
+    #[deprecated(
+        since = "0.11.0",
+        note = "use JobCatalog::handler_with_definition_overrides(handler, overrides); the handler now supplies the catalog identity"
+    )]
     pub fn job_with_definition_overrides<H>(
         self,
         job_type: &'static str,
@@ -110,6 +194,7 @@ impl JobCatalog {
     where
         H: JobHandler + 'static,
     {
+        #[allow(deprecated, reason = "compatibility wrapper delegates to fallible legacy API")]
         self.try_job_with_definition_overrides(job_type, handler, overrides)
             .unwrap_or_else(|error| {
                 panic!(
@@ -251,7 +336,7 @@ impl JobCatalog {
             registry.register_boxed(Arc::clone(&entry.handler));
             for (failure_code, retry_delay_ms) in &entry.retry_delay_overrides {
                 registry.register_retry_delay_override(
-                    entry.job_type,
+                    entry.job_type(),
                     failure_code,
                     *retry_delay_ms,
                 );
@@ -272,7 +357,7 @@ impl JobCatalog {
     /// Returns [`CatalogError::UnknownJobType`] when the name is not in the catalog.
     pub fn require_job_type(&self, job_type: &str) -> Result<JobType<'static>, CatalogError> {
         let key = self.require_job_key(job_type)?;
-        Ok(self.jobs.get(&key).expect("job key validated").job_type)
+        Ok(self.jobs.get(&key).expect("job key validated").job_type())
     }
 
     /// Returns a catalog job type when it is registered and catalog-enabled.
@@ -292,10 +377,10 @@ impl JobCatalog {
         let entry = self.jobs.get(&key).expect("job key validated");
         if !self.effective_defaults(entry).is_enabled {
             return Err(CatalogError::DisabledJobType {
-                job_type: entry.job_type.as_str().to_owned(),
+                job_type: entry.job_type().as_str().to_owned(),
             });
         }
-        Ok(entry.job_type)
+        Ok(entry.job_type())
     }
 
     pub(super) fn validate_defaults(&self) -> Result<(), CatalogError> {
@@ -306,7 +391,7 @@ impl JobCatalog {
         for entry in self.jobs.values() {
             self.effective_defaults(entry).validate().map_err(|field| {
                 CatalogError::InvalidJobDefinitionValue {
-                    job_type: entry.job_type.as_str().to_owned(),
+                    job_type: entry.job_type().as_str().to_owned(),
                     field,
                 }
             })?;
@@ -324,9 +409,9 @@ impl JobCatalog {
         }
 
         for entry in self.jobs.values() {
-            if !scope.contains(entry.job_type) {
+            if !scope.contains(entry.job_type()) {
                 return Err(CatalogError::JobTypeOutsideExactSyncScope {
-                    job_type: entry.job_type.as_str().to_owned(),
+                    job_type: entry.job_type().as_str().to_owned(),
                 });
             }
         }
@@ -340,7 +425,7 @@ impl JobCatalog {
     ) -> JobDefinitionUpsert<'static> {
         let defaults = self.effective_defaults(entry);
         JobDefinitionUpsert {
-            job_type: entry.job_type,
+            job_type: entry.job_type(),
             version: defaults.version,
             max_attempts: defaults.max_attempts,
             default_timeout_seconds: defaults.default_timeout_seconds,
@@ -386,6 +471,34 @@ impl JobCatalog {
                 source,
             }
         })
+    }
+
+    fn insert_handler(
+        mut self,
+        job_type: JobType<'static>,
+        handler: Arc<dyn JobHandler>,
+    ) -> Result<Self, CatalogError> {
+        let key = JobTypeName::new(job_type.as_str()).map_err(|source| {
+            CatalogError::InvalidHandlerJobType {
+                handler_job_type: job_type.as_str().to_owned(),
+                source,
+            }
+        })?;
+        if self.jobs.contains_key(&key) {
+            return Err(CatalogError::DuplicateJobType {
+                job_type: job_type.as_str().to_owned(),
+            });
+        }
+
+        self.jobs.insert(
+            key,
+            CatalogJob {
+                handler,
+                definition_overrides: JobCatalogDefinitionOverrides::new(),
+                retry_delay_overrides: BTreeMap::new(),
+            },
+        );
+        Ok(self)
     }
 
     fn validate_failure_code(failure_code: &str) -> Result<(), CatalogError> {

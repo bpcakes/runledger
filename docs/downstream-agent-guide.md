@@ -1053,6 +1053,9 @@ database text.
 
 Use `JobCatalog` as the worker startup source of truth when handlers,
 definitions, schedules, and workflow builders should stay aligned. Use
+`JobCatalog::handler` to register each handler under the identity returned by
+`JobHandler::job_type`; the older `job` method with a separately declared job
+type remains available only as a deprecated migration path. Use
 `JobCatalogDefinitionOverrides` only for per-job definition differences from
 catalog defaults. Overrides take precedence for the fields they set; version,
 attempts, and timeout values must be positive, while priority may be zero or

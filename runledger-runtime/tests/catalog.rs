@@ -103,12 +103,9 @@ async fn sync_definitions_creates_readable_job_definition_with_defaults() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(
             JobCatalogDefaults::new()
                 .version(2)
@@ -139,12 +136,9 @@ async fn job_before_defaults_uses_later_defaults_on_sync() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_defaults_order", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(
             JobCatalogDefaults::new()
                 .max_attempts(7)
@@ -177,8 +171,7 @@ async fn sync_definitions_uses_job_specific_definition_overrides() {
                 .timeout_seconds(10)
                 .priority(10),
         )
-        .job_with_definition_overrides(
-            CATALOG_TEST_JOB,
+        .handler_with_definition_overrides(
             CountingHandler {
                 runs: Arc::new(AtomicUsize::new(0)),
             },
@@ -186,8 +179,7 @@ async fn sync_definitions_uses_job_specific_definition_overrides() {
                 .timeout_seconds(60)
                 .priority(11),
         )
-        .job_with_definition_overrides(
-            CATALOG_OTHER_JOB,
+        .handler_with_definition_overrides(
             HandlerReturningOtherType,
             JobCatalogDefinitionOverrides::new()
                 .version(3)
@@ -225,12 +217,9 @@ async fn sync_definitions_uses_job_specific_definition_overrides() {
 async fn sync_definitions_is_idempotent() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_idempotent", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog.sync_definitions(&pool).await.expect("first sync");
     catalog.sync_definitions(&pool).await.expect("second sync");
 
@@ -248,12 +237,9 @@ async fn sync_definitions_overwrites_owned_fields_but_preserves_operator_disable
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_owns_fields", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(
             JobCatalogDefaults::new()
                 .max_attempts(5)
@@ -302,12 +288,9 @@ async fn sync_definitions_preserves_operator_enabled_state_on_resync() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_preserve_enabled", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().max_attempts(5));
     catalog
         .sync_definitions(&pool)
@@ -351,8 +334,7 @@ async fn sync_definitions_preserves_operator_disabled_state_for_enabled_job_over
 
     let catalog = JobCatalog::new()
         .defaults(JobCatalogDefaults::new().enabled(false))
-        .job_with_definition_overrides(
-            CATALOG_TEST_JOB,
+        .handler_with_definition_overrides(
             CountingHandler {
                 runs: Arc::new(AtomicUsize::new(0)),
             },
@@ -397,12 +379,9 @@ async fn sync_definitions_writes_disabled_catalog_definition_without_active_sche
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_disabled_additive", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().enabled(false));
     let report = catalog
         .sync_definitions(&pool)
@@ -431,8 +410,7 @@ async fn sync_definitions_writes_disabled_job_override_without_active_schedules(
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_disabled_override_additive", 4).await;
 
-    let catalog = JobCatalog::new().job_with_definition_overrides(
-        CATALOG_TEST_JOB,
+    let catalog = JobCatalog::new().handler_with_definition_overrides(
         CountingHandler {
             runs: Arc::new(AtomicUsize::new(0)),
         },
@@ -465,19 +443,15 @@ async fn sync_definitions_disables_existing_enabled_job_override_without_active_
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_disable_existing_override_additive", 4).await;
 
-    let enabled_catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let enabled_catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     enabled_catalog
         .sync_definitions(&pool)
         .await
         .expect("sync enabled definition");
 
-    let disabled_catalog = JobCatalog::new().job_with_definition_overrides(
-        CATALOG_TEST_JOB,
+    let disabled_catalog = JobCatalog::new().handler_with_definition_overrides(
         CountingHandler {
             runs: Arc::new(AtomicUsize::new(0)),
         },
@@ -511,14 +485,13 @@ async fn sync_definitions_handles_mixed_enabled_and_disabled_overrides() {
 
     let catalog = JobCatalog::new()
         .defaults(JobCatalogDefaults::new().enabled(false))
-        .job_with_definition_overrides(
-            CATALOG_TEST_JOB,
+        .handler_with_definition_overrides(
             CountingHandler {
                 runs: Arc::new(AtomicUsize::new(0)),
             },
             JobCatalogDefinitionOverrides::new().enabled(true),
         )
-        .job(CATALOG_OTHER_JOB, HandlerReturningOtherType);
+        .handler(HandlerReturningOtherType);
     let report = catalog
         .sync_definitions(&pool)
         .await
@@ -572,23 +545,20 @@ async fn sync_definitions_handles_mixed_enabled_and_disabled_overrides() {
 async fn sync_definitions_exact_disables_absent_job_definitions() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_exact", 4).await;
 
-    let third_catalog = JobCatalog::new().job(CATALOG_THIRD_JOB, HandlerReturningThirdType);
+    let third_catalog = JobCatalog::new().handler(HandlerReturningThirdType);
     third_catalog
         .sync_definitions(&pool)
         .await
         .expect("sync third definition");
-    let old_catalog = JobCatalog::new().job(CATALOG_OTHER_JOB, HandlerReturningOtherType);
+    let old_catalog = JobCatalog::new().handler(HandlerReturningOtherType);
     old_catalog
         .sync_definitions(&pool)
         .await
         .expect("sync old definition");
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let report = catalog
         .sync_definitions_exact(
             &pool,
@@ -632,12 +602,9 @@ async fn sync_definitions_exact_disables_absent_job_definitions() {
 async fn sync_definitions_exact_waits_for_schedule_table_lock_before_disabling() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_exact_lock", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let scope =
         JobCatalogSyncScope::job_types([CATALOG_TEST_JOB, CATALOG_OTHER_JOB]).expect("valid scope");
 
@@ -689,12 +656,9 @@ async fn sync_definitions_exact_rejects_empty_catalog() {
 async fn sync_definitions_exact_rejects_catalog_jobs_outside_scope() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_exact_scope", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let error = catalog
         .sync_definitions_exact(
             &pool,
@@ -714,7 +678,7 @@ async fn sync_definitions_exact_rejects_catalog_jobs_outside_scope() {
 async fn sync_definitions_exact_rejects_active_schedules_for_absent_job_types() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_exact_active_schedule", 4).await;
 
-    let old_catalog = JobCatalog::new().job(CATALOG_OTHER_JOB, HandlerReturningOtherType);
+    let old_catalog = JobCatalog::new().handler(HandlerReturningOtherType);
     old_catalog
         .sync_definitions(&pool)
         .await
@@ -737,12 +701,9 @@ async fn sync_definitions_exact_rejects_active_schedules_for_absent_job_types() 
         .await
         .expect("upsert old schedule");
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let error = catalog
         .sync_definitions_exact(
             &pool,
@@ -783,7 +744,7 @@ async fn sync_definitions_exact_allows_active_schedules_for_already_disabled_abs
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_exact_disabled_absent_schedule", 4).await;
 
-    let old_catalog = JobCatalog::new().job(CATALOG_OTHER_JOB, HandlerReturningOtherType);
+    let old_catalog = JobCatalog::new().handler(HandlerReturningOtherType);
     old_catalog
         .sync_definitions(&pool)
         .await
@@ -842,12 +803,9 @@ async fn sync_definitions_exact_allows_active_schedules_for_already_disabled_abs
     .await
     .expect("insert legacy active schedule");
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let report = catalog
         .sync_definitions_exact(
             &pool,
@@ -866,17 +824,14 @@ async fn sync_definitions_exact_allows_active_schedules_for_already_disabled_abs
 async fn sync_definitions_exact_reenables_reintroduced_catalog_jobs() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_exact_reintroduced", 4).await;
 
-    let old_catalog = JobCatalog::new().job(CATALOG_OTHER_JOB, HandlerReturningOtherType);
+    let old_catalog = JobCatalog::new().handler(HandlerReturningOtherType);
     old_catalog
         .sync_definitions(&pool)
         .await
         .expect("sync old definition");
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions_exact(
             &pool,
@@ -886,7 +841,7 @@ async fn sync_definitions_exact_reenables_reintroduced_catalog_jobs() {
         .await
         .expect("exact sync disables old definition");
 
-    let reintroduced = JobCatalog::new().job(CATALOG_OTHER_JOB, HandlerReturningOtherType);
+    let reintroduced = JobCatalog::new().handler(HandlerReturningOtherType);
     let report = reintroduced
         .sync_definitions_exact(
             &pool,
@@ -913,12 +868,9 @@ async fn sync_definitions_exact_reenables_reintroduced_catalog_jobs() {
 async fn sync_definitions_exact_restores_operator_disabled_catalog_jobs() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_exact_restores_pause", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -963,8 +915,7 @@ async fn sync_definitions_exact_restores_enabled_job_override() {
 
     let catalog = JobCatalog::new()
         .defaults(JobCatalogDefaults::new().enabled(false))
-        .job_with_definition_overrides(
-            CATALOG_TEST_JOB,
+        .handler_with_definition_overrides(
             CountingHandler {
                 runs: Arc::new(AtomicUsize::new(0)),
             },
@@ -1014,12 +965,9 @@ async fn sync_definitions_rejects_disabled_catalog_job_with_active_schedule() {
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_disabled_active_schedule", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -1043,12 +991,9 @@ async fn sync_definitions_rejects_disabled_catalog_job_with_active_schedule() {
         .expect("upsert schedule");
 
     let disabled_catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().enabled(false));
     let error = disabled_catalog
         .sync_definitions(&pool)
@@ -1076,12 +1021,9 @@ async fn sync_definitions_rejects_disabled_job_override_with_active_schedule() {
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_disabled_override_active_schedule", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -1104,8 +1046,7 @@ async fn sync_definitions_rejects_disabled_job_override_with_active_schedule() {
         .await
         .expect("upsert schedule");
 
-    let disabled_catalog = JobCatalog::new().job_with_definition_overrides(
-        CATALOG_TEST_JOB,
+    let disabled_catalog = JobCatalog::new().handler_with_definition_overrides(
         CountingHandler {
             runs: Arc::new(AtomicUsize::new(0)),
         },
@@ -1137,12 +1078,9 @@ async fn sync_definitions_exact_rejects_disabled_catalog_job_with_active_schedul
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_exact_disabled_active_schedule", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -1166,12 +1104,9 @@ async fn sync_definitions_exact_rejects_disabled_catalog_job_with_active_schedul
         .expect("upsert schedule");
 
     let disabled_catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().enabled(false));
     let error = disabled_catalog
         .sync_definitions_exact(
@@ -1202,23 +1137,20 @@ async fn sync_definitions_exact_can_disable_catalog_jobs_without_active_schedule
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_exact_disabled_no_schedule", 4).await;
 
-    let old_catalog = JobCatalog::new().job(CATALOG_OTHER_JOB, HandlerReturningOtherType);
+    let old_catalog = JobCatalog::new().handler(HandlerReturningOtherType);
     old_catalog
         .sync_definitions(&pool)
         .await
         .expect("sync old definition");
 
     let disabled_catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
-        .job(CATALOG_OTHER_JOB, HandlerReturningOtherType)
-        .job(CATALOG_THIRD_JOB, HandlerReturningThirdType)
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
+        .handler(HandlerReturningOtherType)
+        .handler(HandlerReturningThirdType)
         .defaults(JobCatalogDefaults::new().enabled(false));
-    let third_catalog = JobCatalog::new().job(CATALOG_THIRD_JOB, HandlerReturningThirdType);
+    let third_catalog = JobCatalog::new().handler(HandlerReturningThirdType);
     third_catalog
         .sync_definitions(&pool)
         .await
@@ -1289,19 +1221,15 @@ async fn sync_definitions_exact_can_disable_catalog_jobs_without_active_schedule
 async fn sync_definitions_exact_writes_disabled_job_override_without_active_schedules() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_exact_disabled_override", 4).await;
 
-    let old_catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let old_catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     old_catalog
         .sync_definitions(&pool)
         .await
         .expect("sync enabled definition");
 
-    let disabled_catalog = JobCatalog::new().job_with_definition_overrides(
-        CATALOG_TEST_JOB,
+    let disabled_catalog = JobCatalog::new().handler_with_definition_overrides(
         CountingHandler {
             runs: Arc::new(AtomicUsize::new(0)),
         },
@@ -1338,12 +1266,9 @@ async fn sync_definitions_rejects_invalid_defaults_before_database_write() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_invalid_defaults", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().timeout_seconds(0));
     let error = catalog
         .sync_definitions(&pool)
@@ -1365,7 +1290,7 @@ async fn sync_definitions_rejects_invalid_defaults_before_database_write() {
 }
 
 #[test]
-fn try_job_with_definition_overrides_rejects_invalid_timeout_override() {
+fn try_handler_with_definition_overrides_rejects_invalid_timeout_override() {
     let error = try_catalog_with_definition_overrides(
         JobCatalogDefinitionOverrides::new().timeout_seconds(0),
     );
@@ -1379,7 +1304,7 @@ fn try_job_with_definition_overrides_rejects_invalid_timeout_override() {
 }
 
 #[test]
-fn try_job_with_definition_overrides_rejects_invalid_version_override() {
+fn try_handler_with_definition_overrides_rejects_invalid_version_override() {
     let error =
         try_catalog_with_definition_overrides(JobCatalogDefinitionOverrides::new().version(0));
     assert!(matches!(
@@ -1392,7 +1317,7 @@ fn try_job_with_definition_overrides_rejects_invalid_version_override() {
 }
 
 #[test]
-fn try_job_with_definition_overrides_rejects_invalid_max_attempts_override() {
+fn try_handler_with_definition_overrides_rejects_invalid_max_attempts_override() {
     let error =
         try_catalog_with_definition_overrides(JobCatalogDefinitionOverrides::new().max_attempts(0));
     assert!(matches!(
@@ -1406,8 +1331,7 @@ fn try_job_with_definition_overrides_rejects_invalid_max_attempts_override() {
 
 fn try_catalog_with_definition_overrides(overrides: JobCatalogDefinitionOverrides) -> CatalogError {
     JobCatalog::new()
-        .try_job_with_definition_overrides(
-            CATALOG_TEST_JOB,
+        .try_handler_with_definition_overrides(
             CountingHandler {
                 runs: Arc::new(AtomicUsize::new(0)),
             },
@@ -1421,12 +1345,9 @@ async fn sync_definitions_rejects_zero_version_before_database_write() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_invalid_version", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().version(0));
     let error = catalog
         .sync_definitions(&pool)
@@ -1450,12 +1371,9 @@ async fn sync_definitions_rejects_zero_max_attempts_before_database_write() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_invalid_attempts", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().max_attempts(0));
     let error = catalog
         .sync_definitions(&pool)
@@ -1481,12 +1399,9 @@ async fn supervisor_with_catalog_processes_enqueued_job_after_sync() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_supervisor", 8).await;
 
     let runs = Arc::new(AtomicUsize::new(0));
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::clone(&runs),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::clone(&runs),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -1544,7 +1459,8 @@ async fn supervisor_with_catalog_processes_enqueued_job_after_sync() {
 }
 
 #[test]
-fn try_job_rejects_handler_job_type_mismatch_before_database() {
+fn legacy_try_job_rejects_handler_job_type_mismatch_before_database() {
+    #[allow(deprecated, reason = "regression coverage for the compatibility API")]
     let error = JobCatalog::new()
         .try_job("jobs.catalog.expected", HandlerReturningOtherType)
         .expect_err("handler mismatch");
@@ -1553,12 +1469,9 @@ fn try_job_rejects_handler_job_type_mismatch_before_database() {
 
 #[test]
 fn enqueue_helper_forwards_all_input_fields() {
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let organization_id =
         Uuid::parse_str("018fa1f8-0000-7000-8000-000000000111").expect("fixed uuid");
     let payload = json!({ "field": "value" });
@@ -1591,12 +1504,9 @@ fn enqueue_helper_forwards_all_input_fields() {
 
 #[test]
 fn schedule_helper_forwards_all_input_fields() {
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let organization_id =
         Uuid::parse_str("018fa1f8-0000-7000-8000-000000000222").expect("fixed uuid");
     let payload_template = json!({ "template": true });
@@ -1627,12 +1537,9 @@ fn schedule_helper_forwards_all_input_fields() {
 
 #[test]
 fn workflow_step_helper_forwards_job_step_fields() {
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let organization_id =
         Uuid::parse_str("018fa1f8-0000-7000-8000-000000000333").expect("fixed uuid");
     let payload = json!({ "step": true });
@@ -1679,12 +1586,9 @@ fn schedule_helper_rejects_unknown_job_type() {
 #[test]
 fn schedule_helper_rejects_disabled_catalog_job_type() {
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().enabled(false));
     let error = catalog
         .job_schedule(&CatalogJobScheduleInput {
@@ -1733,12 +1637,9 @@ fn workflow_dag_helper_rejects_unknown_job_type() {
 #[test]
 fn workflow_step_helper_rejects_disabled_job_type() {
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().enabled(false));
     let error = catalog
         .workflow_step("append-step", CATALOG_TEST_JOB, &json!({}))
@@ -1757,12 +1658,9 @@ fn workflow_step_helper_rejects_unknown_job_type() {
 
 #[test]
 fn catalog_helpers_do_not_check_operator_disabled_database_rows() {
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
 
     assert!(
         catalog
@@ -1774,12 +1672,9 @@ fn catalog_helpers_do_not_check_operator_disabled_database_rows() {
 
 #[test]
 fn workflow_step_helper_rejects_blank_step_key() {
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let error = catalog
         .workflow_step("   ", CATALOG_TEST_JOB, &json!({}))
         .expect_err("blank step key");
@@ -1793,12 +1688,9 @@ fn workflow_step_helper_rejects_blank_step_key() {
 async fn schedule_helper_builds_valid_upsert_for_enabled_catalog_job() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_schedule", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -1832,12 +1724,9 @@ async fn schedule_helper_builds_valid_upsert_for_enabled_catalog_job() {
 
 #[test]
 fn workflow_dag_helper_propagates_build_errors() {
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
 
     let blank_step = catalog
         .workflow_dag("workflow.catalog", &json!({}))
@@ -1906,12 +1795,9 @@ fn catalog_schedule_spec(name: &'static str, is_active: bool) -> CatalogJobSched
 async fn sync_schedules_with_activates_schedule_after_definitions_sync() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_schedules", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -1934,12 +1820,9 @@ async fn sync_schedules_uses_catalog_registered_specs() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_registered", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .schedule(catalog_schedule_spec("catalog-registered-schedule", true));
     catalog
         .sync_definitions(&pool)
@@ -1962,12 +1845,9 @@ async fn sync_schedules_exact_uses_registered_specs_and_derived_scope() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_registered_exact", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .schedule(catalog_schedule_spec(
             "catalog-registered-exact-schedule",
             true,
@@ -2002,12 +1882,9 @@ async fn sync_schedules_exact_with_rejects_dynamic_specs_outside_derived_scope()
         setup_ephemeral_pool("runtime_catalog_sync_derived_scope_extra_spec", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .schedule(catalog_schedule_spec(
             "catalog-registered-scope-schedule",
             true,
@@ -2042,12 +1919,9 @@ async fn sync_schedules_exact_with_rejects_dynamic_specs_outside_derived_scope()
 async fn sync_schedules_with_rejects_unknown_job_type_before_database() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_unknown_job", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let payload = json!({});
     let error = catalog
         .sync_schedules_with(
@@ -2075,12 +1949,9 @@ async fn sync_schedules_with_rejects_disabled_job_type_before_database() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_disabled_job", 4).await;
 
     let catalog = JobCatalog::new()
-        .job(
-            CATALOG_TEST_JOB,
-            CountingHandler {
-                runs: Arc::new(AtomicUsize::new(0)),
-            },
-        )
+        .handler(CountingHandler {
+            runs: Arc::new(AtomicUsize::new(0)),
+        })
         .defaults(JobCatalogDefaults::new().enabled(false));
     catalog
         .sync_definitions(&pool)
@@ -2103,12 +1974,9 @@ async fn sync_schedules_with_rejects_disabled_job_type_before_database() {
 async fn sync_schedules_rejects_duplicate_names_in_sync_batch() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_duplicate_batch", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let first = catalog_schedule_spec("duplicate-batch-schedule", true);
     let second = catalog_schedule_spec("duplicate-batch-schedule", false);
     let error = catalog
@@ -2125,12 +1993,9 @@ async fn sync_schedules_rejects_duplicate_names_in_sync_batch() {
 
 #[test]
 fn sync_schedules_rejects_duplicate_names_on_catalog() {
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let spec = catalog_schedule_spec("duplicate-schedule", true);
     let error = catalog
         .try_schedule(spec)
@@ -2145,12 +2010,9 @@ fn sync_schedules_rejects_duplicate_names_on_catalog() {
 async fn sync_schedules_exact_deactivates_absent_scoped_schedules() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_schedules_exact", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -2196,12 +2058,9 @@ async fn sync_schedules_exact_waits_for_schedule_table_lock() {
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_sync_schedule_exact_lock", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let scope = JobCatalogScheduleSyncScope::schedule_name("catalog-lock-schedule")
         .expect("schedule scope");
 
@@ -2238,12 +2097,9 @@ async fn sync_schedules_exact_with_empty_specs_deactivates_scope() {
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_sync_schedules_exact_empty_specs", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -2285,12 +2141,9 @@ async fn sync_schedules_exact_with_empty_specs_deactivates_scope() {
 async fn sync_schedules_exact_rejects_specs_outside_scope() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_schedules_scope", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let scope = JobCatalogScheduleSyncScope::schedule_name("catalog-present-schedule")
         .expect("schedule scope");
     let error = catalog
@@ -2314,12 +2167,9 @@ async fn sync_schedules_reports_failing_schedule_name() {
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_sync_schedule_error_name", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     let error = catalog
         .sync_schedules_with(
             &pool,
@@ -2346,12 +2196,9 @@ async fn sync_schedules_preserves_next_fire_at_when_cron_is_unchanged() {
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_sync_schedules_preserve_cursor", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -2391,12 +2238,9 @@ async fn sync_schedules_is_idempotent() {
     let (pool, database) =
         setup_ephemeral_pool("runtime_catalog_sync_schedules_idempotent", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await
@@ -2419,12 +2263,9 @@ async fn sync_schedules_is_idempotent() {
 async fn sync_schedules_with_applies_is_active_false() {
     let (pool, database) = setup_ephemeral_pool("runtime_catalog_sync_schedules_inactive", 4).await;
 
-    let catalog = JobCatalog::new().job(
-        CATALOG_TEST_JOB,
-        CountingHandler {
-            runs: Arc::new(AtomicUsize::new(0)),
-        },
-    );
+    let catalog = JobCatalog::new().handler(CountingHandler {
+        runs: Arc::new(AtomicUsize::new(0)),
+    });
     catalog
         .sync_definitions(&pool)
         .await

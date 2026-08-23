@@ -122,7 +122,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_blank_declared_job_type() {
+    fn legacy_try_job_rejects_blank_declared_job_type() {
+        #[allow(deprecated, reason = "regression coverage for the compatibility API")]
         let error = JobCatalog::new()
             .try_job("   ", StaticHandler("jobs.test"))
             .expect_err("blank declared job type");
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn rejects_blank_handler_job_type() {
         let error = JobCatalog::new()
-            .try_job("jobs.test", BlankHandler)
+            .try_handler(BlankHandler)
             .expect_err("blank handler job type");
         assert!(matches!(
             error,
@@ -150,7 +151,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_handler_job_type_mismatch() {
+    fn legacy_try_job_preserves_handler_job_type_mismatch_diagnostic() {
+        #[allow(deprecated, reason = "regression coverage for the compatibility API")]
         let error = JobCatalog::new()
             .try_job("jobs.catalog.expected", MismatchHandler)
             .expect_err("handler mismatch");
@@ -158,11 +160,23 @@ mod tests {
     }
 
     #[test]
+    fn legacy_and_handler_registration_have_equivalent_identity() {
+        let handler_catalog = JobCatalog::new().handler(StaticHandler("jobs.test"));
+        #[allow(deprecated, reason = "equivalence coverage for the compatibility API")]
+        let legacy_catalog = JobCatalog::new().job("jobs.test", StaticHandler("jobs.test"));
+
+        assert_eq!(
+            handler_catalog.to_registry().registered_types(),
+            legacy_catalog.to_registry().registered_types()
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_job_type() {
         let error = JobCatalog::new()
-            .try_job("jobs.dup", StaticHandler("jobs.dup"))
+            .try_handler(StaticHandler("jobs.dup"))
             .expect("first registration")
-            .try_job("jobs.dup", StaticHandler("jobs.dup"))
+            .try_handler(StaticHandler("jobs.dup"))
             .expect_err("duplicate job type");
         assert!(matches!(error, CatalogError::DuplicateJobType { .. }));
     }
@@ -170,7 +184,7 @@ mod tests {
     #[test]
     fn to_registry_preserves_handlers_and_retry_overrides() {
         let catalog = JobCatalog::new()
-            .job("jobs.test", StaticHandler("jobs.test"))
+            .handler(StaticHandler("jobs.test"))
             .try_retry_delay_override("jobs.test", "job.test.wait", 42)
             .expect("retry override");
         let registry = catalog.to_registry();
@@ -200,7 +214,7 @@ mod tests {
     #[test]
     fn retry_override_rejects_blank_failure_code() {
         let error = JobCatalog::new()
-            .job("jobs.test", StaticHandler("jobs.test"))
+            .handler(StaticHandler("jobs.test"))
             .try_retry_delay_override("jobs.test", "   ", 42)
             .expect_err("blank failure code");
         assert!(matches!(error, CatalogError::InvalidFailureCode));
@@ -209,7 +223,7 @@ mod tests {
     #[test]
     fn retry_override_rejects_non_positive_delay() {
         let error = JobCatalog::new()
-            .job("jobs.test", StaticHandler("jobs.test"))
+            .handler(StaticHandler("jobs.test"))
             .try_retry_delay_override("jobs.test", "job.test.wait", 0)
             .expect_err("invalid retry delay");
         assert!(matches!(error, CatalogError::InvalidRetryDelay));
@@ -256,7 +270,7 @@ mod tests {
     #[test]
     fn job_enqueue_rejects_disabled_catalog_defaults() {
         let catalog = JobCatalog::new()
-            .job("jobs.test", StaticHandler("jobs.test"))
+            .handler(StaticHandler("jobs.test"))
             .defaults(JobCatalogDefaults::new().enabled(false));
         let error = catalog
             .job_enqueue(&CatalogJobEnqueueInput {
@@ -276,8 +290,7 @@ mod tests {
 
     #[test]
     fn job_enqueue_rejects_disabled_job_definition_overrides() {
-        let catalog = JobCatalog::new().job_with_definition_overrides(
-            "jobs.test",
+        let catalog = JobCatalog::new().handler_with_definition_overrides(
             StaticHandler("jobs.test"),
             JobCatalogDefinitionOverrides::new().enabled(false),
         );
@@ -300,8 +313,7 @@ mod tests {
     #[test]
     fn job_definition_overrides_take_precedence_over_disabled_catalog_defaults() {
         let catalog = JobCatalog::new()
-            .job_with_definition_overrides(
-                "jobs.test",
+            .handler_with_definition_overrides(
                 StaticHandler("jobs.test"),
                 JobCatalogDefinitionOverrides::new().enabled(true),
             )
@@ -326,8 +338,7 @@ mod tests {
     #[test]
     fn job_schedule_accepts_enabled_job_definition_override() {
         let catalog = JobCatalog::new()
-            .job_with_definition_overrides(
-                "jobs.test",
+            .handler_with_definition_overrides(
                 StaticHandler("jobs.test"),
                 JobCatalogDefinitionOverrides::new().enabled(true),
             )
@@ -350,7 +361,7 @@ mod tests {
 
     #[test]
     fn try_schedule_rejects_invalid_cron_before_database() {
-        let catalog = JobCatalog::new().job("jobs.test", StaticHandler("jobs.test"));
+        let catalog = JobCatalog::new().handler(StaticHandler("jobs.test"));
         let payload = json!({});
         let error = catalog
             .try_schedule(CatalogJobScheduleSpec {
@@ -375,7 +386,7 @@ mod tests {
 
     #[test]
     fn try_schedule_rejects_excessive_jitter_before_database() {
-        let catalog = JobCatalog::new().job("jobs.test", StaticHandler("jobs.test"));
+        let catalog = JobCatalog::new().handler(StaticHandler("jobs.test"));
         let payload = json!({});
         let error = catalog
             .try_schedule(CatalogJobScheduleSpec {
@@ -402,7 +413,7 @@ mod tests {
     fn schedule_sync_scope_uses_registered_schedule_names() {
         let payload = json!({});
         let catalog = JobCatalog::new()
-            .job("jobs.test", StaticHandler("jobs.test"))
+            .handler(StaticHandler("jobs.test"))
             .schedule(CatalogJobScheduleSpec {
                 name: "jobs.test.hourly",
                 job_type: "jobs.test",
@@ -437,7 +448,7 @@ mod tests {
     #[test]
     fn schedule_sync_scope_rejects_empty_registered_schedule_set() {
         let error = JobCatalog::new()
-            .job("jobs.test", StaticHandler("jobs.test"))
+            .handler(StaticHandler("jobs.test"))
             .schedule_sync_scope()
             .expect_err("empty schedule scope");
         assert!(matches!(error, CatalogError::InvalidExactScheduleSyncScope));
@@ -446,7 +457,7 @@ mod tests {
     #[test]
     fn definition_overrides_apply_after_job_registration() {
         let catalog = JobCatalog::new()
-            .job("jobs.test", StaticHandler("jobs.test"))
+            .handler(StaticHandler("jobs.test"))
             .definition_overrides(
                 "jobs.test",
                 JobCatalogDefinitionOverrides::new().enabled(true),
@@ -483,7 +494,7 @@ mod tests {
     #[test]
     fn definition_overrides_reject_invalid_job_type() {
         let error = JobCatalog::new()
-            .job("jobs.test", StaticHandler("jobs.test"))
+            .handler(StaticHandler("jobs.test"))
             .try_definition_overrides("   ", JobCatalogDefinitionOverrides::new().enabled(true))
             .expect_err("invalid job type");
         assert!(matches!(error, CatalogError::InvalidJobType { .. }));
@@ -492,7 +503,7 @@ mod tests {
     #[test]
     fn try_definition_overrides_reject_invalid_values() {
         let error = JobCatalog::new()
-            .job("jobs.test", StaticHandler("jobs.test"))
+            .handler(StaticHandler("jobs.test"))
             .try_definition_overrides(
                 "jobs.test",
                 JobCatalogDefinitionOverrides::new().max_attempts(0),
@@ -509,7 +520,7 @@ mod tests {
 
     #[test]
     fn workflow_dag_propagates_blank_step_key_error() {
-        let catalog = JobCatalog::new().job("jobs.test", StaticHandler("jobs.test"));
+        let catalog = JobCatalog::new().handler(StaticHandler("jobs.test"));
         let error = catalog
             .workflow_dag("workflow.test", &json!({}))
             .job("   ", "jobs.test", &json!({}))
@@ -522,7 +533,7 @@ mod tests {
 
     #[test]
     fn workflow_dag_propagates_unknown_dependency_error() {
-        let catalog = JobCatalog::new().job("jobs.test", StaticHandler("jobs.test"));
+        let catalog = JobCatalog::new().handler(StaticHandler("jobs.test"));
         let error = catalog
             .workflow_dag("workflow.test", &json!({}))
             .job("first", "jobs.test", &json!({}))

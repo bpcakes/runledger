@@ -22,8 +22,9 @@ use runledger_postgres::prelude::{
     DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord, list_job_events,
 };
 use runledger_runtime::Supervisor;
+use runledger_runtime::catalog::JobCatalog;
 use runledger_runtime::config::JobsConfig;
-use runledger_runtime::registry::{JobHandler, JobRegistry};
+use runledger_runtime::registry::JobHandler;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{
@@ -107,15 +108,15 @@ async fn packaged_crates_support_external_consumer_embedding() {
         continuation_canary_enabled: true,
     };
 
-    let mut registry = JobRegistry::new();
-    registry.register(handler);
+    let mut catalog = JobCatalog::new().handler(handler);
     for failure_code in [RETRY_AFTER_FAILURE_CODE, RETRY_AT_FAILURE_CODE] {
-        registry.register_retry_delay_override(
-            JobType::new(SMOKE_JOB_TYPE),
+        catalog = catalog.retry_delay_override(
+            SMOKE_JOB_TYPE,
             failure_code,
             SMOKE_RETRY_POLICY_DELAY_MS,
         );
     }
+    let registry = catalog.to_registry();
 
     let mut tx = harness.pool.begin().await.expect("begin job definition tx");
     upsert_job_definition_tx(

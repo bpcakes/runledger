@@ -70,7 +70,7 @@
 //! #     ) -> std::result::Result<JobCompletion, JobFailure> { Ok(JobCompletion::success()) }
 //! # }
 //!
-//! let catalog = JobCatalog::new().job("jobs.example", MyHandler);
+//! let catalog = JobCatalog::new().handler(MyHandler);
 //! catalog.sync_definitions(&pool).await?;
 //! let supervisor = Supervisor::builder_from_env(&pool)?
 //!     .with_catalog(&catalog)

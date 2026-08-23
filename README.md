@@ -155,7 +155,7 @@ async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
     runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
 
     // Register handlers and sync their job definitions.
-    let catalog = JobCatalog::new().job("jobs.email.send", SendEmail);
+    let catalog = JobCatalog::new().handler(SendEmail);
     catalog.sync_definitions(&pool).await?;
 
     // Run the supervisor until Ctrl-C, with a 30s shutdown drain deadline.
@@ -860,7 +860,7 @@ Schedules are UTC-only. Choose an API by who owns the schedule definition:
 use runledger_runtime::catalog::{CatalogJobScheduleSpec, JobCatalog};
 
 let catalog = JobCatalog::new()
-    .job("profiles.refresh", RefreshHandler)
+    .handler(RefreshHandler)
     .schedule(CatalogJobScheduleSpec {
         name: "profiles.refresh.hourly",
         job_type: "profiles.refresh",
@@ -876,7 +876,7 @@ catalog.sync_definitions(&pool).await?;
 catalog.sync_schedules(&pool).await?;
 ```
 
-Register a schedule's `.job(...)` before its `.schedule(...)` — schedule
+Register a schedule's `.handler(...)` before its `.schedule(...)` — schedule
 registration validates the referenced catalog job type immediately. Sync
 preserves an existing `next_fire_at` cursor while the cron expression is
 unchanged; changing `cron_expr` stores the spec's `next_fire_at`, or `Utc::now()`
@@ -924,20 +924,18 @@ inside an explicit owned job-type set. Exact sync returns the disabled job types
 refuses to disable definitions still referenced by active schedules, and (unlike
 additive sync) restores catalog entries' enabled state from catalog defaults.
 
-Override individual definitions with `job_with_definition_overrides` /
+Override individual definitions with `handler_with_definition_overrides` /
 `definition_overrides`:
 
 ```rust
 let catalog = JobCatalog::new()
-    .job_with_definition_overrides(
-        "documents.extract",
+    .handler_with_definition_overrides(
         ExtractDocuments,
         JobCatalogDefinitionOverrides::new()
             .timeout_seconds(600)
             .priority(20),
     )
-    .job_with_definition_overrides(
-        "auth.cleanup",
+    .handler_with_definition_overrides(
         CleanupAuth,
         JobCatalogDefinitionOverrides::new()
             .timeout_seconds(60)
