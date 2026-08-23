@@ -14,6 +14,28 @@ use super::validation::workflow_dependency_count_overflow_error;
 pub(in crate::jobs::workflows) type DefaultsByJobType = BTreeMap<String, JobDefinitionDefaults>;
 pub(in crate::jobs::workflows) type WorkflowStepIdsByKey = BTreeMap<String, Uuid>;
 
+#[derive(Clone, Copy, Debug)]
+pub(in crate::jobs::workflows) enum WorkflowStepDependencyWriteContext {
+    InitialEnqueue,
+    Append,
+}
+
+impl WorkflowStepDependencyWriteContext {
+    const fn missing_dependent_step_id_error(self) -> &'static str {
+        match self {
+            Self::InitialEnqueue => "missing dependent workflow step id",
+            Self::Append => "missing dependent appended workflow step id",
+        }
+    }
+
+    const fn missing_prerequisite_step_id_error(self) -> &'static str {
+        match self {
+            Self::InitialEnqueue => "missing prerequisite workflow step id",
+            Self::Append => "missing appended workflow prerequisite step id",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(in crate::jobs::workflows) struct JobDefinitionDefaults {
     default_priority: i32,
@@ -222,21 +244,22 @@ pub(in crate::jobs::workflows) async fn insert_workflow_step_dependency_record_t
 
 pub(in crate::jobs::workflows) async fn insert_workflow_step_dependencies_tx(
     tx: &mut DbTx<'_>,
-    payload: &WorkflowRunEnqueue<'_>,
+    steps: &[WorkflowStepEnqueue<'_>],
     workflow_run_id: Uuid,
     step_id_by_key: &WorkflowStepIdsByKey,
+    context: WorkflowStepDependencyWriteContext,
 ) -> Result<()> {
-    for step in payload.steps() {
+    for step in steps {
         let dependent_step_id = step_id_for_key(
             step_id_by_key,
             step.step_key().as_str(),
-            "missing dependent workflow step id",
+            context.missing_dependent_step_id_error(),
         )?;
         for dependency in step.dependencies() {
             let prerequisite_step_id = step_id_for_key(
                 step_id_by_key,
                 dependency.prerequisite_step_key.as_str(),
-                "missing prerequisite workflow step id",
+                context.missing_prerequisite_step_id_error(),
             )?;
             let release_mode = dependency
                 .release_mode

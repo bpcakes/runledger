@@ -1,9 +1,8 @@
-use std::collections::BTreeSet;
-
 use runledger_core::jobs::{WorkflowRunStatus, WorkflowStepStatus};
 use sqlx::types::Uuid;
 
-use crate::jobs::admin::cancel_job_tx;
+use crate::jobs::admin::cancel_job_with_scope_tx;
+use crate::jobs::types::JobCancellationScope;
 use crate::jobs::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowRunDbRecord};
 use crate::{DbTx, Error, Result};
 
@@ -15,7 +14,7 @@ use super::super::locking::{
 use super::super::read::load_workflow_run_by_id_tx;
 use super::super::runtime::{
     complete_external_workflow_step_tx, notify_workflow_run_terminal_tx,
-    recompute_workflow_run_statuses_tx, resolve_terminal_step_queue_tx,
+    recompute_workflow_run_status_tx, resolve_terminal_step_queue_tx,
 };
 
 #[derive(Clone, Copy)]
@@ -29,7 +28,6 @@ struct WorkflowCancellationSweep<'a> {
     workflow_run: WorkflowRunDbRecord,
     scope_organization_id: Option<Uuid>,
     metadata: CancellationMetadata<'a>,
-    touched_run_ids: BTreeSet<Uuid>,
 }
 
 pub async fn cancel_workflow_run_tx(
@@ -88,7 +86,7 @@ async fn cancel_workflow_run_after_lock_phase_tx(
     let mut sweep = WorkflowCancellationSweep::new(workflow_run, organization_id, metadata);
     sweep.sweep_tx(tx, locked_steps).await?;
 
-    recompute_workflow_run_statuses_tx(tx, sweep.touched_run_ids()).await?;
+    recompute_workflow_run_status_tx(tx, sweep.workflow_run_id()).await?;
     // Cancellation marks the run terminal before recompute, so recompute does
     // not observe a nonterminal-to-terminal transition for this run. Release
     // (or defer) its active claim explicitly after all jobs are canceled.
@@ -107,22 +105,15 @@ impl<'a> WorkflowCancellationSweep<'a> {
         scope_organization_id: Option<Uuid>,
         metadata: CancellationMetadata<'a>,
     ) -> Self {
-        let workflow_run_id = workflow_run.id;
-
         Self {
             workflow_run,
             scope_organization_id,
             metadata,
-            touched_run_ids: BTreeSet::from([workflow_run_id]),
         }
     }
 
     fn workflow_run_id(&self) -> Uuid {
         self.workflow_run.id
-    }
-
-    fn touched_run_ids(&self) -> &BTreeSet<Uuid> {
-        &self.touched_run_ids
     }
 
     async fn sweep_tx(
@@ -230,8 +221,12 @@ impl<'a> WorkflowCancellationSweep<'a> {
                         step.step_key.as_str()
                     ))
                 })?;
+                let scope = match step.organization_id {
+                    Some(organization_id) => JobCancellationScope::Organization(organization_id),
+                    None => JobCancellationScope::Global,
+                };
                 let canceled =
-                    cancel_job_tx(tx, step.organization_id, job_id, self.metadata.reason).await?;
+                    cancel_job_with_scope_tx(tx, scope, job_id, self.metadata.reason).await?;
                 if canceled.is_none() {
                     return Err(workflow_internal_state_error(format!(
                         "workflow-managed job {job_id} could not be canceled during workflow run cancel"
@@ -280,12 +275,14 @@ impl<'a> WorkflowCancellationSweep<'a> {
                              output = NULL,
                              updated_at = now()
                          WHERE id = $1
+                           AND workflow_run_id = $5
                            AND status = 'BLOCKED'
                          RETURNING workflow_run_id",
             step_id,
             self.metadata.reason,
             self.metadata.last_error_code,
             self.metadata.last_error_message,
+            self.workflow_run.id,
         )
         .fetch_optional(&mut **tx)
         .await
@@ -299,9 +296,9 @@ impl<'a> WorkflowCancellationSweep<'a> {
         if canceled.is_some() {
             resolve_terminal_step_queue_tx(
                 tx,
+                self.workflow_run.id,
                 step_id,
                 WorkflowStepStatus::Canceled,
-                &mut self.touched_run_ids,
             )
             .await?;
             return Ok(true);

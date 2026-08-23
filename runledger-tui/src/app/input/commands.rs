@@ -14,7 +14,6 @@ impl App {
                     self.job_type_filter = None;
                     self.jobs = None;
                     self.definitions = None;
-                    self.bump_fetch_generation();
                     refresh = true;
                 }
             }
@@ -22,7 +21,6 @@ impl App {
                 if self.workflow_type_filter.is_some() {
                     self.workflow_type_filter = None;
                     self.workflows = None;
-                    self.bump_fetch_generation();
                     refresh = true;
                 }
             }
@@ -30,7 +28,6 @@ impl App {
                 if self.job_type_filter.is_some() {
                     self.job_type_filter = None;
                     self.definitions = None;
-                    self.bump_fetch_generation();
                     refresh = true;
                 }
             }
@@ -58,7 +55,6 @@ impl App {
                 };
                 self.queue_filter = filter;
                 self.jobs = None;
-                self.bump_fetch_generation();
                 self.navigate_top(TopScreen::Queue);
                 true
             }

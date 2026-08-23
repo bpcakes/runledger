@@ -2170,8 +2170,78 @@ async fn concurrent_promoters_create_one_job() {
 }
 
 #[tokio::test]
+async fn invalid_persisted_stage_conflicts_without_starving_valid_intent() {
+    let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_action_conflict", 4).await;
+    record_postgres_server_version(&pool, "intent promotion failure action conflict").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+
+    let invalid_payload = json!({"event": "invalid-persisted-stage"});
+    let invalid = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(
+            JobType::new(JOB_TYPE),
+            &invalid_payload,
+            "invalid-persisted-stage",
+        ),
+    )
+    .await
+    .expect("record intent before corrupting its stage");
+    let healthy_payload = json!({"event": "healthy-after-invalid-stage"});
+    let healthy = record_job_enqueue_intent(
+        &pool,
+        &JobEnqueueIntent::new(
+            JobType::new(JOB_TYPE),
+            &healthy_payload,
+            "healthy-after-invalid-stage",
+        ),
+    )
+    .await
+    .expect("record healthy intent after invalid candidate");
+
+    sqlx::query("UPDATE job_enqueue_intents SET stage = 'future_stage' WHERE id = $1")
+        .bind(invalid.intent_id)
+        .execute(&pool)
+        .await
+        .expect("simulate an unsupported persisted stage");
+
+    let report = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 10)
+        .await
+        .expect("classify invalid row and continue promotion");
+    assert_eq!(report.conflicted, 1);
+    assert_eq!(report.retry_deferred, 0);
+    assert_eq!(report.inserted_jobs, 1);
+    assert_eq!(report.total_promoted, 1);
+
+    let invalid =
+        sqlx::query_as::<_, (String, i32, Option<String>, Option<chrono::DateTime<Utc>>)>(
+            "SELECT status, promotion_attempts, last_error_code, conflicted_at
+         FROM job_enqueue_intents
+         WHERE id = $1",
+        )
+        .bind(invalid.intent_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load raw conflicted intent without decoding its invalid stage");
+    assert_eq!(invalid.0, "CONFLICTED");
+    assert_eq!(invalid.1, 1);
+    assert_eq!(invalid.2.as_deref(), Some("job.invalid_stage"));
+    assert!(invalid.3.is_some());
+    assert_eq!(
+        get_job_enqueue_intent_by_id(&pool, None, healthy.intent_id)
+            .await
+            .expect("load healthy intent")
+            .expect("healthy intent remains")
+            .status,
+        JobEnqueueIntentStatus::Promoted
+    );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn snapshot_drift_defers_without_starving_and_promotes_after_repair() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_poison_row", 4).await;
+    record_postgres_server_version(&pool, "intent promotion failure action defer").await;
     register_test_job_definition(&pool, JOB_TYPE).await;
     let poison_payload = json!({"event": "poison"});
     let healthy_payload = json!({"event": "healthy"});
@@ -2483,6 +2553,7 @@ async fn definition_disabled_after_eligibility_leaves_intent_pending() {
 #[tokio::test]
 async fn enqueue_event_failure_defers_only_failed_intent_and_rolls_back_its_job() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_event_rollback", 4).await;
+    record_postgres_server_version(&pool, "intent promotion savepoint rollback").await;
     register_test_job_definition(&pool, JOB_TYPE).await;
     let failing_payload = json!({"event": "rollback-enqueued-event"});
     let failing_intent = JobEnqueueIntent::new(

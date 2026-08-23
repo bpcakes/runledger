@@ -255,6 +255,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | More work after one successful bounded slice | `JobCompletion::continue_now` or `continue_after`; workflow steps must opt in |
 | At most one active workflow for an application key | `WorkflowRunEnqueueBuilder::active_key` and `enqueue_or_get_active_workflow` |
 | Mutual exclusion for jobs sharing one external resource | `enqueue_job_with_execution_resource` or `WorkflowStepEnqueueBuilder::execution_resource` |
+| Cancel a pending or leased job | `cancel_job_with_scope` with an explicit `JobCancellationScope::{Global, Organization, Admin}` capability |
 | Recover a canceled or dead-lettered direct job | `compare_and_requeue_job` with exact observed state |
 | Intentionally repeat a successful direct job | `compare_and_replay_succeeded_job` |
 | Recover a terminal workflow without rewriting history | `recover_workflow_run` |
@@ -1602,7 +1603,9 @@ If you change SQL or the schema, refresh the cache before committing:
 2. Point `DATABASE_URL` at it.
 3. Run `./scripts/refresh-sqlx-cache.sh`.
 
-The script regenerates the root `.sqlx/`, syncs it into
+The script prints `server_version` and `server_version_num` and refuses a
+server other than PostgreSQL 18 or one with pending Runledger migrations. It
+then regenerates the root `.sqlx/`, syncs it into
 `runledger-postgres/.sqlx/` and `runledger-runtime/.sqlx/`, syncs the root
 `migrations/` into `runledger-postgres/migrations/`, runs `cargo check
 --workspace`, and confirms the publishable tarballs include their per-crate
@@ -1648,12 +1651,14 @@ After reviewing and committing the prepared diff:
 ```
 
 Before publishing any crate, the publish script confirms that the release tag
-is absent locally and remotely, requires the same-named remote branch to point
-at the exact local commit, and verifies that commit's completed GitHub Actions
-`CI` run and every job succeeded. It then dry-runs the branch and tag push,
-publishes crates in dependency order, dry-runs each once its workspace
-dependencies are indexed, publishes the same-version React package to npm,
-creates a `v0.10.1` tag, and atomically pushes the current branch and tag. The
+is absent from the selected remote, requires the same-named remote branch to
+point at the exact local commit, and verifies that commit's completed GitHub
+Actions `CI` run and every job succeeded. It then dry-runs the branch and tag
+push, publishes crates in dependency order, dry-runs each once its workspace
+dependencies are indexed, and publishes the same-version React package to npm.
+Finally, it atomically pushes `HEAD` as both the current branch and remote
+`v0.10.1` tag, then creates or reconciles the local lightweight tag. A
+local-only tag left by an older failed release does not block a retry. The
 publication preflight requires authenticated GitHub and npm CLIs. Set
 `PUBLISH_REMOTE` to override the git remote for the final push.
 

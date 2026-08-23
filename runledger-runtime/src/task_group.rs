@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_after_handle_request_allows_clean_task_exit() {
+    async fn shutdown_after_repeated_handle_requests_allows_clean_task_exit() {
         let (shutdown, mut shutdown_rx) = ShutdownSignal::channel();
         let mut group = test_group(vec![test_shutdown_task("cooperative-loop", async move {
             while !*shutdown_rx.borrow() {
@@ -649,6 +649,7 @@ mod tests {
         })]);
         let shutdown_handle = shutdown.handle();
 
+        shutdown_handle.request();
         shutdown_handle.request();
 
         group

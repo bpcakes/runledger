@@ -15,11 +15,11 @@ use super::errors::{
 };
 use super::read::load_workflow_run_by_id_tx;
 use super::release::enqueue_root_steps_tx;
-use super::runtime::recompute_workflow_run_statuses_tx;
+use super::runtime::recompute_workflow_run_status_tx;
 use super::snapshot::canonical_workflow_enqueue_request;
 use super::steps::{
-    fetch_job_definition_defaults_tx, insert_workflow_step_dependencies_tx,
-    insert_workflow_steps_tx,
+    WorkflowStepDependencyWriteContext, fetch_job_definition_defaults_tx,
+    insert_workflow_step_dependencies_tx, insert_workflow_steps_tx,
 };
 use super::validation::workflow_dag_validation_error;
 use crate::jobs::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
@@ -218,11 +218,17 @@ async fn enqueue_workflow_run_classified_tx_inner(
     let defaults_by_job_type = fetch_job_definition_defaults_tx(tx, payload.steps()).await?;
     let step_id_by_key =
         insert_workflow_steps_tx(tx, payload, workflow_run.id, &defaults_by_job_type).await?;
-    insert_workflow_step_dependencies_tx(tx, payload, workflow_run.id, &step_id_by_key).await?;
+    insert_workflow_step_dependencies_tx(
+        tx,
+        payload.steps(),
+        workflow_run.id,
+        &step_id_by_key,
+        WorkflowStepDependencyWriteContext::InitialEnqueue,
+    )
+    .await?;
 
     enqueue_root_steps_tx(tx, workflow_run.id).await?;
-    recompute_workflow_run_statuses_tx(tx, &std::collections::BTreeSet::from([workflow_run.id]))
-        .await?;
+    recompute_workflow_run_status_tx(tx, workflow_run.id).await?;
 
     let workflow_run = load_workflow_run_by_id_tx(
         tx,

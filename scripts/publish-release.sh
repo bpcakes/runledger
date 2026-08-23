@@ -158,13 +158,6 @@ wait_for_crates_io_index() {
   done
 }
 
-require_tag_absent() {
-  local tag="$1"
-  if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-    die "tag ${tag} already exists"
-  fi
-}
-
 require_remote_tag_absent() {
   local remote="$1"
   local tag="$2"
@@ -413,7 +406,6 @@ require_clean_worktree
 validate_version "$VERSION"
 require_manifest_versions "$VERSION"
 require_publish_order
-require_tag_absent "$TAG"
 
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
 if [[ "$current_branch" == "HEAD" ]]; then
@@ -474,12 +466,15 @@ fi
 wait_for_npm_index "$VERSION"
 verify_existing_npm_artifact "$VERSION"
 
-git tag "$TAG"
-
 git push \
   --atomic \
   "$PUBLISH_REMOTE" \
   "HEAD:refs/heads/${current_branch}" \
-  "refs/tags/${TAG}:refs/tags/${TAG}"
+  "HEAD:refs/tags/${TAG}"
+
+# The remote tag is the publication record. Reconcile the optional local
+# lightweight tag only after the atomic remote update succeeds so a failed push
+# cannot leave local-only state that blocks a retry.
+git tag --force "$TAG" HEAD
 
 echo "Published ${VERSION} and pushed ${TAG}."

@@ -89,11 +89,6 @@ impl StepReleaseCandidate {
         self.id
     }
 
-    #[must_use]
-    pub(in crate::jobs::workflows) fn workflow_run_id(&self) -> Uuid {
-        self.workflow_run_id
-    }
-
     fn releasable_execution(&self) -> Result<ReleasableStepExecution<'_>> {
         match &self.stored_execution {
             StoredStepReleaseExecution::Job {
@@ -461,7 +456,7 @@ mod tests {
             .expect("complete job shape should decode");
 
         assert_eq!(candidate.id(), Uuid::nil());
-        assert_eq!(candidate.workflow_run_id(), workflow_run_id);
+        assert_eq!(candidate.workflow_run_id, workflow_run_id);
         match execution {
             ReleasableStepExecution::Job(JobReleaseSpec {
                 job_type,

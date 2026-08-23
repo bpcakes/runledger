@@ -145,6 +145,20 @@ pub struct AdminJobMetricsRecord {
     pub max_active_run_number: i32,
 }
 
+/// Authorization scope for canceling a job.
+///
+/// Unlike legacy cancellation APIs that use `None` as an admin wildcard, this
+/// type distinguishes an exact global job from an explicit admin operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobCancellationScope {
+    /// Match only a job whose `organization_id` is `NULL`.
+    Global,
+    /// Match only a job owned by this exact organization.
+    Organization(Uuid),
+    /// Match the job regardless of its organization.
+    Admin,
+}
+
 #[derive(Clone, Debug)]
 pub struct JobMetricsRecord {
     pub job_type: JobTypeName,

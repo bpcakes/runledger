@@ -9,7 +9,7 @@ pub(crate) use claim_transitions::{
 };
 pub(crate) use run_status::{
     WORKFLOW_RUN_TERMINAL_CHANNEL, notify_workflow_run_terminal_tx,
-    recompute_workflow_run_statuses_tx,
+    recompute_workflow_run_status_tx,
 };
 pub use terminal::{complete_external_workflow_step, complete_external_workflow_step_tx};
 pub(crate) use terminal::{

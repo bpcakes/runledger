@@ -391,12 +391,38 @@ fn first_jittered_fire_after_utc(
     schedule_id: uuid::Uuid,
     max_jitter_seconds: i32,
 ) -> Option<DateTime<Utc>> {
-    schedule
-        .after(&from)
-        .take(SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT)
-        .map(|next| apply_schedule_jitter(schedule_id, next, max_jitter_seconds))
-        .filter(|next| *next > after)
-        .min()
+    first_jittered_fire_after_candidates_utc(
+        schedule
+            .after(&from)
+            .take(SCHEDULE_STALE_CATCHUP_JITTER_SEARCH_LIMIT),
+        after,
+        schedule_id,
+        max_jitter_seconds,
+    )
+}
+
+fn first_jittered_fire_after_candidates_utc(
+    candidates: impl Iterator<Item = DateTime<Utc>>,
+    after: DateTime<Utc>,
+    schedule_id: uuid::Uuid,
+    max_jitter_seconds: i32,
+) -> Option<DateTime<Utc>> {
+    let mut best = None;
+    for base_fire_at in candidates {
+        // Cron bases are strictly increasing and jitter is nonnegative. Once a
+        // base reaches the best adjusted fire, no remaining candidate can
+        // produce an earlier timestamp; an equal timestamp preserves the same
+        // observable tie result.
+        if best.is_some_and(|best| base_fire_at >= best) {
+            break;
+        }
+
+        let jittered_fire_at = apply_schedule_jitter(schedule_id, base_fire_at, max_jitter_seconds);
+        if jittered_fire_at > after && best.is_none_or(|best| jittered_fire_at < best) {
+            best = Some(jittered_fire_at);
+        }
+    }
+    best
 }
 
 fn next_jittered_fire_after_utc(

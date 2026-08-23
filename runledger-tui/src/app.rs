@@ -1,6 +1,4 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use uuid::Uuid;
 
@@ -15,7 +13,7 @@ pub(crate) mod fetch;
 mod input;
 mod search;
 
-use self::fetch::FetchOutcome;
+use self::fetch::{FetchOutcome, FetchRequest, FetchStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopScreen {
@@ -124,17 +122,13 @@ pub struct App {
     pub definitions: Option<DefinitionsData>,
     pub last_error: Option<String>,
     pub notice: Option<String>,
-    pub last_refresh: Option<Instant>,
-    pub last_fetch_duration: Option<Duration>,
-    pub fetching: bool,
     pub should_quit: bool,
-    fetch_generation: Arc<AtomicU64>,
 }
 
 impl App {
     const TOP_SCREEN_COUNT: usize = 4;
 
-    pub fn new(config: Config, fetch_generation: Arc<AtomicU64>) -> Self {
+    pub fn new(config: Config) -> Self {
         let scope = config.org.map(Scope::for_org).unwrap_or_else(Scope::global);
         Self {
             config,
@@ -163,16 +157,8 @@ impl App {
             definitions: None,
             last_error: None,
             notice: None,
-            last_refresh: None,
-            last_fetch_duration: None,
-            fetching: false,
             should_quit: false,
-            fetch_generation,
         }
-    }
-
-    fn bump_fetch_generation(&self) {
-        self.fetch_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub(crate) fn active_input(&self) -> &ActiveInput {
@@ -240,15 +226,15 @@ impl App {
         )
     }
 
-    pub fn status_line(&self) -> String {
+    pub(crate) fn status_line(&self, fetch_status: FetchStatus) -> String {
         let rows = self.list_len();
         let selected = if rows == 0 {
             "row 0/0".to_owned()
         } else {
             format!("row {}/{}", self.list_selection.min(rows - 1) + 1, rows)
         };
-        let refresh = self.refresh_status_label();
-        let query = self
+        let refresh = self.refresh_status_label(fetch_status);
+        let query = fetch_status
             .last_fetch_duration
             .map(format_duration)
             .unwrap_or_else(|| "query --".to_owned());
@@ -297,13 +283,17 @@ impl App {
         }
     }
 
-    fn refresh_status_label(&self) -> String {
-        let age = self
+    fn refresh_status_label(&self, fetch_status: FetchStatus) -> String {
+        let age = fetch_status
             .last_refresh
             .map(|t| format_duration_short(t.elapsed()))
             .unwrap_or_else(|| "never".to_owned());
         let paused = if self.refresh_paused { " paused" } else { "" };
-        let fetch = if self.fetching { " fetching" } else { "" };
+        let fetch = if fetch_status.fetching {
+            " fetching"
+        } else {
+            ""
+        };
         format!("refresh {age}{paused}{fetch}")
     }
 
@@ -341,7 +331,6 @@ impl App {
         self.screen_stack.clear();
         self.screen = Self::screen_from_top(top);
         self.restore_view_state(self.top_view_states[self.top_screen_index()]);
-        self.bump_fetch_generation();
     }
 
     fn screen_from_top(top: TopScreen) -> Screen {
@@ -360,11 +349,9 @@ impl App {
         self.workflows = None;
         self.workflow_detail = None;
         self.definitions = None;
-        self.bump_fetch_generation();
     }
 
     pub fn push_job_detail(&mut self, job_id: Uuid) {
-        self.bump_fetch_generation();
         self.screen_stack.push(ScreenFrame {
             screen: self.screen.clone(),
             state: self.capture_view_state(),
@@ -377,7 +364,6 @@ impl App {
     }
 
     pub fn push_workflow_detail(&mut self, run_id: Uuid) {
-        self.bump_fetch_generation();
         self.screen_stack.push(ScreenFrame {
             screen: self.screen.clone(),
             state: self.capture_view_state(),
@@ -389,7 +375,6 @@ impl App {
 
     pub fn pop_screen(&mut self) {
         if let Some(prev) = self.screen_stack.pop() {
-            self.bump_fetch_generation();
             self.screen = prev.screen;
             self.restore_view_state(prev.state);
         }
@@ -430,30 +415,40 @@ impl App {
         }
     }
 
-    pub(crate) fn apply_fetch(&mut self, outcome: FetchOutcome, duration: Duration) {
-        self.fetching = false;
-        self.last_fetch_duration = Some(duration);
-        match outcome {
+    pub(crate) fn fetch_request(&self) -> FetchRequest {
+        FetchRequest {
+            screen: self.screen.clone(),
+            scope: self.scope,
+            queue_filter: self.queue_filter,
+            job_type_filter: self.job_type_filter.clone(),
+            workflow_type_filter: self.workflow_type_filter.clone(),
+            limit: self.config.limit,
+        }
+    }
+
+    /// Applies a current fetch outcome and reports whether it refreshed data.
+    pub(crate) fn apply_fetch(&mut self, outcome: FetchOutcome) -> bool {
+        let refreshed = match outcome {
             FetchOutcome::Dashboard(Ok(data)) => {
                 self.dashboard = Some(*data);
                 self.last_error = None;
-                self.last_refresh = Some(Instant::now());
+                true
             }
             FetchOutcome::Jobs(Ok(data)) => {
                 self.jobs = Some(*data);
                 self.last_error = None;
-                self.last_refresh = Some(Instant::now());
+                true
             }
             FetchOutcome::JobDetail(Ok(data)) if matches!(&self.screen, Screen::JobDetail { job_id } if *job_id == data.job.id) =>
             {
                 self.job_detail = Some(*data);
                 self.last_error = None;
-                self.last_refresh = Some(Instant::now());
+                true
             }
             FetchOutcome::Workflows(Ok(data)) => {
                 self.workflows = Some(*data);
                 self.last_error = None;
-                self.last_refresh = Some(Instant::now());
+                true
             }
             FetchOutcome::WorkflowDetail(Ok(data))
                 if matches!(
@@ -463,12 +458,12 @@ impl App {
             {
                 self.workflow_detail = Some(*data);
                 self.last_error = None;
-                self.last_refresh = Some(Instant::now());
+                true
             }
             FetchOutcome::Definitions(Ok(data)) => {
                 self.definitions = Some(*data);
                 self.last_error = None;
-                self.last_refresh = Some(Instant::now());
+                true
             }
             FetchOutcome::Dashboard(Err(e))
             | FetchOutcome::Jobs(Err(e))
@@ -477,10 +472,12 @@ impl App {
             | FetchOutcome::WorkflowDetail(Err(e))
             | FetchOutcome::Definitions(Err(e)) => {
                 self.last_error = Some(e);
+                false
             }
-            _ => {}
-        }
+            _ => false,
+        };
         self.clamp_selection();
+        refreshed
     }
 
     pub(super) fn clamp_selection(&mut self) {
@@ -699,7 +696,7 @@ mod tests {
 
     #[test]
     fn active_input_representation_keeps_modal_modes_mutually_exclusive() {
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
 
         assert_eq!(app.active_input(), &ActiveInput::None);
 
@@ -732,7 +729,7 @@ mod tests {
 
     #[test]
     fn only_organization_and_filter_inputs_block_fetches() {
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
 
         assert!(app.allows_fetch());
 
@@ -754,7 +751,7 @@ mod tests {
 
     #[test]
     fn ignored_keys_preserve_every_active_input_variant() {
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         let cases = [
             (
                 ActiveInput::Organization {
@@ -792,8 +789,7 @@ mod tests {
 
     #[test]
     fn invalid_organization_input_closes_without_changing_scope_or_cache() {
-        let fetch_generation = Arc::new(AtomicU64::new(0));
-        let mut app = App::new(test_config(), fetch_generation.clone());
+        let mut app = App::new(test_config());
         let original_scope = Scope::for_org(Uuid::new_v4());
         app.scope = original_scope;
         app.jobs = Some(JobsData { jobs: Vec::new() });
@@ -805,14 +801,12 @@ mod tests {
         assert_eq!(app.scope, original_scope);
         assert_eq!(app.last_error.as_deref(), Some("Invalid organization UUID"));
         assert!(app.jobs.is_some());
-        assert_eq!(fetch_generation.load(Ordering::Acquire), 0);
         assert_eq!(app.active_input(), &ActiveInput::None);
     }
 
     #[test]
     fn command_input_preserves_refresh_and_non_refresh_return_semantics() {
-        let fetch_generation = Arc::new(AtomicU64::new(0));
-        let mut app = App::new(test_config(), fetch_generation.clone());
+        let mut app = App::new(test_config());
         app.scope = Scope::for_org(Uuid::new_v4());
         app.active_input = ActiveInput::Command {
             text: "scope global".to_owned(),
@@ -820,7 +814,6 @@ mod tests {
 
         assert!(app.handle_key(key(crossterm::event::KeyCode::Enter)));
         assert_eq!(app.scope, Scope::global());
-        assert_eq!(fetch_generation.load(Ordering::Acquire), 1);
         assert_eq!(app.active_input(), &ActiveInput::None);
 
         app.active_input = ActiveInput::Command {
@@ -828,14 +821,12 @@ mod tests {
         };
         assert!(!app.handle_key(key(crossterm::event::KeyCode::Enter)));
         assert_eq!(app.config.refresh_ms, 5_000);
-        assert_eq!(fetch_generation.load(Ordering::Acquire), 1);
         assert_eq!(app.active_input(), &ActiveInput::None);
     }
 
     #[test]
     fn type_filter_input_selects_the_target_and_invalidates_its_cache() {
-        let fetch_generation = Arc::new(AtomicU64::new(0));
-        let mut app = App::new(test_config(), fetch_generation.clone());
+        let mut app = App::new(test_config());
         app.jobs = Some(JobsData { jobs: Vec::new() });
         app.definitions = Some(DefinitionsData {
             definitions: Vec::new(),
@@ -854,7 +845,6 @@ mod tests {
         assert_eq!(app.job_type_filter.as_deref(), Some("j"));
         assert!(app.jobs.is_none());
         assert!(app.definitions.is_none());
-        assert_eq!(fetch_generation.load(Ordering::Acquire), 1);
 
         app.screen = Screen::Workflows;
         app.workflows = Some(WorkflowsData { runs: Vec::new() });
@@ -870,13 +860,11 @@ mod tests {
         assert!(app.handle_key(key(crossterm::event::KeyCode::Enter)));
         assert_eq!(app.workflow_type_filter.as_deref(), Some("w"));
         assert!(app.workflows.is_none());
-        assert_eq!(fetch_generation.load(Ordering::Acquire), 2);
     }
 
     #[test]
     fn search_input_edits_without_scheduling_a_fetch_and_resets_selection() {
-        let fetch_generation = Arc::new(AtomicU64::new(0));
-        let mut app = App::new(test_config(), fetch_generation.clone());
+        let mut app = App::new(test_config());
         app.screen = Screen::Queue;
         app.jobs = Some(JobsData { jobs: Vec::new() });
         app.table_search = Some("saved".to_owned());
@@ -895,13 +883,12 @@ mod tests {
 
         assert_eq!(app.table_search.as_deref(), Some("saved"));
         assert_eq!(app.list_selection, 0);
-        assert_eq!(fetch_generation.load(Ordering::Acquire), 0);
         assert_eq!(app.active_input(), &ActiveInput::None);
     }
 
     #[test]
     fn table_search_does_not_build_fields_without_a_query() {
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         let build_count = Cell::new(0);
 
         assert!(app.matches_table_search(|| {
@@ -920,7 +907,7 @@ mod tests {
 
     #[test]
     fn workflow_detail_open_hint_tracks_selected_step_job() {
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         let external_detail = workflow_detail_with_step(None);
         app.screen = Screen::WorkflowDetail {
             run_id: external_detail.run.id,
@@ -953,7 +940,7 @@ mod tests {
         detail.steps.push(target);
         detail.steps_total = 2;
 
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         app.screen = Screen::WorkflowDetail {
             run_id: detail.run.id,
         };
@@ -975,7 +962,7 @@ mod tests {
         const SEARCH_SENTINEL: &str = "payload-only-replay-reason";
 
         let job_id = Uuid::new_v4();
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         app.screen = Screen::JobDetail { job_id };
         app.job_detail_pane = JobDetailPane::Events;
         app.table_search = Some(SEARCH_SENTINEL.to_owned());
@@ -1048,7 +1035,7 @@ mod tests {
             "90909",
             "100011",
         ] {
-            let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+            let mut app = App::new(test_config());
             app.table_search = Some(query.to_owned());
             app.dashboard = Some(dashboard.clone());
 
@@ -1068,7 +1055,7 @@ mod tests {
             );
         }
 
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         app.table_search = Some("90909.4".to_owned());
         app.dashboard = Some(dashboard);
         assert_eq!(app.list_len(), 0, "search uses the rendered rounded value");
@@ -1076,7 +1063,7 @@ mod tests {
         let mut duration_other = job_metrics("jobs.duration_other");
         duration_other.p50_duration_ms_24h = Some(1.0);
         duration_other.p95_duration_ms_24h = Some(2.0);
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         app.table_search = Some("—".to_owned());
         app.dashboard = Some(DashboardData {
             metrics: vec![duration_other, job_metrics("jobs.no_duration_target")],
@@ -1108,7 +1095,7 @@ mod tests {
         let payload = serde_json::json!({
             "lines": (0..30).collect::<Vec<_>>()
         });
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         app.screen = Screen::JobDetail { job_id };
         app.job_detail_pane = JobDetailPane::Payload;
         app.job_detail = Some(JobDetailData {
@@ -1133,7 +1120,7 @@ mod tests {
 
     #[test]
     fn top_navigation_preserves_selection_for_cached_screens() {
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         app.screen = Screen::Queue;
         app.jobs = Some(JobsData {
             jobs: vec![
@@ -1155,7 +1142,7 @@ mod tests {
     #[test]
     fn popping_detail_restores_parent_selection() {
         let job_ids = [Uuid::new_v4(), Uuid::new_v4()];
-        let mut app = App::new(test_config(), Arc::new(AtomicU64::new(0)));
+        let mut app = App::new(test_config());
         app.screen = Screen::Queue;
         app.jobs = Some(JobsData {
             jobs: vec![

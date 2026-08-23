@@ -29,3 +29,6 @@ smoke/external-consumer/target/
 
 # Cargo local credentials
 /.cargo/credentials.toml
+
+# bv (beads viewer) local config and caches
+.bv/

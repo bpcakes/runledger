@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workflow_steps\n                         SET status = 'CANCELED',\n                             finished_at = COALESCE(finished_at, now()),\n                             status_reason = $2,\n                             last_error_code = $3,\n                             last_error_message = $4,\n                             output = NULL,\n                             updated_at = now()\n                         WHERE id = $1\n                           AND workflow_run_id = $5\n                           AND status = 'BLOCKED'\n                         RETURNING workflow_run_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_run_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1a8cd2adb31c66e0fe45f0e7ac28bdd3f5f35eb50204131e42137b3f01dbf7cc"
+}

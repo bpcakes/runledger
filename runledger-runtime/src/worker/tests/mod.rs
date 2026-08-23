@@ -969,6 +969,21 @@ async fn claim_one_job(pool: &PgPool, worker_id: &str) -> runledger_postgres::jo
     claimed.pop().expect("expected one claimed job")
 }
 
+async fn record_postgres_server_version(pool: &PgPool, diagnostic: &str) {
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "{diagnostic} PostgreSQL server_version={server_version}, server_version_num={server_version_num}"
+    );
+}
+
 fn observer_task_test_job() -> JobObserverLogContext {
     JobObserverLogContext {
         job_id: uuid::Uuid::nil(),

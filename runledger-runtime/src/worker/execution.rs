@@ -18,7 +18,6 @@ use crate::WorkerError;
 use crate::observer::{JobLeaseLostEvent, JobLifecycleObservers, ObservedJob};
 use crate::registry::JobRegistry;
 
-const UNKNOWN_WORKER_ID: &str = "unknown-worker";
 // Kept stable for clients that already match this code; it also covers leases
 // that expired before the worker's lifecycle update reached storage.
 const LEASE_OWNER_MISMATCH_CODE: &str = "job.lease_owner_mismatch";
@@ -51,13 +50,18 @@ impl ClaimedJobExecution {
         lease_ttl_seconds: i32,
         observers: JobLifecycleObservers,
         terminal_observer_tasks: TerminalObserverTasks,
-    ) -> Self {
-        let worker_id = job
-            .worker_id
-            .clone()
-            .unwrap_or_else(|| UNKNOWN_WORKER_ID.to_owned());
+    ) -> Option<Self> {
+        let Some(worker_id) = job.worker_id.clone() else {
+            warn!(
+                job_id = %job.id,
+                run_number = job.run_number,
+                attempt = job.attempt,
+                "rejecting claimed job without a lease owner; leaving claim for reaper recovery"
+            );
+            return None;
+        };
 
-        Self {
+        Some(Self {
             pool,
             registry,
             job,
@@ -65,7 +69,7 @@ impl ClaimedJobExecution {
             observers,
             terminal_observer_tasks,
             worker_id,
-        }
+        })
     }
 
     pub(super) async fn execute(self) {

@@ -34,12 +34,13 @@ use super::super::read::load_workflow_run_by_id_tx;
 use super::super::release::{
     StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx,
 };
-use super::super::runtime::{recompute_workflow_run_statuses_tx, resolve_terminal_step_queue_tx};
+use super::super::runtime::{recompute_workflow_run_status_tx, resolve_terminal_step_queue_tx};
 use super::super::snapshot::{canonical_append_request, deserialize_stored_append_request};
 use super::super::steps::{
-    WorkflowStepIdsByKey, dependency_count_total, fetch_job_definition_defaults_tx,
-    insert_workflow_step_dependency_record_tx, insert_workflow_step_record_tx, step_id_for_key,
-    workflow_step_defaults, workflow_step_effective_organization_id,
+    WorkflowStepDependencyWriteContext, WorkflowStepIdsByKey, dependency_count_total,
+    fetch_job_definition_defaults_tx, insert_workflow_step_dependencies_tx,
+    insert_workflow_step_record_tx, workflow_step_defaults,
+    workflow_step_effective_organization_id,
 };
 use super::super::validation::workflow_dag_validation_error;
 use super::idempotency::{
@@ -246,11 +247,12 @@ async fn persist_appended_step_dependencies_and_mutation_tx(
     canonical_request: &JsonValue,
     step_id_by_key: &WorkflowStepIdsByKey,
 ) -> Result<()> {
-    insert_appended_workflow_step_dependencies_tx(
+    insert_workflow_step_dependencies_tx(
         tx,
-        workflow_run_id,
         &input.steps,
+        workflow_run_id,
         step_id_by_key,
+        WorkflowStepDependencyWriteContext::Append,
     )
     .await?;
     insert_workflow_mutation_row_tx(
@@ -270,8 +272,8 @@ async fn resolve_appended_steps_tx(
     workflow_run_id: Uuid,
     appended_step_ids: &[Uuid],
 ) -> Result<()> {
-    let appended_step_states = load_appended_step_states_tx(tx, appended_step_ids).await?;
-    let mut touched_run_ids = BTreeSet::from([workflow_run_id]);
+    let appended_step_states =
+        load_appended_step_states_tx(tx, workflow_run_id, appended_step_ids).await?;
     for step_id in appended_step_ids {
         let Some(step_state) = appended_step_states.get(step_id) else {
             return Err(workflow_internal_state_error(format!(
@@ -282,10 +284,10 @@ async fn resolve_appended_steps_tx(
             continue;
         }
 
-        resolve_appended_step_state_tx(tx, step_state, &mut touched_run_ids).await?;
+        resolve_appended_step_state_tx(tx, workflow_run_id, step_state).await?;
     }
 
-    recompute_workflow_run_statuses_tx(tx, &touched_run_ids).await?;
+    recompute_workflow_run_status_tx(tx, workflow_run_id).await?;
     Ok(())
 }
 
@@ -361,8 +363,8 @@ fn initial_dependency_counters(
 
 async fn resolve_appended_step_state_tx(
     tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
     step_state: &AppendedStepState,
-    touched_run_ids: &mut BTreeSet<Uuid>,
 ) -> Result<()> {
     if step_state.dependency_count_unsatisfied == 0 {
         return release_candidate_step_tx(tx, &step_state.candidate).await;
@@ -377,9 +379,11 @@ async fn resolve_appended_step_state_tx(
                  last_error_message = 'Step dependency requirements were not satisfied.',
                  updated_at = now()
              WHERE id = $1
+               AND workflow_run_id = $2
                AND status = 'BLOCKED'
              RETURNING workflow_run_id",
         step_state.candidate.id(),
+        workflow_run_id,
     )
     .fetch_optional(&mut **tx)
     .await
@@ -390,9 +394,9 @@ async fn resolve_appended_step_state_tx(
     if canceled.is_some() {
         resolve_terminal_step_queue_tx(
             tx,
+            workflow_run_id,
             step_state.candidate.id(),
             WorkflowStepStatus::Canceled,
-            touched_run_ids,
         )
         .await?;
     }
@@ -400,44 +404,9 @@ async fn resolve_appended_step_state_tx(
     Ok(())
 }
 
-async fn insert_appended_workflow_step_dependencies_tx(
-    tx: &mut DbTx<'_>,
-    workflow_run_id: Uuid,
-    steps: &[WorkflowStepEnqueue<'_>],
-    step_id_by_key: &WorkflowStepIdsByKey,
-) -> Result<()> {
-    for step in steps {
-        let dependent_step_id = step_id_for_key(
-            step_id_by_key,
-            step.step_key().as_str(),
-            "missing dependent appended workflow step id",
-        )?;
-        for dependency in step.dependencies() {
-            let prerequisite_step_id = step_id_for_key(
-                step_id_by_key,
-                dependency.prerequisite_step_key.as_str(),
-                "missing appended workflow prerequisite step id",
-            )?;
-            let release_mode = dependency
-                .release_mode
-                .unwrap_or(WorkflowDependencyReleaseMode::OnTerminal)
-                .as_db_value();
-            insert_workflow_step_dependency_record_tx(
-                tx,
-                workflow_run_id,
-                prerequisite_step_id,
-                dependent_step_id,
-                release_mode,
-            )
-            .await?;
-        }
-    }
-
-    Ok(())
-}
-
 async fn load_appended_step_states_tx(
     tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
     appended_step_ids: &[Uuid],
 ) -> Result<BTreeMap<Uuid, AppendedStepState>> {
     let rows = sqlx::query!(
@@ -456,8 +425,10 @@ async fn load_appended_step_states_tx(
             dependency_count_pending,
             dependency_count_unsatisfied
          FROM workflow_steps
-         WHERE id = ANY($1::uuid[])
+         WHERE workflow_run_id = $1
+           AND id = ANY($2::uuid[])
          FOR UPDATE",
+        workflow_run_id,
         appended_step_ids,
     )
     .fetch_all(&mut **tx)

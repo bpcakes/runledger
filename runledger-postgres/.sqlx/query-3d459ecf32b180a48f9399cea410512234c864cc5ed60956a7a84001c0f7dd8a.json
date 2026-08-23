@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            id,\n            workflow_run_id,\n            execution_kind::text AS \"execution_kind!\",\n            job_type,\n            organization_id,\n            payload,\n            priority,\n            max_attempts,\n            timeout_seconds,\n            stage,\n            execution_resource_key,\n            dependency_count_pending,\n            dependency_count_unsatisfied\n         FROM workflow_steps\n         WHERE id = ANY($1::uuid[])\n         FOR UPDATE",
+  "query": "SELECT\n            id,\n            workflow_run_id,\n            execution_kind::text AS \"execution_kind!\",\n            job_type,\n            organization_id,\n            payload,\n            priority,\n            max_attempts,\n            timeout_seconds,\n            stage,\n            execution_resource_key,\n            dependency_count_pending,\n            dependency_count_unsatisfied\n         FROM workflow_steps\n         WHERE workflow_run_id = $1\n           AND id = ANY($2::uuid[])\n         FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -71,6 +71,7 @@
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "UuidArray"
       ]
     },
@@ -90,5 +91,5 @@
       false
     ]
   },
-  "hash": "525c03e2f508ca2f7c69775a25f48b0f84d0999201f4073ff6844fba294bb6f2"
+  "hash": "3d459ecf32b180a48f9399cea410512234c864cc5ed60956a7a84001c0f7dd8a"
 }

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id\n             FROM workflow_steps\n             WHERE id = ANY($1::uuid[])\n               AND workflow_run_id = $2\n             ORDER BY id ASC\n             FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ed9ffeecc13607eff01bbff2d17b0c019aff3c096ca1fe74bca87fe3c455931a"
+}

@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use runledger_postgres::DbPool;
 
 use crate::data::{
@@ -18,6 +20,19 @@ pub(crate) enum FetchOutcome {
     Definitions(Result<Box<DefinitionsData>, String>),
 }
 
+pub(crate) struct FetchResult {
+    pub generation: u64,
+    pub outcome: FetchOutcome,
+    pub duration: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FetchStatus {
+    pub last_refresh: Option<Instant>,
+    pub last_fetch_duration: Option<Duration>,
+    pub fetching: bool,
+}
+
 pub(crate) struct FetchRequest {
     pub screen: Screen,
     pub scope: Scope,
@@ -27,8 +42,13 @@ pub(crate) struct FetchRequest {
     pub limit: i64,
 }
 
-pub(crate) async fn execute_fetch(pool: &DbPool, req: FetchRequest) -> FetchOutcome {
-    match req.screen {
+pub(crate) async fn execute_fetch(
+    pool: &DbPool,
+    generation: u64,
+    req: FetchRequest,
+) -> FetchResult {
+    let started_at = Instant::now();
+    let outcome = match req.screen {
         Screen::Dashboard => {
             FetchOutcome::Dashboard(fetch_dashboard(pool, req.scope).await.map(Box::new))
         }
@@ -63,5 +83,10 @@ pub(crate) async fn execute_fetch(pool: &DbPool, req: FetchRequest) -> FetchOutc
                 .await
                 .map(Box::new),
         ),
+    };
+    FetchResult {
+        generation,
+        outcome,
+        duration: started_at.elapsed(),
     }
 }
