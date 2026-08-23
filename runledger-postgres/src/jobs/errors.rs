@@ -75,11 +75,8 @@ pub(super) fn job_not_found_error() -> Error {
 }
 
 pub(super) fn lease_owner_mismatch_error() -> Error {
-    Error::QueryError(QueryError::from_classified_with_kind(
-        QueryErrorCategory::Forbidden,
+    Error::QueryError(QueryError::from_kind(
         QueryErrorKind::JobLeaseOwnerMismatch,
-        "job.lease_owner_mismatch",
-        "Job lease is not currently held by this worker.",
         "job lease owner mismatch, missing lease, or expired lease",
     ))
 }
@@ -107,11 +104,8 @@ fn invalid_retry_delay_error(detail: String) -> Error {
 }
 
 pub(super) fn invalid_retry_timing_error(detail: String) -> Error {
-    Error::QueryError(QueryError::from_classified_with_kind(
-        QueryErrorCategory::Validation,
+    Error::QueryError(QueryError::from_kind(
         QueryErrorKind::JobInvalidRetryTiming,
-        "job.invalid_retry_timing",
-        "Job retry timing is invalid.",
         detail,
     ))
 }
@@ -127,11 +121,8 @@ pub(super) fn validate_positive_retry_delay(retry_delay_ms: i32) -> Result<()> {
 }
 
 fn invalid_completion_progress_error(detail: String) -> Error {
-    Error::QueryError(QueryError::from_classified_with_kind(
-        QueryErrorCategory::Validation,
+    Error::QueryError(QueryError::from_kind(
         QueryErrorKind::JobInvalidCompletionProgress,
-        "job.invalid_completion_progress",
-        "Job completion progress is invalid.",
         detail,
     ))
 }
@@ -168,21 +159,15 @@ pub(super) fn validate_completion_progress(
 }
 
 pub(super) fn invalid_continuation_delay_error(detail: String) -> Error {
-    Error::QueryError(QueryError::from_classified_with_kind(
-        QueryErrorCategory::Validation,
+    Error::QueryError(QueryError::from_kind(
         QueryErrorKind::JobInvalidContinuationDelay,
-        "job.invalid_continuation_delay",
-        "Job continuation delay is too large.",
         detail,
     ))
 }
 
 pub(super) fn unstarted_claim_release_not_applicable_error() -> Error {
-    Error::QueryError(QueryError::from_classified_with_kind(
-        QueryErrorCategory::Validation,
+    Error::QueryError(QueryError::from_kind(
         QueryErrorKind::JobUnstartedClaimReleaseNotApplicable,
-        "job.unstarted_claim_release_not_applicable",
-        "Job claim cannot be released as unstarted.",
         "job claim is not eligible for unstarted release",
     ))
 }
@@ -197,21 +182,15 @@ pub(super) fn runtime_config_not_found_error(job_type: &str) -> Error {
 }
 
 pub(super) fn workflow_requeue_not_supported_error() -> Error {
-    Error::QueryError(QueryError::from_classified_with_kind(
-        QueryErrorCategory::Validation,
+    Error::QueryError(QueryError::from_kind(
         QueryErrorKind::JobWorkflowRequeueNotSupported,
-        "job.workflow_requeue_not_supported",
-        "Workflow-managed jobs cannot be requeued directly.",
         "workflow managed job requeue is not supported",
     ))
 }
 
 pub(super) fn workflow_handler_continuation_not_enabled_error() -> Error {
-    Error::QueryError(QueryError::from_classified_with_kind(
-        QueryErrorCategory::Validation,
+    Error::QueryError(QueryError::from_kind(
         QueryErrorKind::JobWorkflowHandlerContinuationNotEnabled,
-        "job.workflow_handler_continuation_not_enabled",
-        "Workflow step handler continuation is not enabled.",
         "workflow-managed job continuation requires allow_handler_continuation",
     ))
 }

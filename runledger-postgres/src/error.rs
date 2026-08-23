@@ -30,6 +30,45 @@ pub enum QueryErrorKind {
     WorkflowReleaseConflict,
 }
 
+impl QueryErrorKind {
+    const fn spec(self) -> QueryErrorSpec {
+        match self {
+            Self::JobLeaseOwnerMismatch => QueryErrorSpec::forbidden(
+                "job.lease_owner_mismatch",
+                "Job lease is not currently held by this worker.",
+            ),
+            Self::JobInvalidCompletionProgress => QueryErrorSpec::validation(
+                "job.invalid_completion_progress",
+                "Job completion progress is invalid.",
+            ),
+            Self::JobInvalidContinuationDelay => QueryErrorSpec::validation(
+                "job.invalid_continuation_delay",
+                "Job continuation delay is too large.",
+            ),
+            Self::JobInvalidRetryTiming => QueryErrorSpec::validation(
+                "job.invalid_retry_timing",
+                "Job retry timing is invalid.",
+            ),
+            Self::JobUnstartedClaimReleaseNotApplicable => QueryErrorSpec::validation(
+                "job.unstarted_claim_release_not_applicable",
+                "Job claim cannot be released as unstarted.",
+            ),
+            Self::JobWorkflowHandlerContinuationNotEnabled => QueryErrorSpec::validation(
+                "job.workflow_handler_continuation_not_enabled",
+                "Workflow step handler continuation is not enabled.",
+            ),
+            Self::JobWorkflowRequeueNotSupported => QueryErrorSpec::validation(
+                "job.workflow_requeue_not_supported",
+                "Workflow-managed jobs cannot be requeued directly.",
+            ),
+            Self::WorkflowReleaseConflict => QueryErrorSpec::conflict(
+                "workflow.release_conflict",
+                "Workflow step release conflicted with another workflow mutation.",
+            ),
+        }
+    }
+}
+
 /// Query-error fields that are safe to emit at application logging boundaries.
 ///
 /// This deliberately excludes the internal message and SQLx source because
@@ -107,11 +146,30 @@ impl FrameworkConstraintSpec {
 }
 
 #[derive(Clone)]
+enum QueryErrorClassification {
+    Fixed(QueryErrorKind),
+    Classified(QueryErrorSpec),
+}
+
+impl QueryErrorClassification {
+    const fn spec(&self) -> QueryErrorSpec {
+        match self {
+            Self::Fixed(kind) => kind.spec(),
+            Self::Classified(spec) => *spec,
+        }
+    }
+
+    const fn kind(&self) -> Option<QueryErrorKind> {
+        match self {
+            Self::Fixed(kind) => Some(*kind),
+            Self::Classified(_) => None,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct QueryError {
-    category: QueryErrorCategory,
-    kind: Option<QueryErrorKind>,
-    code: &'static str,
-    client_message: &'static str,
+    classification: QueryErrorClassification,
     sqlstate: Option<String>,
     constraint: Option<String>,
     message: String,
@@ -127,10 +185,11 @@ impl QueryError {
         internal_message: impl Into<String>,
     ) -> Self {
         Self {
-            category,
-            kind: None,
-            code,
-            client_message,
+            classification: QueryErrorClassification::Classified(QueryErrorSpec {
+                category,
+                code,
+                client_message,
+            }),
             sqlstate: None,
             constraint: None,
             message: internal_message.into(),
@@ -139,18 +198,9 @@ impl QueryError {
     }
 
     #[must_use]
-    pub(crate) fn from_classified_with_kind(
-        category: QueryErrorCategory,
-        kind: QueryErrorKind,
-        code: &'static str,
-        client_message: &'static str,
-        internal_message: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn from_kind(kind: QueryErrorKind, internal_message: impl Into<String>) -> Self {
         Self {
-            category,
-            kind: Some(kind),
-            code,
-            client_message,
+            classification: QueryErrorClassification::Fixed(kind),
             sqlstate: None,
             constraint: None,
             message: internal_message.into(),
@@ -159,11 +209,8 @@ impl QueryError {
     }
 
     #[must_use]
-    pub(crate) fn from_classified_sqlx_with_kind(
-        category: QueryErrorCategory,
+    pub(crate) fn from_sqlx_with_kind(
         kind: QueryErrorKind,
-        code: &'static str,
-        client_message: &'static str,
         internal_message: impl Into<String>,
         source: sqlx::Error,
     ) -> Self {
@@ -178,10 +225,7 @@ impl QueryError {
             .unwrap_or((None, None));
 
         Self {
-            category,
-            kind: Some(kind),
-            code,
-            client_message,
+            classification: QueryErrorClassification::Fixed(kind),
             sqlstate,
             constraint,
             message: internal_message.into(),
@@ -224,10 +268,11 @@ impl QueryError {
         };
 
         Self {
-            category: spec.category(),
-            kind: None,
-            code: spec.code(),
-            client_message: spec.client_message(),
+            classification: QueryErrorClassification::Classified(QueryErrorSpec {
+                category: spec.category(),
+                code: spec.code(),
+                client_message: spec.client_message(),
+            }),
             sqlstate,
             constraint,
             message,
@@ -241,24 +286,24 @@ impl QueryError {
 
     #[must_use]
     pub const fn category(&self) -> QueryErrorCategory {
-        self.category
+        self.classification.spec().category
     }
 
     /// Returns a stable semantic kind when this error participates in
     /// cross-crate runtime policy.
     #[must_use]
     pub const fn kind(&self) -> Option<QueryErrorKind> {
-        self.kind
+        self.classification.kind()
     }
 
     #[must_use]
     pub const fn code(&self) -> &'static str {
-        self.code
+        self.classification.spec().code
     }
 
     #[must_use]
     pub const fn client_message(&self) -> &'static str {
-        self.client_message
+        self.classification.spec().client_message
     }
 
     #[must_use]
@@ -274,7 +319,7 @@ impl QueryError {
     #[must_use]
     pub(crate) fn sanitized_diagnostics(&self) -> SanitizedQueryErrorDiagnostics<'_> {
         SanitizedQueryErrorDiagnostics {
-            code: self.code,
+            code: self.code(),
             sqlstate: self.sqlstate(),
             constraint: self.constraint(),
         }
@@ -305,10 +350,11 @@ impl QueryError {
             return self;
         };
 
-        self.category = spec.category();
-        self.kind = None;
-        self.code = spec.code();
-        self.client_message = spec.client_message();
+        self.classification = QueryErrorClassification::Classified(QueryErrorSpec {
+            category: spec.category(),
+            code: spec.code(),
+            client_message: spec.client_message(),
+        });
         self
     }
 }
@@ -316,10 +362,10 @@ impl QueryError {
 impl fmt::Debug for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueryError")
-            .field("category", &self.category)
-            .field("kind", &self.kind)
-            .field("code", &self.code)
-            .field("client_message", &self.client_message)
+            .field("category", &self.category())
+            .field("kind", &self.kind())
+            .field("code", &self.code())
+            .field("client_message", &self.client_message())
             .field("sqlstate", &self.sqlstate)
             .field("constraint", &self.constraint)
             .field("has_source", &self.source.is_some())
@@ -329,7 +375,7 @@ impl fmt::Debug for QueryError {
 
 impl fmt::Display for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.client_message)
+        write!(f, "{}", self.client_message())
     }
 }
 
@@ -606,7 +652,10 @@ mod tests {
         );
 
         let debug = format!("{error:?}");
-        assert!(debug.contains("job.idempotency_conflict"));
+        assert_eq!(
+            debug,
+            "QueryError { category: Conflict, kind: None, code: \"job.idempotency_conflict\", client_message: \"Job enqueue retry conflicts with the existing idempotency key.\", sqlstate: None, constraint: None, has_source: false }"
+        );
         assert!(!debug.contains("secret-idempotency-key"));
 
         let display = error.to_string();
@@ -655,11 +704,8 @@ mod tests {
 
     #[test]
     fn typed_query_error_from_classified_sqlx_preserves_source_without_leaking_display() {
-        let error = QueryError::from_classified_sqlx_with_kind(
-            QueryErrorCategory::Conflict,
+        let error = QueryError::from_sqlx_with_kind(
             QueryErrorKind::WorkflowReleaseConflict,
-            "workflow.release_conflict",
-            "Workflow step release conflicted with another workflow mutation.",
             "internal context includes secret-lock-key",
             sqlx::Error::Protocol("database detail includes secret-lock-key".into()),
         );
@@ -683,9 +729,74 @@ mod tests {
         assert!(!display.contains("secret-lock-key"));
 
         let debug = format!("{error:?}");
-        assert!(debug.contains("workflow.release_conflict"));
-        assert!(debug.contains("has_source: true"));
+        assert_eq!(
+            debug,
+            "QueryError { category: Conflict, kind: Some(WorkflowReleaseConflict), code: \"workflow.release_conflict\", client_message: \"Workflow step release conflicted with another workflow mutation.\", sqlstate: None, constraint: None, has_source: true }"
+        );
         assert!(!debug.contains("secret-lock-key"));
+    }
+
+    #[test]
+    fn fixed_query_error_kind_metadata_is_exhaustive_and_stable() {
+        let cases = [
+            (
+                QueryErrorKind::JobLeaseOwnerMismatch,
+                QueryErrorCategory::Forbidden,
+                "job.lease_owner_mismatch",
+                "Job lease is not currently held by this worker.",
+            ),
+            (
+                QueryErrorKind::JobInvalidCompletionProgress,
+                QueryErrorCategory::Validation,
+                "job.invalid_completion_progress",
+                "Job completion progress is invalid.",
+            ),
+            (
+                QueryErrorKind::JobInvalidContinuationDelay,
+                QueryErrorCategory::Validation,
+                "job.invalid_continuation_delay",
+                "Job continuation delay is too large.",
+            ),
+            (
+                QueryErrorKind::JobInvalidRetryTiming,
+                QueryErrorCategory::Validation,
+                "job.invalid_retry_timing",
+                "Job retry timing is invalid.",
+            ),
+            (
+                QueryErrorKind::JobUnstartedClaimReleaseNotApplicable,
+                QueryErrorCategory::Validation,
+                "job.unstarted_claim_release_not_applicable",
+                "Job claim cannot be released as unstarted.",
+            ),
+            (
+                QueryErrorKind::JobWorkflowHandlerContinuationNotEnabled,
+                QueryErrorCategory::Validation,
+                "job.workflow_handler_continuation_not_enabled",
+                "Workflow step handler continuation is not enabled.",
+            ),
+            (
+                QueryErrorKind::JobWorkflowRequeueNotSupported,
+                QueryErrorCategory::Validation,
+                "job.workflow_requeue_not_supported",
+                "Workflow-managed jobs cannot be requeued directly.",
+            ),
+            (
+                QueryErrorKind::WorkflowReleaseConflict,
+                QueryErrorCategory::Conflict,
+                "workflow.release_conflict",
+                "Workflow step release conflicted with another workflow mutation.",
+            ),
+        ];
+
+        for (kind, expected_category, expected_code, expected_client_message) in cases {
+            let error = QueryError::from_kind(kind, "internal detail");
+
+            assert_eq!(error.kind(), Some(kind));
+            assert_eq!(error.category(), expected_category);
+            assert_eq!(error.code(), expected_code);
+            assert_eq!(error.client_message(), expected_client_message);
+        }
     }
 
     #[test]
