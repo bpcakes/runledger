@@ -102,10 +102,10 @@ pub use types::{
 pub use workflow_types::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, AppendWorkflowStepsResult,
     CompleteExternalWorkflowStepInput, DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT,
-    EnqueueActiveWorkflowOutcome, WorkflowRecoveryDisposition, WorkflowRecoveryMode,
-    WorkflowRecoveryOutcome, WorkflowRecoveryRequest, WorkflowRunCountFilter, WorkflowRunDbRecord,
-    WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunHandleScope, WorkflowRunListFilter,
-    WorkflowRunResultRecord, WorkflowRunWaitOptions, WorkflowStepDbRecord,
+    EnqueueActiveWorkflowOutcome, ExternalWorkflowStepTerminalOutcome, WorkflowRecoveryDisposition,
+    WorkflowRecoveryMode, WorkflowRecoveryOutcome, WorkflowRecoveryRequest, WorkflowRunCountFilter,
+    WorkflowRunDbRecord, WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunHandleScope,
+    WorkflowRunListFilter, WorkflowRunResultRecord, WorkflowRunWaitOptions, WorkflowStepDbRecord,
     WorkflowStepDependencyDbRecord,
 };
 pub use workflows::{

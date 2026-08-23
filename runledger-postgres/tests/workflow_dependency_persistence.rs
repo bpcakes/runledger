@@ -7,11 +7,11 @@ use runledger_core::jobs::{
     WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
 };
 use runledger_postgres::jobs::{
-    AppendWorkflowStepsInput, CompleteExternalWorkflowStepInput, JobDefinitionUpsert,
-    append_workflow_steps, claim_jobs_for_types, complete_external_workflow_step,
-    complete_external_workflow_step_tx, complete_job_success, enqueue_or_get_active_workflow,
-    enqueue_workflow_run, list_workflow_step_dependencies, list_workflow_steps,
-    upsert_job_definition_tx,
+    AppendWorkflowStepsInput, CompleteExternalWorkflowStepInput,
+    ExternalWorkflowStepTerminalOutcome, JobDefinitionUpsert, append_workflow_steps,
+    claim_jobs_for_types, complete_external_workflow_step, complete_external_workflow_step_tx,
+    complete_job_success, enqueue_or_get_active_workflow, enqueue_workflow_run,
+    list_workflow_step_dependencies, list_workflow_steps, upsert_job_definition_tx,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -143,11 +143,12 @@ async fn assert_cross_run_completion_rejected(
             workflow_run_id: source_run_id,
             organization_id: None,
             step_key: StepKey::new("source-gate"),
-            terminal_status: WorkflowStepStatus::Succeeded,
+            outcome: ExternalWorkflowStepTerminalOutcome::Succeeded {
+                output: Some(&output),
+            },
             status_reason: None,
             last_error_code: None,
             last_error_message: None,
-            output: Some(&output),
         },
     )
     .await
@@ -459,11 +460,10 @@ async fn terminal_propagation_batches_high_fan_out_and_preserves_breadth_first_c
             workflow_run_id: run.id,
             organization_id: None,
             step_key: StepKey::new("gate"),
-            terminal_status: WorkflowStepStatus::Failed,
+            outcome: ExternalWorkflowStepTerminalOutcome::Failed,
             status_reason: Some("forced high fan-out failure"),
             last_error_code: Some("workflow.test.high_fan_out_failure"),
             last_error_message: Some("forced high fan-out failure"),
-            output: None,
         },
     )
     .await

@@ -49,6 +49,65 @@ enum ExistingJobLock {
     MutationReady,
 }
 
+enum PreparedEnqueue<'a> {
+    Keyed(PreparedKeyedEnqueue<'a>),
+    Unkeyed,
+}
+
+struct PreparedKeyedEnqueue<'a> {
+    idempotency_key: &'a str,
+    enqueue_request: Value,
+}
+
+impl<'a> PreparedKeyedEnqueue<'a> {
+    fn new(
+        payload: &JobEnqueue<'_>,
+        idempotency_key: &'a str,
+        stage: &'static str,
+        execution_resource_key: Option<&str>,
+    ) -> Result<Self> {
+        let enqueue_request =
+            canonical_job_enqueue_request_v1(payload, stage, execution_resource_key)?;
+
+        Ok(Self {
+            idempotency_key,
+            enqueue_request,
+        })
+    }
+}
+
+impl<'a> PreparedEnqueue<'a> {
+    fn new(
+        payload: &JobEnqueue<'a>,
+        stage: &'static str,
+        execution_resource_key: Option<&str>,
+    ) -> Result<Self> {
+        let Some(idempotency_key) = payload.idempotency_key else {
+            return Ok(Self::Unkeyed);
+        };
+        Ok(Self::Keyed(PreparedKeyedEnqueue::new(
+            payload,
+            idempotency_key,
+            stage,
+            execution_resource_key,
+        )?))
+    }
+
+    const fn idempotency_key(&self) -> Option<&'a str> {
+        match self {
+            Self::Keyed(prepared) => Some(prepared.idempotency_key),
+            Self::Unkeyed => None,
+        }
+    }
+
+    fn enqueue_request(&self) -> Option<&Value> {
+        match self {
+            Self::Keyed(prepared) => Some(&prepared.enqueue_request),
+            Self::Unkeyed => None,
+        }
+    }
+}
+
 pub(super) enum IntentEnqueueResolution {
     Enqueued(JobEnqueueOutcome),
     DefinitionUnavailable {
@@ -138,13 +197,16 @@ pub(in crate::jobs) async fn enqueue_replayed_job_with_outcome_tx(
 pub(super) async fn enqueue_job_from_intent_tx(
     tx: &mut ReadCommittedTx<'_, '_>,
     payload: &JobEnqueue<'_>,
+    idempotency_key: &str,
     execution_resource_key: Option<&str>,
 ) -> Result<IntentEnqueueResolution> {
-    debug_assert!(payload.idempotency_key.is_some());
     let stage = payload.stage.unwrap_or(JobStage::Queued).as_db_value();
+    let prepared =
+        PreparedKeyedEnqueue::new(payload, idempotency_key, stage, execution_resource_key)?;
     match enqueue_idempotent_job_with_existing_lock_read_committed_tx(
         tx,
         payload,
+        prepared,
         execution_resource_key,
         ExistingJobLock::MutationReady,
         EnqueuedEventPayload::Ordinary,
@@ -185,49 +247,55 @@ async fn enqueue_job_with_existing_lock_tx(
     if let Some(execution_resource_key) = execution_resource_key {
         validate_execution_resource_key(execution_resource_key)?;
     }
-    if payload.idempotency_key.is_some() {
-        let mut read_committed_tx = ensure_read_committed_tx(
-            tx,
-            "job idempotent enqueue",
-            "job.enqueue_idempotency_unsupported_isolation",
-            "Job idempotent enqueue requires READ COMMITTED transaction isolation.",
-        )
-        .await?;
+    match PreparedEnqueue::new(payload, stage, execution_resource_key)? {
+        PreparedEnqueue::Keyed(prepared) => {
+            let mut read_committed_tx = ensure_read_committed_tx(
+                tx,
+                "job idempotent enqueue",
+                "job.enqueue_idempotency_unsupported_isolation",
+                "Job idempotent enqueue requires READ COMMITTED transaction isolation.",
+            )
+            .await?;
 
-        return enqueue_idempotent_job_with_existing_lock_read_committed_tx(
-            &mut read_committed_tx,
-            payload,
-            execution_resource_key,
-            existing_job_lock,
-            event_payload,
-            stage,
-        )
-        .await;
+            enqueue_idempotent_job_with_existing_lock_read_committed_tx(
+                &mut read_committed_tx,
+                payload,
+                prepared,
+                execution_resource_key,
+                existing_job_lock,
+                event_payload,
+                stage,
+            )
+            .await
+        }
+        PreparedEnqueue::Unkeyed => {
+            enqueue_job_with_existing_lock_tx_inner(
+                tx,
+                payload,
+                PreparedEnqueue::Unkeyed,
+                execution_resource_key,
+                existing_job_lock,
+                event_payload,
+                stage,
+            )
+            .await
+        }
     }
-
-    enqueue_job_with_existing_lock_tx_inner(
-        tx,
-        payload,
-        execution_resource_key,
-        existing_job_lock,
-        event_payload,
-        stage,
-    )
-    .await
 }
 
 async fn enqueue_idempotent_job_with_existing_lock_read_committed_tx(
     tx: &mut ReadCommittedTx<'_, '_>,
     payload: &JobEnqueue<'_>,
+    prepared: PreparedKeyedEnqueue<'_>,
     execution_resource_key: Option<&str>,
     existing_job_lock: ExistingJobLock,
     event_payload: EnqueuedEventPayload<'_>,
     stage: &'static str,
 ) -> Result<JobEnqueueOutcome> {
-    debug_assert!(payload.idempotency_key.is_some());
     enqueue_job_with_existing_lock_tx_inner(
         tx.as_tx(),
         payload,
+        PreparedEnqueue::Keyed(prepared),
         execution_resource_key,
         existing_job_lock,
         event_payload,
@@ -239,15 +307,12 @@ async fn enqueue_idempotent_job_with_existing_lock_read_committed_tx(
 async fn enqueue_job_with_existing_lock_tx_inner(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
+    prepared: PreparedEnqueue<'_>,
     execution_resource_key: Option<&str>,
     existing_job_lock: ExistingJobLock,
     event_payload: EnqueuedEventPayload<'_>,
     stage: &'static str,
 ) -> Result<JobEnqueueOutcome> {
-    let enqueue_request = payload
-        .idempotency_key
-        .map(|_| canonical_job_enqueue_request_v1(payload, stage, execution_resource_key))
-        .transpose()?;
     // The conflict clause is selected from static literals only; all request
     // data remains bound below. This dynamic SQL is not SQLx macro-checked, so
     // keep the returned columns and bind order aligned with EnqueuedJobRow and
@@ -291,7 +356,7 @@ async fn enqueue_job_with_existing_lock_tx_inner(
          FROM defaults d
          {}
          RETURNING id, status::text AS status, run_number",
-        enqueue_job_idempotency_conflict_clause(payload),
+        enqueue_job_idempotency_conflict_clause(&prepared, payload.organization_id),
     );
     let row = sqlx::query_as::<_, EnqueuedJobRow>(&insert_sql)
         .bind(payload.job_type)
@@ -301,20 +366,26 @@ async fn enqueue_job_with_existing_lock_tx_inner(
         .bind(payload.max_attempts)
         .bind(payload.timeout_seconds)
         .bind(payload.next_run_at)
-        .bind(payload.idempotency_key)
+        .bind(prepared.idempotency_key())
         .bind(stage)
-        .bind(enqueue_request.as_ref())
+        .bind(prepared.enqueue_request())
         .bind(execution_resource_key)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|error| Error::from_query_sqlx_with_context("enqueue job", error))?;
 
     let Some(row) = row else {
-        let Some(enqueue_request) = enqueue_request.as_ref() else {
+        let PreparedEnqueue::Keyed(prepared) = &prepared else {
             return Err(job_definition_unavailable_error());
         };
-        return resolve_existing_idempotent_job_tx(tx, payload, enqueue_request, existing_job_lock)
-            .await;
+        return resolve_existing_idempotent_job_tx(
+            tx,
+            payload,
+            prepared.idempotency_key,
+            &prepared.enqueue_request,
+            existing_job_lock,
+        )
+        .await;
     };
 
     let job_id: Uuid = row.id;
@@ -361,13 +432,10 @@ pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Resu
 async fn resolve_existing_idempotent_job_tx(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
+    idempotency_key: &str,
     enqueue_request: &Value,
     existing_job_lock: ExistingJobLock,
 ) -> Result<JobEnqueueOutcome> {
-    let Some(idempotency_key) = payload.idempotency_key else {
-        return Err(job_definition_unavailable_error());
-    };
-
     let Some(existing) = load_existing_idempotent_job_tx(
         tx,
         payload,
@@ -526,23 +594,26 @@ async fn load_existing_idempotent_job_tx(
         .map_err(|error| Error::from_query_sqlx_with_context("load idempotent job enqueue", error))
 }
 
-fn enqueue_job_idempotency_conflict_clause(payload: &JobEnqueue<'_>) -> &'static str {
+fn enqueue_job_idempotency_conflict_clause(
+    prepared: &PreparedEnqueue<'_>,
+    organization_id: Option<Uuid>,
+) -> &'static str {
     // Keep these predicates aligned with the partial unique indexes
     // uq_job_queue_type_idempotency_org and uq_job_queue_type_idempotency_global.
-    match (payload.idempotency_key, payload.organization_id) {
-        (Some(_), Some(_)) => {
+    match (prepared, organization_id) {
+        (PreparedEnqueue::Keyed(_), Some(_)) => {
             "ON CONFLICT (job_type, organization_id, idempotency_key)
              WHERE idempotency_key IS NOT NULL
                AND organization_id IS NOT NULL
              DO NOTHING"
         }
-        (Some(_), None) => {
+        (PreparedEnqueue::Keyed(_), None) => {
             "ON CONFLICT (job_type, idempotency_key)
              WHERE idempotency_key IS NOT NULL
                AND organization_id IS NULL
              DO NOTHING"
         }
-        (None, _) => "",
+        (PreparedEnqueue::Unkeyed, _) => "",
     }
 }
 
@@ -682,7 +753,38 @@ mod idempotency_tests {
     use runledger_core::jobs::{JobStage, JobType};
     use serde_json::json;
 
-    use super::{JobEnqueue, canonical_job_enqueue_request_v1};
+    use super::{JobEnqueue, PreparedEnqueue, canonical_job_enqueue_request_v1};
+
+    #[test]
+    fn prepared_enqueue_correlates_key_and_canonical_request() {
+        let payload = json!({"kind": "prepared"});
+        let mut enqueue = JobEnqueue {
+            job_type: JobType::new("jobs.test.prepared"),
+            organization_id: None,
+            payload: &payload,
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: Some("prepared-key"),
+            stage: None,
+        };
+
+        let prepared = PreparedEnqueue::new(&enqueue, JobStage::Queued.as_db_value(), None)
+            .expect("prepare keyed enqueue");
+        let PreparedEnqueue::Keyed(prepared) = prepared else {
+            panic!("keyed enqueue must carry its canonical request");
+        };
+        assert_eq!(prepared.idempotency_key, "prepared-key");
+        assert_eq!(prepared.enqueue_request["payload"], payload);
+
+        enqueue.idempotency_key = None;
+        assert!(matches!(
+            PreparedEnqueue::new(&enqueue, JobStage::Queued.as_db_value(), None)
+                .expect("prepare unkeyed enqueue"),
+            PreparedEnqueue::Unkeyed
+        ));
+    }
 
     #[test]
     fn canonical_job_enqueue_request_v1_matches_golden_snapshot() {

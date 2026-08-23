@@ -5,7 +5,7 @@ use runledger_postgres::jobs::{
     enqueue_job_tx, enqueue_job_with_outcome_tx, get_job_by_id, list_job_events,
 };
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::types::Uuid;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -41,6 +41,26 @@ async fn transactional_enqueue_reports_inserted_or_existing_state() {
     assert_eq!(inserted.run_number, 1);
     assert_eq!(inserted.disposition, JobEnqueueDisposition::Inserted);
     insert_tx.commit().await.expect("commit inserted enqueue");
+
+    let (stored_key, stored_request) = sqlx::query_as::<_, (Option<String>, Option<Value>)>(
+        "SELECT idempotency_key, enqueue_request FROM job_queue WHERE id = $1",
+    )
+    .bind(inserted.job_id)
+    .fetch_one(&pool)
+    .await
+    .expect("load keyed enqueue state");
+    assert_eq!(stored_key.as_deref(), Some("enqueue-outcome-key"));
+    assert_eq!(
+        stored_request,
+        Some(json!({
+            "payload": {"target": "same-request"},
+            "priority": null,
+            "max_attempts": null,
+            "timeout_seconds": null,
+            "next_run_at": null,
+            "stage": "queued"
+        }))
+    );
 
     cancel_job(&pool, None, inserted.job_id, Some("observe current state"))
         .await
@@ -108,6 +128,19 @@ async fn unkeyed_transactional_enqueue_always_reports_inserted() {
     assert_eq!(first.disposition, JobEnqueueDisposition::Inserted);
     assert_eq!(second.disposition, JobEnqueueDisposition::Inserted);
     tx.commit().await.expect("commit unkeyed enqueues");
+
+    for job_id in [first.job_id, second.job_id] {
+        let has_no_correlated_state = sqlx::query_scalar::<_, bool>(
+            "SELECT idempotency_key IS NULL AND enqueue_request IS NULL
+             FROM job_queue
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load unkeyed enqueue state");
+        assert!(has_no_correlated_state);
+    }
 
     teardown_ephemeral_pool(pool, database).await;
 }

@@ -23,11 +23,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             workflow_run_id: workflow_run.id,
             organization_id: None,
             step_key: StepKey::new("seed"),
-            terminal_status: WorkflowStepStatus::Succeeded,
+            outcome: ExternalWorkflowStepTerminalOutcome::Succeeded { output: None },
             status_reason: Some("seed accepted"),
             last_error_code: None,
             last_error_message: None,
-            output: None,
         },
     )
     .await?;

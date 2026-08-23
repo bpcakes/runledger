@@ -903,6 +903,7 @@ async fn promote_prepared_intent_tx(
     match enqueue_job_from_intent_tx(
         tx,
         &enqueue,
+        prepared.request.idempotency_key.as_str(),
         prepared.request.execution_resource_key.as_deref(),
     )
     .await?

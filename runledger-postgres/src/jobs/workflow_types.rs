@@ -202,11 +202,34 @@ pub struct CompleteExternalWorkflowStepInput<'a> {
     pub workflow_run_id: Uuid,
     pub organization_id: Option<Uuid>,
     pub step_key: StepKey<'a>,
-    pub terminal_status: WorkflowStepStatus,
+    pub outcome: ExternalWorkflowStepTerminalOutcome<'a>,
     pub status_reason: Option<&'a str>,
     pub last_error_code: Option<&'a str>,
     pub last_error_message: Option<&'a str>,
-    pub output: Option<&'a Value>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ExternalWorkflowStepTerminalOutcome<'a> {
+    Succeeded { output: Option<&'a Value> },
+    Failed,
+    Canceled,
+}
+
+impl<'a> ExternalWorkflowStepTerminalOutcome<'a> {
+    pub(crate) const fn status(self) -> WorkflowStepStatus {
+        match self {
+            Self::Succeeded { .. } => WorkflowStepStatus::Succeeded,
+            Self::Failed => WorkflowStepStatus::Failed,
+            Self::Canceled => WorkflowStepStatus::Canceled,
+        }
+    }
+
+    pub(crate) const fn output(self) -> Option<&'a Value> {
+        match self {
+            Self::Succeeded { output } => output,
+            Self::Failed | Self::Canceled => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -111,34 +111,6 @@ pub(in crate::jobs::workflows) fn workflow_external_completion_conflict_error(
     ))
 }
 
-pub(in crate::jobs::workflows) fn workflow_external_completion_invalid_status_error(
-    status: WorkflowStepStatus,
-) -> Error {
-    Error::QueryError(QueryError::from_classified(
-        QueryErrorCategory::Validation,
-        "workflow.external_step_invalid_terminal_status",
-        "External workflow step completion status is invalid.",
-        format!(
-            "external workflow step completion requires SUCCEEDED, FAILED, or CANCELED; got {}",
-            status.as_db_value()
-        ),
-    ))
-}
-
-pub(in crate::jobs::workflows) fn workflow_external_completion_output_invalid_error(
-    status: WorkflowStepStatus,
-) -> Error {
-    Error::QueryError(QueryError::from_classified(
-        QueryErrorCategory::Validation,
-        "workflow.external_step_output_invalid_status",
-        "External workflow step output can only be supplied with a successful completion.",
-        format!(
-            "external workflow step output requires SUCCEEDED terminal status; got {}",
-            status.as_db_value()
-        ),
-    ))
-}
-
 pub(in crate::jobs::workflows) fn workflow_external_completion_output_conflict_error(
     step_key: &str,
 ) -> Error {

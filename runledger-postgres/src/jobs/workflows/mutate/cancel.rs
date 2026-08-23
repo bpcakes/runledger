@@ -3,7 +3,9 @@ use sqlx::types::Uuid;
 
 use crate::jobs::admin::cancel_job_with_scope_tx;
 use crate::jobs::types::JobCancellationScope;
-use crate::jobs::workflow_types::{CompleteExternalWorkflowStepInput, WorkflowRunDbRecord};
+use crate::jobs::workflow_types::{
+    CompleteExternalWorkflowStepInput, ExternalWorkflowStepTerminalOutcome, WorkflowRunDbRecord,
+};
 use crate::{DbTx, Error, Result};
 
 use super::super::active_claims::release_or_defer_workflow_active_claim_tx;
@@ -242,11 +244,10 @@ impl<'a> WorkflowCancellationSweep<'a> {
                         workflow_run_id: self.workflow_run.id,
                         organization_id: self.workflow_run.organization_id,
                         step_key: step.step_key.as_borrowed(),
-                        terminal_status: WorkflowStepStatus::Canceled,
+                        outcome: ExternalWorkflowStepTerminalOutcome::Canceled,
                         status_reason: self.metadata.reason,
                         last_error_code: self.metadata.last_error_code,
                         last_error_message: self.metadata.last_error_message,
-                        output: None,
                     },
                 )
                 .await?;
