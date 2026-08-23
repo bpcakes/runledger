@@ -1064,11 +1064,12 @@ the producing step's graph row and dependency edges remain scoped normally.
 Missing access fails with HTTP 401. Metadata-only
 visibility omits stored JSON, idempotency values, worker identifiers, log text,
 and diagnostic messages while listing the omitted field names in
-`redacted_fields`; full visibility is an explicit host grant. Job and workflow
-list endpoints always return bounded
-summary shapes; stored JSON, idempotency values, worker identifiers, and
-diagnostic text are fetched only by the corresponding detail endpoint. All
-responses use `Cache-Control: private, no-store`.
+`redacted_fields`; metadata-only reads also omit those columns from the
+PostgreSQL projection, while full visibility is an explicit host grant. Job and
+workflow list endpoints always return bounded summary shapes. Sensitive stored
+fields are selected only for the corresponding detail or history endpoint when
+the host grants full visibility. All responses use `Cache-Control: private,
+no-store`.
 
 Job definitions are service-wide rather than organization-owned, so an
 organization scope does not include `/definitions` unless the host calls

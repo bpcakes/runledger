@@ -24,7 +24,7 @@ impl AdminScope {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DataVisibility {
-    /// Return operational metadata while omitting payloads and diagnostic text.
+    /// Return operational metadata without selecting payloads or diagnostic text.
     #[default]
     MetadataOnly,
     /// Return stored JSON, idempotency values, worker identifiers, and messages.
