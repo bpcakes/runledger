@@ -817,7 +817,7 @@ async fn worker_shutdown_delivers_terminal_success_when_running_observer_hangs()
 }
 
 #[tokio::test]
-async fn worker_claims_next_batch_without_poll_delay_when_batch_is_full() {
+async fn worker_fills_but_does_not_exceed_exact_capacity_without_poll_delay() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_batch_fill", 8).await;
 
     let mut tx = pool.begin().await.expect("begin tx");
@@ -870,6 +870,23 @@ async fn worker_claims_next_batch_without_poll_delay_when_batch_is_full() {
     .await
     .expect("enqueue second job");
 
+    let third_job_id = enqueue_job(
+        &pool,
+        &JobEnqueue {
+            job_type: JobType::new("jobs.test.shutdown_wait"),
+            organization_id: None,
+            payload: &json!({"kind":"batch-fill-3"}),
+            priority: None,
+            max_attempts: None,
+            timeout_seconds: None,
+            next_run_at: None,
+            idempotency_key: None,
+            stage: Some(runledger_core::jobs::JobStage::Queued),
+        },
+    )
+    .await
+    .expect("enqueue third job");
+
     let runs = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(Notify::new());
     let mut registry = JobRegistry::new();
@@ -900,6 +917,12 @@ async fn worker_claims_next_batch_without_poll_delay_when_batch_is_full() {
         );
         sleep(Duration::from_millis(25)).await;
     }
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        2,
+        "worker must not start work beyond configured JoinSet capacity"
+    );
 
     let _ = shutdown_tx.send(true);
     release.notify_waiters();
@@ -918,6 +941,11 @@ async fn worker_claims_next_batch_without_poll_delay_when_batch_is_full() {
             .expect("job exists");
         assert_eq!(persisted.status, JobStatus::Succeeded);
     }
+    let third = get_job_by_id(&pool, None, third_job_id)
+        .await
+        .expect("load third job")
+        .expect("third job exists");
+    assert_eq!(third.status, JobStatus::Pending);
 
     teardown_ephemeral_pool(pool, database).await;
 }

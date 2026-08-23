@@ -46,6 +46,7 @@ use crate::observer::{
 };
 use crate::registry::{JobHandler, JobRegistry};
 
+mod capacity;
 mod completion_and_retry;
 mod lease_fencing;
 mod observer_tasks;

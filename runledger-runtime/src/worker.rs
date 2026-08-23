@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use runledger_core::jobs::JobType;
 use runledger_postgres::jobs;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
@@ -58,7 +58,6 @@ struct WorkerLoop {
     // Field order mirrors the former function locals' drop order; do not reorder.
     terminal_observer_tasks: TerminalObserverTasks,
     join_set: JoinSet<()>,
-    semaphore: Arc<Semaphore>,
     claimable_job_types: Vec<JobType<'static>>,
     registry: Arc<JobRegistry>,
     observers: JobLifecycleObservers,
@@ -72,11 +71,6 @@ enum WorkerLoopControl {
     Drain(RuntimeLoopExit),
 }
 
-enum SpawnClaimedJobsOutcome {
-    Spawned,
-    SemaphoreClosed,
-}
-
 impl WorkerLoop {
     fn new(
         pool: runledger_postgres::DbPool,
@@ -87,14 +81,12 @@ impl WorkerLoop {
     ) -> Self {
         let registry = Arc::new(registry);
         let claimable_job_types = registry.registered_static_types();
-        let semaphore = Arc::new(Semaphore::new(config.max_global_concurrency));
         let join_set = JoinSet::new();
         let terminal_observer_tasks = TerminalObserverTasks::owned();
 
         Self {
             terminal_observer_tasks,
             join_set,
-            semaphore,
             claimable_job_types,
             registry,
             observers,
@@ -128,7 +120,7 @@ impl WorkerLoop {
             return WorkerLoopControl::Continue;
         }
 
-        let available = self.semaphore.available_permits();
+        let available = self.available_capacity();
         if available == 0 {
             if self.wait_for_shutdown_or_poll_interval().await {
                 return WorkerLoopControl::Drain(RuntimeLoopExit::Shutdown);
@@ -145,12 +137,7 @@ impl WorkerLoop {
         }
 
         let claimed_len = claimed.len();
-        match self.spawn_claimed_jobs(claimed).await {
-            SpawnClaimedJobsOutcome::Spawned => {}
-            SpawnClaimedJobsOutcome::SemaphoreClosed => {
-                return WorkerLoopControl::Drain(RuntimeLoopExit::Completed);
-            }
-        }
+        self.spawn_claimed_jobs(claimed);
 
         if claimed_len == claim_limit {
             return WorkerLoopControl::Continue;
@@ -185,28 +172,21 @@ impl WorkerLoop {
         }
     }
 
-    async fn spawn_claimed_jobs(
-        &mut self,
-        claimed: Vec<jobs::JobQueueRecord>,
-    ) -> SpawnClaimedJobsOutcome {
+    fn available_capacity(&self) -> usize {
+        self.config
+            .max_global_concurrency
+            .saturating_sub(self.join_set.len())
+    }
+
+    fn spawn_claimed_jobs(&mut self, claimed: Vec<jobs::JobQueueRecord>) {
+        debug_assert!(claimed.len() <= self.available_capacity());
         for job in claimed {
-            let permit = match Arc::clone(&self.semaphore).acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => {
-                    // The worker owns this semaphore and never closes it. If
-                    // this defensive branch fires, surface it as an unexpected
-                    // loop completion rather than graceful shutdown.
-                    warn!("worker semaphore closed; stopping worker loop");
-                    return SpawnClaimedJobsOutcome::SemaphoreClosed;
-                }
-            };
             let pool_clone = self.pool.clone();
             let registry_clone = Arc::clone(&self.registry);
             let lease_ttl_seconds = self.config.lease_ttl_seconds;
             let observers = self.observers.clone();
             let terminal_observer_tasks = self.terminal_observer_tasks.clone();
             self.join_set.spawn(async move {
-                let _permit = permit;
                 process_claimed_job_with_terminal_observers(
                     pool_clone,
                     registry_clone,
@@ -218,8 +198,6 @@ impl WorkerLoop {
                 .await;
             });
         }
-
-        SpawnClaimedJobsOutcome::Spawned
     }
 
     async fn wait_for_shutdown_or_poll_interval(&mut self) -> bool {
