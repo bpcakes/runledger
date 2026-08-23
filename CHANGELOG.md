@@ -4,6 +4,19 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add typed `JobRunningUpdate` / `mark_job_running{,_for_lease}` transitions
+  and stage-free `JobOrdinaryProgressUpdate` /
+  `update_job_ordinary_progress{,_for_lease}` APIs. A running transition
+  commits its checkpoint and progress in the same durable transaction.
+
+### Deprecated
+
+- Deprecate stage-bearing `JobProgressUpdate` and
+  `update_job_progress{,_for_lease}`. They remain source-compatible migration
+  paths until downstream callers adopt the typed lifecycle APIs.
+
 ## [0.10.1] - 2026-08-20
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)
 

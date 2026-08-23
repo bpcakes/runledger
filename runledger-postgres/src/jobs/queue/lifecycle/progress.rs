@@ -3,13 +3,59 @@ use sqlx::types::Uuid;
 
 use crate::{DbPool, DbTx, Error, Result};
 
-use super::super::super::types::{JobLeaseIdentity, JobProgressUpdate};
+#[allow(
+    deprecated,
+    reason = "the legacy stage-bearing API delegates through the shared transaction"
+)]
+use super::super::super::types::JobProgressUpdate;
+use super::super::super::types::{JobLeaseIdentity, JobOrdinaryProgressUpdate, JobRunningUpdate};
 use super::common::{UPDATE_PROGRESS_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
+
+#[derive(Clone, Copy)]
+struct ProgressMutation<'a> {
+    stage: Option<JobStage>,
+    progress_done: Option<i64>,
+    progress_total: Option<i64>,
+    checkpoint: Option<&'a serde_json::Value>,
+}
+
+impl<'a> ProgressMutation<'a> {
+    const fn running(update: &JobRunningUpdate<'a>) -> Self {
+        Self {
+            stage: Some(JobStage::Running),
+            progress_done: update.progress_done,
+            progress_total: update.progress_total,
+            checkpoint: update.checkpoint,
+        }
+    }
+
+    const fn ordinary(update: &JobOrdinaryProgressUpdate<'a>) -> Self {
+        Self {
+            stage: None,
+            progress_done: update.progress_done,
+            progress_total: update.progress_total,
+            checkpoint: update.checkpoint,
+        }
+    }
+
+    #[allow(
+        deprecated,
+        reason = "the legacy stage-bearing API delegates through the shared transaction"
+    )]
+    const fn with_stage(update: &JobProgressUpdate<'a>) -> Self {
+        Self {
+            stage: update.stage,
+            progress_done: update.progress_done,
+            progress_total: update.progress_total,
+            checkpoint: update.checkpoint,
+        }
+    }
+}
 
 async fn update_job_progress_row_tx(
     tx: &mut DbTx<'_>,
     identity: JobLeaseIdentity<'_>,
-    progress: &JobProgressUpdate<'_>,
+    progress: ProgressMutation<'_>,
 ) -> Result<u64> {
     let rows_affected = sqlx::query!(
         "WITH locked_job AS MATERIALIZED (
@@ -130,27 +176,10 @@ async fn mark_execution_started_persisted_tx(
     Ok(())
 }
 
-pub async fn update_job_progress(
-    pool: &DbPool,
-    job_id: Uuid,
-    run_number: i32,
-    attempt: i32,
-    worker_id: &str,
-    progress: &JobProgressUpdate<'_>,
-) -> Result<()> {
-    update_job_progress_for_lease(
-        pool,
-        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
-        progress,
-    )
-    .await
-}
-
-/// Updates progress for an exact live job lease.
-pub async fn update_job_progress_for_lease(
+async fn persist_progress_mutation_for_lease(
     pool: &DbPool,
     identity: JobLeaseIdentity<'_>,
-    progress: &JobProgressUpdate<'_>,
+    progress: ProgressMutation<'_>,
 ) -> Result<()> {
     let mut tx = pool
         .begin()
@@ -187,4 +216,119 @@ pub async fn update_job_progress_for_lease(
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
     Ok(())
+}
+
+/// Marks a positional live lease as running and atomically persists its
+/// checkpoint and progress.
+///
+/// Prefer [`mark_job_running_for_lease`] in custom runtimes that already hold
+/// a [`JobLeaseIdentity`].
+pub async fn mark_job_running(
+    pool: &DbPool,
+    job_id: Uuid,
+    run_number: i32,
+    attempt: i32,
+    worker_id: &str,
+    update: &JobRunningUpdate<'_>,
+) -> Result<()> {
+    mark_job_running_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        update,
+    )
+    .await
+}
+
+/// Marks an exact live lease as running and atomically persists its checkpoint
+/// and progress.
+///
+/// This is intentionally an update-taking transition rather than a zero-input
+/// `mark_running` operation: a caller must commit the initial durable resume
+/// state in the same transaction as `RUNNING`.
+pub async fn mark_job_running_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
+    update: &JobRunningUpdate<'_>,
+) -> Result<()> {
+    persist_progress_mutation_for_lease(pool, identity, ProgressMutation::running(update)).await
+}
+
+/// Updates ordinary progress for a positional live lease without changing its
+/// stage.
+///
+/// Prefer [`update_job_ordinary_progress_for_lease`] in custom runtimes that
+/// already hold a [`JobLeaseIdentity`].
+pub async fn update_job_ordinary_progress(
+    pool: &DbPool,
+    job_id: Uuid,
+    run_number: i32,
+    attempt: i32,
+    worker_id: &str,
+    update: &JobOrdinaryProgressUpdate<'_>,
+) -> Result<()> {
+    update_job_ordinary_progress_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        update,
+    )
+    .await
+}
+
+/// Updates ordinary progress for an exact live job lease without changing its
+/// stage.
+pub async fn update_job_ordinary_progress_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
+    update: &JobOrdinaryProgressUpdate<'_>,
+) -> Result<()> {
+    persist_progress_mutation_for_lease(pool, identity, ProgressMutation::ordinary(update)).await
+}
+
+/// Deprecated compatibility entrypoint for callers whose progress input still
+/// carries a stage.
+///
+/// New callers must use [`mark_job_running`] for a `RUNNING` transition and
+/// [`update_job_ordinary_progress`] for ordinary progress. This entrypoint
+/// preserves the historical arbitrary-stage behavior until downstream callers
+/// have migrated.
+#[deprecated(
+    since = "0.10.2",
+    note = "use mark_job_running for RUNNING, or update_job_ordinary_progress for ordinary progress"
+)]
+#[allow(
+    deprecated,
+    reason = "the compatibility function accepts the deprecated input intentionally"
+)]
+pub async fn update_job_progress(
+    pool: &DbPool,
+    job_id: Uuid,
+    run_number: i32,
+    attempt: i32,
+    worker_id: &str,
+    update: &JobProgressUpdate<'_>,
+) -> Result<()> {
+    update_job_progress_for_lease(
+        pool,
+        JobLeaseIdentity::new(job_id, run_number, attempt, worker_id),
+        update,
+    )
+    .await
+}
+
+/// Deprecated compatibility entrypoint for an exact live lease whose progress
+/// input still carries a stage.
+#[deprecated(
+    since = "0.10.2",
+    note = "use mark_job_running_for_lease for RUNNING, or update_job_ordinary_progress_for_lease for ordinary progress"
+)]
+#[allow(
+    deprecated,
+    reason = "the compatibility function accepts the deprecated input intentionally"
+)]
+pub async fn update_job_progress_for_lease(
+    pool: &DbPool,
+    identity: JobLeaseIdentity<'_>,
+    update: &JobProgressUpdate<'_>,
+) -> Result<()> {
+    persist_progress_mutation_for_lease(pool, identity, ProgressMutation::with_stage(update)).await
 }

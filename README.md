@@ -512,10 +512,14 @@ successful completions, output must also match, or Runledger returns
 Breaking API note: `JobHandler::execute` returns
 `Result<JobCompletion, JobFailure>`. The old stage-bearing `JobProgress`
 completion type was removed; use `JobCompletion::success()` or
-`JobCompletion::with_output(...)`. In-flight progress reporting still uses
-`JobProgressUpdate`. Completion disposition and final output are intentionally
-private; inspect them with `disposition()` / `output()` and use constructors
-rather than struct literals.
+`JobCompletion::with_output(...)`. In-flight lifecycle writes now use
+`JobRunningUpdate` with `mark_job_running` for the atomic `RUNNING`
+transition, and `JobOrdinaryProgressUpdate` with
+`update_job_ordinary_progress` for stage-free progress. The older
+stage-bearing `JobProgressUpdate` and `update_job_progress` remain deprecated
+compatibility APIs while callers migrate. Completion disposition and final
+output are intentionally private; inspect them with `disposition()` /
+`output()` and use constructors rather than struct literals.
 
 ### Handler-selected retry timing
 
@@ -1289,11 +1293,14 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   stable `job.lease_owner_mismatch` code, even when the lease was lost by time
   rather than to another worker. Once `lease_expires_at` passes there is no
   owner grace period for heartbeat/progress/success/failure/continuation writes.
-  Release 0.9.0 adds `JobLeaseIdentity` plus `heartbeat_job_for_lease`,
-  `update_job_progress_for_lease`, and success/failure/continuation
-  `_for_lease` variants for custom runtimes. Reuse one identity derived from the
-  claimed row and worker ID so those four lease fences cannot be mixed across
-  jobs; the positional functions remain compatibility wrappers.
+  Release 0.9.0 added `JobLeaseIdentity` for typed lifecycle lease fencing.
+  In 0.10.2 and later, use `mark_job_running_for_lease` with
+  `JobRunningUpdate` to commit `RUNNING` and its initial checkpoint/progress
+  atomically, then use `update_job_ordinary_progress_for_lease` with
+  `JobOrdinaryProgressUpdate` for stage-free progress. Reuse one identity
+  derived from the claimed row and worker ID so lifecycle lease fences cannot
+  be mixed across jobs. The older stage-bearing
+  `update_job_progress_for_lease` remains a deprecated compatibility wrapper.
 - **Transactional enqueue state.** Use `enqueue_job_with_outcome_tx` when the
   caller needs the job ID together with its locked `status`, `run_number`, and
   `Inserted`/`Existing` disposition. That API takes a mutation-ready lock on an

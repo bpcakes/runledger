@@ -42,6 +42,10 @@ pub use admin::{
     update_job_payload_uuid_array_field,
 };
 pub use logs::{insert_job_log, list_job_logs};
+#[allow(
+    deprecated,
+    reason = "deprecated stage-bearing progress APIs remain re-exported for semver compatibility"
+)]
 pub use queue::{
     JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionCatalogSyncReport,
     claim_jobs, claim_jobs_for_types, claim_prestart_jobs, claim_prestart_jobs_for_types,
@@ -56,11 +60,13 @@ pub use queue::{
     enqueue_job_with_outcome_tx, get_job_definition_by_type, get_job_enqueue_intent_by_id,
     get_job_enqueue_intent_metrics, heartbeat_job, heartbeat_job_for_lease,
     insert_job_definition_if_missing_tx, list_job_definitions, list_job_enqueue_intents,
-    promote_job_enqueue_intents_for_types, reap_expired_leases,
-    reap_expired_leases_with_diagnostics, reap_expired_leases_with_terminal_records,
-    record_job_enqueue_intent, record_job_enqueue_intent_tx, release_unstarted_job_claim,
+    mark_job_running, mark_job_running_for_lease, promote_job_enqueue_intents_for_types,
+    reap_expired_leases, reap_expired_leases_with_diagnostics,
+    reap_expired_leases_with_terminal_records, record_job_enqueue_intent,
+    record_job_enqueue_intent_tx, release_unstarted_job_claim,
     sync_catalog_job_definitions_exact_tx, sync_catalog_job_definitions_tx, update_job_definition,
-    update_job_progress, update_job_progress_for_lease, upsert_job_definition_tx,
+    update_job_ordinary_progress, update_job_ordinary_progress_for_lease, update_job_progress,
+    update_job_progress_for_lease, upsert_job_definition_tx,
 };
 pub use replay::{
     CompareAndReplaySucceededJob, CompareAndReplaySucceededJobOutcome,
@@ -78,6 +84,10 @@ pub use schedules::{
     set_job_schedule_next_fire_at_tx, sync_catalog_job_schedules_tx, upsert_job_schedule,
     upsert_job_schedule_tx,
 };
+#[allow(
+    deprecated,
+    reason = "the deprecated stage-bearing progress input remains re-exported during migration"
+)]
 pub use types::{
     CompareAndRequeueJob, CompareAndRequeueJobOutcome, DecodedJobEventPayload,
     DecodedRequeuedEventPayload, JOB_LIST_PAGE_LIMIT_MAX, JOB_SCHEDULE_MAX_JITTER_SECONDS,
@@ -90,13 +100,13 @@ pub use types::{
     JobEnqueueIntentState, JobEnqueueIntentStatus, JobEnqueueOutcome, JobEventRecord,
     JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
     JobLeaseIdentity, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
-    JobProgressUpdate, JobQueueRecord, JobRequeueStatePolicy, JobRuntimeConfigListFilter,
-    JobRuntimeConfigRecord, JobRuntimeConfigUpsert, JobScheduleCatalogSyncEntry,
-    JobScheduleCatalogSyncReport, JobScheduleJobTypeReference, JobScheduleRecord,
-    JobScheduleUpsert, JobScope, JobSuccessCompletionOutcome, NonRequeueableJobStatusError,
-    ReapExpiredLeaseCleanupError, ReapExpiredLeaseCleanupOperation, ReapExpiredLeaseDeferredError,
-    ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult, ReapedLeaseDisposition,
-    ReapedLeaseRecord, ReapedTerminalLeaseRecord, RequeueableJobStatus,
+    JobOrdinaryProgressUpdate, JobProgressUpdate, JobQueueRecord, JobRequeueStatePolicy,
+    JobRunningUpdate, JobRuntimeConfigListFilter, JobRuntimeConfigRecord, JobRuntimeConfigUpsert,
+    JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport, JobScheduleJobTypeReference,
+    JobScheduleRecord, JobScheduleUpsert, JobScope, JobSuccessCompletionOutcome,
+    NonRequeueableJobStatusError, ReapExpiredLeaseCleanupError, ReapExpiredLeaseCleanupOperation,
+    ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult,
+    ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord, RequeueableJobStatus,
     SuccessfulReplayEnqueuedEventPayload,
 };
 pub use workflow_types::{

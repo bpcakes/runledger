@@ -12,11 +12,11 @@ use runledger_core::jobs::{
     WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
 };
 use runledger_postgres::jobs::{
-    JobCompletionUpdate, JobDefinitionUpsert, JobEnqueue, JobFailureUpdate, JobProgressUpdate,
-    claim_prestart_jobs, complete_job_failure, complete_job_success, enqueue_job,
-    enqueue_workflow_run, get_job_by_id, heartbeat_job, list_job_events, list_workflow_steps,
-    reap_expired_leases, release_unstarted_job_claim, update_job_progress,
-    upsert_job_definition_tx,
+    JobCompletionUpdate, JobDefinitionUpsert, JobEnqueue, JobFailureUpdate, JobLeaseIdentity,
+    JobOrdinaryProgressUpdate, JobRunningUpdate, claim_prestart_jobs, complete_job_failure,
+    complete_job_success, enqueue_job, enqueue_workflow_run, get_job_by_id, heartbeat_job,
+    list_job_events, list_workflow_steps, mark_job_running, reap_expired_leases,
+    release_unstarted_job_claim, update_job_ordinary_progress, upsert_job_definition_tx,
 };
 use runledger_test_support::{
     setup_ephemeral_pool_with_untracked_migrations as setup_ephemeral_pool, teardown_ephemeral_pool,
@@ -622,14 +622,13 @@ impl JobHandler for CheckpointingDeadLetterHandler {
         _payload: Value,
     ) -> Result<JobCompletion, JobFailure> {
         let checkpoint = json!({"cursor": "persisted-during-handler"});
-        update_job_progress(
+        update_job_ordinary_progress(
             &self.pool,
             context.job_id,
             context.run_number,
             context.attempt,
             &context.worker_id,
-            &JobProgressUpdate {
-                stage: None,
+            &JobOrdinaryProgressUpdate {
                 progress_done: Some(1),
                 progress_total: Some(2),
                 checkpoint: Some(&checkpoint),

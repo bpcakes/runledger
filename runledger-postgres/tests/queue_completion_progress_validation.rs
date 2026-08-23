@@ -1,8 +1,9 @@
 use runledger_core::jobs::{JobEventType, JobStatus, JobType};
 use runledger_postgres::jobs::{
-    JobCompletionUpdate, JobDefinitionUpsert, JobEnqueue, JobProgressUpdate, JobQueueRecord,
-    claim_jobs, complete_job_success, complete_job_success_with_outcome, enqueue_job,
-    get_job_by_id, list_job_events, update_job_progress, upsert_job_definition_tx,
+    JobCompletionUpdate, JobDefinitionUpsert, JobEnqueue, JobOrdinaryProgressUpdate,
+    JobQueueRecord, claim_jobs, complete_job_success, complete_job_success_with_outcome,
+    enqueue_job, get_job_by_id, list_job_events, update_job_ordinary_progress,
+    upsert_job_definition_tx,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -209,14 +210,13 @@ async fn complete_job_success_with_outcome_returns_coalesced_progress() {
     let job_id = enqueue_test_job(&pool).await;
     let job = claim_one_job(&pool, "worker-success-outcome-existing").await;
     let worker_id = job.worker_id.clone().expect("claimed job has worker id");
-    update_job_progress(
+    update_job_ordinary_progress(
         &pool,
         job.id,
         job.run_number,
         job.attempt,
         &worker_id,
-        &JobProgressUpdate {
-            stage: None,
+        &JobOrdinaryProgressUpdate {
             progress_done: Some(5),
             progress_total: Some(10),
             checkpoint: None,
@@ -254,14 +254,13 @@ async fn complete_job_success_with_outcome_returns_coalesced_progress() {
         .worker_id
         .clone()
         .expect("claimed partial job has worker id");
-    update_job_progress(
+    update_job_ordinary_progress(
         &pool,
         partial_job.id,
         partial_job.run_number,
         partial_job.attempt,
         &partial_worker_id,
-        &JobProgressUpdate {
-            stage: None,
+        &JobOrdinaryProgressUpdate {
             progress_done: Some(5),
             progress_total: Some(10),
             checkpoint: None,
@@ -310,14 +309,13 @@ async fn successful_completion_rejects_progress_invalid_after_existing_progress_
     let job = claim_one_job(&pool, "worker-completion-stale-progress").await;
     let worker_id = job.worker_id.clone().expect("claimed job has worker id");
 
-    update_job_progress(
+    update_job_ordinary_progress(
         &pool,
         job.id,
         job.run_number,
         job.attempt,
         &worker_id,
-        &JobProgressUpdate {
-            stage: None,
+        &JobOrdinaryProgressUpdate {
             progress_done: Some(5),
             progress_total: Some(10),
             checkpoint: None,

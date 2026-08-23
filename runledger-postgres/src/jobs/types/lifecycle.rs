@@ -31,6 +31,46 @@ impl<'a> JobLeaseIdentity<'a> {
     }
 }
 
+/// The progress, checkpoint, and audit data committed with a `RUNNING`
+/// transition.
+///
+/// [`crate::jobs::mark_job_running`] persists this update atomically with the
+/// stage transition and execution-start marker. Do not split that transition
+/// into a stage-only call followed by an ordinary progress update: a crash
+/// between separate writes would lose the durable resume state for the started
+/// attempt.
+#[derive(Clone, Debug)]
+pub struct JobRunningUpdate<'a> {
+    pub progress_done: Option<i64>,
+    pub progress_total: Option<i64>,
+    pub checkpoint: Option<&'a Value>,
+}
+
+/// An ordinary in-flight progress and checkpoint update.
+///
+/// This input intentionally cannot change a job stage. Use
+/// [`JobRunningUpdate`] with [`crate::jobs::mark_job_running`] when execution
+/// starts so the `RUNNING` transition and durable resume state remain one
+/// transaction.
+#[derive(Clone, Debug)]
+pub struct JobOrdinaryProgressUpdate<'a> {
+    pub progress_done: Option<i64>,
+    pub progress_total: Option<i64>,
+    pub checkpoint: Option<&'a Value>,
+}
+
+/// Legacy stage-bearing progress input.
+///
+/// New callers should use [`JobRunningUpdate`] with
+/// [`crate::jobs::mark_job_running`] for a `RUNNING` transition, or
+/// [`JobOrdinaryProgressUpdate`] with
+/// [`crate::jobs::update_job_ordinary_progress`] for ordinary progress. This
+/// compatibility input preserves arbitrary historical stage writes while
+/// downstream callers migrate to the typed lifecycle APIs.
+#[deprecated(
+    since = "0.10.2",
+    note = "use JobRunningUpdate with mark_job_running for RUNNING, or JobOrdinaryProgressUpdate with update_job_ordinary_progress for ordinary progress"
+)]
 #[derive(Clone, Debug)]
 pub struct JobProgressUpdate<'a> {
     pub stage: Option<JobStage>,

@@ -7,8 +7,8 @@ use runledger_core::jobs::{
     JobCompletion, JobContext, JobDeadLetterInfo, JobFailure, JobStatus, JobType,
 };
 use runledger_postgres::jobs::{
-    JobDefinitionUpsert, JobEnqueue, JobProgressUpdate, claim_jobs_for_types, enqueue_job,
-    get_job_by_id, update_job_progress, upsert_job_definition_tx,
+    JobDefinitionUpsert, JobEnqueue, JobRunningUpdate, claim_jobs_for_types, enqueue_job,
+    get_job_by_id, mark_job_running, upsert_job_definition_tx,
 };
 use runledger_runtime::config::JobsConfig;
 use runledger_runtime::observer::{
@@ -306,14 +306,13 @@ async fn run_reaper_loop_shutdown_waits_for_inflight_terminal_hook_delivery() {
     assert_eq!(claimed.len(), 1);
     let claimed_job = claimed.first().expect("claimed job exists");
 
-    update_job_progress(
+    mark_job_running(
         &pool,
         claimed_job.id,
         claimed_job.run_number,
         claimed_job.attempt,
         claimed_job.worker_id.as_deref().expect("worker id is set"),
-        &JobProgressUpdate {
-            stage: Some(runledger_core::jobs::JobStage::Running),
+        &JobRunningUpdate {
             progress_done: None,
             progress_total: None,
             checkpoint: None,

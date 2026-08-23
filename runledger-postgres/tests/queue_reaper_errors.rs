@@ -5,10 +5,10 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    JobDefinitionUpsert, JobEnqueue, JobProgressUpdate, JobQueueRecord, ReapedLeaseDisposition,
-    claim_jobs_for_types, enqueue_job, enqueue_workflow_run, get_job_by_id, heartbeat_job,
-    list_job_events, list_workflow_steps, reap_expired_leases_with_diagnostics,
-    update_job_progress, upsert_job_definition_tx,
+    JobDefinitionUpsert, JobEnqueue, JobOrdinaryProgressUpdate, JobQueueRecord, JobRunningUpdate,
+    ReapedLeaseDisposition, claim_jobs_for_types, enqueue_job, enqueue_workflow_run, get_job_by_id,
+    heartbeat_job, list_job_events, list_workflow_steps, mark_job_running,
+    reap_expired_leases_with_diagnostics, update_job_ordinary_progress, upsert_job_definition_tx,
 };
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::json;
@@ -350,14 +350,13 @@ async fn reaper_reports_legacy_direct_running_without_renewal_heartbeat() {
 
     sleep(Duration::from_millis(5)).await;
     let checkpoint = json!({ "cursor": 900 });
-    update_job_progress(
+    mark_job_running(
         &pool,
         claim.id,
         claim.run_number,
         claim.attempt,
         worker_id,
-        &JobProgressUpdate {
-            stage: Some(JobStage::Running),
+        &JobRunningUpdate {
             progress_done: None,
             progress_total: None,
             checkpoint: Some(&checkpoint),
@@ -556,14 +555,13 @@ async fn reaper_does_not_treat_progress_after_heartbeat_as_started_without_renew
         .as_deref()
         .expect("claimed job should have worker id");
 
-    update_job_progress(
+    mark_job_running(
         &pool,
         claim.id,
         claim.run_number,
         claim.attempt,
         worker_id,
-        &JobProgressUpdate {
-            stage: Some(JobStage::Running),
+        &JobRunningUpdate {
             progress_done: None,
             progress_total: None,
             checkpoint: None,
@@ -584,14 +582,13 @@ async fn reaper_does_not_treat_progress_after_heartbeat_as_started_without_renew
     .expect("heartbeat running job");
 
     sleep(Duration::from_millis(5)).await;
-    update_job_progress(
+    update_job_ordinary_progress(
         &pool,
         claim.id,
         claim.run_number,
         claim.attempt,
         worker_id,
-        &JobProgressUpdate {
-            stage: None,
+        &JobOrdinaryProgressUpdate {
             progress_done: Some(1),
             progress_total: Some(10),
             checkpoint: None,

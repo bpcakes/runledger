@@ -353,13 +353,14 @@ Use `worker::run_worker_loop`, `scheduler::run_scheduler_loop`, and
 If constructing `JobsConfig` directly, validate it; invalid configs can surface
 as `RuntimeError::InvalidJobsConfig` or `RuntimeLoopExit::InvalidConfig`.
 
-Custom runtimes on 0.9.0 or later should construct one `JobLeaseIdentity` from a
-claimed job's ID, run number, attempt, and worker ID, then pass it to
-`heartbeat_job_for_lease`, `update_job_progress_for_lease`, and the appropriate
-success/failure/continuation `_for_lease` completion function. Reuse that value
-for the claim so fields from different leases cannot be mixed. Positional
-lifecycle APIs remain compatible wrappers, and no migration was added after
-0.8.0 for this API.
+Custom runtimes should construct one `JobLeaseIdentity` (available since 0.9.0)
+from a claimed job's ID, run number, attempt, and worker ID. On 0.10.2 or later,
+pass it to `heartbeat_job_for_lease`, `mark_job_running_for_lease` with a
+`JobRunningUpdate`, `update_job_ordinary_progress_for_lease` with a
+`JobOrdinaryProgressUpdate`, and the appropriate success/failure/continuation
+`_for_lease` completion function. Reuse that value for the claim so fields from
+different leases cannot be mixed. The older stage-bearing
+`update_job_progress_for_lease` remains a deprecated compatibility wrapper.
 
 ## Error Handling
 

@@ -3,10 +3,10 @@ use std::time::Duration;
 use runledger_core::jobs::{JobFailureKind, JobStatus, JobType};
 use runledger_postgres::jobs::{
     JobCompletionUpdate, JobContinuationUpdate, JobDefinitionUpsert, JobEnqueue, JobFailureUpdate,
-    cancel_job, claim_jobs, claim_jobs_for_types, claim_prestart_jobs, complete_job_continuation,
-    complete_job_failure, complete_job_success, enqueue_job, enqueue_job_with_execution_resource,
-    get_job_by_id, heartbeat_job, reap_expired_leases, reap_expired_leases_with_diagnostics,
-    release_unstarted_job_claim, upsert_job_definition_tx,
+    JobLeaseIdentity, cancel_job, claim_jobs, claim_jobs_for_types, claim_prestart_jobs,
+    complete_job_continuation, complete_job_failure, complete_job_success, enqueue_job,
+    enqueue_job_with_execution_resource, get_job_by_id, heartbeat_job, reap_expired_leases,
+    reap_expired_leases_with_diagnostics, release_unstarted_job_claim, upsert_job_definition_tx,
 };
 use runledger_postgres::{DbPool, Error};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -658,10 +658,12 @@ async fn every_non_cancellation_lease_exit_releases_the_exact_resource_owner() {
         .expect("claim");
     release_unstarted_job_claim(
         &pool,
-        released.id,
-        released.run_number,
-        released.attempt,
-        released.worker_id.as_deref().expect("worker"),
+        JobLeaseIdentity::new(
+            released.id,
+            released.run_number,
+            released.attempt,
+            released.worker_id.as_deref().expect("worker"),
+        ),
         "worker shutdown",
         1,
     )

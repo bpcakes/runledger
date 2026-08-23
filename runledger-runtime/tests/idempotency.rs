@@ -8,11 +8,11 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::test_support::workflow_run_release_lock_key;
 use runledger_postgres::jobs::{
     AppendWorkflowStepsInput, AppendWorkflowStepsOutcome, CompleteExternalWorkflowStepInput,
-    ExternalWorkflowStepTerminalOutcome, JobEnqueue, JobProgressUpdate, append_workflow_steps,
+    ExternalWorkflowStepTerminalOutcome, JobEnqueue, JobRunningUpdate, append_workflow_steps,
     append_workflow_steps_tx, claim_jobs_for_types, complete_external_workflow_step,
     complete_job_success, enqueue_job, enqueue_job_tx, enqueue_workflow_run,
     enqueue_workflow_run_tx, get_workflow_run_by_type_and_idempotency_key, list_job_events,
-    list_workflow_steps, update_job_progress, update_workflow_step_and_pending_job_payload_tx,
+    list_workflow_steps, mark_job_running, update_workflow_step_and_pending_job_payload_tx,
 };
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
@@ -596,7 +596,7 @@ async fn job_enqueue_idempotency_survives_lifecycle_stage_mutation() {
         .await
         .expect("claim job");
     let claim = claimed.pop().expect("job should be claimable");
-    update_job_progress(
+    mark_job_running(
         &pool,
         claim.id,
         claim.run_number,
@@ -605,8 +605,7 @@ async fn job_enqueue_idempotency_survives_lifecycle_stage_mutation() {
             .worker_id
             .as_deref()
             .expect("claimed job has worker id"),
-        &JobProgressUpdate {
-            stage: Some(runledger_core::jobs::JobStage::Running),
+        &JobRunningUpdate {
             progress_done: None,
             progress_total: None,
             checkpoint: None,

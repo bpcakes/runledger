@@ -2,7 +2,7 @@ use runledger_core::jobs::{
     JobStage, StepKey, WorkflowDependencyReleaseMode, WorkflowRunEnqueue, WorkflowStepEnqueue,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
 
 use crate::Result;
@@ -85,25 +85,110 @@ pub(super) struct StoredCanonicalWorkflowDependency {
     pub(super) release_mode: String,
 }
 
-/// The recovery reader deliberately shares the persisted step schema with
-/// append idempotency, but its entrypoints validate every structural boundary
-/// before deserializing it. That preserves recovery's fail-closed contract
-/// without making append retries reject legacy additive fields.
+/// Recovery has an explicit strict view of the persisted schema. Serde derives
+/// unknown-field observation from these types, while append idempotency keeps
+/// using its legacy-tolerant representation above.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct RecoveryEnqueueSnapshot {
     pub(super) metadata: JsonValue,
     #[serde(default)]
     pub(super) active_key: Option<String>,
     #[serde(default)]
     pub(super) result_step_key: Option<String>,
-    pub(super) steps: Vec<StoredCanonicalWorkflowStep>,
+    steps: Vec<RecoveryCanonicalWorkflowStep>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct RecoveryAppendSnapshot {
     #[serde(default, rename = "append_window_step_key")]
     pub(super) _append_window_step_key: Option<String>,
-    pub(super) steps: Vec<StoredCanonicalWorkflowStep>,
+    steps: Vec<RecoveryCanonicalWorkflowStep>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryCanonicalWorkflowStep {
+    step_key: String,
+    execution_kind: String,
+    job_type: Option<String>,
+    #[serde(default)]
+    organization_id: Option<Uuid>,
+    payload: JsonValue,
+    priority: Option<i32>,
+    max_attempts: Option<i32>,
+    timeout_seconds: Option<i32>,
+    stage: Option<String>,
+    #[serde(default)]
+    allow_handler_continuation: bool,
+    #[serde(default)]
+    execution_resource_key: Option<String>,
+    dependencies: Vec<RecoveryCanonicalWorkflowDependency>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryCanonicalWorkflowDependency {
+    prerequisite_step_key: String,
+    release_mode: String,
+}
+
+impl RecoveryEnqueueSnapshot {
+    pub(super) fn take_steps(&mut self) -> Vec<StoredCanonicalWorkflowStep> {
+        std::mem::take(&mut self.steps)
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+}
+
+impl RecoveryAppendSnapshot {
+    pub(super) fn into_steps(self) -> Vec<StoredCanonicalWorkflowStep> {
+        self.steps.into_iter().map(Into::into).collect()
+    }
+}
+
+impl From<RecoveryCanonicalWorkflowStep> for StoredCanonicalWorkflowStep {
+    fn from(step: RecoveryCanonicalWorkflowStep) -> Self {
+        let RecoveryCanonicalWorkflowStep {
+            step_key,
+            execution_kind,
+            job_type,
+            organization_id,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            stage,
+            allow_handler_continuation,
+            execution_resource_key,
+            dependencies,
+        } = step;
+        Self {
+            step_key,
+            execution_kind,
+            job_type,
+            organization_id,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            stage,
+            allow_handler_continuation,
+            execution_resource_key,
+            dependencies: dependencies.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<RecoveryCanonicalWorkflowDependency> for StoredCanonicalWorkflowDependency {
+    fn from(dependency: RecoveryCanonicalWorkflowDependency) -> Self {
+        Self {
+            prerequisite_step_key: dependency.prerequisite_step_key,
+            release_mode: dependency.release_mode,
+        }
+    }
 }
 
 pub(super) fn canonical_workflow_enqueue_request(
@@ -161,12 +246,11 @@ pub(super) fn deserialize_stored_append_request(
 /// Decodes an initial enqueue snapshot for workflow recovery.
 ///
 /// Recovery must reject unknown structural fields even though append
-/// idempotency is intentionally forward-compatible. Validate that strict
-/// schema before decoding the shared owned representation.
+/// idempotency is intentionally forward-compatible. The strict Serde schema
+/// above applies recursively without inspecting opaque JSON values.
 pub(super) fn deserialize_recovery_enqueue_snapshot(
     value: JsonValue,
 ) -> serde_json::Result<RecoveryEnqueueSnapshot> {
-    validate_strict_enqueue_snapshot(&value)?;
     serde_json::from_value(value)
 }
 
@@ -175,7 +259,6 @@ pub(super) fn deserialize_recovery_enqueue_snapshot(
 pub(super) fn deserialize_recovery_append_snapshot(
     value: JsonValue,
 ) -> serde_json::Result<RecoveryAppendSnapshot> {
-    validate_strict_append_snapshot(&value)?;
     serde_json::from_value(value)
 }
 
@@ -251,106 +334,6 @@ fn sort_stored_dependencies(dependencies: &mut [StoredCanonicalWorkflowDependenc
             .cmp(&right.prerequisite_step_key)
             .then(left.release_mode.cmp(&right.release_mode))
     });
-}
-
-fn validate_strict_enqueue_snapshot(value: &JsonValue) -> serde_json::Result<()> {
-    let object = require_object(value, "enqueue snapshot")?;
-    reject_unknown_fields(
-        object,
-        &["metadata", "active_key", "result_step_key", "steps"],
-        "enqueue snapshot",
-    )?;
-    if let Some(steps) = object.get("steps") {
-        validate_strict_steps(steps)?;
-    }
-    Ok(())
-}
-
-fn validate_strict_append_snapshot(value: &JsonValue) -> serde_json::Result<()> {
-    let object = require_object(value, "append snapshot")?;
-    reject_unknown_fields(
-        object,
-        &["append_window_step_key", "steps"],
-        "append snapshot",
-    )?;
-    if let Some(steps) = object.get("steps") {
-        validate_strict_steps(steps)?;
-    }
-    Ok(())
-}
-
-fn validate_strict_steps(value: &JsonValue) -> serde_json::Result<()> {
-    let steps = value
-        .as_array()
-        .ok_or_else(|| strict_schema_error("snapshot steps must be an array"))?;
-    for step in steps {
-        let object = require_object(step, "workflow step snapshot")?;
-        reject_unknown_fields(
-            object,
-            &[
-                "step_key",
-                "execution_kind",
-                "job_type",
-                "organization_id",
-                "payload",
-                "priority",
-                "max_attempts",
-                "timeout_seconds",
-                "stage",
-                "allow_handler_continuation",
-                "execution_resource_key",
-                "dependencies",
-            ],
-            "workflow step snapshot",
-        )?;
-        if let Some(dependencies) = object.get("dependencies") {
-            validate_strict_dependencies(dependencies)?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_strict_dependencies(value: &JsonValue) -> serde_json::Result<()> {
-    let dependencies = value
-        .as_array()
-        .ok_or_else(|| strict_schema_error("workflow step dependencies must be an array"))?;
-    for dependency in dependencies {
-        let object = require_object(dependency, "workflow dependency snapshot")?;
-        reject_unknown_fields(
-            object,
-            &["prerequisite_step_key", "release_mode"],
-            "workflow dependency snapshot",
-        )?;
-    }
-    Ok(())
-}
-
-fn require_object<'a>(
-    value: &'a JsonValue,
-    snapshot: &str,
-) -> serde_json::Result<&'a JsonMap<String, JsonValue>> {
-    value
-        .as_object()
-        .ok_or_else(|| strict_schema_error(format!("{snapshot} must be an object")))
-}
-
-fn reject_unknown_fields(
-    object: &JsonMap<String, JsonValue>,
-    allowed_fields: &[&str],
-    snapshot: &str,
-) -> serde_json::Result<()> {
-    for field in object.keys() {
-        if !allowed_fields.contains(&field.as_str()) {
-            return Err(strict_schema_error(format!(
-                "unknown field {field} in {snapshot}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn strict_schema_error(detail: impl Into<String>) -> serde_json::Error {
-    <serde_json::Error as serde::de::Error>::custom(detail.into())
 }
 
 const fn is_false(value: &bool) -> bool {
@@ -524,6 +507,81 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn recovery_schema_rejects_unknown_structural_fields_and_keeps_opaque_json_open() {
+        let metadata = json!({
+            "future_metadata": {
+                "steps": [{"unrelated": [true, {"deep": "value"}]}],
+                "dependencies": {"arbitrary": null}
+            }
+        });
+        let payload = json!({
+            "future_payload": {
+                "metadata": {"unrelated": [1, 2, 3]},
+                "dependencies": [{"arbitrary": {"deep": false}}]
+            }
+        });
+        let enqueue_snapshot = json!({
+            "metadata": metadata.clone(),
+            "steps": [{
+                "step_key": "child",
+                "execution_kind": "JOB",
+                "job_type": "jobs.test.child",
+                "payload": payload.clone(),
+                "priority": null,
+                "max_attempts": null,
+                "timeout_seconds": null,
+                "stage": null,
+                "dependencies": [{
+                    "prerequisite_step_key": "gate",
+                    "release_mode": "ON_TERMINAL"
+                }]
+            }]
+        });
+
+        let decoded_enqueue = deserialize_recovery_enqueue_snapshot(enqueue_snapshot.clone())
+            .expect("opaque metadata and payload fields must remain accepted");
+        assert_eq!(decoded_enqueue.metadata, metadata);
+        assert_eq!(decoded_enqueue.steps[0].payload, payload);
+        assert!(decoded_enqueue.active_key.is_none());
+        assert!(decoded_enqueue.result_step_key.is_none());
+        assert!(decoded_enqueue.steps[0].organization_id.is_none());
+        assert!(!decoded_enqueue.steps[0].allow_handler_continuation);
+        assert!(decoded_enqueue.steps[0].execution_resource_key.is_none());
+
+        let mut unknown_enqueue_root = enqueue_snapshot.clone();
+        unknown_enqueue_root["future_enqueue_root"] = json!(true);
+        let error = deserialize_recovery_enqueue_snapshot(unknown_enqueue_root)
+            .expect_err("recovery must reject an unknown enqueue root field");
+        assert!(error.to_string().contains("future_enqueue_root"));
+
+        let mut unknown_step = enqueue_snapshot.clone();
+        unknown_step["steps"][0]["future_step_field"] = json!(true);
+        let error = deserialize_recovery_enqueue_snapshot(unknown_step)
+            .expect_err("recovery must reject an unknown step field");
+        assert!(error.to_string().contains("future_step_field"));
+
+        let mut unknown_dependency = enqueue_snapshot.clone();
+        unknown_dependency["steps"][0]["dependencies"][0]["future_dependency_field"] = json!(true);
+        let error = deserialize_recovery_enqueue_snapshot(unknown_dependency)
+            .expect_err("recovery must reject an unknown dependency field");
+        assert!(error.to_string().contains("future_dependency_field"));
+
+        let append_snapshot = json!({
+            "steps": [enqueue_snapshot["steps"][0].clone()]
+        });
+        let decoded_append = deserialize_recovery_append_snapshot(append_snapshot.clone())
+            .expect("recovery must accept historical append snapshots without the append window");
+        assert!(decoded_append._append_window_step_key.is_none());
+        assert_eq!(decoded_append.steps[0].payload, payload);
+
+        let mut unknown_append_root = append_snapshot;
+        unknown_append_root["future_append_root"] = json!(true);
+        let error = deserialize_recovery_append_snapshot(unknown_append_root)
+            .expect_err("recovery must reject an unknown append root field");
+        assert!(error.to_string().contains("future_append_root"));
     }
 
     #[test]

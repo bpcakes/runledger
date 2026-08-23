@@ -4,10 +4,10 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::jobs::{
     CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobEnqueue, JobEnqueueDisposition,
-    JobFailureUpdate, JobProgressUpdate, JobRequeueStatePolicy, JobScope, RequeueableJobStatus,
-    cancel_job, compare_and_requeue_job, compare_and_requeue_job_tx, complete_job_failure,
-    enqueue_job_with_outcome_tx, enqueue_workflow_run, get_job_by_id, heartbeat_job,
-    list_job_events, list_workflow_steps, update_job_progress,
+    JobFailureUpdate, JobOrdinaryProgressUpdate, JobRequeueStatePolicy, JobScope,
+    RequeueableJobStatus, cancel_job, compare_and_requeue_job, compare_and_requeue_job_tx,
+    complete_job_failure, enqueue_job_with_outcome_tx, enqueue_workflow_run, get_job_by_id,
+    heartbeat_job, list_job_events, list_workflow_steps, update_job_ordinary_progress,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -963,14 +963,13 @@ async fn dead_lettered_status_is_requeueable_with_an_exact_run_match() {
     let claim = claim_one_job(&pool, "worker-dead-letter").await;
     let worker_id = claim.worker_id.as_deref().expect("claimed worker id");
     let checkpoint = json!({"cursor": 900});
-    update_job_progress(
+    update_job_ordinary_progress(
         &pool,
         claim.id,
         claim.run_number,
         claim.attempt,
         worker_id,
-        &JobProgressUpdate {
-            stage: None,
+        &JobOrdinaryProgressUpdate {
             progress_done: Some(900),
             progress_total: Some(1_000),
             checkpoint: Some(&checkpoint),

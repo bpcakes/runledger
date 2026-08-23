@@ -441,6 +441,7 @@ fn lease_expired_failure() -> JobFailure {
 fn failure_transition_for(row: &ReapExpiredLeaseRow) -> ExpiredLeaseTransition<'_> {
     ExpiredLeaseTransition::new(
         FailureIdentity::new(row.job_id, row.run_number, row.attempt),
+        LEASE_EXPIRED_FAILURE,
         DeadLetterSnapshot::new(
             &row.job_type,
             row.organization_id,

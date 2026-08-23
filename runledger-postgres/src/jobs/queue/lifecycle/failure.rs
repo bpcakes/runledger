@@ -11,9 +11,10 @@ use super::super::super::types::{
     JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
     JobLeaseIdentity,
 };
+#[cfg(test)]
+use super::super::failure_transition::RetryTimingSource;
 use super::super::failure_transition::{
     DeadLetterSnapshot, FailureDetails, HandlerFailureTransition, ResolvedRetryTiming,
-    RetryTimingSource,
 };
 use super::common::{COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
 
@@ -208,25 +209,22 @@ fn resolve_retry_timing(
             ));
         }
     };
-    let (next_run_at, source) = requested_retry_not_before.map_or(
-        (policy_next_run_at, RetryTimingSource::Policy),
-        |requested_retry_not_before| {
-            if requested_retry_not_before > policy_next_run_at {
-                (
-                    requested_retry_not_before,
-                    RetryTimingSource::HandlerNotBefore,
-                )
-            } else {
-                (policy_next_run_at, RetryTimingSource::Policy)
-            }
+    Ok(match requested_retry_not_before {
+        None => ResolvedRetryTiming::PolicyOnly {
+            policy_retry_delay_ms,
+            effective_next_run_at: policy_next_run_at,
         },
-    );
-
-    Ok(ResolvedRetryTiming {
-        policy_retry_delay_ms,
-        requested_retry_not_before,
-        next_run_at,
-        source,
+        Some(requested_retry_not_before) if requested_retry_not_before > policy_next_run_at => {
+            ResolvedRetryTiming::HandlerHintWon {
+                policy_retry_delay_ms,
+                requested_retry_not_before,
+            }
+        }
+        Some(requested_retry_not_before) => ResolvedRetryTiming::PolicyWonOverHandlerHint {
+            policy_retry_delay_ms,
+            requested_retry_not_before,
+            effective_next_run_at: policy_next_run_at,
+        },
     })
 }
 
@@ -311,16 +309,14 @@ pub async fn complete_job_failure_with_outcome_for_lease(
             outcome.retry_timing,
         )?;
         transition.apply_retry(&mut tx, retry_timing).await?;
-        match (retry_timing.source, retry_timing.requested_retry_not_before) {
-            (RetryTimingSource::HandlerNotBefore, Some(requested_retry_at)) => {
-                JobFailureCompletionDisposition::RetryScheduledAt {
-                    requested_retry_at,
-                    next_run_at: retry_timing.next_run_at,
-                }
-            }
-            _ => JobFailureCompletionDisposition::RetryScheduled {
-                retry_delay_ms: retry_timing.policy_retry_delay_ms,
-                next_run_at: retry_timing.next_run_at,
+        match retry_timing.handler_hint_won_not_before() {
+            Some(requested_retry_at) => JobFailureCompletionDisposition::RetryScheduledAt {
+                requested_retry_at,
+                next_run_at: retry_timing.effective_next_run_at(),
+            },
+            None => JobFailureCompletionDisposition::RetryScheduled {
+                retry_delay_ms: retry_timing.policy_retry_delay_ms(),
+                next_run_at: retry_timing.effective_next_run_at(),
             },
         }
     };
@@ -434,14 +430,18 @@ mod tests {
         )
         .expect("relative retry timing should resolve");
 
-        assert_eq!(resolved.policy_retry_delay_ms, 1);
-        assert_eq!(resolved.source, RetryTimingSource::HandlerNotBefore);
+        assert!(matches!(
+            resolved,
+            ResolvedRetryTiming::HandlerHintWon { .. }
+        ));
+        assert_eq!(resolved.policy_retry_delay_ms(), 1);
+        assert_eq!(resolved.source(), RetryTimingSource::HandlerNotBefore);
         assert_eq!(
-            resolved.requested_retry_not_before,
+            resolved.requested_retry_not_before(),
             Some(completion_base_at + ChronoDuration::milliseconds(2))
         );
         assert_eq!(
-            resolved.next_run_at,
+            resolved.effective_next_run_at(),
             completion_base_at + ChronoDuration::milliseconds(2)
         );
     }
@@ -457,12 +457,16 @@ mod tests {
         )
         .expect("absolute retry timing should resolve");
 
+        assert!(matches!(
+            resolved,
+            ResolvedRetryTiming::HandlerHintWon { .. }
+        ));
         assert_eq!(
-            resolved.requested_retry_not_before,
+            resolved.requested_retry_not_before(),
             Some(requested_retry_at)
         );
-        assert_eq!(resolved.next_run_at, requested_retry_at);
-        assert_eq!(resolved.source, RetryTimingSource::HandlerNotBefore);
+        assert_eq!(resolved.effective_next_run_at(), requested_retry_at);
+        assert_eq!(resolved.source(), RetryTimingSource::HandlerNotBefore);
     }
 
     #[test]
@@ -477,8 +481,15 @@ mod tests {
         )
         .expect("sub-microsecond absolute retry timing should resolve");
 
-        assert_eq!(resolved.requested_retry_not_before, Some(expected_retry_at));
-        assert_eq!(resolved.next_run_at, expected_retry_at);
+        assert!(matches!(
+            resolved,
+            ResolvedRetryTiming::HandlerHintWon { .. }
+        ));
+        assert_eq!(
+            resolved.requested_retry_not_before(),
+            Some(expected_retry_at)
+        );
+        assert_eq!(resolved.effective_next_run_at(), expected_retry_at);
     }
 
     #[test]
@@ -496,15 +507,19 @@ mod tests {
             )
             .expect("past or equal absolute retry timing should resolve");
 
+            assert!(matches!(
+                resolved,
+                ResolvedRetryTiming::PolicyWonOverHandlerHint { .. }
+            ));
             assert_eq!(
-                resolved.requested_retry_not_before,
+                resolved.requested_retry_not_before(),
                 Some(requested_retry_at)
             );
             assert_eq!(
-                resolved.next_run_at,
+                resolved.effective_next_run_at(),
                 completion_base_at + ChronoDuration::seconds(1)
             );
-            assert_eq!(resolved.source, RetryTimingSource::Policy);
+            assert_eq!(resolved.source(), RetryTimingSource::Policy);
         }
     }
 
@@ -514,10 +529,11 @@ mod tests {
         let resolved = resolve_retry_timing(completion_base_at, Some(2_500), None)
             .expect("policy-only retry should resolve");
 
-        assert_eq!(resolved.requested_retry_not_before, None);
-        assert_eq!(resolved.source, RetryTimingSource::Policy);
+        assert!(matches!(resolved, ResolvedRetryTiming::PolicyOnly { .. }));
+        assert_eq!(resolved.requested_retry_not_before(), None);
+        assert_eq!(resolved.source(), RetryTimingSource::Policy);
         assert_eq!(
-            resolved.next_run_at,
+            resolved.effective_next_run_at(),
             completion_base_at + ChronoDuration::milliseconds(2_500)
         );
     }
@@ -532,10 +548,11 @@ mod tests {
         )
         .expect("zero lower bound should fall back to policy");
 
-        assert_eq!(resolved.requested_retry_not_before, None);
-        assert_eq!(resolved.source, RetryTimingSource::Policy);
+        assert!(matches!(resolved, ResolvedRetryTiming::PolicyOnly { .. }));
+        assert_eq!(resolved.requested_retry_not_before(), None);
+        assert_eq!(resolved.source(), RetryTimingSource::Policy);
         assert_eq!(
-            resolved.next_run_at,
+            resolved.effective_next_run_at(),
             completion_base_at + ChronoDuration::milliseconds(2_500)
         );
     }
@@ -570,10 +587,11 @@ mod tests {
         )
         .expect("irrelevant past lower bound should fall back to policy");
 
-        assert_eq!(resolved.requested_retry_not_before, None);
-        assert_eq!(resolved.source, RetryTimingSource::Policy);
+        assert!(matches!(resolved, ResolvedRetryTiming::PolicyOnly { .. }));
+        assert_eq!(resolved.requested_retry_not_before(), None);
+        assert_eq!(resolved.source(), RetryTimingSource::Policy);
         assert_eq!(
-            resolved.next_run_at,
+            resolved.effective_next_run_at(),
             completion_base_at + ChronoDuration::seconds(1)
         );
     }

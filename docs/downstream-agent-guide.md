@@ -190,7 +190,8 @@ row and its worker ID, then reuse it for every lifecycle write:
 ```rust
 use runledger_postgres::jobs::{
     JobLeaseIdentity, complete_job_success_for_lease,
-    heartbeat_job_for_lease, update_job_progress_for_lease,
+    JobOrdinaryProgressUpdate, JobRunningUpdate, heartbeat_job_for_lease,
+    mark_job_running_for_lease, update_job_ordinary_progress_for_lease,
 };
 
 let lease = JobLeaseIdentity::new(
@@ -201,7 +202,19 @@ let lease = JobLeaseIdentity::new(
 );
 
 heartbeat_job_for_lease(&pool, lease, lease_duration_seconds).await?;
-update_job_progress_for_lease(&pool, lease, &progress).await?;
+let running = JobRunningUpdate {
+    progress_done: None,
+    progress_total: None,
+    checkpoint: None,
+};
+mark_job_running_for_lease(&pool, lease, &running).await?;
+
+let progress = JobOrdinaryProgressUpdate {
+    progress_done: Some(1),
+    progress_total: Some(2),
+    checkpoint: None,
+};
+update_job_ordinary_progress_for_lease(&pool, lease, &progress).await?;
 complete_job_success_for_lease(&pool, lease, Some(&completion)).await?;
 ```
 
@@ -212,7 +225,14 @@ the type prevents callers from accidentally pairing a job ID with the run,
 attempt, or worker from another claim. A stale or expired identity returns the
 same `job.lease_owner_mismatch` error as the positional APIs. Those existing
 functions remain compatibility wrappers, so adopting the identity form is
-optional. This API is available in 0.9.0 and later.
+optional. The identity form is available in 0.9.0 and later.
+
+`mark_job_running_for_lease` deliberately takes `JobRunningUpdate`: persist the
+first checkpoint and progress with the `RUNNING` transition rather than making
+a zero-argument stage call followed by another write. The older stage-bearing
+`JobProgressUpdate` and `update_job_progress_for_lease` remain deprecated only
+for staged downstream migration. This running/progress API split is available
+in 0.10.2 and later.
 
 ## Workflow DAG Rule
 

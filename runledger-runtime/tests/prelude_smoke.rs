@@ -45,6 +45,16 @@ async fn all_preludes_can_be_glob_imported_together() {
         "prelude:intent",
     )
     .with_stage(JobStage::Queued);
+    let _running_update = JobRunningUpdate {
+        progress_done: None,
+        progress_total: None,
+        checkpoint: None,
+    };
+    let _ordinary_progress_update = JobOrdinaryProgressUpdate {
+        progress_done: Some(1),
+        progress_total: Some(1),
+        checkpoint: None,
+    };
 
     let metadata = json!({ "source": "prelude_smoke" });
     let first = WorkflowStepEnqueueBuilder::new(
