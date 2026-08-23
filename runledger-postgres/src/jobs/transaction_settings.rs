@@ -1,4 +1,31 @@
+use std::time::Duration;
+
 use crate::{DbTx, Error, Result};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::jobs) struct PostgresTimeout(Duration);
+
+impl PostgresTimeout {
+    pub(in crate::jobs) const fn new(duration: Duration) -> Self {
+        assert!(
+            duration.subsec_nanos() % 1_000_000 == 0,
+            "PostgreSQL timeout duration must use whole milliseconds"
+        );
+        assert!(
+            duration.as_millis() <= i64::MAX as u128,
+            "PostgreSQL timeout milliseconds must fit in i64"
+        );
+        Self(duration)
+    }
+
+    pub(in crate::jobs) const fn milliseconds(self) -> i64 {
+        self.0.as_millis() as i64
+    }
+
+    fn setting_value(self) -> String {
+        format!("{}ms", self.milliseconds())
+    }
+}
 
 #[derive(Clone, Copy)]
 enum OperationTimeoutSetting {
@@ -33,6 +60,15 @@ pub(in crate::jobs) async fn cap_local_lock_timeout_tx(
     .await
 }
 
+pub(in crate::jobs) async fn cap_local_lock_timeout_duration_tx(
+    tx: &mut DbTx<'_>,
+    timeout: PostgresTimeout,
+    context: &'static str,
+) -> Result<String> {
+    let setting_value = timeout.setting_value();
+    cap_local_lock_timeout_tx(tx, &setting_value, timeout.milliseconds(), context).await
+}
+
 /// Caps the transaction-local PostgreSQL `statement_timeout` while preserving
 /// any stricter caller setting and returns the exact prior value for restoration.
 pub(in crate::jobs) async fn cap_local_statement_timeout_tx(
@@ -49,6 +85,15 @@ pub(in crate::jobs) async fn cap_local_statement_timeout_tx(
         context,
     )
     .await
+}
+
+pub(in crate::jobs) async fn cap_local_statement_timeout_duration_tx(
+    tx: &mut DbTx<'_>,
+    timeout: PostgresTimeout,
+    context: &'static str,
+) -> Result<String> {
+    let setting_value = timeout.setting_value();
+    cap_local_statement_timeout_tx(tx, &setting_value, timeout.milliseconds(), context).await
 }
 
 /// Caps the transaction-local PostgreSQL `transaction_timeout` while preserving
@@ -105,6 +150,15 @@ pub(in crate::jobs) async fn cap_local_transaction_timeout_tx(
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context(context, error))
+}
+
+pub(in crate::jobs) async fn cap_local_transaction_timeout_duration_tx(
+    tx: &mut DbTx<'_>,
+    timeout: PostgresTimeout,
+    context: &'static str,
+) -> Result<String> {
+    let setting_value = timeout.setting_value();
+    cap_local_transaction_timeout_tx(tx, &setting_value, timeout.milliseconds(), context).await
 }
 
 /// Caps timeouts whose effective deadline is evaluated when a statement or
@@ -202,7 +256,82 @@ mod tests {
     use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
     use tokio::time::timeout;
 
-    use super::cap_local_transaction_timeout_tx;
+    use super::{
+        PostgresTimeout, cap_local_lock_timeout_duration_tx,
+        cap_local_transaction_timeout_duration_tx,
+    };
+
+    #[test]
+    fn postgres_timeout_derives_text_and_milliseconds_from_one_duration() {
+        let timeout = PostgresTimeout::new(Duration::from_millis(1_250));
+        let maximum = PostgresTimeout::new(Duration::from_millis(i64::MAX as u64));
+
+        assert_eq!(timeout.setting_value(), "1250ms");
+        assert_eq!(timeout.milliseconds(), 1_250);
+        assert_eq!(maximum.milliseconds(), i64::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "PostgreSQL timeout milliseconds must fit in i64")]
+    fn postgres_timeout_rejects_milliseconds_above_postgresql_comparison_bound() {
+        PostgresTimeout::new(Duration::from_millis(i64::MAX as u64 + 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "PostgreSQL timeout duration must use whole milliseconds")]
+    fn postgres_timeout_rejects_fractional_milliseconds() {
+        PostgresTimeout::new(Duration::from_micros(1_500));
+    }
+
+    #[tokio::test]
+    async fn lock_timeout_cap_preserves_ordering_at_millisecond_boundaries() {
+        let (pool, database) = setup_ephemeral_pool("postgres_lock_timeout_boundaries", 1).await;
+        let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+            .fetch_one(&pool)
+            .await
+            .expect("read PostgreSQL server_version");
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+                .fetch_one(&pool)
+                .await
+                .expect("read PostgreSQL server_version_num");
+        eprintln!(
+            "lock timeout boundary PostgreSQL server_version={server_version}, \
+             server_version_num={server_version_num}"
+        );
+
+        let cap = PostgresTimeout::new(Duration::from_millis(1_000));
+        let mut tx = pool.begin().await.expect("begin timeout boundary tx");
+
+        for (caller_timeout, expected_timeout) in
+            [("999ms", "999ms"), ("1000ms", "1s"), ("1001ms", "1s")]
+        {
+            sqlx::query_scalar::<_, String>("SELECT set_config('lock_timeout', $1, true)")
+                .bind(caller_timeout)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("set caller lock timeout");
+
+            cap_local_lock_timeout_duration_tx(
+                &mut tx,
+                cap,
+                "cap lock timeout at ordering boundary",
+            )
+            .await
+            .expect("cap lock timeout");
+
+            assert_eq!(
+                sqlx::query_scalar::<_, String>("SHOW lock_timeout")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("read capped lock timeout"),
+                expected_timeout
+            );
+        }
+
+        tx.rollback().await.expect("roll back boundary tx");
+        teardown_ephemeral_pool(pool, database).await;
+    }
 
     #[tokio::test]
     async fn transaction_timeout_cap_rearms_a_looser_active_timer() {
@@ -226,10 +355,9 @@ mod tests {
             .await
             .expect("set loose session transaction timeout");
         let mut tx = pool.begin().await.expect("begin capped transaction");
-        let previous = cap_local_transaction_timeout_tx(
+        let previous = cap_local_transaction_timeout_duration_tx(
             &mut tx,
-            "300ms",
-            300,
+            PostgresTimeout::new(Duration::from_millis(300)),
             "cap transaction timeout in regression test",
         )
         .await
