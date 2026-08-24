@@ -13,12 +13,22 @@ All notable changes to this workspace are documented here.
   and stage-free `JobOrdinaryProgressUpdate` /
   `update_job_ordinary_progress{,_for_lease}` APIs. A running transition
   commits its checkpoint and progress in the same durable transaction.
+- Add handler-derived `JobCatalog::{handler, try_handler}` registration and
+  matching `handler_with_definition_overrides` variants.
+- Add explicit `JobCancellationScope` and `WorkflowRunReadScope` APIs, including
+  `cancel_job_with_scope` and the workflow read helpers suffixed with
+  `_with_scope`, so callers cannot confuse global, organization, and admin
+  visibility.
+- Add `JobFailureKind::is_retryable` as the authoritative retryability query.
 
 ### Deprecated
 
 - Deprecate stage-bearing `JobProgressUpdate` and
   `update_job_progress{,_for_lease}`. They remain source-compatible migration
   paths until downstream callers adopt the typed lifecycle APIs.
+- Deprecate `JobCatalog::{job, try_job}` and their
+  `job_with_definition_overrides` variants. Use the corresponding `handler*`
+  APIs so the handler supplies the catalog identity once.
 
 ### Changed
 
