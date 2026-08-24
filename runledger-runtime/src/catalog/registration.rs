@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use runledger_core::jobs::{JobHandler, JobHandlerRegistry, JobType, JobTypeName};
+use runledger_core::jobs::{JobHandler, JobType, JobTypeName};
 use runledger_postgres::jobs::JobDefinitionUpsert;
 
 use crate::registry::JobRegistry;
@@ -333,7 +333,7 @@ impl JobCatalog {
     pub fn to_registry(&self) -> JobRegistry {
         let mut registry = JobRegistry::new();
         for entry in self.jobs.values() {
-            registry.register_boxed(Arc::clone(&entry.handler));
+            registry.register_boxed_for_type(entry.job_type(), Arc::clone(&entry.handler));
             for (failure_code, retry_delay_ms) in &entry.retry_delay_overrides {
                 registry.register_retry_delay_override(
                     entry.job_type(),
@@ -493,6 +493,7 @@ impl JobCatalog {
         self.jobs.insert(
             key,
             CatalogJob {
+                job_type,
                 handler,
                 definition_overrides: JobCatalogDefinitionOverrides::new(),
                 retry_delay_overrides: BTreeMap::new(),

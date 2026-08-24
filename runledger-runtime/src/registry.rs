@@ -29,7 +29,8 @@ impl JobRegistry {
         H: JobHandler + 'static,
     {
         let handler: Arc<dyn JobHandler> = Arc::new(handler);
-        self.handlers.insert(handler.job_type(), handler);
+        let job_type = handler.job_type();
+        self.register_boxed_for_type(job_type, handler);
     }
 
     pub fn try_register<H>(&mut self, handler: H) -> Result<(), JobRegistryError>
@@ -48,8 +49,16 @@ impl JobRegistry {
             return Err(JobRegistryError::DuplicateJobType { job_type });
         }
 
-        self.handlers.insert(job_type, handler);
+        self.register_boxed_for_type(job_type, handler);
         Ok(())
+    }
+
+    pub(crate) fn register_boxed_for_type(
+        &mut self,
+        job_type: JobType<'static>,
+        handler: Arc<dyn JobHandler>,
+    ) {
+        self.handlers.insert(job_type, handler);
     }
 
     /// Registers the policy retry delay for one job type and failure code.
@@ -107,7 +116,8 @@ impl JobRegistry {
 
 impl JobHandlerRegistry for JobRegistry {
     fn register_boxed(&mut self, handler: Arc<dyn JobHandler>) {
-        self.handlers.insert(handler.job_type(), handler);
+        let job_type = handler.job_type();
+        self.register_boxed_for_type(job_type, handler);
     }
 }
 

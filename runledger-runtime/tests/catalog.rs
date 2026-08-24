@@ -85,6 +85,29 @@ impl JobHandler for HandlerReturningThirdType {
     }
 }
 
+struct ChangingIdentityHandler {
+    identity_reads: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl JobHandler for ChangingIdentityHandler {
+    fn job_type(&self) -> JobType<'static> {
+        if self.identity_reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            JobType::new(CATALOG_TEST_JOB)
+        } else {
+            JobType::new(CATALOG_OTHER_JOB)
+        }
+    }
+
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        Ok(JobCompletion::success())
+    }
+}
+
 fn test_config() -> JobsConfig {
     JobsConfig {
         worker_id: "catalog-test-worker".to_string(),
@@ -1301,6 +1324,33 @@ fn try_handler_with_definition_overrides_rejects_invalid_timeout_override() {
             field: "default_timeout_seconds"
         } if job_type == CATALOG_TEST_JOB
     ));
+}
+
+#[test]
+fn catalog_uses_the_identity_validated_at_handler_registration() {
+    let identity_reads = Arc::new(AtomicUsize::new(0));
+    let catalog = JobCatalog::new()
+        .handler(ChangingIdentityHandler {
+            identity_reads: Arc::clone(&identity_reads),
+        })
+        .retry_delay_override(CATALOG_TEST_JOB, "transient", 250);
+
+    assert_eq!(identity_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        catalog
+            .require_job_type(CATALOG_TEST_JOB)
+            .expect("registered job type"),
+        JobType::new(CATALOG_TEST_JOB)
+    );
+
+    let registry = catalog.to_registry();
+    assert!(registry.get(JobType::new(CATALOG_TEST_JOB)).is_some());
+    assert!(registry.get(JobType::new(CATALOG_OTHER_JOB)).is_none());
+    assert_eq!(
+        registry.retry_delay_override(JobType::new(CATALOG_TEST_JOB), "transient"),
+        Some(250)
+    );
+    assert_eq!(identity_reads.load(Ordering::SeqCst), 1);
 }
 
 #[test]
