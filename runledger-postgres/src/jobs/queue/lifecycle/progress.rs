@@ -292,7 +292,7 @@ pub async fn update_job_ordinary_progress_for_lease(
 /// preserves the historical arbitrary-stage behavior until downstream callers
 /// have migrated.
 #[deprecated(
-    since = "0.10.2",
+    since = "0.11.0",
     note = "use mark_job_running for RUNNING, or update_job_ordinary_progress for ordinary progress"
 )]
 #[allow(
@@ -318,7 +318,7 @@ pub async fn update_job_progress(
 /// Deprecated compatibility entrypoint for an exact live lease whose progress
 /// input still carries a stage.
 #[deprecated(
-    since = "0.10.2",
+    since = "0.11.0",
     note = "use mark_job_running_for_lease for RUNNING, or update_job_ordinary_progress_for_lease for ordinary progress"
 )]
 #[allow(

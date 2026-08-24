@@ -68,7 +68,7 @@ pub struct JobOrdinaryProgressUpdate<'a> {
 /// compatibility input preserves arbitrary historical stage writes while
 /// downstream callers migrate to the typed lifecycle APIs.
 #[deprecated(
-    since = "0.10.2",
+    since = "0.11.0",
     note = "use JobRunningUpdate with mark_job_running for RUNNING, or JobOrdinaryProgressUpdate with update_job_ordinary_progress for ordinary progress"
 )]
 #[derive(Clone, Debug)]

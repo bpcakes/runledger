@@ -29,6 +29,17 @@ All notable changes to this workspace are documented here.
 - Use one authoritative filtered/unfiltered claim statement after PostgreSQL 18
   custom-plan, generic-plan, cardinality, skew, and contention benchmarks
   demonstrated plan and throughput parity.
+- Breaking: replace `CompleteExternalWorkflowStepInput.terminal_status` and
+  `.output` with `outcome: ExternalWorkflowStepTerminalOutcome`, which encodes
+  output only for successful completion.
+- Breaking: replace `JobEnqueueIntentOutcome.status` and `.promoted_job_id`
+  fields with a typed `state`; use `status()` and `promoted_job_id()` for the
+  previous flattened views.
+- Breaking: consolidate `JobEnqueueIntentRecord` lifecycle fields into a typed
+  `state`. Existing flattened field reads must use the lifecycle accessors,
+  including `promotion_error()` for structured error details.
+- Breaking: make `EphemeralDatabase` identity fields private; use `name()` and
+  `url()` when inspecting a test database.
 
 ### Removed
 
@@ -47,6 +58,18 @@ All notable changes to this workspace are documented here.
   choose an explicit progress/checkpoint policy, and handle every typed
   no-mutation outcome. For `SUCCEEDED`, provide a stable replay request key and
   use successful replay so the source row and output remain immutable.
+- Construct `CompleteExternalWorkflowStepInput` with
+  `ExternalWorkflowStepTerminalOutcome::Succeeded { output }`, `Failed`, or
+  `Canceled` instead of setting terminal status and output independently.
+- For `JobEnqueueIntentOutcome`, replace `.status` and `.promoted_job_id` field
+  reads with `status()` and `promoted_job_id()`.
+- For `JobEnqueueIntentRecord`, replace removed lifecycle field reads with
+  `status()`, `promoted_job_id()`, `promotion_attempts()`,
+  `last_attempted_at()`, `promoted_at()`, and `conflicted_at()`. Replace
+  `last_error_code` / `last_error_message` with `promotion_error()` and its
+  `code()` / `message()` methods.
+- Replace direct `EphemeralDatabase.name` and `.url` field access with
+  `name()` and `url()`.
 - Apply `202608240001_expand_workflow_step_job_link` first, deploy 0.11, and
   drain all 0.10 writers and leases before applying
   `202608240002_contract_workflow_step_job_link`. See the staged migration
