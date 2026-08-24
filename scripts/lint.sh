@@ -11,6 +11,7 @@ cargo fmt --all -- --check
 cargo fmt --manifest-path "$SMOKE_MANIFEST" -- --check
 
 ./scripts/check-admin-openapi.sh
+bash ./scripts/test-sqlx-migration-info.sh
 
 cargo clippy \
   --workspace \

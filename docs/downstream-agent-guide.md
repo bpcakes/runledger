@@ -3,10 +3,10 @@
 This guide is for agents integrating Runledger into another application. It is
 not an instruction file for agents maintaining this repository.
 
-This guide targets Runledger 0.10.0 and retains the operational contracts added
-in 0.6.0 through 0.9.0. Runledger requires Rust 1.88 or later and PostgreSQL 18
-or later. An older PostgreSQL server with an extension-provided `uuidv7()`
-function is not a supported substitute.
+This guide targets the Runledger version in the current checkout and retains
+the operational contracts from earlier supported releases. Runledger requires
+Rust 1.88 or later and PostgreSQL 18 or later. An older PostgreSQL server with
+an extension-provided `uuidv7()` function is not a supported substitute.
 
 ## Choose The Highest-Level API
 
@@ -869,13 +869,15 @@ ad-hoc SQL.
 
 ## Workflow Completion And Validation
 
-For external workflow steps, `CompleteExternalWorkflowStepInput::output` can be
-set only when `terminal_status` is `WorkflowStepStatus::Succeeded`. Failed or
-canceled external completions must leave output unset. Repeating an already
-terminal external completion is idempotent only when terminal status,
+For external workflow steps, set
+`CompleteExternalWorkflowStepInput::outcome` to
+`ExternalWorkflowStepTerminalOutcome::Succeeded { output }`, `Failed`, or
+`Canceled`. Only the succeeded variant can carry output. Repeating an already
+terminal external completion is idempotent only when the outcome,
 `status_reason`, `last_error_code`, and `last_error_message` match. Changed
-metadata returns `workflow.external_step_conflicting_completion_retry`; for
-successful completions, changed output returns
+terminal state or metadata returns
+`workflow.external_step_conflicting_completion_retry`; for successful
+completions, changed output returns
 `workflow.external_step_conflicting_output_retry`.
 
 `WorkflowDagBuilder` validates workflow shape, not job registration. `.job(...)`

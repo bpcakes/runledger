@@ -8,6 +8,9 @@ use super::{JobCompletion, JobContext, JobDeadLetterInfo, JobFailure};
 
 #[async_trait]
 pub trait JobHandler: Send + Sync {
+    /// Returns the stable identity used to register and route this handler.
+    ///
+    /// Implementations must return the same value for the handler's lifetime.
     fn job_type(&self) -> JobType<'static>;
     async fn execute(
         &self,

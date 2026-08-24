@@ -12,6 +12,8 @@ VENDORED_MIGRATION_CRATES=(
   "runledger-test-support"
 )
 
+source "$ROOT_DIR/scripts/lib/sqlx-migration-info.sh"
+
 cd "$ROOT_DIR"
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -47,12 +49,12 @@ if [[ ! "$server_version_num" =~ ^18[0-9]{4}$ ]]; then
 fi
 echo "Using PostgreSQL ${server_version} (server_version_num=${server_version_num})."
 
-if ! migration_info="$(cargo sqlx migrate info --source migrations)"; then
+if ! migration_info="$(NO_COLOR=1 CARGO_TERM_COLOR=never cargo sqlx migrate info --source migrations)"; then
   echo "error: failed to inspect Runledger migration state; DATABASE_URL must have the current migrations applied." >&2
   exit 1
 fi
-if grep -qi 'pending' <<<"$migration_info"; then
-  echo "error: DATABASE_URL has pending Runledger migrations; apply the canonical migrations before refreshing SQLx metadata." >&2
+if ! sqlx_migration_info_is_current <<<"$migration_info"; then
+  echo "error: DATABASE_URL migration state is not current; apply the canonical migrations and resolve checksum drift before refreshing SQLx metadata." >&2
   printf '%s\n' "$migration_info" >&2
   exit 1
 fi
