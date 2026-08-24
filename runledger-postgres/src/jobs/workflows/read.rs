@@ -65,12 +65,13 @@ pub async fn get_workflow_run_by_id_with_scope(
     workflow_run_id: Uuid,
 ) -> Result<Option<WorkflowRunDbRecord>> {
     let (is_admin, organization_id) = scope.visibility_predicate();
-    let row = sqlx::query_as::<_, WorkflowRunRow>(
+    let row = sqlx::query_as!(
+        WorkflowRunRow,
         "SELECT
             id,
             workflow_type,
             organization_id,
-            status::text AS status,
+            status::text AS \"status!\",
             idempotency_key,
             result_step_key,
             metadata,
@@ -82,10 +83,10 @@ pub async fn get_workflow_run_by_id_with_scope(
          WHERE id = $1
            AND ($2::bool OR organization_id IS NOT DISTINCT FROM $3::uuid)
          LIMIT 1",
+        workflow_run_id,
+        is_admin,
+        organization_id,
     )
-    .bind(workflow_run_id)
-    .bind(is_admin)
-    .bind(organization_id)
     .fetch_optional(pool)
     .await
     .map_err(|error| crate::Error::from_query_sqlx_with_context("get workflow run by id", error))?;
