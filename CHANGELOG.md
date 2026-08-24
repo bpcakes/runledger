@@ -26,6 +26,11 @@ All notable changes to this workspace are documented here.
   The paired `202608240001_expand_workflow_step_job_link` and
   `202608240002_contract_workflow_step_job_link` migrations support an
   expand/drain/contract rollout while old 0.10 writers are retired.
+- Diagnose expand-window trigger drift per expected trigger through
+  `WorkflowJobLinkTriggerDiagnostic` and typed
+  `WorkflowJobLinkTriggerProblem` values. The compatibility guard validates
+  rollout safety while accepting triggers that fire on a safe superset of
+  update columns.
 - Use one authoritative filtered/unfiltered claim statement after PostgreSQL 18
   custom-plan, generic-plan, cardinality, skew, and contention benchmarks
   demonstrated plan and throughput parity.

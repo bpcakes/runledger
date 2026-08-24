@@ -1224,7 +1224,10 @@ Two supported startup modes:
 - `ensure_schema_compatible_after_idempotency_cutover(&pool)` — read-only
   validation that an existing `_sqlx_migrations` history matches the bundled
   migrations, with explicit errors for missing history, incompatible history,
-  legacy idempotency rows, or PostgreSQL query/connectivity failures.
+  legacy idempotency rows, invalid expand-window triggers, or PostgreSQL
+  query/connectivity failures. Trigger failures identify the expected public
+  table and trigger plus typed problems such as missing function wiring,
+  disabled origin writes, or incorrect constraint deferral.
   Externally managed DDL can validate the `NOT VALID` cutover constraints after
   this check passes.
 
