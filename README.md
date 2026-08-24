@@ -60,7 +60,7 @@ read-only HTTP admin contract and React panel.
   - [Active workflow keys](#active-workflow-keys)
   - [Durable execution resources](#durable-execution-resources)
   - [Workflow recovery](#workflow-recovery)
-  - [Upgrade map for releases 0.6 through 0.10](#upgrade-map-for-releases-06-through-010)
+  - [Upgrade map for releases 0.6 through 0.11](#upgrade-map-for-releases-06-through-011)
   - [0.7 to 0.8 activation and rollback](#07-to-08-activation-and-rollback)
   - [Schedules](#schedules)
   - [Job definition catalog](#job-definition-catalog)
@@ -161,7 +161,7 @@ async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
     runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
 
     // Register handlers and sync their job definitions.
-    let catalog = JobCatalog::new().job("jobs.email.send", SendEmail);
+    let catalog = JobCatalog::new().handler(SendEmail);
     catalog.sync_definitions(&pool).await?;
 
     // Run the supervisor until Ctrl-C, with a 30s shutdown drain deadline.
@@ -463,7 +463,7 @@ let result = handle.get_result(Default::default()).await?;
 ```
 
 The handle is scoped when created or retrieved: organization workflows use
-`WorkflowRunHandleScope::Organization`, global workflows use `Global`, and
+`WorkflowRunReadScope::Organization`, global workflows use `Global`, and
 trusted operator surfaces can use `Admin`. Use `get_status` for a cheap status
 probe, `get_run` to load the scoped run record, and `get_result` to wait for or
 read the declared result. Notifications wake waiters quickly, but polling
@@ -777,10 +777,10 @@ the function neither commits nor rolls back it. A source must be terminal.
 Recovery of an active-key workflow can remain blocked until its old claim is
 quiescent, or while another run owns that key.
 
-### Upgrade map for releases 0.6 through 0.10
+### Upgrade map for releases 0.6 through 0.11
 
-The `0.10` release line includes the contracts introduced in the preceding
-four releases. When skipping versions, preserve each release's schema and
+The `0.11` release line includes the contracts introduced in the preceding
+releases. When skipping versions, preserve each release's schema and
 runtime fence:
 
 | Release | Schema requirement | Activation requirement |
@@ -790,6 +790,7 @@ runtime fence:
 | `0.8` | Apply `202607250001_harden_continuation_metrics_payload_validation` and `202607280001` through `202607280005` before any 0.8 runtime loop or persistence API runs. | Deploy every 0.8 writer with new paths unused, quiesce all older processes and leases, then canary workflow continuation, active keys, resources, retry hints, and workflow recovery. |
 | `0.9` | No migration after 0.8.0. | Custom runtimes may adopt `JobLeaseIdentity` and its `_for_lease` lifecycle APIs without a coordinated schema or source migration; the positional functions remain available. |
 | `0.10` | Apply `202608180001_job_enqueue_intents` before any process records or promotes enqueue intents. | Deploy exact-ID retention cleanup to every queue-retention caller before enabling intent writers. Keep at least one promoter for every intent type, and budget for each enabled supervisor's independent idle polling. |
+| `0.11` | Apply `202608240001_expand_workflow_step_job_link`, deploy 0.11, drain every 0.10 writer and lease, then apply `202608240002_contract_workflow_step_job_link`. | Migrate every removed `requeue_job` call before compiling 0.11: use exact-scope compare-and-requeue for canceled/dead-lettered jobs and fresh-job successful replay for `SUCCEEDED`. The contract migration is the 0.10 rollback boundary. |
 
 For 0.8 source upgrades, construct `WorkflowDagStepValidationInput` with
 `WorkflowDagStepValidationInput::new(...)` and its option setters; it is now
@@ -866,7 +867,7 @@ Schedules are UTC-only. Choose an API by who owns the schedule definition:
 use runledger_runtime::catalog::{CatalogJobScheduleSpec, JobCatalog};
 
 let catalog = JobCatalog::new()
-    .job("profiles.refresh", RefreshHandler)
+    .handler(RefreshHandler)
     .schedule(CatalogJobScheduleSpec {
         name: "profiles.refresh.hourly",
         job_type: "profiles.refresh",
@@ -882,7 +883,7 @@ catalog.sync_definitions(&pool).await?;
 catalog.sync_schedules(&pool).await?;
 ```
 
-Register a schedule's `.job(...)` before its `.schedule(...)` — schedule
+Register a schedule's `.handler(...)` before its `.schedule(...)` — schedule
 registration validates the referenced catalog job type immediately. Sync
 preserves an existing `next_fire_at` cursor while the cron expression is
 unchanged; changing `cron_expr` stores the spec's `next_fire_at`, or `Utc::now()`
@@ -930,20 +931,18 @@ inside an explicit owned job-type set. Exact sync returns the disabled job types
 refuses to disable definitions still referenced by active schedules, and (unlike
 additive sync) restores catalog entries' enabled state from catalog defaults.
 
-Override individual definitions with `job_with_definition_overrides` /
+Override individual definitions with `handler_with_definition_overrides` /
 `definition_overrides`:
 
 ```rust
 let catalog = JobCatalog::new()
-    .job_with_definition_overrides(
-        "documents.extract",
+    .handler_with_definition_overrides(
         ExtractDocuments,
         JobCatalogDefinitionOverrides::new()
             .timeout_seconds(600)
             .priority(20),
     )
-    .job_with_definition_overrides(
-        "auth.cleanup",
+    .handler_with_definition_overrides(
         CleanupAuth,
         JobCatalogDefinitionOverrides::new()
             .timeout_seconds(60)
@@ -985,11 +984,14 @@ These examples and integration references are compile-checked:
 
 The `runledger_postgres::jobs` admin surface exposes job/workflow detail, list,
 and count helpers for operator UIs and service-owned dashboards. Use
-`list_workflow_runs` with `WorkflowRunListFilter` when rendering workflow tables,
-and `count_workflow_runs` with `WorkflowRunCountFilter` for status counters such
-as failed workflows or runs waiting for external completion. These helpers use
-the same optional organization scope and workflow-type substring filtering as
-the TUI.
+`list_workflow_runs_with_scope` with `WorkflowRunReadListFilter` when rendering
+workflow tables, and `count_workflow_runs_with_scope` with
+`WorkflowRunReadCountFilter` for status counters such as failed workflows or
+runs waiting for external completion. Set `WorkflowRunReadScope::Global` for
+exact global rows, `Organization(id)` for one tenant, or `Admin` only for a
+trusted all-tenant surface. The legacy nullable read helpers remain available:
+their `None` scope retains the historical admin wildcard. These helpers use the
+same workflow-type substring filtering as the TUI.
 
 Use `get_job_continuation_metrics` for continuation canaries and runaway-loop
 alerts. Each `JobContinuationMetricsRecord` reports the prior 24 hours' successful
@@ -1310,14 +1312,40 @@ forward migrations:
   pagination. Like the history indexes, all four list indexes are built
   concurrently in separate nontransactional migrations and remain outside the
   custom compatibility fence.
+- `202608240001_expand_workflow_step_job_link` — audits and backfills reciprocal
+  workflow-step/job links, then makes `workflow_steps.job_id` authoritative
+  while maintaining `job_queue.workflow_step_id` as a trigger-backed projection
+  for mixed-version writers and readers. It is intentionally outside the custom
+  compatibility fence during the rolling-deployment window.
+- `202608240002_contract_workflow_step_job_link` — re-runs both relationship
+  anti-joins, removes the compatibility triggers, reciprocal FK/unique
+  constraint, and `job_queue.workflow_step_id`, then advances the custom
+  compatibility fence so pre-contract binaries refuse the destructive schema.
 
 Every forward migration from
 `202607190001_job_replays_and_continuation_metrics` through
-`202608210006_admin_workflows_org_created_index` is recorded and
-checksum-validated in `_sqlx_migrations` but deliberately omitted from the custom
+`202608240001_expand_workflow_step_job_link` is recorded and checksum-validated in
+`_sqlx_migrations` but deliberately omitted from the custom
 `runledger_migration_history` compatibility fence. This lets released filtered
 startup helpers coexist during the documented expand-first windows; it does
 not make a raw migrator from an older crate tolerate unknown SQLx history rows.
+
+The workflow-step/job cutover is deliberately staged for rolling deployments:
+
+1. Apply migrations through `202608240001_expand_workflow_step_job_link` with
+   externally managed DDL. Keep both relationship anti-joins empty.
+2. Roll every application instance to code that reads and writes ownership only
+   through `workflow_steps.job_id`. The expand triggers keep the deprecated
+   projection usable by any not-yet-replaced instance.
+3. After the old instances are drained, apply
+   `202608240002_contract_workflow_step_job_link`. This step takes exclusive
+   locks on `job_queue` and `workflow_steps`, removes the projection, and is the
+   breaking rollback boundary. Do not start a pre-contract binary afterward.
+
+`migrate_after_idempotency_cutover` applies the complete bundled set, including
+the contract migration. Deployments that need a mixed-version window must use
+externally managed DDL plus `ensure_schema_compatible_after_idempotency_cutover`
+during the expand phase, then apply the contract explicitly after the drain.
 
 Treat the flattened baseline as a from-scratch schema definition, not an
 in-place upgrade from the older multi-file standalone history; apply later
@@ -1333,7 +1361,10 @@ Two supported startup modes:
 - `ensure_schema_compatible_after_idempotency_cutover(&pool)` — read-only
   validation that an existing `_sqlx_migrations` history matches the bundled
   migrations, with explicit errors for missing history, incompatible history,
-  legacy idempotency rows, or PostgreSQL query/connectivity failures.
+  legacy idempotency rows, invalid expand-window triggers, or PostgreSQL
+  query/connectivity failures. Trigger failures identify the expected public
+  table and trigger plus typed problems such as missing function wiring,
+  disabled origin writes, or incorrect constraint deferral.
   Externally managed DDL can validate the `NOT VALID` cutover constraints after
   this check passes.
 
@@ -1440,7 +1471,7 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   rather than to another worker. Once `lease_expires_at` passes there is no
   owner grace period for heartbeat/progress/success/failure/continuation writes.
   Release 0.9.0 added `JobLeaseIdentity` for typed lifecycle lease fencing.
-  In 0.10.2 and later, use `mark_job_running_for_lease` with
+  In 0.11.0 and later, use `mark_job_running_for_lease` with
   `JobRunningUpdate` to commit `RUNNING` and its initial checkpoint/progress
   atomically, then use `update_job_ordinary_progress_for_lease` with
   `JobOrdinaryProgressUpdate` for stage-free progress. Reuse one identity
@@ -1470,18 +1501,13 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   Every request must choose `JobRequeueStatePolicy::PreserveProgressAndCheckpoint`
   to resume from committed state or `ResetProgressAndCheckpoint` to restart
   from scratch; the selected policy is recorded in the `REQUEUED` event.
-  The older pool-owning `requeue_job` API is deprecated for 0.6 compatibility;
-  its `organization_id: None` is an unconstrained lookup, not
-  `JobScope::Global`, and its behavior corresponds to
-  `ResetProgressAndCheckpoint`. Migrate every compatibility caller deliberately
-  and handle `NotFound`, `ExpectationMismatch`, and
-  `CancellationNotQuiesced` as no-mutation outcomes. The typed API intentionally
-  does not replay `SUCCEEDED` jobs in place; use the separate successful-replay
-  API described below.
-  When a canceled handler's retained lease is still active, the compatibility
-  API returns the
-  conflict code `job.cancellation_not_quiesced` so compatibility callers know
-  the recovery may be retried after lease expiry.
+  Version 0.11 removes the deprecated pool-owning `requeue_job` API. Its
+  `organization_id: None` was an unconstrained lookup, not `JobScope::Global`,
+  so migration requires observing and authorizing the row's exact scope.
+  `ResetProgressAndCheckpoint` matches its old state-reset behavior; callers
+  must also handle `NotFound`, `ExpectationMismatch`, and
+  `CancellationNotQuiesced` as normal no-mutation outcomes. The typed recovery
+  API intentionally does not accept `SUCCEEDED`; use successful replay below.
 - **Successful replay.** `compare_and_replay_succeeded_job` creates an
   idempotent fresh job from an exactly scoped successful direct-job run;
   `compare_and_replay_succeeded_job_tx` composes the same operation with a
@@ -1639,25 +1665,26 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.10.1
+./scripts/prepare-release.sh 0.11.0
 ```
 
 The preparation script starts from a clean working tree or resumes an existing
 generated release diff whose manifests are already at the requested version.
 It rejects changes outside the files it generates. The script bumps publishable
-crate and root workspace dependency versions, refreshes the root and standalone
-smoke lockfiles plus SQLx offline metadata, runs workspace tests and the locked
-packaged smoke test, dry-runs `runledger-core`, packages the library crates, and
-build-verifies the packaged `runledger-tui` binary. It also tests, builds, and
-dry-run packs `@runledger/admin`, and verifies that every crate archive contains
-the repository license. If publishing manually, run
+crates through their shared workspace package version, updates the explicit
+published workspace dependency pins, refreshes the root and standalone smoke
+lockfiles plus SQLx offline metadata, runs workspace tests and the locked
+packaged smoke test, dry-runs `runledger-core`, packages the library crates,
+and build-verifies the packaged `runledger-tui` binary. It also tests, builds,
+and dry-run packs `@runledger/admin`, and verifies that every crate archive
+contains the repository license. If publishing manually, run
 `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres` or
 `runledger-runtime` and commit any resulting `.sqlx/` changes.
 
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.10.1
+./scripts/publish-release.sh 0.11.0
 ```
 
 Before publishing any crate, the publish script confirms that the release tag
@@ -1667,7 +1694,7 @@ Actions `CI` run and every job succeeded. It then dry-runs the branch and tag
 push, publishes crates in dependency order, dry-runs each once its workspace
 dependencies are indexed, and publishes the same-version React package to npm.
 Finally, it atomically pushes `HEAD` as both the current branch and remote
-`v0.10.1` tag, then creates or reconciles the local lightweight tag. A
+`v0.11.0` tag, then creates or reconciles the local lightweight tag. A
 local-only tag left by an older failed release does not block a retry. The
 publication preflight requires authenticated GitHub and npm CLIs. Set
 `PUBLISH_REMOTE` to override the git remote for the final push.
@@ -1681,17 +1708,15 @@ artifacts from different commits under one version.
 
 Observable contract changes to call out in release notes for this line:
 
-- Migration `202608180001_job_enqueue_intents` adds durable, strictly
-  idempotent transactional handoff before a job definition exists.
-- Intent promotion is enabled by default for worker-enabled supervisors and
-  has independent polling controls; retain promoter coverage for every intent
-  type while accounting for each enabled supervisor's idle query rate.
-- Queue retention must remove exact promoted-intent links in the same
-  `READ COMMITTED` transaction before deleting linked jobs. Deploy that path to
-  every retention caller before enabling intent writers.
-- Unix-like operating systems are now the only supported platforms. Deferred
-  reaper query-error logs also replace the previous internal/source fields with
-  the sanitized `error_constraint` field.
+- The deprecated `requeue_job` symbol is removed. Migrate canceled and
+  dead-lettered recovery to the exact-scope compare-and-requeue APIs, and
+  migrate successful work to fresh-job replay before compiling 0.11.
+- The workflow-step/job link uses an expand/drain/contract migration. Apply
+  `202608240001` before deploying 0.11 and `202608240002` only after all 0.10
+  writers and leases have drained.
+- Typed running and ordinary-progress APIs replace ambiguous stage-bearing
+  progress writes; the older progress wrappers remain deprecated migration
+  paths for this release.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

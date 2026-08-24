@@ -1,8 +1,8 @@
 # Runledger LLM Integration Summary
 
 Runledger is a Rust workspace for durable jobs, workflow orchestration, and
-worker runtime loops on PostgreSQL. This summary describes release 0.10.1,
-including the 0.6 through 0.9 continuation, recovery, replay, metrics, event,
+worker runtime loops on PostgreSQL. This summary describes release 0.11.0,
+including the 0.6 through 0.11 continuation, recovery, replay, metrics, event,
 coordination, lease-identity, and durable enqueue-intent contracts. The minimum
 supported versions are Rust 1.88 and PostgreSQL 18.
 
@@ -47,8 +47,11 @@ can be imported together.
 
 Use `set_job_schedule_active` to pause/resume schedules and
 `set_job_schedule_next_fire_at` to retime a schedule cursor.
-Use `runledger_postgres::jobs::count_workflow_runs` with
-`runledger_postgres::jobs::WorkflowRunCountFilter` for workflow counters.
+Use `runledger_postgres::jobs::count_workflow_runs_with_scope` with
+`runledger_postgres::jobs::WorkflowRunReadCountFilter` for workflow counters.
+Use `WorkflowRunReadScope::Global` for exact global rows,
+`Organization(id)` for one tenant, and `Admin` only for trusted all-tenant
+surfaces.
 
 For browser-based operator views, mount the state-complete `runledger-admin`
 router at `/api/admin/runledger/v1`. The embedding service must authenticate the
@@ -146,8 +149,8 @@ Use lower-level builders when call sites should pass explicit `StepKey` and
 Do not manually orchestrate ordinary workflows by polling job status, enqueueing
 dependent jobs from parent handlers, encoding dependency state in payload JSON,
 or adding app-owned workflow edge tables.
-Do not call `requeue_job` on workflow-managed jobs; it returns
-`job.workflow_requeue_not_supported`.
+Direct-job recovery rejects workflow-managed jobs with
+`job.workflow_requeue_not_supported`; recover the workflow run instead.
 Use `update_job_payload_uuid_array_field` only for direct pending jobs; inspect
 `JobPayloadUuidArrayFieldUpdate` for `Updated`, `NotFound`, or rejected updates.
 
@@ -260,7 +263,7 @@ Use `compare_and_requeue_job` for standalone pool-owning recovery and
 and run number. Always handle `Requeued`, `ExpectationMismatch`, `NotFound`, and
 `CancellationNotQuiesced`; only `Requeued` mutates the job.
 
-Deprecated `requeue_job` requires a deliberate migration:
+Runledger 0.11 removes `requeue_job`; upgrading requires a deliberate migration:
 
 - legacy `organization_id: None` was an unconstrained lookup and is not
   `JobScope::Global`;
@@ -369,7 +372,7 @@ If constructing `JobsConfig` directly, validate it; invalid configs can surface
 as `RuntimeError::InvalidJobsConfig` or `RuntimeLoopExit::InvalidConfig`.
 
 Custom runtimes should construct one `JobLeaseIdentity` (available since 0.9.0)
-from a claimed job's ID, run number, attempt, and worker ID. On 0.10.2 or later,
+from a claimed job's ID, run number, attempt, and worker ID. On 0.11.0 or later,
 pass it to `heartbeat_job_for_lease`, `mark_job_running_for_lease` with a
 `JobRunningUpdate`, `update_job_ordinary_progress_for_lease` with a
 `JobOrdinaryProgressUpdate`, and the appropriate success/failure/continuation

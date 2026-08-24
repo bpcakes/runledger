@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{
     JobCompletion, JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobEventType, JobFailure,
-    JobFailureKind, JobRetryTiming, JobStage, JobStatus, JobType, JobTypeName, StepKey,
+    JobFailureKind, JobRetryTiming, JobStatus, JobType, JobTypeName, StepKey,
     WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
 };
 use runledger_postgres::jobs::{
@@ -40,12 +40,13 @@ use super::{
 use crate::RuntimeLoopExit;
 use crate::config::JobsConfig;
 use crate::observer::{
-    JobCompletionPersistFailedEvent, JobContinuedEvent, JobFailedEvent, JobFailureDisposition,
-    JobLeaseLostEvent, JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent,
-    JobSucceededEvent, ObservedJob,
+    JobCompletionPersistFailedEvent, JobCompletionPersistenceOperation, JobContinuedEvent,
+    JobFailedEvent, JobFailureDisposition, JobLeaseLostEvent, JobLifecycleObserver,
+    JobLifecycleObservers, JobRunningEvent, JobSucceededEvent, ObservedJob,
 };
 use crate::registry::{JobHandler, JobRegistry};
 
+mod capacity;
 mod completion_and_retry;
 mod lease_fencing;
 mod observer_tasks;
@@ -262,6 +263,12 @@ struct RecordingObserver {
     failed: Arc<Mutex<Vec<JobFailedEvent>>>,
     persist_failed: Arc<Mutex<Vec<JobCompletionPersistFailedEvent>>>,
     lease_lost: Arc<Mutex<Vec<JobLeaseLostEvent>>>,
+}
+
+struct CommitCheckingSucceededObserver {
+    pool: PgPool,
+    committed_status: Arc<Mutex<Option<JobStatus>>>,
+    checked: Arc<Notify>,
 }
 
 impl RecordingObserver {
@@ -879,6 +886,22 @@ impl JobLifecycleObserver for RecordingObserver {
     }
 }
 
+#[async_trait::async_trait]
+impl JobLifecycleObserver for CommitCheckingSucceededObserver {
+    async fn on_job_succeeded(&self, event: JobSucceededEvent) {
+        let status = get_job_by_id(&self.pool, None, event.job.job_id)
+            .await
+            .expect("success observer should read committed job")
+            .expect("success observer job should exist")
+            .status;
+        *self
+            .committed_status
+            .lock()
+            .expect("committed status lock should not be poisoned") = Some(status);
+        self.checked.notify_one();
+    }
+}
+
 struct TerminalHookPanicHandler {
     runs: Arc<AtomicUsize>,
     terminal_failures: Arc<AtomicUsize>,
@@ -1001,39 +1024,5 @@ fn observer_task_observed_job() -> ObservedJob {
         attempt: 1,
         max_attempts: 3,
         worker_id: "worker-observer-task-cap".to_string(),
-    }
-}
-
-fn observer_task_queue_record() -> runledger_postgres::jobs::JobQueueRecord {
-    let now = Utc::now();
-    runledger_postgres::jobs::JobQueueRecord {
-        id: uuid::Uuid::nil(),
-        job_type: JobTypeName::from_static("jobs.test.observer_task_cap"),
-        organization_id: None,
-        payload: json!({}),
-        status: JobStatus::Leased,
-        priority: 100,
-        run_number: 1,
-        attempt: 1,
-        max_attempts: 3,
-        timeout_seconds: 30,
-        next_run_at: now,
-        lease_expires_at: Some(now + ChronoDuration::seconds(30)),
-        last_heartbeat_at: Some(now),
-        worker_id: Some("worker-observer-task-cap".to_string()),
-        started_at: Some(now),
-        finished_at: None,
-        stage: JobStage::Running,
-        progress_done: None,
-        progress_total: None,
-        progress_pct: None,
-        checkpoint: None,
-        output: None,
-        idempotency_key: None,
-        status_reason: None,
-        last_error_code: None,
-        last_error_message: None,
-        created_at: now,
-        updated_at: now,
     }
 }

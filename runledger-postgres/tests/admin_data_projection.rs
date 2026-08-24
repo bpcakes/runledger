@@ -215,8 +215,8 @@ async fn metadata_only_admin_reads_do_not_require_sensitive_column_privileges() 
         .await
         .expect("enqueue projection workflow");
 
-    let role = format!("{}_metadata_reader", database.name);
-    let restricted = create_metadata_reader(&pool, &database.url, &role).await;
+    let role = format!("{}_metadata_reader", database.name());
+    let restricted = create_metadata_reader(&pool, database.url(), &role).await;
 
     let job = get_admin_job_by_id(
         &restricted,

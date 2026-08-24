@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
 
-    let catalog = JobCatalog::new().job("jobs.email.send", SendEmail);
+    let catalog = JobCatalog::new().handler(SendEmail);
     // Optional catalog-owned schedules. Register schedules on the builder
     // before calling sync_schedules or schedule_sync_scope. Uncomment the whole
     // shadowing binding so later startup code uses the scheduled catalog.

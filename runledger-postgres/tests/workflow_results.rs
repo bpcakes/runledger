@@ -7,10 +7,11 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::{
     CompleteExternalWorkflowStepInput, DEFAULT_WORKFLOW_RUN_WAIT_TIMEOUT,
     ExternalWorkflowStepTerminalOutcome, JobCompletionUpdate, JobDefinitionUpsert,
-    JobFailureUpdate, WorkflowRunHandleError, WorkflowRunHandleScope, WorkflowRunWaitOptions,
-    cancel_workflow_run_tx, claim_jobs_for_types, complete_external_workflow_step,
-    complete_job_failure, complete_job_success, enqueue_workflow_run_handle, list_workflow_steps,
-    retrieve_workflow_run_handle, upsert_job_definition_tx, workflow_run_handle,
+    JobFailureUpdate, WorkflowRunHandleError, WorkflowRunHandleScope, WorkflowRunReadScope,
+    WorkflowRunWaitOptions, cancel_workflow_run_tx, claim_jobs_for_types,
+    complete_external_workflow_step, complete_job_failure, complete_job_success,
+    enqueue_workflow_run_handle, list_workflow_steps, retrieve_workflow_run_handle,
+    upsert_job_definition_tx, workflow_run_handle,
 };
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::{Value, json};
@@ -545,7 +546,7 @@ async fn workflow_handle_initial_lookup_timeout_runs_final_probe() {
         setup_ephemeral_pool("workflow_handle_final_probe_initial_lookup", 1).await;
     let side_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect(&database.url)
+        .connect(database.url())
         .await
         .expect("connect side pool");
     let job_type = JobType::new("jobs.test.workflow_final_probe_initial_lookup");
@@ -1250,7 +1251,12 @@ async fn workflow_handle_scope_controls_run_visibility() {
     let handle = enqueue_workflow_run_handle(&pool, &workflow)
         .await
         .expect("enqueue workflow handle");
-    assert_eq!(handle.scope, WorkflowRunHandleScope::Global);
+    assert_eq!(handle.scope, WorkflowRunReadScope::Global);
+    let legacy_scope = WorkflowRunHandleScope::Global;
+    assert_eq!(
+        legacy_scope, handle.scope,
+        "legacy handle scope alias remains valid"
+    );
 
     let status = handle.get_status().await.expect("load status in scope");
     assert_eq!(status, Some(WorkflowRunStatus::Running));
@@ -1266,7 +1272,7 @@ async fn workflow_handle_scope_controls_run_visibility() {
         Some("result")
     );
 
-    let admin = workflow_run_handle(&pool, WorkflowRunHandleScope::Admin, handle.workflow_run_id);
+    let admin = workflow_run_handle(&pool, WorkflowRunReadScope::Admin, handle.workflow_run_id);
     assert_eq!(
         admin.get_status().await.expect("load status as admin"),
         Some(WorkflowRunStatus::Running)
@@ -1279,7 +1285,7 @@ async fn workflow_handle_scope_controls_run_visibility() {
             .is_some_and(|run| run.id == handle.workflow_run_id)
     );
 
-    let mismatched_scope = WorkflowRunHandleScope::Organization(Uuid::from_u128(0x5C09E));
+    let mismatched_scope = WorkflowRunReadScope::Organization(Uuid::from_u128(0x5C09E));
     let mismatched = workflow_run_handle(&pool, mismatched_scope, handle.workflow_run_id);
     assert_eq!(
         mismatched
@@ -1302,13 +1308,9 @@ async fn workflow_handle_scope_controls_run_visibility() {
     assert!(matches!(error, WorkflowRunHandleError::NotFound));
     assert_eq!(error.code(), "workflow.run_not_found");
 
-    retrieve_workflow_run_handle(
-        &pool,
-        WorkflowRunHandleScope::Global,
-        handle.workflow_run_id,
-    )
-    .await
-    .expect("matching scope should retrieve the handle");
+    retrieve_workflow_run_handle(&pool, WorkflowRunReadScope::Global, handle.workflow_run_id)
+        .await
+        .expect("matching scope should retrieve the handle");
 
     teardown_ephemeral_pool(pool, database).await;
 }

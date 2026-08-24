@@ -17,13 +17,8 @@ pub use read::{
     list_admin_workflow_dependencies, list_admin_workflow_steps, list_admin_workflow_summaries,
     list_job_events, list_job_events_before, list_jobs, workflow_exists_in_scope,
 };
-#[allow(
-    deprecated,
-    reason = "deprecated recovery entrypoints remain re-exported for semver compatibility"
-)]
 pub use recovery::{
     cancel_job, cancel_job_with_scope, compare_and_requeue_job, compare_and_requeue_job_tx,
-    requeue_job,
 };
 
 pub(crate) use recovery::cancel_job_with_scope_tx;

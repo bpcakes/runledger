@@ -6,8 +6,7 @@ use sqlx::types::Uuid;
 use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::errors::{
-    cancellation_not_quiesced_error, ensure_rejection_rollback_succeeded, invalid_job_state_error,
-    job_not_found_error, workflow_requeue_not_supported_error,
+    invalid_job_state_error, job_not_found_error, workflow_requeue_not_supported_error,
 };
 use super::super::queue::advance::{
     AdvanceJobToNextRun, JOB_QUEUE_COLUMNS_SQL, advance_locked_job_to_next_run_tx,
@@ -24,22 +23,6 @@ use super::super::types::{
     CompareAndRequeueJob, CompareAndRequeueJobOutcome, JobCancellationScope, JobQueueRecord,
 };
 use super::super::workflows::on_terminal;
-use super::read::get_job_by_id;
-
-async fn rollback_and_classify_missing_job_mutation(
-    tx: DbTx<'_>,
-    pool: &DbPool,
-    organization_id: Option<Uuid>,
-    job_id: Uuid,
-) -> Result<Error> {
-    rollback_missing_job_mutation(tx).await;
-    let exists = get_job_by_id(pool, organization_id, job_id).await?;
-    Ok(if exists.is_none() {
-        job_not_found_error()
-    } else {
-        invalid_job_state_error()
-    })
-}
 
 async fn rollback_missing_job_mutation(tx: DbTx<'_>) {
     if let Err(error) = tx.rollback().await {
@@ -84,31 +67,6 @@ const fn cancellation_scope_predicate(scope: JobCancellationScope) -> (bool, Opt
         JobCancellationScope::Organization(organization_id) => (false, Some(organization_id)),
         JobCancellationScope::Admin => (true, None),
     }
-}
-
-async fn workflow_managed_job_exists_tx(
-    tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    organization_id: Option<Uuid>,
-) -> Result<bool> {
-    let exists: bool = sqlx::query_scalar!(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM job_queue jq
-            WHERE jq.id = $1
-              AND jq.workflow_step_id IS NOT NULL
-              AND ($2::uuid IS NULL OR jq.organization_id = $2)
-         ) AS \"exists!\"",
-        job_id,
-        organization_id,
-    )
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("requeue workflow-managed job check", error)
-    })?;
-
-    Ok(exists)
 }
 
 /// Cancels a pending or leased job within an explicit authorization scope.
@@ -280,7 +238,7 @@ pub(crate) async fn cancel_job_with_scope_tx(
 struct CompareAndRequeueCandidateRow {
     #[sqlx(flatten)]
     job: JobQueueRow,
-    workflow_step_id: Option<Uuid>,
+    workflow_managed: bool,
     canceled_lease_still_active: bool,
 }
 
@@ -294,10 +252,9 @@ fn compare_and_requeue_candidate_from_row(
     row: CompareAndRequeueCandidateRow,
 ) -> Result<CompareAndRequeueCandidate> {
     let job = row.job.into_record()?;
-    let workflow_managed = row.workflow_step_id.is_some();
     Ok(CompareAndRequeueCandidate {
         job,
-        workflow_managed,
+        workflow_managed: row.workflow_managed,
         canceled_lease_still_active: row.canceled_lease_still_active,
     })
 }
@@ -311,7 +268,11 @@ async fn lock_compare_and_requeue_candidate_tx(
     let sql = format!(
         "SELECT
             {JOB_QUEUE_COLUMNS_SQL},
-            workflow_step_id,
+            EXISTS (
+                SELECT 1
+                FROM workflow_steps ws
+                WHERE ws.job_id = job_queue.id
+            ) AS workflow_managed,
             (
                 status = 'CANCELED'
                 AND lease_expires_at IS NOT NULL
@@ -322,7 +283,11 @@ async fn lock_compare_and_requeue_candidate_tx(
            AND organization_id IS NOT DISTINCT FROM $2::uuid
            AND status::text = $3::text
            AND run_number = $4::int4
-           AND workflow_step_id IS NULL
+           AND NOT EXISTS (
+                SELECT 1
+                FROM workflow_steps ws
+                WHERE ws.job_id = job_queue.id
+           )
            AND NOT (
                 status = 'CANCELED'
                 AND lease_expires_at IS NOT NULL
@@ -362,7 +327,11 @@ async fn load_compare_and_requeue_candidate_for_classification_tx(
     let sql = format!(
         "SELECT
             {JOB_QUEUE_COLUMNS_SQL},
-            workflow_step_id,
+            EXISTS (
+                SELECT 1
+                FROM workflow_steps ws
+                WHERE ws.job_id = job_queue.id
+            ) AS workflow_managed,
             (
                 status = 'CANCELED'
                 AND lease_expires_at IS NOT NULL
@@ -541,104 +510,6 @@ where
         after: Box::new(after),
         event_id,
     })
-}
-
-#[deprecated(
-    since = "0.6.0",
-    note = "use compare_and_requeue_job (or compare_and_requeue_job_tx for caller-owned transactions) with exact JobScope and RequeueableJobStatus expectations"
-)]
-pub async fn requeue_job(
-    pool: &DbPool,
-    organization_id: Option<Uuid>,
-    job_id: Uuid,
-    reason: Option<&str>,
-) -> Result<JobQueueRecord> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
-
-    let workflow_managed = workflow_managed_job_exists_tx(&mut tx, job_id, organization_id).await?;
-    if workflow_managed {
-        ensure_rejection_rollback_succeeded(tx.rollback().await)?;
-        return Err(workflow_requeue_not_supported_error());
-    }
-
-    let previous_run = sqlx::query!(
-        "SELECT
-            run_number,
-            attempt,
-            lease_expires_at,
-            (
-                status = 'CANCELED'
-                AND lease_expires_at IS NOT NULL
-                AND lease_expires_at > clock_timestamp()
-            ) AS \"canceled_lease_still_active!\"
-         FROM job_queue
-         WHERE id = $1
-           AND ($2::uuid IS NULL OR organization_id = $2)
-           AND status IN ('DEAD_LETTERED', 'CANCELED', 'SUCCEEDED')
-         FOR UPDATE",
-        job_id,
-        organization_id,
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("requeue job prefetch attempt", error))?;
-
-    let Some(previous_run) = previous_run else {
-        return Err(
-            rollback_and_classify_missing_job_mutation(tx, pool, organization_id, job_id).await?,
-        );
-    };
-    let previous_run_number: i32 = previous_run.run_number;
-    let previous_attempt: i32 = previous_run.attempt;
-    if let (true, Some(retry_after)) = (
-        previous_run.canceled_lease_still_active,
-        previous_run.lease_expires_at,
-    ) {
-        ensure_rejection_rollback_succeeded(tx.rollback().await)?;
-        return Err(cancellation_not_quiesced_error(retry_after));
-    }
-
-    let record = advance_locked_job_to_next_run_tx(
-        &mut tx,
-        &AdvanceJobToNextRun {
-            job_id,
-            preserve_missing_resume_state: false,
-            progress_done: None,
-            progress_total: None,
-            checkpoint: None,
-            next_run_at: None,
-            status_reason: reason,
-        },
-        "requeue job",
-    )
-    .await?;
-
-    let event_attempt = (previous_attempt > 0).then_some(previous_attempt);
-    insert_requeued_event_tx(
-        &mut tx,
-        RequeuedJobEvent {
-            job_id: record.id,
-            completed_run_number: previous_run_number,
-            attempt: event_attempt,
-            stage: None,
-            progress_done: None,
-            progress_total: None,
-            payload: RequeuedEventPayload::Basic {
-                reason: record.status_reason.as_deref().unwrap_or("REQUEUED"),
-            },
-        },
-        "insert requeued event",
-    )
-    .await?;
-
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
-
-    Ok(record)
 }
 
 #[cfg(test)]

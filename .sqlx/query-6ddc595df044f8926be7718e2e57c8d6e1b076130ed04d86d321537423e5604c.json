@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n                SELECT 1\n                FROM workflow_steps ws\n                WHERE ws.job_id = jq.id\n            ) AS \"workflow_managed!\"\n         FROM job_queue jq\n         WHERE jq.id = $1\n         FOR UPDATE OF jq",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_managed!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6ddc595df044f8926be7718e2e57c8d6e1b076130ed04d86d321537423e5604c"
+}

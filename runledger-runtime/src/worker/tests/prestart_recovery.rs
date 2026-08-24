@@ -118,7 +118,7 @@ async fn process_claimed_job_aborts_when_running_progress_cannot_be_persisted() 
     .expect("enqueue job");
 
     let claimed_job = claim_one_job(&pool, "worker-persistence-failure").await;
-    let worker_pool = connect_closed_pool(&database.url).await;
+    let worker_pool = connect_closed_pool(database.url()).await;
 
     let runs = Arc::new(AtomicUsize::new(0));
     let mut registry = JobRegistry::new();
@@ -424,7 +424,7 @@ async fn reaper_requeues_unstarted_claim_when_running_progress_never_persisted()
     .expect("enqueue job");
 
     let claimed_job = claim_one_job(&pool, "worker-persistence-failure").await;
-    let worker_pool = connect_closed_pool(&database.url).await;
+    let worker_pool = connect_closed_pool(database.url()).await;
 
     let runs = Arc::new(AtomicUsize::new(0));
     let mut registry = JobRegistry::new();
@@ -559,7 +559,7 @@ async fn reaper_does_not_burn_retry_attempt_when_later_attempt_never_started() {
     .expect("make second attempt claimable immediately");
 
     let second_claimed_job = claim_one_job(&pool, "worker-retry-2").await;
-    let failing_worker_pool = connect_closed_pool(&database.url).await;
+    let failing_worker_pool = connect_closed_pool(database.url()).await;
 
     let second_runs = Arc::new(AtomicUsize::new(0));
     let mut second_registry = JobRegistry::new();

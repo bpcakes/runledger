@@ -269,9 +269,11 @@
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
 //! use runledger_postgres::prelude::*;
 //!
-//! let _run = get_workflow_run_by_id(&pool, None, workflow_run_id).await?;
-//! let _steps = list_workflow_steps(&pool, None, workflow_run_id).await?;
-//! let _dependencies = list_workflow_step_dependencies(&pool, None, workflow_run_id).await?;
+//! let scope = WorkflowRunReadScope::Admin;
+//! let _run = get_workflow_run_by_id_with_scope(&pool, scope, workflow_run_id).await?;
+//! let _steps = list_workflow_steps_with_scope(&pool, scope, workflow_run_id).await?;
+//! let _dependencies =
+//!     list_workflow_step_dependencies_with_scope(&pool, scope, workflow_run_id).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -330,7 +332,8 @@ pub use error::{
     classify_query_error_with_constraint_classifier, has_framework_constraint_classifier,
 };
 pub use migrations::{
-    MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
+    MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
+    WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
     migrate_after_idempotency_cutover,
 };
 #[allow(
@@ -379,6 +382,7 @@ pub mod prelude {
         SuccessfulReplayEnqueuedEventPayload, WorkflowRecoveryDisposition, WorkflowRecoveryMode,
         WorkflowRecoveryOutcome, WorkflowRecoveryRequest, WorkflowRunDbRecord, WorkflowRunHandle,
         WorkflowRunHandleError, WorkflowRunHandleScope, WorkflowRunListFilter,
+        WorkflowRunReadCountFilter, WorkflowRunReadListFilter, WorkflowRunReadScope,
         WorkflowRunResultRecord, WorkflowRunWaitOptions, WorkflowStepDbRecord,
         WorkflowStepDependencyDbRecord, append_workflow_steps, append_workflow_steps_tx,
         cancel_job, cancel_job_with_scope, cancel_workflow_run_tx,
@@ -390,8 +394,10 @@ pub mod prelude {
         complete_job_failure_for_lease, complete_job_failure_with_outcome,
         complete_job_failure_with_outcome_for_lease, complete_job_success,
         complete_job_success_for_lease, complete_job_success_with_outcome,
-        complete_job_success_with_outcome_for_lease, count_workflow_step_dependencies,
-        count_workflow_steps, delete_promoted_job_enqueue_intents_before,
+        complete_job_success_with_outcome_for_lease, count_workflow_runs_with_scope,
+        count_workflow_step_dependencies, count_workflow_step_dependencies_with_scope,
+        count_workflow_steps, count_workflow_steps_with_scope,
+        delete_promoted_job_enqueue_intents_before,
         delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, enqueue_job_tx,
         enqueue_job_with_execution_resource, enqueue_job_with_execution_resource_tx,
         enqueue_job_with_outcome_tx, enqueue_or_get_active_workflow,
@@ -400,21 +406,24 @@ pub mod prelude {
         get_job_continuation_metrics, get_job_definition_by_type, get_job_enqueue_intent_by_id,
         get_job_enqueue_intent_metrics, get_job_metrics, get_job_payload_by_idempotency_key,
         get_job_runtime_config_by_type, get_job_schedule_by_name, get_latest_job_payload_for_run,
-        get_latest_workflow_run_by_type, get_required_job_runtime_config_by_type,
-        get_workflow_run_by_id, get_workflow_run_by_type_and_idempotency_key,
+        get_latest_workflow_run_by_type, get_latest_workflow_run_by_type_with_scope,
+        get_required_job_runtime_config_by_type, get_workflow_run_by_id,
+        get_workflow_run_by_id_with_scope, get_workflow_run_by_type_and_idempotency_key,
         get_workflow_run_id_for_job, heartbeat_job_for_lease, insert_job_definition_if_missing_tx,
         insert_job_log, insert_job_runtime_config_if_missing, list_admin_job_definitions,
         list_admin_job_summaries, list_admin_workflow_dependencies, list_admin_workflow_steps,
         list_admin_workflow_summaries, list_job_definitions, list_job_enqueue_intents,
         list_job_events, list_job_logs, list_job_runtime_configs, list_jobs, list_workflow_runs,
-        list_workflow_step_dependencies, list_workflow_step_dependencies_page, list_workflow_steps,
-        list_workflow_steps_page, mark_job_running_for_lease,
-        prepare_schedule_exact_sync_critical_section_tx, promote_job_enqueue_intents_for_types,
-        reap_expired_leases_with_diagnostics, record_job_enqueue_intent,
-        record_job_enqueue_intent_tx, recover_workflow_run, recover_workflow_run_tx, requeue_job,
-        retrieve_workflow_run_handle, set_job_schedule_active, set_job_schedule_active_tx,
-        set_job_schedule_next_fire_at, set_job_schedule_next_fire_at_tx,
-        sync_catalog_job_schedules_tx, update_job_definition,
+        list_workflow_runs_with_scope, list_workflow_step_dependencies,
+        list_workflow_step_dependencies_page, list_workflow_step_dependencies_page_with_scope,
+        list_workflow_step_dependencies_with_scope, list_workflow_steps, list_workflow_steps_page,
+        list_workflow_steps_page_with_scope, list_workflow_steps_with_scope,
+        mark_job_running_for_lease, prepare_schedule_exact_sync_critical_section_tx,
+        promote_job_enqueue_intents_for_types, reap_expired_leases_with_diagnostics,
+        record_job_enqueue_intent, record_job_enqueue_intent_tx, recover_workflow_run,
+        recover_workflow_run_tx, retrieve_workflow_run_handle, set_job_schedule_active,
+        set_job_schedule_active_tx, set_job_schedule_next_fire_at,
+        set_job_schedule_next_fire_at_tx, sync_catalog_job_schedules_tx, update_job_definition,
         update_job_ordinary_progress_for_lease, update_job_payload_uuid_array_field,
         update_job_progress_for_lease, update_workflow_step_and_pending_job_payload_tx,
         upsert_job_definition_tx, upsert_job_runtime_config, upsert_job_runtime_config_tx,
@@ -426,8 +435,9 @@ pub mod prelude {
     };
     pub use crate::{
         DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, QueryError, QueryErrorCategory,
-        QueryErrorKind, SchemaCompatibilityError,
-        ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
+        QueryErrorKind, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
+        WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
+        migrate_after_idempotency_cutover,
     };
 }
 

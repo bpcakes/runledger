@@ -4,8 +4,8 @@ use std::future::Future;
 use runledger_core::jobs::WorkflowRunStatus;
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    JobContinuationMetricsRecord, JobMetricsRecord, WorkflowRunCountFilter, count_workflow_runs,
-    get_job_continuation_metrics, get_job_metrics,
+    JobContinuationMetricsRecord, JobMetricsRecord, WorkflowRunReadCountFilter,
+    count_workflow_runs_with_scope, get_job_continuation_metrics, get_job_metrics,
 };
 
 use crate::scope::Scope;
@@ -81,13 +81,14 @@ impl DashboardData {
 }
 
 pub async fn fetch(pool: &DbPool, scope: Scope) -> runledger_postgres::Result<DashboardData> {
-    let failed_workflow_filter = WorkflowRunCountFilter {
-        organization_id: scope.organization_id,
+    let workflow_read_scope = scope.workflow_read_scope();
+    let failed_workflow_filter = WorkflowRunReadCountFilter {
+        scope: workflow_read_scope,
         status: Some(WorkflowRunStatus::CompletedWithErrors),
         workflow_type: None,
     };
-    let external_wait_filter = WorkflowRunCountFilter {
-        organization_id: scope.organization_id,
+    let external_wait_filter = WorkflowRunReadCountFilter {
+        scope: workflow_read_scope,
         status: Some(WorkflowRunStatus::WaitingForExternal),
         workflow_type: None,
     };
@@ -96,8 +97,8 @@ pub async fn fetch(pool: &DbPool, scope: Scope) -> runledger_postgres::Result<Da
         try_join_dashboard_queries(
             get_job_metrics(pool, scope.organization_id, None),
             get_job_continuation_metrics(pool, scope.organization_id, None),
-            count_workflow_runs(pool, &failed_workflow_filter),
-            count_workflow_runs(pool, &external_wait_filter),
+            count_workflow_runs_with_scope(pool, &failed_workflow_filter),
+            count_workflow_runs_with_scope(pool, &external_wait_filter),
         )
         .await?;
 

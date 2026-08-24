@@ -52,9 +52,7 @@ pub struct Supervisor {
 pub struct SupervisorBuilder<'a> {
     pool: &'a runledger_postgres::DbPool,
     runtime: Handle,
-    registry: Option<JobRegistry>,
-    registry_source: Option<RegistrySource>,
-    mixed_registry_sources: bool,
+    registry_selection: Option<RegistrySelection>,
     config: JobsConfig,
     observers: Vec<Arc<dyn JobLifecycleObserver>>,
     worker_enabled: bool,
@@ -70,10 +68,26 @@ pub struct SupervisorShutdown {
     handle: ShutdownHandle,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RegistrySource {
-    Registry,
-    Catalog,
+enum RegistrySelection {
+    Direct(JobRegistry),
+    Catalog(JobRegistry),
+    Mixed,
+}
+
+impl RegistrySelection {
+    fn direct(current: Option<Self>, registry: JobRegistry) -> Self {
+        match current {
+            None | Some(Self::Direct(_)) => Self::Direct(registry),
+            Some(Self::Catalog(_)) | Some(Self::Mixed) => Self::Mixed,
+        }
+    }
+
+    fn catalog(current: Option<Self>, registry: JobRegistry) -> Self {
+        match current {
+            None | Some(Self::Catalog(_)) => Self::Catalog(registry),
+            Some(Self::Direct(_)) | Some(Self::Mixed) => Self::Mixed,
+        }
+    }
 }
 
 impl Supervisor {
@@ -108,9 +122,7 @@ impl Supervisor {
         Ok(SupervisorBuilder {
             pool,
             runtime,
-            registry: None,
-            registry_source: None,
-            mixed_registry_sources: false,
+            registry_selection: None,
             config,
             observers: Vec::new(),
             worker_enabled: true,
@@ -244,9 +256,8 @@ impl<'a> SupervisorBuilder<'a> {
     /// supervisors can be built without one.
     #[must_use = "builder methods return an updated builder value"]
     pub fn with_registry(mut self, registry: JobRegistry) -> Self {
-        self.mixed_registry_sources |= self.registry_source == Some(RegistrySource::Catalog);
-        self.registry_source = Some(RegistrySource::Registry);
-        self.registry = Some(registry);
+        self.registry_selection =
+            Some(RegistrySelection::direct(self.registry_selection, registry));
         self
     }
 
@@ -264,9 +275,10 @@ impl<'a> SupervisorBuilder<'a> {
     /// by [`Self::build`]. Choose one registration source per builder.
     #[must_use = "builder methods return an updated builder value"]
     pub fn with_catalog(mut self, catalog: impl Borrow<JobCatalog>) -> Self {
-        self.mixed_registry_sources |= self.registry_source == Some(RegistrySource::Registry);
-        self.registry_source = Some(RegistrySource::Catalog);
-        self.registry = Some(catalog.borrow().to_registry());
+        self.registry_selection = Some(RegistrySelection::catalog(
+            self.registry_selection,
+            catalog.borrow().to_registry(),
+        ));
         self
     }
 
@@ -337,9 +349,7 @@ impl<'a> SupervisorBuilder<'a> {
         let Self {
             pool,
             runtime,
-            registry,
-            registry_source: _,
-            mixed_registry_sources,
+            registry_selection,
             config,
             observers,
             worker_enabled,
@@ -360,12 +370,11 @@ impl<'a> SupervisorBuilder<'a> {
                 .map_err(|source| RuntimeError::InvalidJobsConfig { source })?;
         }
 
-        if mixed_registry_sources {
-            return Err(RuntimeError::MixedRegistrySources);
-        }
-
-        let registry = match registry {
-            Some(registry) => registry,
+        let registry = match registry_selection {
+            Some(RegistrySelection::Direct(registry) | RegistrySelection::Catalog(registry)) => {
+                registry
+            }
+            Some(RegistrySelection::Mixed) => return Err(RuntimeError::MixedRegistrySources),
             None if worker_enabled || reaper_enabled => {
                 return Err(RuntimeError::MissingRegistry {
                     worker_enabled,
@@ -464,12 +473,32 @@ impl SupervisorShutdown {
 mod tests {
     use std::time::Duration;
 
+    use async_trait::async_trait;
+    use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobHandler, JobType};
+    use serde_json::Value;
     use sqlx::postgres::PgPoolOptions;
     use tokio::time::timeout;
 
     use super::*;
 
     const UNUSED_LAZY_POOL_URL: &str = "postgres://postgres:postgres@127.0.0.1:65535/runledger";
+
+    struct RegistrySelectionHandler(&'static str);
+
+    #[async_trait]
+    impl JobHandler for RegistrySelectionHandler {
+        fn job_type(&self) -> JobType<'static> {
+            JobType::new(self.0)
+        }
+
+        async fn execute(
+            &self,
+            _context: JobContext,
+            _payload: Value,
+        ) -> std::result::Result<JobCompletion, JobFailure> {
+            Ok(JobCompletion::success())
+        }
+    }
 
     fn lazy_pool() -> runledger_postgres::DbPool {
         PgPoolOptions::new()
@@ -494,6 +523,16 @@ mod tests {
 
     fn empty_builder(pool: &runledger_postgres::DbPool) -> SupervisorBuilder<'_> {
         Supervisor::builder(pool, test_config()).expect("supervisor builder has runtime")
+    }
+
+    fn registry_with(job_type: &'static str) -> JobRegistry {
+        let mut registry = JobRegistry::new();
+        registry.register(RegistrySelectionHandler(job_type));
+        registry
+    }
+
+    fn catalog_with(job_type: &'static str) -> JobCatalog {
+        JobCatalog::new().handler(RegistrySelectionHandler(job_type))
     }
 
     fn missing_registry_flags(builder: SupervisorBuilder<'_>) -> (bool, bool) {
@@ -525,9 +564,7 @@ mod tests {
         assert_eq!(builder.intent_promoter_config, None);
         assert!(builder.scheduler_enabled);
         assert!(builder.reaper_enabled);
-        assert!(builder.registry.is_none());
-        assert_eq!(builder.registry_source, None);
-        assert!(!builder.mixed_registry_sources);
+        assert!(builder.registry_selection.is_none());
     }
 
     #[tokio::test]
@@ -543,9 +580,116 @@ mod tests {
         let pool = lazy_pool();
         let builder = empty_builder(&pool).with_registry(JobRegistry::new());
 
-        assert!(builder.registry.is_some());
-        assert_eq!(builder.registry_source, Some(RegistrySource::Registry));
-        assert!(!builder.mixed_registry_sources);
+        assert!(matches!(
+            builder.registry_selection,
+            Some(RegistrySelection::Direct(_))
+        ));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SelectionState {
+        Unset,
+        Direct,
+        Catalog,
+        Mixed,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SelectionInput {
+        Direct,
+        Catalog,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ExpectedSelection {
+        Direct,
+        Catalog,
+        Mixed,
+    }
+
+    #[tokio::test]
+    async fn registry_selection_transition_table_is_complete() {
+        let pool = lazy_pool();
+        let cases = [
+            (
+                SelectionState::Unset,
+                SelectionInput::Direct,
+                ExpectedSelection::Direct,
+            ),
+            (
+                SelectionState::Unset,
+                SelectionInput::Catalog,
+                ExpectedSelection::Catalog,
+            ),
+            (
+                SelectionState::Direct,
+                SelectionInput::Direct,
+                ExpectedSelection::Direct,
+            ),
+            (
+                SelectionState::Direct,
+                SelectionInput::Catalog,
+                ExpectedSelection::Mixed,
+            ),
+            (
+                SelectionState::Catalog,
+                SelectionInput::Direct,
+                ExpectedSelection::Mixed,
+            ),
+            (
+                SelectionState::Catalog,
+                SelectionInput::Catalog,
+                ExpectedSelection::Catalog,
+            ),
+            (
+                SelectionState::Mixed,
+                SelectionInput::Direct,
+                ExpectedSelection::Mixed,
+            ),
+            (
+                SelectionState::Mixed,
+                SelectionInput::Catalog,
+                ExpectedSelection::Mixed,
+            ),
+        ];
+
+        for (state, input, expected) in cases {
+            let builder = match state {
+                SelectionState::Unset => empty_builder(&pool),
+                SelectionState::Direct => {
+                    empty_builder(&pool).with_registry(registry_with("jobs.selection.previous"))
+                }
+                SelectionState::Catalog => {
+                    empty_builder(&pool).with_catalog(catalog_with("jobs.selection.previous"))
+                }
+                SelectionState::Mixed => empty_builder(&pool)
+                    .with_registry(registry_with("jobs.selection.previous"))
+                    .with_catalog(catalog_with("jobs.selection.mixed")),
+            };
+            let builder = match input {
+                SelectionInput::Direct => {
+                    builder.with_registry(registry_with("jobs.selection.current"))
+                }
+                SelectionInput::Catalog => {
+                    builder.with_catalog(catalog_with("jobs.selection.current"))
+                }
+            };
+
+            match (&builder.registry_selection, expected) {
+                (Some(RegistrySelection::Direct(registry)), ExpectedSelection::Direct)
+                | (Some(RegistrySelection::Catalog(registry)), ExpectedSelection::Catalog) => {
+                    assert_eq!(
+                        registry.registered_types(),
+                        vec![JobType::new("jobs.selection.current")],
+                        "same-source selection should use the latest value for {state:?} + {input:?}"
+                    );
+                }
+                (Some(RegistrySelection::Mixed), ExpectedSelection::Mixed) => {}
+                _ => panic!(
+                    "unexpected registry selection for transition {state:?} + {input:?}: expected {expected:?}"
+                ),
+            }
+        }
     }
 
     #[tokio::test]
@@ -577,6 +721,38 @@ mod tests {
         assert!(matches!(
             catalog_then_registry,
             RuntimeError::MixedRegistrySources
+        ));
+    }
+
+    #[tokio::test]
+    async fn builder_validates_config_before_rejecting_mixed_registry_sources() {
+        let pool = lazy_pool();
+        let mut invalid_jobs_config = test_config();
+        invalid_jobs_config.claim_batch_size = 0;
+        let invalid_jobs = Supervisor::builder(&pool, invalid_jobs_config)
+            .expect("supervisor builder has runtime")
+            .with_registry(JobRegistry::new())
+            .with_catalog(JobCatalog::new())
+            .build();
+        assert!(matches!(
+            invalid_jobs,
+            Err(RuntimeError::InvalidJobsConfig {
+                source: crate::config::JobsConfigValidationError::InvalidClaimBatchSize {
+                    actual: 0
+                }
+            })
+        ));
+
+        let invalid_promoter = empty_builder(&pool)
+            .with_registry(JobRegistry::new())
+            .with_catalog(JobCatalog::new())
+            .with_intent_promoter_config(IntentPromoterConfig::new(Duration::ZERO, 1))
+            .build();
+        assert!(matches!(
+            invalid_promoter,
+            Err(RuntimeError::InvalidJobsConfig {
+                source: crate::config::JobsConfigValidationError::ZeroPollInterval
+            })
         ));
     }
 

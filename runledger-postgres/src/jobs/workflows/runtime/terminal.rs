@@ -108,60 +108,55 @@ pub(crate) async fn process_workflow_step_terminal_by_job_id_tx(
         output,
     };
 
-    let linked_workflow_step_id: Option<Uuid> = sqlx::query_scalar!(
-        "SELECT workflow_step_id FROM job_queue WHERE id = $1 FOR UPDATE",
+    let workflow_managed = sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+                SELECT 1
+                FROM workflow_steps ws
+                WHERE ws.job_id = jq.id
+            ) AS "workflow_managed!"
+         FROM job_queue jq
+         WHERE jq.id = $1
+         FOR UPDATE OF jq"#,
         transition.job_id
     )
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| {
-        Error::from_query_sqlx_with_context(
-            "lookup workflow step linkage for job integrity check",
-            error,
-        )
+        Error::from_query_sqlx_with_context("lookup workflow step ownership by job id", error)
     })?
-    .flatten();
+    .unwrap_or(false);
 
-    if let Some(linked_workflow_step_id) = linked_workflow_step_id {
-        let mut read_committed_tx = ensure_read_committed_tx(
-            tx,
-            "workflow job terminal completion",
-            "workflow.terminal_completion_unsupported_isolation",
-            "Workflow job completion requires READ COMMITTED transaction isolation.",
-        )
-        .await?;
-
-        return process_linked_workflow_step_terminal_by_job_id_read_committed_tx(
-            &mut read_committed_tx,
-            &transition,
-            linked_workflow_step_id,
-        )
-        .await;
+    if !workflow_managed {
+        return Ok(());
     }
 
-    process_unlinked_workflow_step_terminal_by_job_id_tx(tx, &transition).await
+    let mut read_committed_tx = ensure_read_committed_tx(
+        tx,
+        "workflow job terminal completion",
+        "workflow.terminal_completion_unsupported_isolation",
+        "Workflow job completion requires READ COMMITTED transaction isolation.",
+    )
+    .await?;
+
+    process_linked_workflow_step_terminal_by_job_id_read_committed_tx(
+        &mut read_committed_tx,
+        &transition,
+    )
+    .await
 }
 
 async fn process_linked_workflow_step_terminal_by_job_id_read_committed_tx(
     tx: &mut ReadCommittedTx<'_, '_>,
     transition: &WorkflowStepTerminalTransition<'_, '_, '_, '_>,
-    linked_workflow_step_id: Uuid,
 ) -> Result<()> {
     let tx = tx.as_tx();
     let Some(step) = lock_workflow_step_for_terminal_transition_tx(tx, transition.job_id).await?
     else {
         return Err(workflow_internal_state_error(format!(
-            "workflow-managed job {} links to workflow step {linked_workflow_step_id} but workflow_steps.job_id has no matching row",
+            "workflow-managed job {} lost its workflow_steps.job_id relationship while locked",
             transition.job_id,
         )));
     };
-
-    if step.id != linked_workflow_step_id {
-        return Err(workflow_internal_state_error(format!(
-            "workflow step linkage mismatch for job {}: job_queue.workflow_step_id={linked_workflow_step_id}, workflow_steps.id={}",
-            transition.job_id, step.id,
-        )));
-    }
 
     if step.status.is_terminal() {
         return Ok(());
@@ -213,21 +208,6 @@ async fn process_linked_workflow_step_terminal_by_job_id_read_committed_tx(
     recompute_workflow_run_status_tx(tx, step.workflow_run_id).await?;
 
     Ok(())
-}
-
-async fn process_unlinked_workflow_step_terminal_by_job_id_tx(
-    tx: &mut DbTx<'_>,
-    transition: &WorkflowStepTerminalTransition<'_, '_, '_, '_>,
-) -> Result<()> {
-    let Some(step) = lock_workflow_step_for_terminal_transition_tx(tx, transition.job_id).await?
-    else {
-        return Ok(());
-    };
-
-    Err(workflow_internal_state_error(format!(
-        "workflow step linkage mismatch for job {}: job_queue.workflow_step_id is NULL, workflow_steps.id={}",
-        transition.job_id, step.id,
-    )))
 }
 
 async fn lock_workflow_step_for_terminal_transition_tx(

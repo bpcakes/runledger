@@ -1,6 +1,6 @@
 [package]
 name = "runledger-test-support"
-version = "0.10.1"
+version.workspace = true
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"

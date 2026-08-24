@@ -58,15 +58,6 @@ pub(super) fn invalid_job_state_error() -> Error {
     ))
 }
 
-pub(super) fn cancellation_not_quiesced_error(retry_after: chrono::DateTime<chrono::Utc>) -> Error {
-    Error::QueryError(QueryError::from_classified(
-        QueryErrorCategory::Conflict,
-        "job.cancellation_not_quiesced",
-        "Canceled job recovery must wait for the prior lease to expire.",
-        format!("canceled job lease remains active until {retry_after}"),
-    ))
-}
-
 pub(super) fn ensure_rejection_rollback_succeeded(
     rollback_result: std::result::Result<(), sqlx::Error>,
 ) -> Result<()> {

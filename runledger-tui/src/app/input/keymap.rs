@@ -3,16 +3,6 @@ use crossterm::event::{KeyCode, KeyEvent};
 use super::super::{ActiveInput, App, FilterTarget, JobDetailPane, Screen, TopScreen};
 
 impl App {
-    pub fn update_payload_visible_rows(&mut self, visible_rows: usize) {
-        self.payload_visible_rows = visible_rows.max(1);
-        if matches!(
-            (&self.screen, self.job_detail_pane),
-            (Screen::JobDetail { .. }, JobDetailPane::Payload)
-        ) {
-            self.detail_scroll = self.detail_scroll.min(self.payload_scroll_max());
-        }
-    }
-
     /// Returns true when a data refresh should be scheduled.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if !matches!(self.active_input(), ActiveInput::None) {
@@ -63,7 +53,7 @@ impl App {
             }
             KeyCode::Char('t') => {
                 let target = if matches!(
-                    self.screen,
+                    self.current_frame.screen,
                     Screen::Workflows | Screen::WorkflowDetail { .. }
                 ) {
                     FilterTarget::Workflow
@@ -77,7 +67,7 @@ impl App {
                 };
                 self.active_input = ActiveInput::Filter { target, text };
             }
-            KeyCode::Char('w') if matches!(self.screen, Screen::Workflows) => {
+            KeyCode::Char('w') if matches!(self.current_frame.screen, Screen::Workflows) => {
                 self.active_input = ActiveInput::Filter {
                     target: FilterTarget::Workflow,
                     text: self.workflow_type_filter.clone().unwrap_or_default(),
@@ -92,10 +82,8 @@ impl App {
                 refresh = self.clear_context_filters();
             }
             KeyCode::Char('y') => self.copy_selected_identifier(),
-            KeyCode::Char('f') if matches!(self.screen, Screen::Queue) => {
-                self.queue_filter = self.queue_filter.next();
-                self.jobs = None;
-                refresh = true;
+            KeyCode::Char('f') if matches!(self.current_frame.screen, Screen::Queue) => {
+                refresh = self.transition_queue_status_filter(self.queue_filter.next());
             }
             KeyCode::Char('1') => {
                 self.navigate_top(TopScreen::Dashboard);
@@ -140,7 +128,10 @@ impl App {
             }
             KeyCode::Char('v')
                 if matches!(
-                    (&self.screen, self.job_detail_pane),
+                    (
+                        &self.current_frame.screen,
+                        self.current_frame.state.job_detail_pane
+                    ),
                     (Screen::JobDetail { .. }, JobDetailPane::Payload)
                 ) =>
             {
@@ -153,12 +144,15 @@ impl App {
             }
             KeyCode::Char('R')
                 if matches!(
-                    (&self.screen, self.job_detail_pane),
+                    (
+                        &self.current_frame.screen,
+                        self.current_frame.state.job_detail_pane
+                    ),
                     (Screen::JobDetail { .. }, JobDetailPane::Payload)
                 ) =>
             {
                 self.payload_raw = !self.payload_raw;
-                self.detail_scroll = 0;
+                self.current_frame.state.job_detail_viewport.scroll = 0;
                 self.notice = Some(if self.payload_raw {
                     "Payload raw mode".to_owned()
                 } else {
@@ -166,23 +160,25 @@ impl App {
                 });
             }
             KeyCode::Char(']') | KeyCode::Right
-                if matches!(self.screen, Screen::JobDetail { .. }) =>
+                if matches!(self.current_frame.screen, Screen::JobDetail { .. }) =>
             {
-                self.job_detail_pane = self.job_detail_pane.next();
-                self.detail_scroll = 0;
-                self.list_selection = 0;
+                self.current_frame.state.job_detail_pane =
+                    self.current_frame.state.job_detail_pane.next();
+                self.current_frame.state.job_detail_viewport.scroll = 0;
+                self.current_frame.state.list_selection = 0;
             }
             KeyCode::Char('[') | KeyCode::Left
-                if matches!(self.screen, Screen::JobDetail { .. }) =>
+                if matches!(self.current_frame.screen, Screen::JobDetail { .. }) =>
             {
-                self.job_detail_pane = self.job_detail_pane.prev();
-                self.detail_scroll = 0;
-                self.list_selection = 0;
+                self.current_frame.state.job_detail_pane =
+                    self.current_frame.state.job_detail_pane.prev();
+                self.current_frame.state.job_detail_viewport.scroll = 0;
+                self.current_frame.state.list_selection = 0;
             }
             KeyCode::Char('l') | KeyCode::Enter => {
-                let before = self.screen.clone();
+                let before = self.current_frame.screen.clone();
                 self.activate_selection();
-                if self.screen != before {
+                if self.current_frame.screen != before {
                     refresh = true;
                 }
             }

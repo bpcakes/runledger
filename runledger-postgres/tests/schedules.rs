@@ -2,17 +2,17 @@ use chrono::{DateTime, Utc};
 use runledger_core::jobs::{JobType, JobTypeName, WorkflowDagBuilder};
 use runledger_postgres::jobs::{
     JobDefinitionCatalogSyncError, JobDefinitionCatalogSyncMode, JobDefinitionUpdate,
-    JobDefinitionUpsert, JobEnqueue, JobScheduleCatalogSyncEntry, JobScheduleUpsert,
-    claim_due_schedules_tx, deactivate_schedules_absent_from_names_tx, enqueue_job,
-    enqueue_workflow_run, get_job_definition_by_type, get_job_schedule_by_name,
+    JobDefinitionUpsert, JobEnqueue, JobScheduleCatalogSyncEntry, JobScheduleRecord,
+    JobScheduleUpsert, claim_due_schedules_tx, deactivate_schedules_absent_from_names_tx,
+    enqueue_job, enqueue_workflow_run, get_job_definition_by_type, get_job_schedule_by_name,
     mark_schedule_fired_tx, prepare_schedule_exact_sync_critical_section_tx,
     set_job_schedule_active, sync_catalog_job_definitions_exact_tx,
     sync_catalog_job_definitions_tx, sync_catalog_job_schedules_tx, update_job_definition,
     upsert_job_definition_tx, upsert_job_schedule, upsert_job_schedule_tx,
 };
-use runledger_postgres::{Error, QueryError, QueryErrorCategory};
+use runledger_postgres::{DbPool, DbTx, Error, QueryError, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::types::Uuid;
 use tokio::time::{Duration, timeout};
 
@@ -22,21 +22,144 @@ const DEFINITION_DISABLE_JOB: &str = "jobs.definition.disable_guard";
 const ENQUEUE_LOCK_JOB: &str = "jobs.definition.enqueue_lock";
 const WORKFLOW_LOCK_JOB: &str = "jobs.definition.workflow_lock";
 
+#[derive(Clone, Copy)]
+struct ActiveStatePolicyMatrixCase {
+    name: &'static str,
+    stored_is_active: bool,
+    requested_is_active: bool,
+    expected_preserved_is_active: bool,
+    expected_applied_is_active: bool,
+}
+
+const ACTIVE_STATE_POLICY_MATRIX: [ActiveStatePolicyMatrixCase; 4] = [
+    ActiveStatePolicyMatrixCase {
+        name: "schedule-policy-active-active",
+        stored_is_active: true,
+        requested_is_active: true,
+        expected_preserved_is_active: true,
+        expected_applied_is_active: true,
+    },
+    ActiveStatePolicyMatrixCase {
+        name: "schedule-policy-active-inactive",
+        stored_is_active: true,
+        requested_is_active: false,
+        expected_preserved_is_active: true,
+        expected_applied_is_active: false,
+    },
+    ActiveStatePolicyMatrixCase {
+        name: "schedule-policy-inactive-active",
+        stored_is_active: false,
+        requested_is_active: true,
+        expected_preserved_is_active: false,
+        expected_applied_is_active: true,
+    },
+    ActiveStatePolicyMatrixCase {
+        name: "schedule-policy-inactive-inactive",
+        stored_is_active: false,
+        requested_is_active: false,
+        expected_preserved_is_active: false,
+        expected_applied_is_active: false,
+    },
+];
+
+#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
+struct PersistedScheduleSqlState {
+    id: Uuid,
+    job_type: String,
+    organization_id: Option<Uuid>,
+    payload_template: Value,
+    cron_expr: String,
+    timezone: String,
+    is_active: bool,
+    max_jitter_seconds: i32,
+    next_fire_at: DateTime<Utc>,
+    last_fired_at: Option<DateTime<Utc>>,
+}
+
 fn fixed_utc(input: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(input)
         .expect("valid fixed timestamp")
         .with_timezone(&Utc)
 }
 
-async fn read_schedule_state(
-    pool: &runledger_postgres::DbPool,
-    name: &str,
-) -> (bool, DateTime<Utc>) {
+async fn read_schedule_state(pool: &DbPool, name: &str) -> (bool, DateTime<Utc>) {
     let schedule = get_job_schedule_by_name(pool, name)
         .await
         .expect("read schedule state")
         .expect("schedule exists");
     (schedule.is_active, schedule.next_fire_at)
+}
+
+async fn read_schedule_sql_state_tx(tx: &mut DbTx<'_>, name: &str) -> PersistedScheduleSqlState {
+    sqlx::query_as::<_, PersistedScheduleSqlState>(
+        "SELECT
+            id,
+            job_type,
+            organization_id,
+            payload_template,
+            cron_expr,
+            timezone,
+            is_active,
+            max_jitter_seconds,
+            next_fire_at,
+            last_fired_at
+         FROM job_schedules
+         WHERE name = $1",
+    )
+    .bind(name)
+    .fetch_one(&mut **tx)
+    .await
+    .expect("read persisted schedule SQL state")
+}
+
+async fn record_postgres_18_server_version(pool: &DbPool, diagnostic: &str) {
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "{diagnostic} PostgreSQL server_version={server_version}, \
+         server_version_num={server_version_num}"
+    );
+    assert_eq!(
+        server_version_num / 10_000,
+        18,
+        "{diagnostic} validation must run on PostgreSQL 18"
+    );
+}
+
+fn assert_schedule_result_parity_except_active(
+    preserved: &JobScheduleRecord,
+    applied: &JobScheduleRecord,
+) {
+    assert_eq!(preserved.id, applied.id);
+    assert_eq!(preserved.name, applied.name);
+    assert_eq!(preserved.job_type, applied.job_type);
+    assert_eq!(preserved.organization_id, applied.organization_id);
+    assert_eq!(preserved.payload_template, applied.payload_template);
+    assert_eq!(preserved.cron_expr, applied.cron_expr);
+    assert_eq!(preserved.max_jitter_seconds, applied.max_jitter_seconds);
+    assert_eq!(preserved.next_fire_at, applied.next_fire_at);
+}
+
+fn assert_schedule_sql_parity_except_active(
+    preserved: &PersistedScheduleSqlState,
+    applied: &PersistedScheduleSqlState,
+) {
+    assert_eq!(preserved.id, applied.id);
+    assert_eq!(preserved.job_type, applied.job_type);
+    assert_eq!(preserved.organization_id, applied.organization_id);
+    assert_eq!(preserved.payload_template, applied.payload_template);
+    assert_eq!(preserved.cron_expr, applied.cron_expr);
+    assert_eq!(preserved.timezone, applied.timezone);
+    assert_eq!(preserved.max_jitter_seconds, applied.max_jitter_seconds);
+    assert_eq!(preserved.next_fire_at, applied.next_fire_at);
+    assert_eq!(preserved.last_fired_at, applied.last_fired_at);
 }
 
 fn disabled_definition_upsert() -> JobDefinitionUpsert<'static> {
@@ -118,6 +241,86 @@ async fn exact_catalog_definition_sync_rejects_empty_catalog_and_scope() {
         definition.is_none(),
         "invalid exact sync should not write definitions"
     );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn definition_catalog_sync_reports_empty_partial_all_absent_and_additive_cases() {
+    const ALPHA: &str = "jobs.definition.absent_set.alpha";
+    const BETA: &str = "jobs.definition.absent_set.beta";
+    const GAMMA: &str = "jobs.definition.absent_set.gamma";
+    const OUTSIDE: &str = "jobs.definition.absent_set.outside";
+
+    let (pool, database) = setup_ephemeral_pool("postgres_definition_absent_set", 4).await;
+    record_postgres_18_server_version(&pool, "definition catalog absent-set regression").await;
+
+    let alpha = definition_upsert(ALPHA, true);
+    let beta = definition_upsert(BETA, true);
+    let gamma = definition_upsert(GAMMA, true);
+    let outside = definition_upsert(OUTSIDE, true);
+    let alpha_name = JobTypeName::new(ALPHA).expect("valid alpha job type");
+    let beta_name = JobTypeName::new(BETA).expect("valid beta job type");
+    let gamma_name = JobTypeName::new(GAMMA).expect("valid gamma job type");
+
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin definition catalog sync tx");
+    let additive_report = sync_catalog_job_definitions_tx(
+        &mut tx,
+        &[alpha.clone(), beta.clone(), gamma.clone()],
+        JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState,
+    )
+    .await
+    .expect("seed definitions additively");
+    assert!(additive_report.disabled_absent_job_types.is_empty());
+    assert!(additive_report.disabled_catalog_job_types.is_empty());
+
+    let empty_absent_report = sync_catalog_job_definitions_exact_tx(
+        &mut tx,
+        &[alpha.clone(), beta.clone(), gamma.clone()],
+        &[gamma_name.clone(), alpha_name.clone(), beta_name.clone()],
+    )
+    .await
+    .expect("exact sync with no absent definitions");
+    assert!(empty_absent_report.disabled_absent_job_types.is_empty());
+
+    let partial_absent_report = sync_catalog_job_definitions_exact_tx(
+        &mut tx,
+        &[alpha.clone(), gamma.clone()],
+        &[gamma_name.clone(), beta_name.clone(), alpha_name],
+    )
+    .await
+    .expect("exact sync with one absent definition");
+    assert_eq!(
+        partial_absent_report.disabled_absent_job_types,
+        vec![beta_name.clone()]
+    );
+
+    let restore_report = sync_catalog_job_definitions_tx(
+        &mut tx,
+        &[beta.clone()],
+        JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState,
+    )
+    .await
+    .expect("restore partial absent definition additively");
+    assert!(restore_report.disabled_absent_job_types.is_empty());
+
+    let all_absent_report = sync_catalog_job_definitions_exact_tx(
+        &mut tx,
+        &[outside],
+        &[gamma_name.clone(), beta_name.clone()],
+    )
+    .await
+    .expect("exact sync with every scoped definition absent");
+    assert_eq!(
+        all_absent_report.disabled_absent_job_types,
+        vec![beta_name, gamma_name]
+    );
+    tx.commit()
+        .await
+        .expect("commit definition catalog sync tx");
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -641,6 +844,122 @@ async fn schedule_upsert_returns_active_state_preserved_on_conflict() {
         paused_after_conflict.next_fire_at, second_next_fire_at,
         "same-cron upsert should not retime the schedule cursor"
     );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn schedule_active_state_policy_matrix_preserves_result_and_sql_parity() {
+    let (pool, database) = setup_ephemeral_pool("postgres_schedule_active_state_policy", 4).await;
+    record_postgres_18_server_version(&pool, "schedule active-state policy").await;
+
+    let mut definition_tx = pool.begin().await.expect("begin job definition tx");
+    upsert_job_definition_tx(&mut definition_tx, &definition_upsert(SCHEDULE_JOB, true))
+        .await
+        .expect("upsert job definition");
+    definition_tx
+        .commit()
+        .await
+        .expect("commit job definition tx");
+
+    let seed_payload = json!({ "source": "seed" });
+    let requested_payload = json!({ "source": "identical-policy-matrix" });
+    let organization_id = Some(Uuid::from_u128(0x6e06_4f73_304f_4fe4_8a09_0d15_2295_14f7));
+    let seed_next_fire_at = fixed_utc("2026-05-26T12:00:00Z");
+    let requested_next_fire_at = fixed_utc("2026-05-26T13:00:00Z");
+
+    for case in ACTIVE_STATE_POLICY_MATRIX {
+        let seed = JobScheduleUpsert {
+            name: case.name,
+            job_type: JobType::new(SCHEDULE_JOB),
+            organization_id,
+            payload_template: &seed_payload,
+            cron_expr: "0 0 * * * *",
+            is_active: case.stored_is_active,
+            next_fire_at: seed_next_fire_at,
+            max_jitter_seconds: 3,
+        };
+        let seeded = upsert_job_schedule(&pool, &seed)
+            .await
+            .expect("seed schedule state for active-state policy matrix");
+        assert_eq!(seeded.is_active, case.stored_is_active);
+
+        // Both policy routes receive structurally identical requests against the
+        // same persisted row. The ordinary path rolls back so catalog sync sees
+        // the exact original SQL state, including the schedule ID.
+        let ordinary_request = JobScheduleUpsert {
+            name: case.name,
+            job_type: JobType::new(SCHEDULE_JOB),
+            organization_id: None,
+            payload_template: &requested_payload,
+            cron_expr: "0 15 * * * *",
+            is_active: case.requested_is_active,
+            next_fire_at: requested_next_fire_at,
+            max_jitter_seconds: 17,
+        };
+        let mut ordinary_tx = pool.begin().await.expect("begin ordinary upsert tx");
+        let preserved_result = upsert_job_schedule_tx(&mut ordinary_tx, &ordinary_request)
+            .await
+            .expect("persist ordinary schedule upsert");
+        let preserved_sql = read_schedule_sql_state_tx(&mut ordinary_tx, case.name).await;
+        assert_eq!(
+            preserved_result.is_active, case.expected_preserved_is_active,
+            "ordinary upsert should preserve the stored active state for {}",
+            case.name
+        );
+        assert_eq!(
+            preserved_sql.is_active, case.expected_preserved_is_active,
+            "ordinary upsert SQL state should preserve the stored active state for {}",
+            case.name
+        );
+        ordinary_tx
+            .rollback()
+            .await
+            .expect("rollback ordinary upsert tx");
+
+        let catalog_request = JobScheduleUpsert {
+            name: case.name,
+            job_type: JobType::new(SCHEDULE_JOB),
+            organization_id: None,
+            payload_template: &requested_payload,
+            cron_expr: "0 15 * * * *",
+            is_active: case.requested_is_active,
+            next_fire_at: requested_next_fire_at,
+            max_jitter_seconds: 17,
+        };
+        let mut catalog_tx = pool.begin().await.expect("begin catalog sync tx");
+        let report = sync_catalog_job_schedules_tx(
+            &mut catalog_tx,
+            &[JobScheduleCatalogSyncEntry {
+                upsert: catalog_request,
+            }],
+        )
+        .await
+        .expect("persist catalog schedule upsert");
+        let applied_sql = read_schedule_sql_state_tx(&mut catalog_tx, case.name).await;
+        assert_eq!(report.synced_schedule_names, vec![case.name.to_owned()]);
+        assert_eq!(
+            applied_sql.is_active, case.expected_applied_is_active,
+            "catalog sync SQL state should apply the requested active state for {}",
+            case.name
+        );
+        catalog_tx
+            .commit()
+            .await
+            .expect("commit catalog schedule sync tx");
+
+        let applied_result = get_job_schedule_by_name(&pool, case.name)
+            .await
+            .expect("load catalog schedule result")
+            .expect("catalog schedule should exist");
+        assert_eq!(
+            applied_result.is_active, case.expected_applied_is_active,
+            "catalog sync result should apply the requested active state for {}",
+            case.name
+        );
+        assert_schedule_result_parity_except_active(&preserved_result, &applied_result);
+        assert_schedule_sql_parity_except_active(&preserved_sql, &applied_sql);
+    }
 
     teardown_ephemeral_pool(pool, database).await;
 }

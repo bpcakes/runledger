@@ -260,11 +260,10 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                     max_attempts,
                     timeout_seconds,
                     next_run_at,
-                    workflow_step_id,
                     stage,
                     execution_resource_key
                  )
-                 VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8, $9)
+                 VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8)
                  RETURNING id, run_number",
                 job.job_type.as_str(),
                 candidate.organization_id,
@@ -272,7 +271,6 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                 job.priority,
                 job.max_attempts,
                 job.timeout_seconds,
-                candidate.id,
                 job.stage.as_db_value(),
                 job.execution_resource_key,
             )

@@ -35,16 +35,23 @@ async fn process_claimed_job_observer_reports_success_after_commit() {
     let mut registry = JobRegistry::new();
     registry.register(LoopSuccessHandler { runs: runs.clone() });
     let observer = RecordingObserver::default();
+    let committed_status = Arc::new(Mutex::new(None));
+    let commit_checked = Arc::new(Notify::new());
+    let observers = JobLifecycleObservers::from_arc_observers(vec![
+        Arc::new(observer.clone()),
+        Arc::new(CommitCheckingSucceededObserver {
+            pool: pool.clone(),
+            committed_status: committed_status.clone(),
+            checked: commit_checked.clone(),
+        }),
+    ]);
 
-    process_claimed_job_with_observer(
-        pool.clone(),
-        Arc::new(registry),
-        claimed_job,
-        30,
-        observer.lifecycle_observers(),
-    )
-    .await;
+    process_claimed_job_with_observer(pool.clone(), Arc::new(registry), claimed_job, 30, observers)
+        .await;
     wait_for_observer_count(|| observer.succeeded().len(), 1, Duration::from_millis(500)).await;
+    timeout(Duration::from_millis(500), commit_checked.notified())
+        .await
+        .expect("success observer should verify committed state");
 
     let persisted = get_job_by_id(&pool, None, job_id)
         .await
@@ -57,6 +64,13 @@ async fn process_claimed_job_observer_reports_success_after_commit() {
     assert_eq!(succeeded.len(), 1);
     assert_eq!(succeeded[0].job.job_id, job_id);
     assert_eq!(succeeded[0].job.worker_id, "worker-observer-success");
+    assert_eq!(
+        *committed_status
+            .lock()
+            .expect("committed status lock should not be poisoned"),
+        Some(JobStatus::Succeeded),
+        "terminal observer must run only after success is durably committed"
+    );
     assert!(observer.failed().is_empty());
     assert!(observer.persist_failed().is_empty());
     assert!(observer.lease_lost().is_empty());

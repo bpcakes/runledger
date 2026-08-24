@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 
+use futures_util::FutureExt;
 use runledger_core::jobs::JobDeadLetterReason;
 use runledger_postgres::jobs::{ReapedLeaseDisposition, ReapedLeaseRecord};
-use tokio::task::{Id, JoinSet};
+use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
 use tracing::{Instrument, info, info_span, warn};
 
@@ -17,8 +19,7 @@ const REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 const REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub(super) struct ReapedObserverTasks {
-    in_flight: JoinSet<()>,
-    metadata: HashMap<Id, ReapedObserverMetadata>,
+    in_flight: JoinSet<ReapedObserverTaskResult>,
     max_in_flight: usize,
 }
 
@@ -35,7 +36,6 @@ impl ReapedObserverTasks {
     fn with_max_concurrency(max_in_flight: usize) -> Self {
         Self {
             in_flight: JoinSet::new(),
-            metadata: HashMap::new(),
             max_in_flight,
         }
     }
@@ -78,29 +78,24 @@ impl ReapedObserverTasks {
                 disposition: reaped_lease_disposition(&job.disposition),
             };
             let observers = observers.clone();
-            let abort_handle = self.in_flight.spawn(
+            self.in_flight.spawn(run_reaped_observer_task(
+                observer_metadata,
                 async move {
                     observers.job_lease_reaped(event).await;
                 }
                 .instrument(observer_span),
-            );
-            self.metadata.insert(abort_handle.id(), observer_metadata);
+            ));
         }
 
         self.drain_finished();
     }
 
     pub(super) fn drain_finished(&mut self) {
-        drain_completed_reaped_observer_notifications(&mut self.in_flight, &mut self.metadata);
-        clear_stale_reaped_observer_metadata_if_idle(
-            &self.in_flight,
-            &mut self.metadata,
-            "reaped lease observer metadata diverged from in-flight task set; clearing stale metadata",
-        );
+        drain_completed_reaped_observer_notifications(&mut self.in_flight);
     }
 
     pub(super) async fn abort_for_shutdown(&mut self) {
-        abort_reaped_observer_fanout(&mut self.in_flight, &mut self.metadata).await;
+        abort_reaped_observer_fanout(&mut self.in_flight).await;
     }
 
     #[cfg(test)]
@@ -163,25 +158,16 @@ fn reaped_lease_disposition(disposition: &ReapedLeaseDisposition) -> JobLeaseRea
 }
 
 fn drain_completed_reaped_observer_notifications(
-    in_flight: &mut JoinSet<()>,
-    metadata: &mut HashMap<Id, ReapedObserverMetadata>,
+    in_flight: &mut JoinSet<ReapedObserverTaskResult>,
 ) {
-    while let Some(result) = in_flight.try_join_next_with_id() {
-        handle_reaped_observer_join_result(result, metadata);
+    while let Some(result) = in_flight.try_join_next() {
+        handle_reaped_observer_join_result(result);
     }
 }
 
-async fn abort_reaped_observer_fanout(
-    in_flight: &mut JoinSet<()>,
-    metadata: &mut HashMap<Id, ReapedObserverMetadata>,
-) {
-    drain_completed_reaped_observer_notifications(in_flight, metadata);
+async fn abort_reaped_observer_fanout(in_flight: &mut JoinSet<ReapedObserverTaskResult>) {
+    drain_completed_reaped_observer_notifications(in_flight);
     if in_flight.is_empty() {
-        clear_stale_reaped_observer_metadata_if_idle(
-            in_flight,
-            metadata,
-            "reaped lease observer metadata diverged while shutdown fanout abort had no in-flight tasks",
-        );
         return;
     }
 
@@ -194,7 +180,7 @@ async fn abort_reaped_observer_fanout(
     in_flight.abort_all();
     let drain_result = timeout(
         REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT,
-        drain_aborted_reaped_observer_notifications(in_flight, metadata),
+        drain_aborted_reaped_observer_notifications(in_flight),
     )
     .await;
 
@@ -210,137 +196,94 @@ async fn abort_reaped_observer_fanout(
         Err(_) => {
             warn!(
                 remaining_in_flight_observers = in_flight.len(),
-                undrained_reaped_observer_metadata_entries = metadata.len(),
                 drain_timeout_ms = REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT.as_millis(),
                 "reaped lease observer abort drain timed out during shutdown; dropping unresolved observer tasks"
             );
         }
     }
-
-    if !metadata.is_empty() {
-        warn!(
-            stale_reaped_observer_metadata_entries = metadata.len(),
-            "reaped lease observer metadata remains after shutdown fanout abort; clearing stale metadata"
-        );
-        metadata.clear();
-    }
 }
 
 async fn drain_aborted_reaped_observer_notifications(
-    in_flight: &mut JoinSet<()>,
-    metadata: &mut HashMap<Id, ReapedObserverMetadata>,
+    in_flight: &mut JoinSet<ReapedObserverTaskResult>,
 ) -> usize {
     let mut cancelled_observer_count = 0;
 
-    while let Some(result) = in_flight.join_next_with_id().await {
+    while let Some(result) = in_flight.join_next().await {
         match result {
             Err(error) if error.is_cancelled() => {
-                let id = error.id();
-                if metadata.remove(&id).is_none() {
-                    warn!(
-                        "reaped lease observer cancellation observed during shutdown; metadata missing in reaper loop"
-                    );
-                }
                 cancelled_observer_count += 1;
             }
-            other => handle_reaped_observer_join_result(other, metadata),
+            other => handle_reaped_observer_join_result(other),
         }
     }
 
     cancelled_observer_count
 }
 
-fn handle_reaped_observer_join_result(
-    result: ReapedObserverJoinResult,
-    metadata: &mut HashMap<Id, ReapedObserverMetadata>,
-) {
+fn handle_reaped_observer_join_result(result: ReapedObserverJoinResult) {
     match result {
-        Ok((id, ())) => {
-            if metadata.remove(&id).is_none() {
-                warn!("reaped lease observer completed; metadata missing in reaper loop");
-            }
-        }
-        Err(error) if error.is_panic() => {
-            let id = error.id();
-            if let Some(meta) = metadata.remove(&id) {
-                warn!(
-                    job_id = meta.job_id,
-                    job_type = meta.job_type,
-                    organization_id = ?meta.organization_id,
-                    run_number = meta.run_number,
-                    attempt = meta.attempt,
-                    max_attempts = meta.max_attempts,
-                    worker_id = meta.worker_id,
-                    error = %error,
-                    "reaped lease observer task panicked after observer-level panic handling"
-                );
-            } else {
-                warn!(
-                    error = %error,
-                    "reaped lease observer task panicked after observer-level panic handling; metadata missing in reaper loop"
-                );
-            }
+        Ok(ReapedObserverTaskResult {
+            outcome: ReapedObserverTaskOutcome::Completed,
+            ..
+        }) => {}
+        Ok(ReapedObserverTaskResult {
+            metadata,
+            outcome: ReapedObserverTaskOutcome::Panicked(panic_message),
+        }) => {
+            warn!(
+                job_id = metadata.job_id,
+                job_type = metadata.job_type,
+                organization_id = ?metadata.organization_id,
+                run_number = metadata.run_number,
+                attempt = metadata.attempt,
+                max_attempts = metadata.max_attempts,
+                worker_id = metadata.worker_id,
+                panic = %panic_message,
+                "reaped lease observer task panicked after observer-level panic handling"
+            );
         }
         Err(error) if error.is_cancelled() => {
-            let id = error.id();
-            if let Some(meta) = metadata.remove(&id) {
-                warn!(
-                    job_id = meta.job_id,
-                    job_type = meta.job_type,
-                    organization_id = ?meta.organization_id,
-                    run_number = meta.run_number,
-                    attempt = meta.attempt,
-                    max_attempts = meta.max_attempts,
-                    worker_id = meta.worker_id,
-                    error = %error,
-                    "reaped lease observer task was cancelled outside shutdown abort handling"
-                );
-            } else {
-                warn!(
-                    error = %error,
-                    "reaped lease observer task was cancelled outside shutdown abort handling; metadata missing in reaper loop"
-                );
-            }
+            warn!(
+                error = %error,
+                "reaped lease observer task was cancelled outside shutdown abort handling"
+            );
         }
         Err(error) => {
-            let id = error.id();
-            if let Some(meta) = metadata.remove(&id) {
-                warn!(
-                    job_id = meta.job_id,
-                    job_type = meta.job_type,
-                    organization_id = ?meta.organization_id,
-                    run_number = meta.run_number,
-                    attempt = meta.attempt,
-                    max_attempts = meta.max_attempts,
-                    worker_id = meta.worker_id,
-                    error = %error,
-                    "reaped lease observer task join failed"
-                );
-            } else {
-                warn!(
-                    error = %error,
-                    "reaped lease observer task join failed; metadata missing in reaper loop"
-                );
-            }
+            warn!(error = %error, "reaped lease observer task join failed");
         }
     }
 }
 
-fn clear_stale_reaped_observer_metadata_if_idle(
-    in_flight: &JoinSet<()>,
-    metadata: &mut HashMap<Id, ReapedObserverMetadata>,
-    message: &'static str,
-) {
-    if in_flight.is_empty() && !metadata.is_empty() {
-        warn!(
-            stale_reaped_observer_metadata_entries = metadata.len(),
-            "{}", message
-        );
-        metadata.clear();
-    }
+async fn run_reaped_observer_task<F>(
+    metadata: ReapedObserverMetadata,
+    notification: F,
+) -> ReapedObserverTaskResult
+where
+    F: Future<Output = ()>,
+{
+    let outcome = match AssertUnwindSafe(notification).catch_unwind().await {
+        Ok(()) => ReapedObserverTaskOutcome::Completed,
+        Err(panic_payload) => {
+            ReapedObserverTaskOutcome::Panicked(panic_payload_message(&*panic_payload))
+        }
+    };
+
+    ReapedObserverTaskResult { metadata, outcome }
 }
 
-#[derive(Debug)]
+fn panic_payload_message(panic_payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = panic_payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+
+    if let Some(message) = panic_payload.downcast_ref::<&'static str>() {
+        return (*message).to_string();
+    }
+
+    "non-string panic payload".to_string()
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct ReapedObserverMetadata {
     job_id: String,
     job_type: String,
@@ -365,4 +308,60 @@ impl From<&ObservedJob> for ReapedObserverMetadata {
     }
 }
 
-type ReapedObserverJoinResult = std::result::Result<(Id, ()), tokio::task::JoinError>;
+#[derive(Debug, PartialEq, Eq)]
+struct ReapedObserverTaskResult {
+    metadata: ReapedObserverMetadata,
+    outcome: ReapedObserverTaskOutcome,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReapedObserverTaskOutcome {
+    Completed,
+    Panicked(String),
+}
+
+type ReapedObserverJoinResult =
+    std::result::Result<ReapedObserverTaskResult, tokio::task::JoinError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_metadata() -> ReapedObserverMetadata {
+        ReapedObserverMetadata {
+            job_id: "0198d600-f47d-7e70-b3ef-161cdd42cabc".to_owned(),
+            job_type: "jobs.test.reaper.observer".to_owned(),
+            organization_id: None,
+            run_number: 2,
+            attempt: 3,
+            max_attempts: 5,
+            worker_id: "worker-reaped-observer".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn observer_task_returns_metadata_on_success() {
+        let metadata = test_metadata();
+
+        let result = run_reaped_observer_task(metadata, async {}).await;
+
+        assert_eq!(result.metadata, test_metadata());
+        assert_eq!(result.outcome, ReapedObserverTaskOutcome::Completed);
+    }
+
+    #[tokio::test]
+    async fn observer_task_normalizes_panic_and_returns_metadata() {
+        let metadata = test_metadata();
+
+        let result = run_reaped_observer_task(metadata, async {
+            panic!("reaped observer task panic");
+        })
+        .await;
+
+        assert_eq!(result.metadata, test_metadata());
+        assert_eq!(
+            result.outcome,
+            ReapedObserverTaskOutcome::Panicked("reaped observer task panic".to_owned())
+        );
+    }
+}

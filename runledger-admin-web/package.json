@@ -1,6 +1,6 @@
 {
   "name": "@runledger/admin",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "Framework-neutral client and reusable React admin panel for Runledger",
   "license": "MIT",
   "type": "module",

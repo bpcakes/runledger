@@ -129,7 +129,6 @@ impl ClaimedJobExecution {
                     running_notification
                         .spawn_terminal_observer(
                             &self.terminal_observer_tasks,
-                            &self.job,
                             self.observers.clone(),
                             TerminalJobObserverEvent::LeaseLost(JobLeaseLostEvent {
                                 job: observed_job.clone(),

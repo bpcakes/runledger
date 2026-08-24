@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use runledger_postgres::jobs;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
@@ -398,6 +397,16 @@ pub(super) enum TerminalJobObserverEvent {
 }
 
 impl TerminalJobObserverEvent {
+    pub(super) fn job(&self) -> &ObservedJob {
+        match self {
+            Self::Continued(event) => &event.job,
+            Self::Succeeded(event) => &event.job,
+            Self::Failed(event) => &event.job,
+            Self::CompletionPersistFailed(event) => &event.job,
+            Self::LeaseLost(event) => &event.job,
+        }
+    }
+
     async fn notify(self, observers: &JobLifecycleObservers) {
         match self {
             Self::Continued(event) => observers.job_continued(event).await,
@@ -420,9 +429,9 @@ pub(super) struct JobObserverLogContext {
 }
 
 impl JobObserverLogContext {
-    pub(super) fn from_job(job: &jobs::JobQueueRecord) -> Self {
+    pub(super) fn from_observed_job(job: &ObservedJob) -> Self {
         Self {
-            job_id: job.id,
+            job_id: job.job_id,
             job_type: job.job_type.to_string(),
             run_number: job.run_number,
             attempt: job.attempt,
@@ -458,7 +467,6 @@ impl JobRunningNotification {
     pub(super) async fn spawn_terminal_observer(
         &mut self,
         terminal_observer_tasks: &TerminalObserverTasks,
-        job: &jobs::JobQueueRecord,
         observers: JobLifecycleObservers,
         event: TerminalJobObserverEvent,
     ) {
@@ -467,7 +475,7 @@ impl JobRunningNotification {
         }
 
         let span = tracing::Span::current();
-        let job_log_context = JobObserverLogContext::from_job(job);
+        let job_log_context = JobObserverLogContext::from_observed_job(event.job());
         if let Some(handle) = self.handle.take_if(|handle| handle.is_finished()) {
             RunningObserverHandle::new(handle, job_log_context.clone())
                 .drain()

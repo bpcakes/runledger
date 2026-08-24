@@ -613,6 +613,35 @@ mod tests {
     }
 
     #[test]
+    fn classifies_workflow_linkage_cutover_audit_constraints() {
+        for constraint in [
+            "os_workflow_job_linkage_expand_audit",
+            "os_workflow_job_linkage_expand_rollback_audit",
+            "os_workflow_job_linkage_contract_audit",
+        ] {
+            let spec = classify_database_error(
+                &ErrorKind::CheckViolation,
+                Some("23514"),
+                Some(constraint),
+            );
+            assert_eq!(spec.code, "workflow.linkage_cutover_audit_failed");
+        }
+    }
+
+    #[test]
+    fn classifies_workflow_linkage_compatibility_trigger_table_constraint() {
+        let spec = classify_database_error(
+            &ErrorKind::CheckViolation,
+            Some("23514"),
+            Some("os_workflow_job_linkage_compatibility_trigger_table"),
+        );
+        assert_eq!(
+            spec.code,
+            "workflow.linkage_compatibility_trigger_table_invalid"
+        );
+    }
+
+    #[test]
     fn classifies_external_gate_downgrade_blocked_constraint() {
         let spec = classify_database_error(
             &ErrorKind::CheckViolation,

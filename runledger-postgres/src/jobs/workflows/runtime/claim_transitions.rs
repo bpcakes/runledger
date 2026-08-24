@@ -114,11 +114,10 @@ struct WorkflowHandlerContinuationRow {
 pub(crate) async fn mark_workflow_step_enqueued_for_handler_continuation_tx(
     tx: &mut DbTx<'_>,
     job_id: Uuid,
-    workflow_step_id: Uuid,
 ) -> Result<()> {
     // Lifecycle continuation already owns job_queue(id), preserving the
     // repository-wide job-row-before-workflow-step lock order.
-    let row = sqlx::query_as::<_, WorkflowHandlerContinuationRow>(
+    let Some(row) = sqlx::query_as::<_, WorkflowHandlerContinuationRow>(
         "SELECT
             id,
             job_id,
@@ -126,31 +125,32 @@ pub(crate) async fn mark_workflow_step_enqueued_for_handler_continuation_tx(
             status::text AS status,
             allow_handler_continuation
          FROM workflow_steps
-         WHERE id = $1
+         WHERE job_id = $1
          /* runledger:lock_workflow_step_for_handler_continuation */
          FOR UPDATE",
     )
-    .bind(workflow_step_id)
+    .bind(job_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| {
         Error::from_query_sqlx_with_context("lock workflow step for handler continuation", error)
     })?
-    .ok_or_else(|| {
-        workflow_internal_state_error(format!(
-            "workflow-managed job {job_id} links to missing workflow step {workflow_step_id}"
-        ))
-    })?;
+    else {
+        // Direct jobs have no workflow step and retain ordinary continuation
+        // behavior. workflow_steps.job_id is the authoritative ownership
+        // lookup for both the expand window and the contracted schema.
+        return Ok(());
+    };
 
     let execution_kind = parse_workflow_step_execution_kind(row.execution_kind)?;
     let status = parse_workflow_step_status(row.status)?;
-    if row.id != workflow_step_id
-        || row.job_id != Some(job_id)
+    if row.job_id != Some(job_id)
         || execution_kind != WorkflowStepExecutionKind::Job
         || status != WorkflowStepStatus::Running
     {
         return Err(workflow_internal_state_error(format!(
-            "workflow handler continuation linkage/status mismatch: job_id={job_id}, workflow_step_id={workflow_step_id}, stored_job_id={:?}, execution_kind={}, status={}",
+            "workflow handler continuation linkage/status mismatch: job_id={job_id}, workflow_step_id={}, stored_job_id={:?}, execution_kind={}, status={}",
+            row.id,
             row.job_id,
             execution_kind.as_db_value(),
             status.as_db_value()
@@ -175,7 +175,7 @@ pub(crate) async fn mark_workflow_step_enqueued_for_handler_continuation_tx(
            AND status = 'RUNNING'
            AND allow_handler_continuation
          RETURNING id",
-        workflow_step_id,
+        row.id,
         job_id,
         HANDLER_CONTINUATION_REASON,
     )
@@ -188,9 +188,10 @@ pub(crate) async fn mark_workflow_step_enqueued_for_handler_continuation_tx(
         )
     })?;
 
-    if updated_step_id != Some(workflow_step_id) {
+    if updated_step_id != Some(row.id) {
         return Err(workflow_internal_state_error(format!(
-            "workflow handler continuation expected exactly one workflow step update for job_id={job_id}, workflow_step_id={workflow_step_id}"
+            "workflow handler continuation expected exactly one workflow step update for job_id={job_id}, workflow_step_id={}",
+            row.id,
         )));
     }
 

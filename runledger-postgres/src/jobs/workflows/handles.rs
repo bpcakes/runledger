@@ -14,16 +14,16 @@ use crate::{DbPool, Error, QueryError, QueryErrorCategory, Result};
 use super::super::row_decode::{
     parse_step_key_name, parse_workflow_run_status, parse_workflow_type_name,
 };
-use super::super::rows::WorkflowRunRow;
 use super::super::workflow_types::{
-    WorkflowRunDbRecord, WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunHandleScope,
+    WorkflowRunDbRecord, WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunReadScope,
     WorkflowRunResultRecord, WorkflowRunWaitOptions,
 };
 use super::enqueue::enqueue_workflow_run;
 use super::errors::workflow_active_key_api_required_error;
-use super::read::get_workflow_run_by_id;
+use super::read::get_workflow_run_by_id_with_scope;
 use super::runtime::WORKFLOW_RUN_TERMINAL_CHANNEL;
 
+#[derive(sqlx::FromRow)]
 struct WorkflowRunResultLookupRow {
     id: Uuid,
     workflow_type: String,
@@ -126,7 +126,7 @@ impl WaitDecision {
 
 struct WorkflowResultWaiter<'pool> {
     pool: &'pool DbPool,
-    scope: WorkflowRunHandleScope,
+    scope: WorkflowRunReadScope,
     workflow_run_id: Uuid,
     start: WaitStart,
     deadline: Option<Instant>,
@@ -164,7 +164,7 @@ impl WorkflowRunHandle {
 impl<'pool> WorkflowResultWaiter<'pool> {
     fn new(
         pool: &'pool DbPool,
-        scope: WorkflowRunHandleScope,
+        scope: WorkflowRunReadScope,
         workflow_run_id: Uuid,
         options: WorkflowRunWaitOptions,
     ) -> Self {
@@ -426,7 +426,7 @@ impl<'pool> WorkflowResultWaiter<'pool> {
 
 pub fn workflow_run_handle(
     pool: &DbPool,
-    scope: WorkflowRunHandleScope,
+    scope: WorkflowRunReadScope,
     workflow_run_id: Uuid,
 ) -> WorkflowRunHandle {
     WorkflowRunHandle {
@@ -438,7 +438,7 @@ pub fn workflow_run_handle(
 
 pub async fn retrieve_workflow_run_handle(
     pool: &DbPool,
-    scope: WorkflowRunHandleScope,
+    scope: WorkflowRunReadScope,
     workflow_run_id: Uuid,
 ) -> std::result::Result<WorkflowRunHandle, WorkflowRunHandleError> {
     let Some(_) = load_workflow_run_status(pool, scope, workflow_run_id).await? else {
@@ -458,8 +458,8 @@ pub async fn enqueue_workflow_run_handle(
     let workflow_run = enqueue_workflow_run(pool, payload).await?;
     let scope = workflow_run
         .organization_id
-        .map(WorkflowRunHandleScope::Organization)
-        .unwrap_or(WorkflowRunHandleScope::Global);
+        .map(WorkflowRunReadScope::Organization)
+        .unwrap_or(WorkflowRunReadScope::Global);
 
     Ok(workflow_run_handle(pool, scope, workflow_run.id))
 }
@@ -553,47 +553,22 @@ fn deadline_has_elapsed(deadline: Option<Instant>) -> bool {
 
 async fn load_workflow_run_status(
     pool: &DbPool,
-    scope: WorkflowRunHandleScope,
+    scope: WorkflowRunReadScope,
     workflow_run_id: Uuid,
 ) -> Result<Option<WorkflowRunStatus>> {
-    let status = match scope {
-        WorkflowRunHandleScope::Organization(organization_id) => {
-            sqlx::query_scalar!(
-                "SELECT status::text AS \"status!\"
-                 FROM workflow_runs
-                 WHERE id = $1
-                   AND organization_id = $2
-                 LIMIT 1",
-                workflow_run_id,
-                organization_id,
-            )
-            .fetch_optional(pool)
-            .await
-        }
-        WorkflowRunHandleScope::Global => {
-            sqlx::query_scalar!(
-                "SELECT status::text AS \"status!\"
-             FROM workflow_runs
-             WHERE id = $1
-               AND organization_id IS NULL
-             LIMIT 1",
-                workflow_run_id,
-            )
-            .fetch_optional(pool)
-            .await
-        }
-        WorkflowRunHandleScope::Admin => {
-            sqlx::query_scalar!(
-                "SELECT status::text AS \"status!\"
-             FROM workflow_runs
-             WHERE id = $1
-             LIMIT 1",
-                workflow_run_id,
-            )
-            .fetch_optional(pool)
-            .await
-        }
-    }
+    let (is_admin, organization_id) = scope.visibility_predicate();
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status::text
+         FROM workflow_runs
+         WHERE id = $1
+           AND ($2::bool OR organization_id IS NOT DISTINCT FROM $3::uuid)
+         LIMIT 1",
+    )
+    .bind(workflow_run_id)
+    .bind(is_admin)
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
     .map_err(|error| Error::from_query_sqlx_with_context("load workflow handle status", error))?;
 
     status.map(parse_workflow_run_status).transpose()
@@ -601,54 +576,15 @@ async fn load_workflow_run_status(
 
 async fn load_workflow_run_for_scope(
     pool: &DbPool,
-    scope: WorkflowRunHandleScope,
+    scope: WorkflowRunReadScope,
     workflow_run_id: Uuid,
 ) -> Result<Option<WorkflowRunDbRecord>> {
-    match scope {
-        WorkflowRunHandleScope::Organization(organization_id) => {
-            get_workflow_run_by_id(pool, Some(organization_id), workflow_run_id).await
-        }
-        WorkflowRunHandleScope::Global => {
-            load_global_workflow_run_by_id(pool, workflow_run_id).await
-        }
-        WorkflowRunHandleScope::Admin => get_workflow_run_by_id(pool, None, workflow_run_id).await,
-    }
-}
-
-async fn load_global_workflow_run_by_id(
-    pool: &DbPool,
-    workflow_run_id: Uuid,
-) -> Result<Option<WorkflowRunDbRecord>> {
-    let row = sqlx::query_as!(
-        WorkflowRunRow,
-        "SELECT
-            id,
-            workflow_type,
-            organization_id,
-            status::text AS \"status!\",
-            idempotency_key,
-            result_step_key,
-            metadata,
-            started_at,
-            finished_at,
-            created_at,
-            updated_at
-         FROM workflow_runs
-         WHERE id = $1
-           AND organization_id IS NULL
-         LIMIT 1",
-        workflow_run_id,
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("load global workflow run", error))?;
-
-    row.map(WorkflowRunRow::into_record).transpose()
+    get_workflow_run_by_id_with_scope(pool, scope, workflow_run_id).await
 }
 
 async fn load_workflow_run_result(
     pool: &DbPool,
-    scope: WorkflowRunHandleScope,
+    scope: WorkflowRunReadScope,
     workflow_run_id: Uuid,
 ) -> std::result::Result<WorkflowRunResultLookup, WorkflowRunHandleError> {
     let Some(row) = load_workflow_run_result_row(pool, scope, workflow_run_id).await? else {
@@ -693,71 +629,29 @@ async fn load_workflow_run_result(
 
 async fn load_workflow_run_result_row(
     pool: &DbPool,
-    scope: WorkflowRunHandleScope,
+    scope: WorkflowRunReadScope,
     workflow_run_id: Uuid,
 ) -> std::result::Result<Option<WorkflowRunResultLookupRow>, WorkflowRunHandleError> {
-    let row = match scope {
-        WorkflowRunHandleScope::Organization(organization_id) => {
-            sqlx::query_as!(
-                WorkflowRunResultLookupRow,
-                "SELECT
-                    id,
-                    workflow_type,
-                    organization_id,
-                    status::text AS \"status!\",
-                    result_step_key,
-                    result,
-                    finished_at
-                 FROM workflow_runs
-                 WHERE id = $1
-                   AND organization_id = $2
-                 LIMIT 1",
-                workflow_run_id,
-                organization_id,
-            )
-            .fetch_optional(pool)
-            .await
-        }
-        WorkflowRunHandleScope::Global => {
-            sqlx::query_as!(
-                WorkflowRunResultLookupRow,
-                "SELECT
-                id,
-                workflow_type,
-                organization_id,
-                status::text AS \"status!\",
-                result_step_key,
-                result,
-                finished_at
-             FROM workflow_runs
-             WHERE id = $1
-               AND organization_id IS NULL
-             LIMIT 1",
-                workflow_run_id,
-            )
-            .fetch_optional(pool)
-            .await
-        }
-        WorkflowRunHandleScope::Admin => {
-            sqlx::query_as!(
-                WorkflowRunResultLookupRow,
-                "SELECT
-                id,
-                workflow_type,
-                organization_id,
-                status::text AS \"status!\",
-                result_step_key,
-                result,
-                finished_at
-             FROM workflow_runs
-             WHERE id = $1
-             LIMIT 1",
-                workflow_run_id,
-            )
-            .fetch_optional(pool)
-            .await
-        }
-    }
+    let (is_admin, organization_id) = scope.visibility_predicate();
+    let row = sqlx::query_as::<_, WorkflowRunResultLookupRow>(
+        "SELECT
+            id,
+            workflow_type,
+            organization_id,
+            status::text AS status,
+            result_step_key,
+            result,
+            finished_at
+         FROM workflow_runs
+         WHERE id = $1
+           AND ($2::bool OR organization_id IS NOT DISTINCT FROM $3::uuid)
+         LIMIT 1",
+    )
+    .bind(workflow_run_id)
+    .bind(is_admin)
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
     .map_err(|error| {
         WorkflowRunHandleError::Storage(Error::from_query_sqlx_with_context(
             "load workflow result row",
@@ -770,7 +664,7 @@ async fn load_workflow_run_result_row(
 
 async fn load_workflow_run_result_before_deadline(
     pool: &DbPool,
-    scope: WorkflowRunHandleScope,
+    scope: WorkflowRunReadScope,
     workflow_run_id: Uuid,
     deadline: Option<Instant>,
 ) -> std::result::Result<WorkflowRunResultLookup, WorkflowRunHandleError> {

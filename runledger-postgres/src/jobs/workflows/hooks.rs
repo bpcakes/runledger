@@ -40,12 +40,8 @@ pub(crate) async fn on_retry_scheduled(
     .await
 }
 
-pub(crate) async fn on_handler_continuation(
-    tx: &mut DbTx<'_>,
-    job_id: Uuid,
-    workflow_step_id: Uuid,
-) -> Result<()> {
-    mark_workflow_step_enqueued_for_handler_continuation_tx(tx, job_id, workflow_step_id).await
+pub(crate) async fn on_handler_continuation(tx: &mut DbTx<'_>, job_id: Uuid) -> Result<()> {
+    mark_workflow_step_enqueued_for_handler_continuation_tx(tx, job_id).await
 }
 
 pub(crate) async fn on_terminal(

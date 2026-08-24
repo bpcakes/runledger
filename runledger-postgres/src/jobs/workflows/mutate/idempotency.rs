@@ -4,14 +4,14 @@ use sqlx::types::Uuid;
 use crate::{DbTx, Error, Result};
 
 use super::super::snapshot::{
-    StoredCanonicalAppendRequest, StoredCanonicalWorkflowStep, deserialize_stored_append_request,
+    CanonicalAppendRequest, CanonicalWorkflowStep, deserialize_stored_append_request,
 };
 
 pub(super) async fn stored_append_request_matches_tx(
     tx: &mut DbTx<'_>,
     existing_request: &JsonValue,
     workflow_organization_id: Option<Uuid>,
-    requested: &StoredCanonicalAppendRequest,
+    requested: &CanonicalAppendRequest,
 ) -> Result<bool> {
     let existing = deserialize_stored_append_request(existing_request, workflow_organization_id)?;
     if !existing
@@ -31,7 +31,7 @@ pub(super) async fn stored_append_request_matches_tx(
 fn stored_append_request_matches_for_test(
     existing_request: &JsonValue,
     workflow_organization_id: Option<Uuid>,
-    requested: &StoredCanonicalAppendRequest,
+    requested: &CanonicalAppendRequest,
 ) -> Result<bool> {
     let existing = deserialize_stored_append_request(existing_request, workflow_organization_id)?;
     Ok(
@@ -47,8 +47,8 @@ fn stored_append_request_matches_for_test(
 
 #[cfg(test)]
 fn stored_append_steps_match_for_test(
-    left: &[StoredCanonicalWorkflowStep],
-    right: &[StoredCanonicalWorkflowStep],
+    left: &[CanonicalWorkflowStep],
+    right: &[CanonicalWorkflowStep],
 ) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
@@ -58,8 +58,8 @@ fn stored_append_steps_match_for_test(
 
 async fn stored_append_steps_match_tx(
     tx: &mut DbTx<'_>,
-    left: &[StoredCanonicalWorkflowStep],
-    right: &[StoredCanonicalWorkflowStep],
+    left: &[CanonicalWorkflowStep],
+    right: &[CanonicalWorkflowStep],
 ) -> Result<bool> {
     if left.len() != right.len() {
         return Ok(false);
@@ -80,8 +80,8 @@ async fn stored_append_steps_match_tx(
 }
 
 fn stored_append_step_fields_match(
-    left: &StoredCanonicalWorkflowStep,
-    right: &StoredCanonicalWorkflowStep,
+    left: &CanonicalWorkflowStep,
+    right: &CanonicalWorkflowStep,
 ) -> bool {
     left.step_key == right.step_key
         && left.execution_kind == right.execution_kind
@@ -138,8 +138,9 @@ pub(super) async fn insert_workflow_mutation_row_tx(
     workflow_run_id: Uuid,
     mutation_key: &str,
     mutation_metadata: &JsonValue,
-    request: &JsonValue,
+    request: &CanonicalAppendRequest,
 ) -> Result<()> {
+    let request = request.to_json_value()?;
     sqlx::query!(
         "INSERT INTO workflow_run_mutations (
             workflow_run_id,
@@ -169,14 +170,13 @@ mod tests {
     use serde_json::json;
     use sqlx::types::Uuid;
 
-    use super::super::super::snapshot::{
-        canonical_append_request, deserialize_stored_append_request,
-    };
+    use super::super::super::snapshot::canonical_append_request;
     use super::stored_append_request_matches_for_test;
 
     #[test]
     fn canonical_append_request_matches_golden_snapshot() {
-        let workflow_organization_id = Some(Uuid::now_v7());
+        let organization_id = Uuid::now_v7();
+        let workflow_organization_id = Some(organization_id);
         let payload = json!({"kind": "golden"});
         let step = WorkflowStepEnqueueBuilder::new(
             StepKey::new("child"),
@@ -191,11 +191,12 @@ mod tests {
         .expect("build appended step");
 
         let canonical =
-            canonical_append_request(StepKey::new("gate"), workflow_organization_id, &[step])
-                .expect("canonicalize append request");
+            canonical_append_request(StepKey::new("gate"), workflow_organization_id, &[step]);
 
         assert_eq!(
-            canonical,
+            canonical
+                .to_json_value()
+                .expect("serialize canonical append request"),
             json!({
                 "append_window_step_key": "gate",
                 "steps": [
@@ -218,6 +219,12 @@ mod tests {
                     }
                 ]
             })
+        );
+        assert_eq!(
+            serde_json::to_string(&canonical).expect("serialize exact canonical append request"),
+            format!(
+                "{{\"append_window_step_key\":\"gate\",\"steps\":[{{\"step_key\":\"child\",\"execution_kind\":\"JOB\",\"job_type\":\"jobs.test.child\",\"organization_id\":\"{organization_id}\",\"payload\":{{\"kind\":\"golden\"}},\"priority\":5,\"max_attempts\":2,\"timeout_seconds\":60,\"stage\":\"queued\",\"dependencies\":[{{\"prerequisite_step_key\":\"gate\",\"release_mode\":\"ON_TERMINAL\"}}]}}]}}"
+            )
         );
     }
 
@@ -246,23 +253,21 @@ mod tests {
             StepKey::new("gate"),
             workflow_organization_id,
             &[alpha.clone(), beta.clone()],
-        )
-        .expect("build canonical append request");
+        );
         let reordered_request = canonical_append_request(
             StepKey::new("gate"),
             workflow_organization_id,
             &[beta, alpha],
-        )
-        .expect("build reordered append request");
-        let requested =
-            deserialize_stored_append_request(&reordered_request, workflow_organization_id)
-                .expect("deserialize reordered append request");
+        );
+        let existing_request = existing_request
+            .to_json_value()
+            .expect("serialize canonical append request");
 
         assert!(
             stored_append_request_matches_for_test(
                 &existing_request,
                 workflow_organization_id,
-                &requested,
+                &reordered_request,
             )
             .expect("compare reordered append request"),
             "same logical append batch should match after step reordering",
@@ -334,17 +339,13 @@ mod tests {
             StepKey::new("gate"),
             workflow_organization_id,
             &[beta, alpha],
-        )
-        .expect("build reordered append request");
-        let requested =
-            deserialize_stored_append_request(&reordered_request, workflow_organization_id)
-                .expect("deserialize reordered append request");
+        );
 
         assert!(
             stored_append_request_matches_for_test(
                 &legacy_request,
                 workflow_organization_id,
-                &requested
+                &reordered_request
             )
             .expect("compare legacy append request"),
             "legacy stored rows with unsorted steps should still match",
@@ -373,20 +374,18 @@ mod tests {
         .expect("build explicitly scoped step");
 
         let existing_request =
-            canonical_append_request(StepKey::new("gate"), workflow_organization_id, &[implicit])
-                .expect("build implicit canonical request");
+            canonical_append_request(StepKey::new("gate"), workflow_organization_id, &[implicit]);
         let explicit_request =
-            canonical_append_request(StepKey::new("gate"), workflow_organization_id, &[explicit])
-                .expect("build explicit canonical request");
-        let requested =
-            deserialize_stored_append_request(&explicit_request, workflow_organization_id)
-                .expect("deserialize explicit request");
+            canonical_append_request(StepKey::new("gate"), workflow_organization_id, &[explicit]);
+        let existing_request = existing_request
+            .to_json_value()
+            .expect("serialize implicit canonical request");
 
         assert!(
             stored_append_request_matches_for_test(
                 &existing_request,
                 workflow_organization_id,
-                &requested,
+                &explicit_request,
             )
             .expect("compare implicit and explicit requests"),
             "same effective workflow organization should compare equal",
@@ -413,14 +412,12 @@ mod tests {
         .expect("build step with default queued stage");
 
         let existing_request = canonical_append_request(StepKey::new("gate"), None, &[cleared])
-            .expect("build cleared-stage request");
-        let queued_request = canonical_append_request(StepKey::new("gate"), None, &[queued])
-            .expect("build queued-stage request");
-        let requested = deserialize_stored_append_request(&queued_request, None)
-            .expect("deserialize queued-stage request");
+            .to_json_value()
+            .expect("serialize cleared-stage request");
+        let queued_request = canonical_append_request(StepKey::new("gate"), None, &[queued]);
 
         assert!(
-            stored_append_request_matches_for_test(&existing_request, None, &requested)
+            stored_append_request_matches_for_test(&existing_request, None, &queued_request)
                 .expect("compare cleared and queued stage requests"),
             "cleared job stage should compare as the inserted queued default",
         );
@@ -442,7 +439,7 @@ mod tests {
             ]
         });
         assert!(
-            stored_append_request_matches_for_test(&legacy_cleared_request, None, &requested)
+            stored_append_request_matches_for_test(&legacy_cleared_request, None, &queued_request)
                 .expect("compare legacy cleared and queued stage requests"),
             "legacy null job stage should normalize to the inserted queued default",
         );
@@ -472,23 +469,21 @@ mod tests {
             StepKey::new("gate"),
             workflow_organization_id,
             &[first_step],
-        )
-        .expect("build first request");
+        );
         let changed_request = canonical_append_request(
             StepKey::new("gate"),
             workflow_organization_id,
             &[changed_step],
-        )
-        .expect("build changed request");
-        let requested =
-            deserialize_stored_append_request(&changed_request, workflow_organization_id)
-                .expect("deserialize changed request");
+        );
+        let existing_request = existing_request
+            .to_json_value()
+            .expect("serialize first request");
 
         assert!(
             !stored_append_request_matches_for_test(
                 &existing_request,
                 workflow_organization_id,
-                &requested,
+                &changed_request,
             )
             .expect("compare changed requests"),
             "changed step organization must not compare equal",
@@ -525,17 +520,13 @@ mod tests {
             )
             .try_build()
             .expect("build current step")],
-        )
-        .expect("build current request");
-        let requested =
-            deserialize_stored_append_request(&current_request, workflow_organization_id)
-                .expect("deserialize current request");
+        );
 
         assert!(
             stored_append_request_matches_for_test(
                 &legacy_request,
                 workflow_organization_id,
-                &requested
+                &current_request
             )
             .expect("compare legacy request without step scope"),
             "legacy rows without step scope should match the run organization by default",

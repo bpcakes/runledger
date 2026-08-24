@@ -4,9 +4,13 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+use runledger_core::jobs::{
+    JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowType,
+};
+use runledger_postgres::jobs::{enqueue_workflow_run, list_workflow_steps};
 use runledger_postgres::{
-    MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
-    migrate_after_idempotency_cutover,
+    MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerProblem,
+    ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
 };
 use runledger_test_support::{
     EphemeralDatabase, acquire_test_db_connection_budget, setup_unmigrated_ephemeral_pool,
@@ -14,6 +18,7 @@ use runledger_test_support::{
 };
 use serde_json::{Value, json};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
+use sqlx::types::Uuid;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
 const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
@@ -83,6 +88,8 @@ const WORKFLOW_STEPS_FOR_ORGANIZATION_QUERY: &str =
 const WORKFLOW_STEPS_GLOBAL_QUERY: &str =
     include_str!("../src/jobs/admin/queries/list_workflow_steps_global.sql");
 const CONTINUATION_METRICS_CTE_MIGRATION_VERSION: i64 = 202608230001;
+const WORKFLOW_STEP_JOB_LINK_EXPAND_MIGRATION_VERSION: i64 = 202608240001;
+const WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION: i64 = 202608240002;
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,
@@ -113,6 +120,9 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Refactors only the continuation metrics view query; its columns and
     // result semantics are unchanged.
     CONTINUATION_METRICS_CTE_MIGRATION_VERSION,
+    // Keeps the legacy reciprocal column as a trigger-maintained projection so
+    // old and new binaries can coexist before the fenced contract migration.
+    WORKFLOW_STEP_JOB_LINK_EXPAND_MIGRATION_VERSION,
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 
@@ -825,6 +835,599 @@ async fn migrate_rejects_a_valid_same_named_index_with_the_wrong_shape() {
     .await
     .expect("read preserved conflicting index");
     assert!(definition.contains("(job_type)"));
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
+    let harness = TestHarness::fresh("runledger_pg_workflow_job_link_rollout").await;
+    record_postgres_18_server_version(&harness.pool, "workflow job-link rollout").await;
+    apply_runledger_migrations_through(&harness.pool, CONTINUATION_METRICS_CTE_MIGRATION_VERSION)
+        .await;
+
+    sqlx::query(
+        "INSERT INTO job_definitions (
+            job_type,
+            version,
+            max_attempts,
+            default_timeout_seconds,
+            default_priority,
+            is_enabled
+         )
+         VALUES ('jobs.test.workflow_job_link', 1, 3, 30, 100, true)",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("insert workflow job-link definition");
+    let workflow_run_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO workflow_runs (workflow_type)
+         VALUES ('workflow.test.job_link_rollout')
+         RETURNING id",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("insert workflow job-link run");
+    let legacy_step_id = insert_job_workflow_step(&harness.pool, workflow_run_id, "legacy").await;
+
+    // The released writer populated both columns in one transaction because
+    // the baseline's deferred symmetry triggers rejected either one-sided
+    // shape at commit.
+    let mut legacy_tx = harness.pool.begin().await.expect("begin legacy writer tx");
+    let legacy_job_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO job_queue (
+            job_type,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            next_run_at,
+            workflow_step_id,
+            stage
+         )
+         VALUES (
+            'jobs.test.workflow_job_link',
+            '{}'::jsonb,
+            100,
+            3,
+            30,
+            now(),
+            $1,
+            'queued'
+         )
+         RETURNING id",
+    )
+    .bind(legacy_step_id)
+    .fetch_one(&mut *legacy_tx)
+    .await
+    .expect("legacy writer inserts reciprocal queue relationship");
+    sqlx::query("UPDATE workflow_steps SET job_id = $2 WHERE id = $1")
+        .bind(legacy_step_id)
+        .bind(legacy_job_id)
+        .execute(&mut *legacy_tx)
+        .await
+        .expect("legacy writer inserts authoritative step relationship");
+    legacy_tx.commit().await.expect("commit legacy writer tx");
+
+    // Simulate one-sided historical data from an externally disabled trigger;
+    // the expand migration must repair this before changing trigger semantics.
+    sqlx::query(
+        "ALTER TABLE workflow_steps
+         DISABLE TRIGGER trg_workflow_steps_job_linkage_symmetry",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("disable baseline symmetry trigger for backfill fixture");
+    sqlx::query("UPDATE workflow_steps SET job_id = NULL WHERE id = $1")
+        .bind(legacy_step_id)
+        .execute(&harness.pool)
+        .await
+        .expect("create one-sided legacy linkage");
+    sqlx::query(
+        "ALTER TABLE workflow_steps
+         ENABLE TRIGGER trg_workflow_steps_job_linkage_symmetry",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("restore baseline symmetry trigger");
+
+    apply_runledger_migration(
+        &harness.pool,
+        WORKFLOW_STEP_JOB_LINK_EXPAND_MIGRATION_VERSION,
+    )
+    .await;
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT job_id FROM workflow_steps WHERE id = $1",)
+            .bind(legacy_step_id)
+            .fetch_one(&harness.pool)
+            .await
+            .expect("read expand-backfilled step relationship"),
+        Some(legacy_job_id)
+    );
+
+    // The new writer stores only workflow_steps.job_id. The expand trigger
+    // projects it into the deprecated column for an old binary's readers.
+    let new_step_id = insert_job_workflow_step(&harness.pool, workflow_run_id, "new-writer").await;
+    let new_job_id = insert_direct_job(&harness.pool).await;
+    sqlx::query("UPDATE workflow_steps SET job_id = $2 WHERE id = $1")
+        .bind(new_step_id)
+        .bind(new_job_id)
+        .execute(&harness.pool)
+        .await
+        .expect("new writer stores only workflow_steps.job_id");
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT workflow_step_id FROM job_queue WHERE id = $1",
+        )
+        .bind(new_job_id)
+        .fetch_one(&harness.pool)
+        .await
+        .expect("old reader sees expand compatibility projection"),
+        Some(new_step_id)
+    );
+
+    // An old writer remains valid during the same expand window by completing
+    // its established queue-insert/step-update dual-write transaction.
+    let old_step_id = insert_job_workflow_step(&harness.pool, workflow_run_id, "old-writer").await;
+    let mut old_tx = harness.pool.begin().await.expect("begin old writer tx");
+    let old_job_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO job_queue (
+            job_type,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            next_run_at,
+            workflow_step_id,
+            stage
+         )
+         VALUES (
+            'jobs.test.workflow_job_link',
+            '{}'::jsonb,
+            100,
+            3,
+            30,
+            now(),
+            $1,
+            'queued'
+         )
+         RETURNING id",
+    )
+    .bind(old_step_id)
+    .fetch_one(&mut *old_tx)
+    .await
+    .expect("old writer inserts reciprocal projection in expand window");
+    sqlx::query("UPDATE workflow_steps SET job_id = $2 WHERE id = $1 AND job_id IS NULL")
+        .bind(old_step_id)
+        .bind(old_job_id)
+        .execute(&mut *old_tx)
+        .await
+        .expect("old writer stores its authoritative relationship in expand window");
+    old_tx
+        .commit()
+        .await
+        .expect("old dual writer commits in expand window");
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT job_id FROM workflow_steps WHERE id = $1",)
+            .bind(old_step_id)
+            .fetch_one(&harness.pool)
+            .await
+            .expect("new reader sees old writer through authoritative relationship"),
+        Some(old_job_id)
+    );
+    assert_eq!(workflow_job_link_anti_join_count(&harness.pool).await, 0);
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current guard accepts the validated expand-only rollout schema");
+
+    let current_payload = json!({"writer": "current-binary-expand"});
+    let current_metadata = json!({"migration": "workflow-job-link-expand"});
+    let current_step = WorkflowStepEnqueueBuilder::new(
+        StepKey::new("current-binary"),
+        JobType::new("jobs.test.workflow_job_link"),
+        &current_payload,
+    )
+    .try_build()
+    .expect("build current-binary expand workflow step");
+    let current_workflow = WorkflowRunEnqueueBuilder::new(
+        WorkflowType::new("workflow.test.current_binary_expand"),
+        &current_metadata,
+    )
+    .step(current_step)
+    .try_build()
+    .expect("build current-binary expand workflow");
+    let current_run = enqueue_workflow_run(&harness.pool, &current_workflow)
+        .await
+        .expect("current binary enqueues against expand-only schema");
+    let current_steps = list_workflow_steps(&harness.pool, None, current_run.id)
+        .await
+        .expect("current binary reads steps from expand-only schema");
+    let current_job_id = current_steps[0]
+        .job_id
+        .expect("current binary released expand-only workflow job");
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT workflow_step_id FROM job_queue WHERE id = $1",
+        )
+        .bind(current_job_id)
+        .fetch_one(&harness.pool)
+        .await
+        .expect("old reader sees current binary's projected relationship"),
+        Some(current_steps[0].id)
+    );
+
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove one expand compatibility trigger for guard regression");
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "an incomplete expand projection",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::Missing,
+    )
+    .await;
+
+    sqlx::raw_sql(
+        "CREATE SCHEMA workflow_job_link_shadow;
+         CREATE TABLE workflow_job_link_shadow.workflow_steps (
+            id uuid PRIMARY KEY,
+            job_id uuid
+         );
+         CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
+         AFTER INSERT OR UPDATE OF job_id
+         ON workflow_job_link_shadow.workflow_steps
+         FOR EACH ROW
+         EXECUTE FUNCTION public.project_workflow_step_job_linkage_compatibility();",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("create wrong-schema trigger lookalike");
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a wrong-schema trigger lookalike",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::Missing,
+    )
+    .await;
+    sqlx::query("DROP SCHEMA workflow_job_link_shadow CASCADE")
+        .execute(&harness.pool)
+        .await
+        .expect("remove wrong-schema trigger lookalike");
+
+    sqlx::query(
+        "CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
+         AFTER INSERT OR UPDATE OF job_id ON workflow_steps
+         FOR EACH ROW
+         EXECUTE FUNCTION enforce_workflow_job_linkage_symmetry()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("create wrong-function trigger lookalike");
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a trigger invoking the wrong function",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::WrongFunction,
+    )
+    .await;
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove wrong-function trigger lookalike");
+
+    sqlx::query(
+        "CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
+         AFTER INSERT OR UPDATE OF job_id ON workflow_steps
+         FOR EACH ROW
+         EXECUTE FUNCTION project_workflow_step_job_linkage_compatibility()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("restore expand compatibility trigger after guard regression");
+    sqlx::query(
+        "ALTER TABLE workflow_steps
+         DISABLE TRIGGER trg_workflow_steps_job_linkage_compatibility",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("disable expand compatibility trigger");
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a disabled trigger",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::NotEnabledForOriginWrites,
+    )
+    .await;
+    sqlx::query(
+        "ALTER TABLE workflow_steps
+         ENABLE REPLICA TRIGGER trg_workflow_steps_job_linkage_compatibility",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("make expand compatibility trigger replica-only");
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a replica-only trigger",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::NotEnabledForOriginWrites,
+    )
+    .await;
+    sqlx::query(
+        "ALTER TABLE workflow_steps
+         ENABLE TRIGGER trg_workflow_steps_job_linkage_compatibility",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("restore expand compatibility trigger to origin mode");
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current guard accepts all correctly defined and enabled expand triggers");
+
+    // Firing on a safe superset of UPDATE statements still protects every
+    // relationship-column mutation and should not be rejected as schema drift.
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove column-specific compatibility trigger");
+    sqlx::query(
+        "CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
+         AFTER INSERT OR UPDATE ON workflow_steps
+         FOR EACH ROW
+         EXECUTE FUNCTION project_workflow_step_job_linkage_compatibility()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("create safe all-updates compatibility trigger");
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current guard accepts a trigger firing on a safe update superset");
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove safe all-updates compatibility trigger");
+    sqlx::query(
+        "CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
+         AFTER INSERT OR UPDATE OF job_id ON workflow_steps
+         FOR EACH ROW
+         EXECUTE FUNCTION project_workflow_step_job_linkage_compatibility()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("restore column-specific compatibility trigger");
+
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_symmetry ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove deferred workflow-step symmetry trigger");
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER trg_workflow_steps_job_linkage_symmetry
+         AFTER INSERT OR UPDATE OF job_id ON workflow_steps
+         NOT DEFERRABLE
+         FOR EACH ROW
+         EXECUTE FUNCTION enforce_workflow_job_linkage_symmetry()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("create non-deferrable workflow-step symmetry trigger");
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a non-deferrable symmetry trigger",
+        "trg_workflow_steps_job_linkage_symmetry",
+        WorkflowJobLinkTriggerProblem::WrongConstraintMode,
+    )
+    .await;
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_symmetry ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove non-deferrable workflow-step symmetry trigger");
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER trg_workflow_steps_job_linkage_symmetry
+         AFTER INSERT OR UPDATE OF job_id ON workflow_steps
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW
+         EXECUTE FUNCTION enforce_workflow_job_linkage_symmetry()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("restore deferred workflow-step symmetry trigger");
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current guard accepts restored deferred symmetry semantics");
+
+    // Give PostgreSQL enough cardinality to compare actual indexed point plans
+    // instead of choosing tiny-table sequential scans.
+    sqlx::query(
+        "INSERT INTO workflow_steps (
+            workflow_run_id,
+            step_key,
+            job_type,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            stage
+         )
+         SELECT
+            $1,
+            'plan-step-' || ordinal::text,
+            'jobs.test.workflow_job_link',
+            '{}'::jsonb,
+            100,
+            3,
+            30,
+            'queued'
+         FROM generate_series(1, 2000) AS ordinal",
+    )
+    .bind(workflow_run_id)
+    .execute(&harness.pool)
+    .await
+    .expect("seed reverse-lookup plan cardinality");
+    sqlx::query(
+        "INSERT INTO job_queue (
+            job_type,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            next_run_at,
+            stage
+         )
+         SELECT
+            'jobs.test.workflow_job_link',
+            '{}'::jsonb,
+            100,
+            3,
+            30,
+            now(),
+            'queued'
+         FROM generate_series(1, 2000)",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("seed legacy-lookup plan cardinality");
+    sqlx::raw_sql("ANALYZE job_queue; ANALYZE workflow_steps;")
+        .execute(&harness.pool)
+        .await
+        .expect("analyze workflow job-link plan fixtures");
+
+    let reverse_plan = sqlx::query_scalar::<_, Value>(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+         SELECT id FROM workflow_steps WHERE job_id = $1",
+    )
+    .bind(new_job_id)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("explain authoritative reverse lookup");
+    let legacy_plan = sqlx::query_scalar::<_, Value>(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+         SELECT workflow_step_id FROM job_queue WHERE id = $1",
+    )
+    .bind(new_job_id)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("explain deprecated reciprocal lookup");
+    eprintln!(
+        "workflow job-link PostgreSQL 18 plan comparison reverse={reverse_plan} legacy={legacy_plan}"
+    );
+    assert!(
+        reverse_plan
+            .to_string()
+            .contains("uq_workflow_steps_job_id"),
+        "reverse lookup must use the retained unique job_id index: {reverse_plan}"
+    );
+    assert!(
+        legacy_plan.to_string().contains("job_queue_pkey"),
+        "legacy lookup comparison must use the queue primary key: {legacy_plan}"
+    );
+
+    apply_runledger_migration(
+        &harness.pool,
+        WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION,
+    )
+    .await;
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current guard accepts contracted workflow job-link schema");
+    assert!(!job_queue_workflow_step_id_exists(&harness.pool).await);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM runledger_migration_history
+                WHERE version = $1
+             )",
+        )
+        .bind(WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION)
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read workflow job-link contract compatibility fence"),
+        "contract migration must fence older binaries"
+    );
+
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn contracted_workflow_step_job_link_is_one_to_one_and_delete_safe() {
+    let harness = TestHarness::fresh("runledger_pg_workflow_job_link_contract").await;
+    record_postgres_18_server_version(&harness.pool, "workflow job-link contract").await;
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("apply contracted workflow job-link schema");
+
+    assert!(!job_queue_workflow_step_id_exists(&harness.pool).await);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT confdeltype::text
+             FROM pg_constraint
+             WHERE conname = 'fk_workflow_steps_job'
+               AND conrelid = 'workflow_steps'::regclass",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .expect("read authoritative relationship delete action"),
+        "n",
+        "workflow_steps.job_id must retain ON DELETE SET NULL"
+    );
+
+    sqlx::query(
+        "INSERT INTO job_definitions (
+            job_type,
+            version,
+            max_attempts,
+            default_timeout_seconds,
+            default_priority,
+            is_enabled
+         )
+         VALUES ('jobs.test.workflow_job_link', 1, 3, 30, 100, true)",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("insert contracted job-link definition");
+    let workflow_run_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO workflow_runs (workflow_type)
+         VALUES ('workflow.test.job_link_contract')
+         RETURNING id",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("insert contracted job-link run");
+    let first_step_id = insert_job_workflow_step(&harness.pool, workflow_run_id, "first").await;
+    let second_step_id = insert_job_workflow_step(&harness.pool, workflow_run_id, "second").await;
+    let job_id = insert_direct_job(&harness.pool).await;
+    sqlx::query("UPDATE workflow_steps SET job_id = $2 WHERE id = $1")
+        .bind(first_step_id)
+        .bind(job_id)
+        .execute(&harness.pool)
+        .await
+        .expect("link first workflow step to job");
+
+    let duplicate_error = sqlx::query("UPDATE workflow_steps SET job_id = $2 WHERE id = $1")
+        .bind(second_step_id)
+        .bind(job_id)
+        .execute(&harness.pool)
+        .await
+        .expect_err("one job must not link to two workflow steps");
+    assert_eq!(
+        duplicate_error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("uq_workflow_steps_job_id")
+    );
+
+    sqlx::query("DELETE FROM job_queue WHERE id = $1")
+        .bind(job_id)
+        .execute(&harness.pool)
+        .await
+        .expect("delete linked workflow job");
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT job_id FROM workflow_steps WHERE id = $1",)
+            .bind(first_step_id)
+            .fetch_one(&harness.pool)
+            .await
+            .expect("read step after linked job deletion"),
+        None
+    );
 
     harness.teardown().await;
 }
@@ -1079,7 +1682,7 @@ async fn raw_version_missing_strands_session_lock_until_pool_close_but_safe_path
         .expect("apply current migrations before raw compatibility check");
 
     let _migration_connection_budget = acquire_test_db_connection_budget(2).await;
-    let database_url = harness.database.url.clone();
+    let database_url = harness.database.url().to_owned();
     let raw_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -1189,7 +1792,7 @@ async fn safe_migrator_does_not_deadlock_concurrent_index_migrations_while_waiti
     .await;
 
     let _migration_connection_budget = acquire_test_db_connection_budget(2).await;
-    let database_url = harness.database.url.clone();
+    let database_url = harness.database.url().to_owned();
     let holder_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -2292,6 +2895,185 @@ async fn migration_history_contains(pool: &PgPool, migration_version: i64) -> bo
     .fetch_one(pool)
     .await
     .unwrap_or_else(|error| panic!("read migration history for {migration_version}: {error}"))
+}
+
+async fn apply_runledger_migration(pool: &PgPool, version: i64) {
+    let mut conn = pool.acquire().await.expect("acquire migration connection");
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| {
+            migration.migration_type.is_up_migration() && migration.version == version
+        })
+        .unwrap_or_else(|| panic!("Runledger migration {version} should exist"));
+
+    (*conn)
+        .apply(migration)
+        .await
+        .unwrap_or_else(|error| panic!("apply Runledger migration {version}: {error}"));
+}
+
+async fn record_postgres_18_server_version(pool: &PgPool, diagnostic: &str) {
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "{diagnostic} PostgreSQL server_version={server_version}, \
+         server_version_num={server_version_num}"
+    );
+    assert_eq!(
+        server_version_num / 10_000,
+        18,
+        "database-backed workflow job-link evidence requires PostgreSQL 18"
+    );
+}
+
+async fn insert_job_workflow_step(pool: &PgPool, workflow_run_id: Uuid, step_key: &str) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO workflow_steps (
+            workflow_run_id,
+            step_key,
+            job_type,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            stage
+         )
+         VALUES (
+            $1,
+            $2,
+            'jobs.test.workflow_job_link',
+            '{}'::jsonb,
+            100,
+            3,
+            30,
+            'queued'
+         )
+         RETURNING id",
+    )
+    .bind(workflow_run_id)
+    .bind(step_key)
+    .fetch_one(pool)
+    .await
+    .expect("insert job-backed workflow step")
+}
+
+async fn insert_direct_job(pool: &PgPool) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO job_queue (
+            job_type,
+            payload,
+            priority,
+            max_attempts,
+            timeout_seconds,
+            next_run_at,
+            stage
+         )
+         VALUES (
+            'jobs.test.workflow_job_link',
+            '{}'::jsonb,
+            100,
+            3,
+            30,
+            now(),
+            'queued'
+         )
+         RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("insert direct job")
+}
+
+async fn workflow_job_link_anti_join_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM (
+            SELECT jq.id
+            FROM job_queue jq
+            WHERE jq.workflow_step_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM workflow_steps ws
+                  WHERE ws.id = jq.workflow_step_id
+                    AND ws.job_id = jq.id
+              )
+
+            UNION ALL
+
+            SELECT ws.id
+            FROM workflow_steps ws
+            WHERE ws.job_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM job_queue jq
+                  WHERE jq.id = ws.job_id
+                    AND jq.workflow_step_id = ws.id
+              )
+         ) inconsistencies",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count reciprocal workflow job-link anti-joins")
+}
+
+async fn assert_workflow_job_link_expand_schema_rejected(
+    pool: &PgPool,
+    invalid_case: &str,
+    expected_trigger_name: &str,
+    expected_problem: WorkflowJobLinkTriggerProblem,
+) {
+    let error = ensure_schema_compatible_after_idempotency_cutover(pool)
+        .await
+        .expect_err("workflow job-link expand schema should be rejected");
+    let SchemaCompatibilityError::WorkflowJobLinkExpandTriggersInvalid {
+        trigger_diagnostics,
+        inconsistent_link_count,
+    } = &error
+    else {
+        panic!("unexpected schema compatibility result for {invalid_case}: {error}");
+    };
+    assert_eq!(*inconsistent_link_count, 0, "invalid case: {invalid_case}");
+    assert_eq!(
+        trigger_diagnostics.len(),
+        1,
+        "unexpected trigger diagnostics for {invalid_case}: {error}"
+    );
+    assert_eq!(
+        trigger_diagnostics[0].trigger_name(),
+        expected_trigger_name,
+        "invalid case: {invalid_case}"
+    );
+    assert_eq!(
+        trigger_diagnostics[0].problems(),
+        &[expected_problem],
+        "invalid case: {invalid_case}"
+    );
+    assert!(
+        error.to_string().contains(expected_trigger_name),
+        "diagnostic should identify the invalid trigger for {invalid_case}: {error}"
+    );
+}
+
+async fn job_queue_workflow_step_id_exists(pool: &PgPool) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'job_queue'
+              AND column_name = 'workflow_step_id'
+         )",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("inspect deprecated job_queue.workflow_step_id column")
 }
 
 async fn apply_enqueue_request_cutover_migration(pool: &PgPool) {

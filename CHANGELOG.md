@@ -4,6 +4,9 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-24
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.1...v0.11.0)
+
 ### Added
 
 - Add the host-authorized, read-only `runledger-admin` Axum API with a versioned
@@ -56,6 +59,67 @@ All notable changes to this workspace are documented here.
 - Deprecate stage-bearing `JobProgressUpdate` and
   `update_job_progress{,_for_lease}`. They remain source-compatible migration
   paths until downstream callers adopt the typed lifecycle APIs.
+
+### Changed
+
+- Make `workflow_steps.job_id` the sole stored workflow-step/job relationship.
+  The paired `202608240001_expand_workflow_step_job_link` and
+  `202608240002_contract_workflow_step_job_link` migrations support an
+  expand/drain/contract rollout while old 0.10 writers are retired.
+- Diagnose expand-window trigger drift per expected trigger through
+  `WorkflowJobLinkTriggerDiagnostic` and typed
+  `WorkflowJobLinkTriggerProblem` values. The compatibility guard validates
+  rollout safety while accepting triggers that fire on a safe superset of
+  update columns.
+- Use one authoritative filtered/unfiltered claim statement after PostgreSQL 18
+  custom-plan, generic-plan, cardinality, skew, and contention benchmarks
+  demonstrated plan and throughput parity.
+- Breaking: replace `CompleteExternalWorkflowStepInput.terminal_status` and
+  `.output` with `outcome: ExternalWorkflowStepTerminalOutcome`, which encodes
+  output only for successful completion.
+- Breaking: replace `JobEnqueueIntentOutcome.status` and `.promoted_job_id`
+  fields with a typed `state`; use `status()` and `promoted_job_id()` for the
+  previous flattened views.
+- Breaking: consolidate `JobEnqueueIntentRecord` lifecycle fields into a typed
+  `state`. Existing flattened field reads must use the lifecycle accessors,
+  including `promotion_error()` for structured error details.
+- Breaking: make `EphemeralDatabase` identity fields private; use `name()` and
+  `url()` when inspecting a test database.
+
+### Removed
+
+- Breaking: remove the deprecated in-place `requeue_job` API and its wildcard
+  nullable scope. Recover canceled or dead-lettered direct jobs through
+  `compare_and_requeue_job` or `compare_and_requeue_job_tx`; replay successful
+  direct jobs into a new lineage-linked job through
+  `compare_and_replay_succeeded_job` or its transaction form.
+
+### Upgrade notes
+
+- Before upgrading source to 0.11, migrate every `requeue_job` caller. Observe
+  and authorize the exact job scope; `organization_id: None` was an admin
+  wildcard and must not become `JobScope::Global`. For canceled or
+  dead-lettered jobs, derive `CompareAndRequeueJob` from the observed row,
+  choose an explicit progress/checkpoint policy, and handle every typed
+  no-mutation outcome. For `SUCCEEDED`, provide a stable replay request key and
+  use successful replay so the source row and output remain immutable.
+- Construct `CompleteExternalWorkflowStepInput` with
+  `ExternalWorkflowStepTerminalOutcome::Succeeded { output }`, `Failed`, or
+  `Canceled` instead of setting terminal status and output independently.
+- For `JobEnqueueIntentOutcome`, replace `.status` and `.promoted_job_id` field
+  reads with `status()` and `promoted_job_id()`.
+- For `JobEnqueueIntentRecord`, replace removed lifecycle field reads with
+  `status()`, `promoted_job_id()`, `promotion_attempts()`,
+  `last_attempted_at()`, `promoted_at()`, and `conflicted_at()`. Replace
+  `last_error_code` / `last_error_message` with `promotion_error()` and its
+  `code()` / `message()` methods.
+- Replace direct `EphemeralDatabase.name` and `.url` field access with
+  `name()` and `url()`.
+- Apply `202608240001_expand_workflow_step_job_link` first, deploy 0.11, and
+  drain all 0.10 writers and leases before applying
+  `202608240002_contract_workflow_step_job_link`. See the staged migration
+  procedure in the README; applying the contract migration is the rollback
+  boundary for 0.10 binaries.
 
 ## [0.10.1] - 2026-08-20
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)

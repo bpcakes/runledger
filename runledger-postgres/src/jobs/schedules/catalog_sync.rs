@@ -4,7 +4,7 @@ use super::super::schedule_definition_guard::{self, GuardLockContext};
 use super::super::types::{
     JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport, JobScheduleRecord, JobScheduleUpsert,
 };
-use super::row::{JobScheduleRow, job_schedule_from_row};
+use super::persistence::{ScheduleActiveStatePolicy, persist_job_schedule_tx};
 use super::validation::validate_job_schedule_upsert;
 
 /// Upserts catalog-owned schedules inside an existing transaction.
@@ -57,57 +57,13 @@ async fn upsert_catalog_job_schedule_tx(
         .await?;
     }
 
-    let row = sqlx::query_as::<_, JobScheduleRow>(
-        "INSERT INTO job_schedules (
-            name,
-            job_type,
-            organization_id,
-            payload_template,
-            cron_expr,
-            timezone,
-            is_active,
-            next_fire_at,
-            max_jitter_seconds
-         )
-         VALUES ($1, $2, $3, $4::jsonb, $5, 'UTC', $6, $7, $8)
-         ON CONFLICT (name)
-         DO UPDATE
-            SET job_type = EXCLUDED.job_type,
-                payload_template = EXCLUDED.payload_template,
-                next_fire_at = CASE
-                    WHEN job_schedules.cron_expr IS DISTINCT FROM EXCLUDED.cron_expr
-                    THEN EXCLUDED.next_fire_at
-                    ELSE job_schedules.next_fire_at
-                END,
-                cron_expr = EXCLUDED.cron_expr,
-                timezone = EXCLUDED.timezone,
-                is_active = EXCLUDED.is_active,
-                max_jitter_seconds = EXCLUDED.max_jitter_seconds,
-                updated_at = now()
-         RETURNING
-            id,
-            name,
-            job_type,
-            organization_id,
-            payload_template,
-            cron_expr,
-            is_active,
-            max_jitter_seconds,
-            next_fire_at",
+    persist_job_schedule_tx(
+        tx,
+        payload,
+        ScheduleActiveStatePolicy::ApplyRequested,
+        "sync catalog job schedule",
     )
-    .bind(payload.name)
-    .bind(payload.job_type.as_str())
-    .bind(payload.organization_id)
-    .bind(payload.payload_template)
-    .bind(payload.cron_expr)
-    .bind(payload.is_active)
-    .bind(payload.next_fire_at)
-    .bind(payload.max_jitter_seconds)
-    .fetch_one(&mut **tx)
     .await
-    .map_err(|error| Error::from_query_sqlx_with_context("sync catalog job schedule", error))?;
-
-    job_schedule_from_row(row)
 }
 
 /// Deactivates enabled schedules whose names are in `scope_names` but absent

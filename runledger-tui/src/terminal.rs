@@ -254,7 +254,7 @@ mod tests {
     fn rapid_filter_changes_coalesce_behind_the_in_flight_fetch() {
         let mut lifecycle = FetchLifecycle::new(Instant::now());
         let mut app = test_app();
-        app.screen = crate::app::Screen::Queue;
+        app.current_frame.screen = crate::app::Screen::Queue;
         let first = lifecycle.start_fetch().expect("initial fetch");
 
         for _ in 0..3 {

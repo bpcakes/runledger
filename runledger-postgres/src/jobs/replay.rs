@@ -61,7 +61,7 @@ pub enum CompareAndReplaySucceededJobOutcome {
 struct ReplayCandidateRow {
     #[sqlx(flatten)]
     job: JobQueueRow,
-    workflow_step_id: Option<Uuid>,
+    workflow_managed: bool,
     execution_resource_key: Option<String>,
 }
 
@@ -153,10 +153,9 @@ async fn load_or_classify_existing_replay_tx(
 
 fn replay_candidate_from_row(row: ReplayCandidateRow) -> Result<ReplayCandidate> {
     let job = row.job.into_record()?;
-    let workflow_managed = row.workflow_step_id.is_some();
     Ok(ReplayCandidate {
         job,
-        workflow_managed,
+        workflow_managed: row.workflow_managed,
         execution_resource_key: row.execution_resource_key,
     })
 }
@@ -170,14 +169,22 @@ async fn lock_eligible_replay_source_tx(
     let sql = format!(
         "SELECT
             {JOB_QUEUE_COLUMNS_SQL},
-            workflow_step_id,
+            EXISTS (
+                SELECT 1
+                FROM workflow_steps ws
+                WHERE ws.job_id = job_queue.id
+            ) AS workflow_managed,
             execution_resource_key
          FROM job_queue
          WHERE id = $1
            AND organization_id IS NOT DISTINCT FROM $2::uuid
            AND status = 'SUCCEEDED'
            AND run_number = $3::int4
-           AND workflow_step_id IS NULL
+           AND NOT EXISTS (
+                SELECT 1
+                FROM workflow_steps ws
+                WHERE ws.job_id = job_queue.id
+           )
          FOR NO KEY UPDATE"
     );
     let row = sqlx::query_as::<_, ReplayCandidateRow>(&sql)
@@ -202,7 +209,11 @@ async fn load_replay_source_for_classification_tx(
     let sql = format!(
         "SELECT
             {JOB_QUEUE_COLUMNS_SQL},
-            workflow_step_id,
+            EXISTS (
+                SELECT 1
+                FROM workflow_steps ws
+                WHERE ws.job_id = job_queue.id
+            ) AS workflow_managed,
             execution_resource_key
          FROM job_queue
          WHERE id = $1

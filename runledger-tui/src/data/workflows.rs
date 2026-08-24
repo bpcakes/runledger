@@ -1,9 +1,10 @@
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
-    WorkflowRunDbRecord, WorkflowRunListFilter, WorkflowStepDbRecord,
-    WorkflowStepDependencyDbRecord, count_workflow_step_dependencies, count_workflow_steps,
-    get_workflow_run_by_id, list_workflow_runs, list_workflow_step_dependencies_page,
-    list_workflow_steps_page,
+    WorkflowRunDbRecord, WorkflowRunReadListFilter, WorkflowStepDbRecord,
+    WorkflowStepDependencyDbRecord, count_workflow_step_dependencies_with_scope,
+    count_workflow_steps_with_scope, get_workflow_run_by_id_with_scope,
+    list_workflow_runs_with_scope, list_workflow_step_dependencies_page_with_scope,
+    list_workflow_steps_page_with_scope,
 };
 use uuid::Uuid;
 
@@ -40,14 +41,14 @@ pub async fn fetch_runs(
     workflow_type: Option<&str>,
     limit: i64,
 ) -> runledger_postgres::Result<WorkflowsData> {
-    let filter = WorkflowRunListFilter {
-        organization_id: scope.organization_id,
+    let filter = WorkflowRunReadListFilter {
+        scope: scope.workflow_read_scope(),
         status: None,
         workflow_type,
         limit,
         offset: 0,
     };
-    let runs = list_workflow_runs(pool, &filter).await?;
+    let runs = list_workflow_runs_with_scope(pool, &filter).await?;
     Ok(WorkflowsData { runs })
 }
 
@@ -57,21 +58,22 @@ pub async fn fetch_detail(
     run_id: Uuid,
     limit: i64,
 ) -> Result<WorkflowDetailData, String> {
-    let run = get_workflow_run_by_id(pool, scope.organization_id, run_id)
+    let read_scope = scope.workflow_read_scope();
+    let run = get_workflow_run_by_id_with_scope(pool, read_scope, run_id)
         .await
         .map_err(pg_error)?
         .ok_or_else(|| "Workflow run not found.".to_owned())?;
-    let steps = list_workflow_steps_page(pool, scope.organization_id, run_id, limit, 0)
+    let steps = list_workflow_steps_page_with_scope(pool, read_scope, run_id, limit, 0)
         .await
         .map_err(pg_error)?;
     let dependencies =
-        list_workflow_step_dependencies_page(pool, scope.organization_id, run_id, limit, 0)
+        list_workflow_step_dependencies_page_with_scope(pool, read_scope, run_id, limit, 0)
             .await
             .map_err(pg_error)?;
-    let steps_total = count_workflow_steps(pool, scope.organization_id, run_id)
+    let steps_total = count_workflow_steps_with_scope(pool, read_scope, run_id)
         .await
         .map_err(pg_error)?;
-    let dependencies_total = count_workflow_step_dependencies(pool, scope.organization_id, run_id)
+    let dependencies_total = count_workflow_step_dependencies_with_scope(pool, read_scope, run_id)
         .await
         .map_err(pg_error)?;
     Ok(WorkflowDetailData {

@@ -2,10 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use runledger_core::jobs::{
     StepKey, WorkflowDependencyReleaseMode, WorkflowRunStatus, WorkflowStepEnqueue,
-    WorkflowStepExecution, WorkflowStepExecutionKind, WorkflowStepStatus,
-    validate_workflow_step_append,
+    WorkflowStepExecutionKind, WorkflowStepStatus, validate_workflow_step_append,
 };
-use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
 
 use crate::jobs::row_decode::{
@@ -35,12 +33,11 @@ use super::super::release::{
     StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx,
 };
 use super::super::runtime::{recompute_workflow_run_status_tx, resolve_terminal_step_queue_tx};
-use super::super::snapshot::{canonical_append_request, deserialize_stored_append_request};
+use super::super::snapshot::{CanonicalAppendRequest, canonical_append_request};
 use super::super::steps::{
     WorkflowStepDependencyWriteContext, WorkflowStepIdsByKey, dependency_count_total,
     fetch_job_definition_defaults_tx, insert_workflow_step_dependencies_tx,
-    insert_workflow_step_record_tx, workflow_step_defaults,
-    workflow_step_effective_organization_id,
+    insert_workflow_step_record_tx, workflow_step_effective_organization_id,
 };
 use super::super::validation::workflow_dag_validation_error;
 use super::idempotency::{
@@ -49,9 +46,8 @@ use super::idempotency::{
 };
 
 #[derive(Debug)]
-struct AppendedStepState {
+struct ImmediatelyReadyAppendedStepCandidate {
     candidate: StepReleaseCandidate,
-    dependency_count_pending: i32,
     dependency_count_unsatisfied: i32,
 }
 
@@ -108,9 +104,7 @@ async fn append_workflow_steps_read_committed_tx(
         input.append_window_step_key,
         workflow_run.organization_id,
         &input.steps,
-    )?;
-    let comparable_request =
-        deserialize_stored_append_request(&canonical_request, workflow_run.organization_id)?;
+    );
 
     if let Some(existing_request) =
         load_existing_mutation_request_tx(tx, workflow_run.id, input.mutation_key).await?
@@ -119,7 +113,7 @@ async fn append_workflow_steps_read_committed_tx(
             tx,
             &existing_request,
             workflow_run.organization_id,
-            &comparable_request,
+            &canonical_request,
         )
         .await?
         {
@@ -212,12 +206,6 @@ async fn insert_appended_step_records_tx(
     let mut appended_step_ids = Vec::with_capacity(steps.len());
 
     for step in steps {
-        let defaults = match step.execution() {
-            WorkflowStepExecution::Job(execution) => {
-                Some(workflow_step_defaults(&defaults_by_job_type, execution)?)
-            }
-            WorkflowStepExecution::External => None,
-        };
         let (dependency_count_pending, dependency_count_unsatisfied) =
             initial_dependency_counters(&existing_statuses_by_key, &new_step_keys, step)?;
         let step_id = insert_workflow_step_record_tx(
@@ -225,7 +213,7 @@ async fn insert_appended_step_records_tx(
             workflow_run_id,
             workflow_step_effective_organization_id(workflow_organization_id, step),
             step,
-            defaults,
+            &defaults_by_job_type,
             dependency_count_pending,
             dependency_count_unsatisfied,
         )
@@ -244,7 +232,7 @@ async fn persist_appended_step_dependencies_and_mutation_tx(
     tx: &mut DbTx<'_>,
     workflow_run_id: Uuid,
     input: &AppendWorkflowStepsInputRecord<'_>,
-    canonical_request: &JsonValue,
+    canonical_request: &CanonicalAppendRequest,
     step_id_by_key: &WorkflowStepIdsByKey,
 ) -> Result<()> {
     insert_workflow_step_dependencies_tx(
@@ -272,19 +260,16 @@ async fn resolve_appended_steps_tx(
     workflow_run_id: Uuid,
     appended_step_ids: &[Uuid],
 ) -> Result<()> {
-    let appended_step_states =
-        load_appended_step_states_tx(tx, workflow_run_id, appended_step_ids).await?;
-    for step_id in appended_step_ids {
-        let Some(step_state) = appended_step_states.get(step_id) else {
-            return Err(workflow_internal_state_error(format!(
-                "missing appended workflow step state for step id {step_id}"
-            )));
-        };
-        if step_state.dependency_count_pending != 0 {
-            continue;
-        }
-
-        resolve_appended_step_state_tx(tx, workflow_run_id, step_state).await?;
+    // The IDs are collected from successful INSERT ... RETURNING calls in this
+    // transaction, so the former missing-state diagnostic was unreachable. The
+    // ready-candidate query intentionally returns only a subset: omitted rows
+    // are pending and require neither decoding nor release work.
+    let ready_candidates =
+        load_immediately_ready_appended_step_candidates_tx(tx, workflow_run_id, appended_step_ids)
+            .await?;
+    for ready_candidate in &ready_candidates {
+        resolve_immediately_ready_appended_step_candidate_tx(tx, workflow_run_id, ready_candidate)
+            .await?;
     }
 
     recompute_workflow_run_status_tx(tx, workflow_run_id).await?;
@@ -330,9 +315,7 @@ fn initial_dependency_counters(
     let mut dependency_count_unsatisfied = 0i32;
 
     for dependency in step.dependencies() {
-        let release_mode = dependency
-            .release_mode
-            .unwrap_or(WorkflowDependencyReleaseMode::OnTerminal);
+        let release_mode = dependency.effective_release_mode();
         if let Some(status) =
             existing_statuses_by_key.get(dependency.prerequisite_step_key.as_str())
         {
@@ -361,13 +344,13 @@ fn initial_dependency_counters(
     Ok((dependency_count_pending, dependency_count_unsatisfied))
 }
 
-async fn resolve_appended_step_state_tx(
+async fn resolve_immediately_ready_appended_step_candidate_tx(
     tx: &mut DbTx<'_>,
     workflow_run_id: Uuid,
-    step_state: &AppendedStepState,
+    ready_candidate: &ImmediatelyReadyAppendedStepCandidate,
 ) -> Result<()> {
-    if step_state.dependency_count_unsatisfied == 0 {
-        return release_candidate_step_tx(tx, &step_state.candidate).await;
+    if ready_candidate.dependency_count_unsatisfied == 0 {
+        return release_candidate_step_tx(tx, &ready_candidate.candidate).await;
     }
 
     let canceled = sqlx::query!(
@@ -382,7 +365,7 @@ async fn resolve_appended_step_state_tx(
                AND workflow_run_id = $2
                AND status = 'BLOCKED'
              RETURNING workflow_run_id",
-        step_state.candidate.id(),
+        ready_candidate.candidate.id(),
         workflow_run_id,
     )
     .fetch_optional(&mut **tx)
@@ -395,7 +378,7 @@ async fn resolve_appended_step_state_tx(
         resolve_terminal_step_queue_tx(
             tx,
             workflow_run_id,
-            step_state.candidate.id(),
+            ready_candidate.candidate.id(),
             WorkflowStepStatus::Canceled,
         )
         .await?;
@@ -404,11 +387,11 @@ async fn resolve_appended_step_state_tx(
     Ok(())
 }
 
-async fn load_appended_step_states_tx(
+async fn load_immediately_ready_appended_step_candidates_tx(
     tx: &mut DbTx<'_>,
     workflow_run_id: Uuid,
     appended_step_ids: &[Uuid],
-) -> Result<BTreeMap<Uuid, AppendedStepState>> {
+) -> Result<Vec<ImmediatelyReadyAppendedStepCandidate>> {
     let rows = sqlx::query!(
         "SELECT
             id,
@@ -422,11 +405,12 @@ async fn load_appended_step_states_tx(
             timeout_seconds,
             stage,
             execution_resource_key,
-            dependency_count_pending,
             dependency_count_unsatisfied
          FROM workflow_steps
          WHERE workflow_run_id = $1
            AND id = ANY($2::uuid[])
+           AND dependency_count_pending = 0
+         ORDER BY array_position($2::uuid[], id)
          FOR UPDATE",
         workflow_run_id,
         appended_step_ids,
@@ -434,7 +418,10 @@ async fn load_appended_step_states_tx(
     .fetch_all(&mut **tx)
     .await
     .map_err(|error| {
-        Error::from_query_sqlx_with_context("load appended workflow step states", error)
+        Error::from_query_sqlx_with_context(
+            "load immediately ready appended workflow step candidates",
+            error,
+        )
     })?;
 
     rows.into_iter()
@@ -442,28 +429,22 @@ async fn load_appended_step_states_tx(
             let execution_kind = parse_workflow_step_execution_kind(row.execution_kind)?;
             let job_type = row.job_type.map(parse_job_type_name).transpose()?;
             let stage = row.stage.map(parse_job_stage).transpose()?;
-            Ok((
-                row.id,
-                AppendedStepState {
-                    candidate: StepReleaseCandidate::from_decoded_fields(
-                        StepReleaseCandidateInit {
-                            id: row.id,
-                            workflow_run_id: row.workflow_run_id,
-                            execution_kind,
-                            job_type,
-                            organization_id: row.organization_id,
-                            payload: row.payload,
-                            priority: row.priority,
-                            max_attempts: row.max_attempts,
-                            timeout_seconds: row.timeout_seconds,
-                            stage,
-                            execution_resource_key: row.execution_resource_key,
-                        },
-                    ),
-                    dependency_count_pending: row.dependency_count_pending,
-                    dependency_count_unsatisfied: row.dependency_count_unsatisfied,
-                },
-            ))
+            Ok(ImmediatelyReadyAppendedStepCandidate {
+                candidate: StepReleaseCandidate::from_decoded_fields(StepReleaseCandidateInit {
+                    id: row.id,
+                    workflow_run_id: row.workflow_run_id,
+                    execution_kind,
+                    job_type,
+                    organization_id: row.organization_id,
+                    payload: row.payload,
+                    priority: row.priority,
+                    max_attempts: row.max_attempts,
+                    timeout_seconds: row.timeout_seconds,
+                    stage,
+                    execution_resource_key: row.execution_resource_key,
+                }),
+                dependency_count_unsatisfied: row.dependency_count_unsatisfied,
+            })
         })
         .collect()
 }
@@ -567,4 +548,271 @@ async fn load_append_result_tx(
         appended_steps,
         outcome,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
+    use serde_json::Value as JsonValue;
+    use sqlx::types::Uuid;
+
+    use crate::{DbPool, DbTx};
+
+    use super::{load_immediately_ready_appended_step_candidates_tx, resolve_appended_steps_tx};
+
+    async fn record_postgres_18_server_version(pool: &DbPool) {
+        let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+            .fetch_one(pool)
+            .await
+            .expect("read PostgreSQL server_version");
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+                .fetch_one(pool)
+                .await
+                .expect("read PostgreSQL server_version_num");
+        eprintln!(
+            "append ready-candidate regression PostgreSQL server_version={server_version}, \
+             server_version_num={server_version_num}"
+        );
+        assert_eq!(
+            server_version_num / 10_000,
+            18,
+            "append ready-candidate regression must run on PostgreSQL 18"
+        );
+    }
+
+    async fn insert_running_workflow_run(pool: &DbPool, workflow_type: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO workflow_runs (workflow_type)
+             VALUES ($1)
+             RETURNING id",
+        )
+        .bind(workflow_type)
+        .fetch_one(pool)
+        .await
+        .expect("insert workflow run")
+    }
+
+    async fn insert_external_blocked_step(
+        tx: &mut DbTx<'_>,
+        workflow_run_id: Uuid,
+        step_key: &str,
+        dependency_count_total: i32,
+        dependency_count_pending: i32,
+        dependency_count_unsatisfied: i32,
+    ) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO workflow_steps (
+                workflow_run_id,
+                step_key,
+                execution_kind,
+                status,
+                dependency_count_total,
+                dependency_count_pending,
+                dependency_count_unsatisfied
+             )
+             VALUES ($1, $2, 'EXTERNAL', 'BLOCKED', $3, $4, $5)
+             RETURNING id",
+        )
+        .bind(workflow_run_id)
+        .bind(step_key)
+        .bind(dependency_count_total)
+        .bind(dependency_count_pending)
+        .bind(dependency_count_unsatisfied)
+        .fetch_one(&mut **tx)
+        .await
+        .expect("insert external blocked workflow step")
+    }
+
+    async fn seed_ready_candidate_plan_noise(pool: &DbPool) {
+        let noise_run_id =
+            insert_running_workflow_run(pool, "workflow.test.append_ready_candidate_plan_noise")
+                .await;
+        sqlx::query(
+            "INSERT INTO workflow_steps (workflow_run_id, step_key, execution_kind)
+             SELECT $1, format('append-ready-candidate-plan-noise-%s', ordinal), 'EXTERNAL'
+             FROM generate_series(1, 512) AS noise(ordinal)",
+        )
+        .bind(noise_run_id)
+        .execute(pool)
+        .await
+        .expect("seed ready-candidate plan noise");
+        sqlx::query("ANALYZE workflow_steps")
+            .execute(pool)
+            .await
+            .expect("analyze workflow steps for ready-candidate plan");
+    }
+
+    fn plan_node_types(plan: &JsonValue) -> Vec<String> {
+        fn visit(node: &JsonValue, node_types: &mut Vec<String>) {
+            if let Some(node_type) = node["Node Type"].as_str() {
+                node_types.push(node_type.to_owned());
+            }
+            if let Some(children) = node["Plans"].as_array() {
+                for child in children {
+                    visit(child, node_types);
+                }
+            }
+        }
+
+        let mut node_types = Vec::new();
+        visit(&plan[0]["Plan"], &mut node_types);
+        node_types
+    }
+
+    #[tokio::test]
+    async fn ready_appended_candidates_filter_pending_preserve_input_order_and_skip_missing_rows() {
+        let (pool, database) = setup_ephemeral_pool("workflow_append_ready_candidates", 4).await;
+        record_postgres_18_server_version(&pool).await;
+        seed_ready_candidate_plan_noise(&pool).await;
+
+        let workflow_run_id =
+            insert_running_workflow_run(&pool, "workflow.test.append_ready_candidates").await;
+        let mut tx = pool.begin().await.expect("begin ready-candidate test tx");
+        let ready_first =
+            insert_external_blocked_step(&mut tx, workflow_run_id, "ready-first", 0, 0, 0).await;
+        let pending =
+            insert_external_blocked_step(&mut tx, workflow_run_id, "pending", 1, 1, 0).await;
+        let born_unsatisfied =
+            insert_external_blocked_step(&mut tx, workflow_run_id, "born-unsatisfied", 1, 0, 1)
+                .await;
+        let ready_second =
+            insert_external_blocked_step(&mut tx, workflow_run_id, "ready-second", 0, 0, 0).await;
+        let missing = Uuid::now_v7();
+        let appended_step_ids = vec![
+            ready_second,
+            missing,
+            pending,
+            born_unsatisfied,
+            ready_first,
+        ];
+
+        let ready_candidates = load_immediately_ready_appended_step_candidates_tx(
+            &mut tx,
+            workflow_run_id,
+            &appended_step_ids,
+        )
+        .await
+        .expect("load immediately ready appended candidates");
+        assert_eq!(
+            ready_candidates
+                .iter()
+                .map(|candidate| candidate.candidate.id())
+                .collect::<Vec<_>>(),
+            vec![ready_second, born_unsatisfied, ready_first],
+            "the ready-only query must retain the append-input order while omitting pending and absent rows"
+        );
+
+        let plan = sqlx::query_scalar::<_, JsonValue>(
+            "EXPLAIN (ANALYZE, FORMAT JSON)
+             SELECT
+                id,
+                workflow_run_id,
+                execution_kind::text,
+                job_type,
+                organization_id,
+                payload,
+                priority,
+                max_attempts,
+                timeout_seconds,
+                stage,
+                execution_resource_key,
+                dependency_count_unsatisfied
+             FROM workflow_steps
+             WHERE workflow_run_id = $1
+               AND id = ANY($2::uuid[])
+               AND dependency_count_pending = 0
+             ORDER BY array_position($2::uuid[], id)
+             FOR UPDATE",
+        )
+        .bind(workflow_run_id)
+        .bind(&appended_step_ids)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("explain ready appended-candidate query");
+        let node_types = plan_node_types(&plan);
+        eprintln!(
+            "append ready-candidate EXPLAIN ANALYZE node_types={node_types:?}, planning_time_ms={}, execution_time_ms={}",
+            plan[0]["Planning Time"], plan[0]["Execution Time"]
+        );
+        assert_eq!(
+            plan[0]["Plan"]["Actual Rows"].as_f64(),
+            Some(3.0),
+            "only immediately ready existing rows should reach the candidate plan"
+        );
+        assert!(
+            node_types.iter().any(|node_type| node_type == "LockRows"),
+            "ready candidates remain locked before release: {plan}"
+        );
+        assert!(
+            node_types.iter().any(|node_type| node_type == "Sort"),
+            "ready candidates must sort by append-input order: {plan}"
+        );
+        assert!(
+            node_types
+                .iter()
+                .any(|node_type| matches!(node_type.as_str(), "Index Scan" | "Bitmap Heap Scan")),
+            "the ready-candidate lookup should remain ID-index driven: {plan}"
+        );
+        assert!(
+            !node_types.iter().any(|node_type| node_type == "Seq Scan"),
+            "the ready-candidate lookup must not scan unrelated workflow steps: {plan}"
+        );
+
+        // The normal append path obtains these IDs from successful inserts, so
+        // it cannot include `missing`. Passing it here proves the deliberate
+        // replacement for the old unreachable diagnostic: a non-candidate is
+        // simply omitted, just like a pending appended row.
+        resolve_appended_steps_tx(&mut tx, workflow_run_id, &appended_step_ids)
+            .await
+            .expect("resolve ready appended candidates while omitting missing row");
+
+        let step_states = sqlx::query_as::<_, (Uuid, String, i32, i32, Option<String>)>(
+            "SELECT
+                id,
+                status::text,
+                dependency_count_pending,
+                dependency_count_unsatisfied,
+                last_error_code
+             FROM workflow_steps
+             WHERE workflow_run_id = $1",
+        )
+        .bind(workflow_run_id)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("load appended candidate states")
+        .into_iter()
+        .map(|(id, status, pending, unsatisfied, last_error_code)| {
+            (id, (status, pending, unsatisfied, last_error_code))
+        })
+        .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            step_states.get(&ready_second),
+            Some(&("WAITING_FOR_EXTERNAL".to_owned(), 0, 0, None))
+        );
+        assert_eq!(
+            step_states.get(&pending),
+            Some(&("BLOCKED".to_owned(), 1, 0, None))
+        );
+        assert_eq!(
+            step_states.get(&born_unsatisfied),
+            Some(&(
+                "CANCELED".to_owned(),
+                0,
+                1,
+                Some("workflow.dependency_unsatisfied".to_owned()),
+            ))
+        );
+        assert_eq!(
+            step_states.get(&ready_first),
+            Some(&("WAITING_FOR_EXTERNAL".to_owned(), 0, 0, None))
+        );
+
+        tx.rollback()
+            .await
+            .expect("roll back ready-candidate test tx");
+        teardown_ephemeral_pool(pool, database).await;
+    }
 }

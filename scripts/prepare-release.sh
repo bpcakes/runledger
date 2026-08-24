@@ -40,14 +40,8 @@ release_generated_path() {
     Cargo.toml | \
       Cargo.lock | \
       smoke/external-consumer/Cargo.lock | \
-      runledger-admin/Cargo.toml | \
       runledger-admin-web/package.json | \
       runledger-admin-web/package-lock.json | \
-      runledger-core/Cargo.toml | \
-      runledger-test-support/Cargo.toml | \
-      runledger-postgres/Cargo.toml | \
-      runledger-runtime/Cargo.toml | \
-      runledger-tui/Cargo.toml | \
       .sqlx/* | \
       runledger-postgres/.sqlx/* | \
       runledger-runtime/.sqlx/* | \
@@ -61,7 +55,32 @@ release_generated_path() {
   esac
 }
 
-crate_manifest_version() {
+workspace_package_version() {
+  awk '
+    /^\[workspace\.package\][[:space:]]*$/ {
+      in_workspace_package = 1
+      next
+    }
+    in_workspace_package && /^\[/ {
+      exit
+    }
+    in_workspace_package && /^[[:space:]]*version[[:space:]]*=/ {
+      value = $0
+      sub(/^[^"]*"/, "", value)
+      sub(/".*$/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' "$ROOT_DIR/Cargo.toml"
+}
+
+manifest_inherits_workspace_version() {
   local manifest="$1"
 
   awk '
@@ -72,11 +91,7 @@ crate_manifest_version() {
     in_package && /^\[/ {
       exit
     }
-    in_package && /^[[:space:]]*version[[:space:]]*=/ {
-      value = $0
-      sub(/^[^"]*"/, "", value)
-      sub(/".*$/, "", value)
-      print value
+    in_package && /^[[:space:]]*version\.workspace[[:space:]]*=[[:space:]]*true[[:space:]]*$/ {
       found = 1
       exit
     }
@@ -91,14 +106,17 @@ crate_manifest_version() {
 require_manifest_versions() {
   local version="$1"
   local crate
+  local manifest_version
+
+  manifest_version="$(workspace_package_version)" \
+    || die "could not read workspace package version"
+  if [[ "$manifest_version" != "$version" ]]; then
+    die "cannot resume: workspace package version is ${manifest_version}, expected ${version}"
+  fi
 
   for crate in "${PUBLISHABLE_CRATES[@]}"; do
-    local manifest_version
-    manifest_version="$(crate_manifest_version "$ROOT_DIR/${crate}/Cargo.toml")" \
-      || die "could not read ${crate} package version"
-    if [[ "$manifest_version" != "$version" ]]; then
-      die "cannot resume: ${crate} manifest is ${manifest_version}, expected ${version}"
-    fi
+    manifest_inherits_workspace_version "$ROOT_DIR/${crate}/Cargo.toml" \
+      || die "cannot resume: ${crate} does not inherit the workspace package version"
   done
 
   for crate in "${WORKSPACE_DEPENDENCY_CRATES[@]}"; do
@@ -184,13 +202,12 @@ npm_version_exists() {
   return 2
 }
 
-bump_crate_manifest() {
-  local manifest="$1"
+bump_workspace_package_version() {
   RELEASE_VERSION="$VERSION" perl -0pi -e '
     my $version = $ENV{"RELEASE_VERSION"};
-    s/^(version\s*=\s*")[^"]+(")/$1$version$2/m
-      or die "failed to update package version in $ARGV\n";
-  ' "$manifest"
+    s/(\[workspace\.package\]\s*\n\s*version\s*=\s*")[^"]+(")/$1$version$2/
+      or die "failed to update workspace package version in $ARGV\n";
+  ' "$ROOT_DIR/Cargo.toml"
 }
 
 bump_workspace_dependency() {
@@ -251,15 +268,14 @@ case "$npm_status" in
   *) die "could not determine whether @runledger/admin ${VERSION} exists on npm" ;;
 esac
 
-for crate in "${PUBLISHABLE_CRATES[@]}"; do
-  bump_crate_manifest "$ROOT_DIR/${crate}/Cargo.toml"
-done
+bump_workspace_package_version
 
 for crate in "${WORKSPACE_DEPENDENCY_CRATES[@]}"; do
   bump_workspace_dependency "$crate"
 done
 
 npm version "$VERSION" --allow-same-version --no-git-tag-version --prefix "$ROOT_DIR/runledger-admin-web" >/dev/null
+require_manifest_versions "$VERSION"
 
 cargo update -w
 cargo update \

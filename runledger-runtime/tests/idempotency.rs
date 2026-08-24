@@ -25,6 +25,27 @@ use support::{query_error_code, register_job_definition};
 
 mod support;
 
+async fn record_postgres_18_server_version(pool: &sqlx::PgPool, diagnostic: &str) {
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "{diagnostic} PostgreSQL server_version={server_version}, \
+         server_version_num={server_version_num}"
+    );
+    assert_eq!(
+        server_version_num / 10_000,
+        18,
+        "{diagnostic} validation must run on PostgreSQL 18"
+    );
+}
+
 fn assert_error_does_not_expose(error: &runledger_postgres::Error, sensitive: &str) {
     assert!(
         !error.to_string().contains(sensitive),
@@ -1192,6 +1213,76 @@ async fn append_workflow_steps_rejects_conflicting_retry() {
         panic!("expected query error");
     };
     assert!(query_error.internal_message().contains("append-conflict"));
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn append_workflow_steps_matches_legacy_persisted_request_shape() {
+    let (pool, database) = setup_ephemeral_pool("workflow_append_legacy_retry", 8).await;
+    record_postgres_18_server_version(&pool, "workflow append legacy retry").await;
+
+    let organization_id = Uuid::now_v7();
+    let workflow_type = WorkflowType::new("workflow.test.append_legacy_retry");
+    let gate_payload = json!({"kind": "append-legacy-gate"});
+    let metadata = json!({"source": "test"});
+    let gate = WorkflowStepEnqueueBuilder::new_external(StepKey::new("gate"), &gate_payload)
+        .try_build()
+        .expect("build external gate");
+    let workflow = WorkflowRunEnqueueBuilder::new(workflow_type, &metadata)
+        .organization_id(organization_id)
+        .step(gate)
+        .try_build()
+        .expect("build workflow");
+    let run = enqueue_workflow_run(&pool, &workflow)
+        .await
+        .expect("enqueue workflow");
+
+    let append_payload = json!({"kind": "append-legacy"});
+    let appended =
+        WorkflowStepEnqueueBuilder::new_external(StepKey::new("appended"), &append_payload)
+            .try_build()
+            .expect("build appended step");
+    let mutation_metadata = json!({});
+    let input = AppendWorkflowStepsInput {
+        workflow_run_id: run.id,
+        organization_id: Some(organization_id),
+        mutation_key: "append-legacy",
+        mutation_metadata: &mutation_metadata,
+        append_window_step_key: StepKey::new("gate"),
+        steps: vec![appended],
+    };
+
+    let first = append_workflow_steps(&pool, &input)
+        .await
+        .expect("first append succeeds");
+    assert_eq!(first.outcome, AppendWorkflowStepsOutcome::Appended);
+
+    sqlx::query(
+        "UPDATE workflow_run_mutations
+         SET request = jsonb_set(
+             jsonb_set(
+                 (request - 'append_window_step_key') #- '{steps,0,organization_id}',
+                 '{future_root_field}',
+                 'true'::jsonb
+             ),
+             '{steps,0,future_step_field}',
+             'true'::jsonb
+         )
+         WHERE workflow_run_id = $1
+           AND mutation_key = $2",
+    )
+    .bind(run.id)
+    .bind("append-legacy")
+    .execute(&pool)
+    .await
+    .expect("rewrite mutation request into a legacy-compatible shape");
+
+    let retry = append_workflow_steps(&pool, &input)
+        .await
+        .expect("legacy-shaped identical retry returns existing mutation");
+    assert_eq!(retry.outcome, AppendWorkflowStepsOutcome::AlreadyApplied);
+    assert_eq!(retry.appended_steps[0].id, first.appended_steps[0].id);
 
     teardown_ephemeral_pool(pool, database).await;
 }

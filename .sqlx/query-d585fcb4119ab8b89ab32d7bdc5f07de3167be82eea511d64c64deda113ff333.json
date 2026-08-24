@@ -1,0 +1,55 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            job_type AS \"job_type!\",\n            organization_id,\n            max_attempts,\n            progress_done,\n            progress_total,\n            clock_timestamp() AS \"completion_base_at!\"\n         FROM job_queue\n         WHERE id = $1\n           AND run_number = $2\n           AND attempt = $3\n           AND worker_id = $4\n           AND status = 'LEASED'\n           AND lease_expires_at IS NOT NULL\n           AND lease_expires_at > clock_timestamp()\n         FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "progress_done",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "progress_total",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "completion_base_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "d585fcb4119ab8b89ab32d7bdc5f07de3167be82eea511d64c64deda113ff333"
+}

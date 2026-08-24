@@ -23,7 +23,6 @@ pub(super) struct CompletionLeaseRow {
     pub(super) max_attempts: i32,
     pub(super) progress_done: Option<i64>,
     pub(super) progress_total: Option<i64>,
-    pub(super) workflow_step_id: Option<Uuid>,
     pub(super) completion_base_at: DateTime<Utc>,
 }
 
@@ -40,7 +39,6 @@ pub(super) async fn lock_live_completion_lease_tx(
             max_attempts,
             progress_done,
             progress_total,
-            workflow_step_id,
             clock_timestamp() AS "completion_base_at!"
          FROM job_queue
          WHERE id = $1

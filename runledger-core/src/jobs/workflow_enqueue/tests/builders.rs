@@ -512,6 +512,36 @@ fn workflow_step_enqueue_builder_wires_dependency_release_modes() {
 }
 
 #[test]
+fn workflow_dependency_effective_release_mode_defaults_only_when_omitted() {
+    let omitted = WorkflowStepDependencySpec {
+        prerequisite_step_key: StepKey::new("step.omitted"),
+        release_mode: None,
+    };
+    let terminal = WorkflowStepDependencySpec {
+        prerequisite_step_key: StepKey::new("step.terminal"),
+        release_mode: Some(WorkflowDependencyReleaseMode::OnTerminal),
+    };
+    let success = WorkflowStepDependencySpec {
+        prerequisite_step_key: StepKey::new("step.success"),
+        release_mode: Some(WorkflowDependencyReleaseMode::OnSuccess),
+    };
+
+    assert_eq!(omitted.release_mode, None);
+    assert_eq!(
+        omitted.effective_release_mode(),
+        WorkflowDependencyReleaseMode::OnTerminal
+    );
+    assert_eq!(
+        terminal.effective_release_mode(),
+        WorkflowDependencyReleaseMode::OnTerminal
+    );
+    assert_eq!(
+        success.effective_release_mode(),
+        WorkflowDependencyReleaseMode::OnSuccess
+    );
+}
+
+#[test]
 fn workflow_step_enqueue_builder_preserves_dependency_append_order() {
     let payload = serde_json::json!({"test": true});
     let step = WorkflowStepEnqueueBuilder::new(

@@ -9,7 +9,7 @@ use runledger_postgres::jobs::{
     complete_job_failure, enqueue_job_with_outcome_tx, enqueue_workflow_run, get_job_by_id,
     heartbeat_job, list_job_events, list_workflow_steps, update_job_ordinary_progress,
 };
-use runledger_postgres::{DbPool, Error, QueryErrorCategory};
+use runledger_postgres::{DbPool, Error};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
@@ -755,10 +755,6 @@ async fn compare_and_requeue_rejects_non_read_committed_transactions_up_front() 
 }
 
 #[tokio::test]
-#[expect(
-    deprecated,
-    reason = "the regression test exercises the legacy requeue compatibility entrypoint"
-)]
 async fn canceled_live_job_waits_for_its_original_lease_window_before_requeue() {
     let (pool, database) =
         setup_ephemeral_pool("postgres_compare_requeue_cancel_quiescence", 4).await;
@@ -794,26 +790,6 @@ async fn canceled_live_job_waits_for_its_original_lease_window_before_requeue() 
             .get("lease_quiesces_at")
             .is_some_and(Value::is_string)
     );
-
-    let legacy_error = runledger_postgres::jobs::requeue_job(
-        &pool,
-        None,
-        job_id,
-        Some("legacy recovery must also wait for quiescence"),
-    )
-    .await
-    .expect_err("legacy recovery must expose active cancellation quiescence as retryable");
-    let Error::QueryError(legacy_error) = legacy_error else {
-        panic!("expected cancellation quiescence query error");
-    };
-    assert_eq!(legacy_error.category(), QueryErrorCategory::Conflict);
-    assert_eq!(legacy_error.code(), "job.cancellation_not_quiesced");
-    let still_canceled = get_job_by_id(&pool, None, job_id)
-        .await
-        .expect("load job after rejected legacy recovery")
-        .expect("canceled job exists");
-    assert_eq!(still_canceled.status, JobStatus::Canceled);
-    assert_eq!(still_canceled.run_number, claim.run_number);
 
     let mut blocked_tx = pool.begin().await.expect("begin early recovery");
     let outcome = compare_and_requeue_job_tx(

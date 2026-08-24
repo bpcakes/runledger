@@ -30,10 +30,6 @@ mod types;
 mod workflow_types;
 mod workflows;
 
-#[allow(
-    deprecated,
-    reason = "deprecated admin entrypoints remain re-exported for semver compatibility"
-)]
 pub use admin::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
     cancel_job_with_scope, compare_and_requeue_job, compare_and_requeue_job_tx,
@@ -43,7 +39,7 @@ pub use admin::{
     list_admin_job_events, list_admin_job_events_before, list_admin_job_logs,
     list_admin_job_logs_before, list_admin_job_summaries, list_admin_workflow_dependencies,
     list_admin_workflow_steps, list_admin_workflow_summaries, list_job_events,
-    list_job_events_before, list_jobs, requeue_job, update_job_payload_uuid_array_field,
+    list_job_events_before, list_jobs, update_job_payload_uuid_array_field,
     workflow_exists_in_scope,
 };
 pub use logs::{insert_job_log, list_job_logs, list_job_logs_before};
@@ -126,19 +122,26 @@ pub use workflow_types::{
     EnqueueActiveWorkflowOutcome, ExternalWorkflowStepTerminalOutcome, WorkflowRecoveryDisposition,
     WorkflowRecoveryMode, WorkflowRecoveryOutcome, WorkflowRecoveryRequest, WorkflowRunCountFilter,
     WorkflowRunDbRecord, WorkflowRunHandle, WorkflowRunHandleError, WorkflowRunHandleScope,
-    WorkflowRunListFilter, WorkflowRunResultRecord, WorkflowRunWaitOptions, WorkflowStepDbRecord,
+    WorkflowRunListFilter, WorkflowRunReadCountFilter, WorkflowRunReadListFilter,
+    WorkflowRunReadScope, WorkflowRunResultRecord, WorkflowRunWaitOptions, WorkflowStepDbRecord,
     WorkflowStepDependencyDbRecord,
 };
 pub use workflows::{
     append_workflow_steps, append_workflow_steps_tx, cancel_workflow_run_tx,
     complete_external_workflow_step, complete_external_workflow_step_tx, count_workflow_runs,
-    count_workflow_step_dependencies, count_workflow_steps, enqueue_or_get_active_workflow,
+    count_workflow_runs_with_scope, count_workflow_step_dependencies,
+    count_workflow_step_dependencies_with_scope, count_workflow_steps,
+    count_workflow_steps_with_scope, enqueue_or_get_active_workflow,
     enqueue_or_get_active_workflow_tx, enqueue_workflow_run, enqueue_workflow_run_handle,
-    enqueue_workflow_run_tx, get_latest_workflow_run_by_type, get_workflow_run_by_id,
-    get_workflow_run_by_type_and_idempotency_key, get_workflow_run_by_type_and_idempotency_key_tx,
-    get_workflow_run_id_for_job, list_workflow_runs, list_workflow_step_dependencies,
-    list_workflow_step_dependencies_page, list_workflow_step_keys_for_update_tx,
-    list_workflow_steps, list_workflow_steps_page, recover_workflow_run, recover_workflow_run_tx,
+    enqueue_workflow_run_tx, get_latest_workflow_run_by_type,
+    get_latest_workflow_run_by_type_with_scope, get_workflow_run_by_id,
+    get_workflow_run_by_id_with_scope, get_workflow_run_by_type_and_idempotency_key,
+    get_workflow_run_by_type_and_idempotency_key_tx, get_workflow_run_id_for_job,
+    list_workflow_runs, list_workflow_runs_with_scope, list_workflow_step_dependencies,
+    list_workflow_step_dependencies_page, list_workflow_step_dependencies_page_with_scope,
+    list_workflow_step_dependencies_with_scope, list_workflow_step_keys_for_update_tx,
+    list_workflow_steps, list_workflow_steps_page, list_workflow_steps_page_with_scope,
+    list_workflow_steps_with_scope, recover_workflow_run, recover_workflow_run_tx,
     retrieve_workflow_run_handle, update_workflow_step_and_pending_job_payload_tx,
     workflow_run_handle,
 };

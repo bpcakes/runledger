@@ -48,9 +48,12 @@ Use `runledger_postgres::jobs::set_job_schedule_active` to pause or resume a
 schedule, and `runledger_postgres::jobs::set_job_schedule_next_fire_at` to
 retime the schedule cursor.
 
-Use `runledger_postgres::jobs::count_workflow_runs` with
-`runledger_postgres::jobs::WorkflowRunCountFilter` for workflow status counters
-instead of fetching pages of runs just to count them.
+Use `runledger_postgres::jobs::count_workflow_runs_with_scope` with
+`runledger_postgres::jobs::WorkflowRunReadCountFilter` for workflow status
+counters instead of fetching pages of runs just to count them. Set
+`WorkflowRunReadScope::Global` for exact global rows,
+`WorkflowRunReadScope::Organization(id)` for one tenant, or `Admin` only for a
+trusted all-tenant surface.
 
 ## Durable Transactional Handoff
 
@@ -232,7 +235,7 @@ first checkpoint and progress with the `RUNNING` transition rather than making
 a zero-argument stage call followed by another write. The older stage-bearing
 `JobProgressUpdate` and `update_job_progress_for_lease` remain deprecated only
 for staged downstream migration. This running/progress API split is available
-in 0.10.2 and later.
+in 0.11.0 and later.
 
 ## Workflow DAG Rule
 
@@ -655,7 +658,7 @@ with application writes. That transaction must be `READ COMMITTED`, and the
 function neither commits nor rolls it back. An active-key recovery can remain
 blocked until the source claim is quiescent, or while another run owns the key.
 
-## Release Upgrade Map: 0.6 Through 0.10
+## Release Upgrade Map: 0.6 Through 0.11
 
 When an integration skips versions, preserve every intermediate runtime and
 schema boundary:
@@ -667,6 +670,7 @@ schema boundary:
 | 0.8.0 | `202607250001_harden_continuation_metrics_payload_validation` plus `202607280001` through `202607280005` before any 0.8 runtime loop or persistence API runs. | Deploy every writer with workflow continuation, active keys, resources, retry hints, and workflow recovery unused; quiesce all pre-0.8 processes and leases, then canary each path. |
 | 0.9.0 | No migration after 0.8.0. | Custom runtimes may adopt `JobLeaseIdentity` and the `_for_lease` lifecycle APIs without a coordinated schema or source migration; the positional functions remain available. |
 | 0.10.0 | `202608180001_job_enqueue_intents` before any process records or promotes enqueue intents. | Deploy exact-ID retention cleanup to every queue-retention caller before enabling intent writers. Keep promoter coverage for every intent type, and budget for independent polling by each enabled supervisor. |
+| 0.11.0 | `202608240001_expand_workflow_step_job_link` before deploying 0.11; `202608240002_contract_workflow_step_job_link` only after all 0.10 writers and leases drain. | Migrate every removed `requeue_job` call before compiling: exact-scope compare-and-requeue replaces canceled/dead-lettered recovery, while successful replay creates a fresh job for `SUCCEEDED`. Contracting the link is the 0.10 rollback boundary. |
 
 For 0.8 source compatibility, construct the now non-exhaustive
 `WorkflowDagStepValidationInput` through
@@ -922,13 +926,13 @@ should resume from the last committed checkpoint, or
 `ResetProgressAndCheckpoint` for an explicit restart. The policy is written to
 the `REQUEUED` event for auditability.
 
-### Migrating deprecated `requeue_job`
+### Migrating the `requeue_job` API removed in 0.11
 
-The compatibility API remains for the staged 0.6 rollout, not as the final
-recovery contract. Audit every admin endpoint, CLI, and repair sweep that calls
-it, then map behavior deliberately:
+Version 0.11 removes this compatibility API. Before upgrading, audit every
+admin endpoint, CLI, and repair sweep that calls it, then map behavior
+deliberately:
 
-| Deprecated behavior | Typed migration |
+| Removed behavior | Typed migration |
 | --- | --- |
 | `organization_id: Some(id)` | Use `JobScope::Organization(id)` and verify it matches the observed record. |
 | `organization_id: None` | This was an unconstrained lookup. Do **not** translate it to `JobScope::Global`; observe the row, authorize its actual tenant, and derive exact scope. |
@@ -1050,6 +1054,9 @@ database text.
 
 Use `JobCatalog` as the worker startup source of truth when handlers,
 definitions, schedules, and workflow builders should stay aligned. Use
+`JobCatalog::handler` to register each handler under the identity returned by
+`JobHandler::job_type`; the older `job` method with a separately declared job
+type remains available only as a deprecated migration path. Use
 `JobCatalogDefinitionOverrides` only for per-job definition differences from
 catalog defaults. Overrides take precedence for the fields they set; version,
 attempts, and timeout values must be positive, while priority may be zero or

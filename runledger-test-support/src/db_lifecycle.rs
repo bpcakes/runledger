@@ -1,7 +1,6 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -14,8 +13,6 @@ const DEFAULT_CREATE_DATABASE_PERMITS: u32 = 9;
 
 static DATABASE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static EPHEMERAL_DB_CONNECTION_BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
-static EPHEMERAL_DB_PERMITS: OnceLock<Mutex<HashMap<String, OwnedSemaphorePermit>>> =
-    OnceLock::new();
 
 #[derive(Debug)]
 pub struct TestDbConnectionBudgetPermit {
@@ -57,7 +54,7 @@ pub async fn setup_unmigrated_ephemeral_pool(
         .expect("create ephemeral database");
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
-        .connect(&database.url)
+        .connect(database.url())
         .await
         .expect("connect postgres");
     (pool, database)
@@ -94,23 +91,45 @@ fn runledger_migrations_dir() -> PathBuf {
 
 pub async fn teardown_ephemeral_pool(pool: PgPool, database: EphemeralDatabase) {
     pool.close().await;
-    drop_database(&database.name)
-        .await
-        .expect("drop ephemeral database");
-    release_ephemeral_db_permit(&database.name);
-    std::mem::forget(database);
+    database.teardown().await.expect("drop ephemeral database");
 }
 
 #[derive(Debug)]
 pub struct EphemeralDatabase {
-    pub name: String,
-    pub url: String,
+    identity: EphemeralDatabaseIdentity,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+#[derive(Debug)]
+struct EphemeralDatabaseIdentity {
+    name: String,
+    url: String,
+}
+
+impl EphemeralDatabase {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.identity.name
+    }
+
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.identity.url
+    }
+
+    pub async fn teardown(mut self) -> Result<(), sqlx::Error> {
+        drop_database(self.name()).await?;
+        drop(self.permit.take());
+        Ok(())
+    }
 }
 
 impl Drop for EphemeralDatabase {
     fn drop(&mut self) {
-        let name = self.name.clone();
-        let permit = take_ephemeral_db_permit(&name);
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let name = self.identity.name.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let _permit = permit;
@@ -136,11 +155,13 @@ async fn create_ephemeral_database_with_permit(
     let create_sql = format!("CREATE DATABASE {name}");
     sqlx::raw_sql(&create_sql).execute(&admin_pool).await?;
     admin_pool.close().await;
-    retain_ephemeral_db_permit(&name, permit);
 
     Ok(EphemeralDatabase {
-        url: with_database_name(admin_url, &name),
-        name,
+        identity: EphemeralDatabaseIdentity {
+            url: with_database_name(admin_url, &name),
+            name,
+        },
+        permit: Some(permit),
     })
 }
 
@@ -178,32 +199,6 @@ fn ephemeral_db_connection_budget_size() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_TEST_DB_CONNECTION_BUDGET)
-}
-
-fn retain_ephemeral_db_permit(database_name: &str, permit: OwnedSemaphorePermit) {
-    let previous = ephemeral_db_permits()
-        .lock()
-        .expect("ephemeral database permit registry should not be poisoned")
-        .insert(database_name.to_owned(), permit);
-    debug_assert!(
-        previous.is_none(),
-        "ephemeral database names should be unique"
-    );
-}
-
-fn release_ephemeral_db_permit(database_name: &str) {
-    let _permit = take_ephemeral_db_permit(database_name);
-}
-
-fn take_ephemeral_db_permit(database_name: &str) -> Option<OwnedSemaphorePermit> {
-    ephemeral_db_permits()
-        .lock()
-        .expect("ephemeral database permit registry should not be poisoned")
-        .remove(database_name)
-}
-
-fn ephemeral_db_permits() -> &'static Mutex<HashMap<String, OwnedSemaphorePermit>> {
-    EPHEMERAL_DB_PERMITS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub async fn drop_database(database_name: &str) -> Result<(), sqlx::Error> {
@@ -291,10 +286,17 @@ fn sanitize_identifier(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+
+    const CLEANUP_ATTEMPTS: usize = 100;
+    const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+    static LIFECYCLE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
     async fn setup_modes_preserve_migration_history_semantics() {
+        let _guard = LIFECYCLE_TEST_LOCK.lock().await;
         let (pool, database) = setup_unmigrated_ephemeral_pool("support_unmigrated", 1).await;
         assert!(!relation_exists(&pool, "job_queue").await);
         assert!(!relation_exists(&pool, "_sqlx_migrations").await);
@@ -310,6 +312,143 @@ mod tests {
         assert!(relation_exists(&pool, "job_queue").await);
         assert!(relation_exists(&pool, "_sqlx_migrations").await);
         teardown_ephemeral_pool(pool, database).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_teardown_preserves_identity_and_releases_exact_permit_count() {
+        let _guard = LIFECYCLE_TEST_LOCK.lock().await;
+        let available_before = ephemeral_db_connection_budget().available_permits();
+        let max_connections = 3;
+        let reserved_permits = max_connections as usize + 1;
+        assert!(available_before >= reserved_permits);
+
+        let (pool, database) =
+            setup_unmigrated_ephemeral_pool("support_explicit_teardown", max_connections).await;
+        let name = database.name().to_owned();
+        let url = database.url().to_owned();
+
+        assert_eq!(
+            ephemeral_db_connection_budget().available_permits(),
+            available_before - reserved_permits
+        );
+        assert_eq!(database.name(), name);
+        assert_eq!(database.url(), url);
+        assert!(url.ends_with(&format!("/{name}")));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT current_database()")
+                .fetch_one(&pool)
+                .await
+                .expect("read current database"),
+            name
+        );
+        record_postgres_version(&pool).await;
+
+        teardown_ephemeral_pool(pool, database).await;
+
+        assert!(!database_exists(&name).await);
+        assert_eq!(
+            ephemeral_db_connection_budget().available_permits(),
+            available_before
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_fallback_cleans_database_and_releases_exact_permit_count() {
+        let _guard = LIFECYCLE_TEST_LOCK.lock().await;
+        let available_before = ephemeral_db_connection_budget().available_permits();
+        let max_connections = 2;
+        let reserved_permits = max_connections as usize + 1;
+        let (pool, database) =
+            setup_unmigrated_ephemeral_pool("support_drop_fallback", max_connections).await;
+        let name = database.name().to_owned();
+
+        assert_eq!(
+            ephemeral_db_connection_budget().available_permits(),
+            available_before - reserved_permits
+        );
+        pool.close().await;
+        drop(database);
+
+        wait_for_database_cleanup_and_permits(&name, available_before).await;
+    }
+
+    #[tokio::test]
+    async fn panic_path_runs_drop_fallback_without_leaking_permits() {
+        let _guard = LIFECYCLE_TEST_LOCK.lock().await;
+        let available_before = ephemeral_db_connection_budget().available_permits();
+        let max_connections = 1;
+        let reserved_permits = max_connections as usize + 1;
+        let (pool, database) =
+            setup_unmigrated_ephemeral_pool("support_panic_fallback", max_connections).await;
+        let name = database.name().to_owned();
+
+        assert_eq!(
+            ephemeral_db_connection_budget().available_permits(),
+            available_before - reserved_permits
+        );
+        let panic_task = tokio::spawn(async move {
+            let _pool = pool;
+            let _database = database;
+            panic!("intentional lifecycle panic");
+        });
+        assert!(panic_task.await.expect_err("task should panic").is_panic());
+
+        wait_for_database_cleanup_and_permits(&name, available_before).await;
+    }
+
+    async fn record_postgres_version(pool: &PgPool) {
+        let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+            .fetch_one(pool)
+            .await
+            .expect("read PostgreSQL server_version");
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+                .fetch_one(pool)
+                .await
+                .expect("read PostgreSQL server_version_num");
+        eprintln!(
+            "db lifecycle PostgreSQL server_version={server_version} server_version_num={server_version_num}"
+        );
+        assert!(
+            server_version_num >= 180_000,
+            "db lifecycle tests require PostgreSQL 18+, got {server_version} ({server_version_num})"
+        );
+    }
+
+    async fn wait_for_database_cleanup_and_permits(
+        database_name: &str,
+        expected_available_permits: usize,
+    ) {
+        for _ in 0..CLEANUP_ATTEMPTS {
+            if !database_exists(database_name).await
+                && ephemeral_db_connection_budget().available_permits()
+                    == expected_available_permits
+            {
+                return;
+            }
+            tokio::time::sleep(CLEANUP_POLL_INTERVAL).await;
+        }
+
+        panic!(
+            "database {database_name} or its permits were not cleaned up; database_exists={} available_permits={} expected_available_permits={expected_available_permits}",
+            database_exists(database_name).await,
+            ephemeral_db_connection_budget().available_permits(),
+        );
+    }
+
+    async fn database_exists(database_name: &str) -> bool {
+        let admin_pool = connect_admin_pool(admin_database_url().await)
+            .await
+            .expect("connect admin pool");
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
+        )
+        .bind(database_name)
+        .fetch_one(&admin_pool)
+        .await
+        .expect("query database existence");
+        admin_pool.close().await;
+        exists
     }
 
     async fn relation_exists(pool: &PgPool, name: &str) -> bool {
