@@ -69,7 +69,10 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobsDa
         " Job queue ",
         &columns,
         rows,
-        TableSelection::new(app.list_selection, TableEnterAction::OpenDetails),
+        TableSelection::new(
+            app.current_frame.state.list_selection,
+            TableEnterAction::OpenDetails,
+        ),
         "No jobs match the current scope and filters.",
     );
 }

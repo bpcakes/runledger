@@ -58,7 +58,10 @@ pub fn draw_runs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &W
         " Workflow runs ",
         &columns,
         rows,
-        TableSelection::new(app.list_selection, TableEnterAction::OpenDetails),
+        TableSelection::new(
+            app.current_frame.state.list_selection,
+            TableEnterAction::OpenDetails,
+        ),
         "No workflow runs match the current scope and filters.",
     );
 }
@@ -109,7 +112,9 @@ pub fn draw_detail(
     let filtered_steps: Vec<_> = app.visible_workflow_steps(&data.steps).collect();
     let selected_step_id = filtered_steps
         .get(
-            app.list_selection
+            app.current_frame
+                .state
+                .list_selection
                 .min(filtered_steps.len().saturating_sub(1)),
         )
         .map(|step| step.id);
@@ -153,7 +158,7 @@ pub fn draw_detail(
         " Steps ",
         &step_columns,
         step_rows,
-        TableSelection::new(app.list_selection, step_enter_action),
+        TableSelection::new(app.current_frame.state.list_selection, step_enter_action),
         "No workflow steps match the current search.",
     );
 

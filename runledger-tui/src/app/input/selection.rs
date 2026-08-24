@@ -8,7 +8,10 @@ use super::clipboard::copy_to_terminal_clipboard;
 impl App {
     pub(in crate::app) fn move_selection(&mut self, delta: i32) {
         if matches!(
-            (&self.screen, self.job_detail_pane),
+            (
+                &self.current_frame.screen,
+                self.current_frame.state.job_detail_pane
+            ),
             (Screen::JobDetail { .. }, JobDetailPane::Payload)
         ) {
             let max_scroll = self.payload_scroll_max();
@@ -16,11 +19,19 @@ impl App {
                 return;
             }
             let next = if delta.is_positive() {
-                self.job_detail_viewport.scroll.saturating_add(1)
+                self.current_frame
+                    .state
+                    .job_detail_viewport
+                    .scroll
+                    .saturating_add(1)
             } else {
-                self.job_detail_viewport.scroll.saturating_sub(1)
+                self.current_frame
+                    .state
+                    .job_detail_viewport
+                    .scroll
+                    .saturating_sub(1)
             };
-            self.job_detail_viewport.scroll = next.min(max_scroll);
+            self.current_frame.state.job_detail_viewport.scroll = next.min(max_scroll);
             return;
         }
 
@@ -30,35 +41,41 @@ impl App {
         }
         let step = delta.unsigned_abs() as usize;
         let next = if delta.is_positive() {
-            self.list_selection.saturating_add(step)
+            self.current_frame.state.list_selection.saturating_add(step)
         } else {
-            self.list_selection.saturating_sub(step)
+            self.current_frame.state.list_selection.saturating_sub(step)
         };
-        self.list_selection = next.min(len - 1);
+        self.current_frame.state.list_selection = next.min(len - 1);
     }
 
     pub(in crate::app::input) fn move_to_start(&mut self) {
         if matches!(
-            (&self.screen, self.job_detail_pane),
+            (
+                &self.current_frame.screen,
+                self.current_frame.state.job_detail_pane
+            ),
             (Screen::JobDetail { .. }, JobDetailPane::Payload)
         ) {
-            self.job_detail_viewport.scroll = 0;
+            self.current_frame.state.job_detail_viewport.scroll = 0;
         } else {
-            self.list_selection = 0;
+            self.current_frame.state.list_selection = 0;
         }
     }
 
     pub(in crate::app::input) fn move_to_end(&mut self) {
         if matches!(
-            (&self.screen, self.job_detail_pane),
+            (
+                &self.current_frame.screen,
+                self.current_frame.state.job_detail_pane
+            ),
             (Screen::JobDetail { .. }, JobDetailPane::Payload)
         ) {
-            self.job_detail_viewport.scroll = self.payload_scroll_max();
+            self.current_frame.state.job_detail_viewport.scroll = self.payload_scroll_max();
             return;
         }
         let len = self.list_len();
         if len > 0 {
-            self.list_selection = len - 1;
+            self.current_frame.state.list_selection = len - 1;
         }
     }
 
@@ -71,11 +88,14 @@ impl App {
         } else {
             crate::format::job_payload_lines(&detail.job.payload)
         };
-        crate::format::job_payload_scroll_max(lines.len(), self.job_detail_viewport.visible_rows)
+        crate::format::job_payload_scroll_max(
+            lines.len(),
+            self.current_frame.state.job_detail_viewport.visible_rows,
+        )
     }
 
     pub(in crate::app::input) fn activate_selection(&mut self) {
-        match &self.screen {
+        match &self.current_frame.screen {
             Screen::Dashboard => {
                 if let Some(job_type) = self.selected_dashboard_job_type() {
                     self.navigate_top(TopScreen::Queue);
@@ -105,33 +125,33 @@ impl App {
     fn selected_dashboard_job_type(&self) -> Option<String> {
         let dashboard = self.dashboard.as_ref()?;
         self.visible_dashboard_metrics(dashboard)
-            .nth(self.list_selection)
+            .nth(self.current_frame.state.list_selection)
             .map(|metric| metric.job_type.as_str().to_owned())
     }
 
     fn selected_job_id(&self) -> Option<Uuid> {
         let jobs = &self.jobs.as_ref()?.jobs;
         self.visible_jobs(jobs)
-            .nth(self.list_selection)
+            .nth(self.current_frame.state.list_selection)
             .map(|job| job.id)
     }
 
     fn selected_workflow_run_id(&self) -> Option<Uuid> {
         let runs = &self.workflows.as_ref()?.runs;
         self.visible_workflow_runs(runs)
-            .nth(self.list_selection)
+            .nth(self.current_frame.state.list_selection)
             .map(|run| run.id)
     }
 
     pub(crate) fn selected_workflow_step_job_id(&self) -> Option<Uuid> {
         let steps = &self.workflow_detail.as_ref()?.steps;
         self.visible_workflow_steps(steps)
-            .nth(self.list_selection)
+            .nth(self.current_frame.state.list_selection)
             .and_then(|step| step.job_id)
     }
 
     fn selected_identifier(&self) -> Option<String> {
-        match self.screen {
+        match self.current_frame.screen {
             Screen::Dashboard => self.selected_dashboard_job_type(),
             Screen::Queue => self.selected_job_id().map(|id| id.to_string()),
             Screen::JobDetail { job_id } => Some(job_id.to_string()),
@@ -142,7 +162,7 @@ impl App {
                 .or_else(|| Some(run_id.to_string())),
             Screen::Definitions => self
                 .visible_definitions(&self.definitions.as_ref()?.definitions)
-                .nth(self.list_selection)
+                .nth(self.current_frame.state.list_selection)
                 .map(|definition| definition.job_type.as_str().to_owned()),
         }
     }

@@ -202,7 +202,7 @@ fn draw_tabs_and_status(f: &mut Frame, app: &App, fetch_status: FetchStatus) -> 
 }
 
 fn draw_screen_content(f: &mut Frame, area: Rect, app: &mut App) {
-    match &app.screen {
+    match &app.current_frame.screen {
         Screen::Dashboard => {
             if let Some(data) = &app.dashboard {
                 super::dashboard::draw(f, area, app, data);
@@ -220,8 +220,13 @@ fn draw_screen_content(f: &mut Frame, area: Rect, app: &mut App) {
         Screen::JobDetail { job_id } => {
             if let Some(data) = &app.job_detail {
                 if data.job.id == *job_id {
-                    app.job_detail_viewport =
-                        super::job_detail::draw(f, area, app, data, app.job_detail_viewport);
+                    app.current_frame.state.job_detail_viewport = super::job_detail::draw(
+                        f,
+                        area,
+                        app,
+                        data,
+                        app.current_frame.state.job_detail_viewport,
+                    );
                 } else {
                     draw_loading(f, area, &app.last_error);
                 }

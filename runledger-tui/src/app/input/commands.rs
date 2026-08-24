@@ -7,7 +7,7 @@ impl App {
     pub(in crate::app::input) fn clear_context_filters(&mut self) -> bool {
         let mut refresh = false;
         self.transition_table_search(None);
-        match self.screen {
+        match self.current_frame.screen {
             Screen::Queue | Screen::JobDetail { .. } => {
                 if self.queue_filter != QueueStatusFilter::All || self.job_type_filter.is_some() {
                     self.transition_queue_status_filter(QueueStatusFilter::All);

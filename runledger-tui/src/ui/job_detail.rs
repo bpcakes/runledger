@@ -56,11 +56,13 @@ pub fn draw(
 
     let pane_labels = ["Summary", "Events", "Logs", "Payload"];
     let tabs = Tabs::new(pane_labels)
-        .select(job_detail_pane_index(app.job_detail_pane))
+        .select(job_detail_pane_index(
+            app.current_frame.state.job_detail_pane,
+        ))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_widget(tabs, chunks[2]);
 
-    match app.job_detail_pane {
+    match app.current_frame.state.job_detail_pane {
         JobDetailPane::Summary => {
             draw_summary(f, chunks[3], data);
             viewport
@@ -169,7 +171,12 @@ fn draw_summary(f: &mut Frame, area: ratatui::layout::Rect, data: &JobDetailData
 fn draw_events(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobDetailData) {
     let events: Vec<_> = app.visible_job_events(&data.events).collect();
     let selected_event_details = events
-        .get(app.list_selection.min(events.len().saturating_sub(1)))
+        .get(
+            app.current_frame
+                .state
+                .list_selection
+                .min(events.len().saturating_sub(1)),
+        )
         .and_then(|event| event_details(event));
     let (table_area, details_area) = if selected_event_details.is_some() && area.height >= 10 {
         let chunks = Layout::default()
@@ -211,7 +218,10 @@ fn draw_events(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &Job
         " Events ",
         &columns,
         rows,
-        TableSelection::new(app.list_selection, TableEnterAction::None),
+        TableSelection::new(
+            app.current_frame.state.list_selection,
+            TableEnterAction::None,
+        ),
         "No job events match the current search.",
     );
 
@@ -354,7 +364,10 @@ fn draw_logs(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &JobDe
         " Logs ",
         &columns,
         rows,
-        TableSelection::new(app.list_selection, TableEnterAction::None),
+        TableSelection::new(
+            app.current_frame.state.list_selection,
+            TableEnterAction::None,
+        ),
         "No log lines match the current search.",
     );
 }
@@ -465,7 +478,7 @@ mod tests {
             limit: 100,
             skip_schema_check: false,
         });
-        app.job_detail_pane = JobDetailPane::Payload;
+        app.current_frame.state.job_detail_pane = JobDetailPane::Payload;
         app
     }
 

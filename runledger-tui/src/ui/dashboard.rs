@@ -61,7 +61,7 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &Dashbo
                     table_cell(field, align)
                 })
                 .collect();
-            TableRow::new(cells).style(if i == app.list_selection && warn {
+            TableRow::new(cells).style(if i == app.current_frame.state.list_selection && warn {
                 style.add_modifier(Modifier::REVERSED)
             } else if warn {
                 style
@@ -77,7 +77,10 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &Dashbo
         " Metrics ",
         &DASHBOARD_COLUMNS,
         rows,
-        TableSelection::new(app.list_selection, TableEnterAction::None),
+        TableSelection::new(
+            app.current_frame.state.list_selection,
+            TableEnterAction::None,
+        ),
         "No job metrics in this scope.",
     );
 }

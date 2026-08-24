@@ -49,7 +49,10 @@ pub fn draw(f: &mut Frame, area: ratatui::layout::Rect, app: &App, data: &Defini
         " Job definitions ",
         &columns,
         rows,
-        TableSelection::new(app.list_selection, TableEnterAction::None),
+        TableSelection::new(
+            app.current_frame.state.list_selection,
+            TableEnterAction::None,
+        ),
         "No job definitions match the current filter.",
     );
 }

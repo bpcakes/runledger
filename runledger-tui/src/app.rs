@@ -101,7 +101,7 @@ impl ActiveInput {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewState {
     pub list_selection: usize,
     pub job_detail_viewport: JobDetailViewport,
@@ -118,26 +118,32 @@ impl Default for ViewState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenFrame {
     pub screen: Screen,
     pub state: ViewState,
 }
 
+impl ScreenFrame {
+    fn new(screen: Screen) -> Self {
+        Self {
+            screen,
+            state: ViewState::default(),
+        }
+    }
+}
+
 pub struct App {
     pub config: Config,
     pub scope: Scope,
-    pub screen: Screen,
+    pub current_frame: ScreenFrame,
     pub screen_stack: Vec<ScreenFrame>,
     pub top_view_states: [ViewState; 4],
-    pub list_selection: usize,
-    pub job_detail_viewport: JobDetailViewport,
     pub payload_raw: bool,
     pub payload_wrap: bool,
     pub queue_filter: QueueStatusFilter,
     pub job_type_filter: Option<String>,
     pub workflow_type_filter: Option<String>,
-    pub job_detail_pane: JobDetailPane,
     pub show_help: bool,
     active_input: ActiveInput,
     pub table_search: Option<String>,
@@ -161,17 +167,14 @@ impl App {
         Self {
             config,
             scope,
-            screen: Screen::Dashboard,
+            current_frame: ScreenFrame::new(Screen::Dashboard),
             screen_stack: Vec::new(),
             top_view_states: [ViewState::default(); Self::TOP_SCREEN_COUNT],
-            list_selection: 0,
-            job_detail_viewport: JobDetailViewport::default(),
             payload_raw: false,
             payload_wrap: false,
             queue_filter: QueueStatusFilter::All,
             job_type_filter: None,
             workflow_type_filter: None,
-            job_detail_pane: JobDetailPane::Summary,
             show_help: false,
             active_input: ActiveInput::None,
             table_search: None,
@@ -206,7 +209,7 @@ impl App {
     }
 
     pub fn top_screen(&self) -> TopScreen {
-        match &self.screen {
+        match &self.current_frame.screen {
             Screen::Dashboard => TopScreen::Dashboard,
             Screen::Queue | Screen::JobDetail { .. } => TopScreen::Queue,
             Screen::Workflows | Screen::WorkflowDetail { .. } => TopScreen::Workflows,
@@ -215,7 +218,7 @@ impl App {
     }
 
     pub fn screen_title(&self) -> &'static str {
-        match &self.screen {
+        match &self.current_frame.screen {
             Screen::Dashboard => "Dashboard",
             Screen::Queue => "Queue",
             Screen::JobDetail { .. } => "Job",
@@ -225,30 +228,16 @@ impl App {
         }
     }
 
-    fn capture_view_state(&self) -> ViewState {
-        ViewState {
-            list_selection: self.list_selection,
-            job_detail_viewport: self.job_detail_viewport,
-            job_detail_pane: self.job_detail_pane,
-        }
-    }
-
-    fn restore_view_state(&mut self, state: ViewState) {
-        self.list_selection = state.list_selection;
-        self.job_detail_viewport = state.job_detail_viewport;
-        self.job_detail_pane = state.job_detail_pane;
-        self.clamp_selection();
-    }
-
     fn save_current_top_view_state(&mut self) {
         if self.screen_stack.is_empty() && self.is_top_level_screen() {
-            self.top_view_states[self.top_screen_index()] = self.capture_view_state();
+            let index = self.top_screen_index();
+            self.top_view_states[index] = self.current_frame.state;
         }
     }
 
     fn is_top_level_screen(&self) -> bool {
         matches!(
-            self.screen,
+            self.current_frame.screen,
             Screen::Dashboard | Screen::Queue | Screen::Workflows | Screen::Definitions
         )
     }
@@ -258,7 +247,11 @@ impl App {
         let selected = if rows == 0 {
             "row 0/0".to_owned()
         } else {
-            format!("row {}/{}", self.list_selection.min(rows - 1) + 1, rows)
+            format!(
+                "row {}/{}",
+                self.current_frame.state.list_selection.min(rows - 1) + 1,
+                rows
+            )
         };
         let refresh = self.refresh_status_label(fetch_status);
         let query = fetch_status
@@ -284,7 +277,7 @@ impl App {
     }
 
     pub fn key_hint_line(&self) -> &'static str {
-        match self.screen {
+        match self.current_frame.screen {
             Screen::Dashboard => {
                 "Enter queue filter | / search | t type | c clear | p pause | r refresh | ? help | q quit"
             }
@@ -330,7 +323,7 @@ impl App {
             .as_deref()
             .map(|q| format!(" search='{q}'"))
             .unwrap_or_default();
-        match self.screen {
+        match self.current_frame.screen {
             Screen::Dashboard => format!("scope {}", self.scope.label()) + &search,
             Screen::Queue | Screen::JobDetail { .. } => format!(
                 "scope {} status {} type {}{}",
@@ -356,8 +349,17 @@ impl App {
     pub fn navigate_top(&mut self, top: TopScreen) {
         self.save_current_top_view_state();
         self.screen_stack.clear();
-        self.screen = Self::screen_from_top(top);
-        self.restore_view_state(self.top_view_states[self.top_screen_index()]);
+        let index = match top {
+            TopScreen::Dashboard => 0,
+            TopScreen::Queue => 1,
+            TopScreen::Workflows => 2,
+            TopScreen::Definitions => 3,
+        };
+        self.current_frame = ScreenFrame {
+            screen: Self::screen_from_top(top),
+            state: self.top_view_states[index],
+        };
+        self.clamp_selection();
     }
 
     fn screen_from_top(top: TopScreen) -> Screen {
@@ -405,42 +407,45 @@ impl App {
 
     fn transition_table_search(&mut self, query: Option<String>) -> bool {
         self.table_search = query;
-        self.list_selection = 0;
+        self.current_frame.state.list_selection = 0;
         self.clamp_selection();
         false
     }
 
     pub fn push_job_detail(&mut self, job_id: Uuid) {
-        self.screen_stack.push(ScreenFrame {
-            screen: self.screen.clone(),
-            state: self.capture_view_state(),
-        });
-        self.screen = Screen::JobDetail { job_id };
+        let previous = std::mem::replace(
+            &mut self.current_frame,
+            ScreenFrame::new(Screen::JobDetail { job_id }),
+        );
+        self.screen_stack.push(previous);
         self.job_detail = None;
-        self.list_selection = 0;
-        self.job_detail_viewport = JobDetailViewport::default();
-        self.job_detail_pane = JobDetailPane::Summary;
     }
 
     pub fn push_workflow_detail(&mut self, run_id: Uuid) {
-        self.screen_stack.push(ScreenFrame {
-            screen: self.screen.clone(),
-            state: self.capture_view_state(),
-        });
-        self.screen = Screen::WorkflowDetail { run_id };
+        let next_state = ViewState {
+            list_selection: 0,
+            ..self.current_frame.state
+        };
+        let previous = std::mem::replace(
+            &mut self.current_frame,
+            ScreenFrame {
+                screen: Screen::WorkflowDetail { run_id },
+                state: next_state,
+            },
+        );
+        self.screen_stack.push(previous);
         self.workflow_detail = None;
-        self.list_selection = 0;
     }
 
     pub fn pop_screen(&mut self) {
         if let Some(prev) = self.screen_stack.pop() {
-            self.screen = prev.screen;
-            self.restore_view_state(prev.state);
+            self.current_frame = prev;
+            self.clamp_selection();
         }
     }
 
     pub fn list_len(&self) -> usize {
-        match &self.screen {
+        match &self.current_frame.screen {
             Screen::Dashboard => self
                 .dashboard
                 .as_ref()
@@ -449,7 +454,7 @@ impl App {
                 .jobs
                 .as_ref()
                 .map_or(0, |data| self.visible_jobs(&data.jobs).count()),
-            Screen::JobDetail { .. } => match self.job_detail_pane {
+            Screen::JobDetail { .. } => match self.current_frame.state.job_detail_pane {
                 JobDetailPane::Events => self
                     .job_detail
                     .as_ref()
@@ -476,7 +481,7 @@ impl App {
 
     pub(crate) fn fetch_request(&self) -> FetchRequest {
         FetchRequest {
-            screen: self.screen.clone(),
+            screen: self.current_frame.screen.clone(),
             scope: self.scope,
             queue_filter: self.queue_filter,
             job_type_filter: self.job_type_filter.clone(),
@@ -498,7 +503,7 @@ impl App {
                 self.last_error = None;
                 true
             }
-            FetchOutcome::JobDetail(Ok(data)) if matches!(&self.screen, Screen::JobDetail { job_id } if *job_id == data.job.id) =>
+            FetchOutcome::JobDetail(Ok(data)) if matches!(&self.current_frame.screen, Screen::JobDetail { job_id } if *job_id == data.job.id) =>
             {
                 self.job_detail = Some(*data);
                 self.last_error = None;
@@ -511,7 +516,7 @@ impl App {
             }
             FetchOutcome::WorkflowDetail(Ok(data))
                 if matches!(
-                    &self.screen,
+                    &self.current_frame.screen,
                     Screen::WorkflowDetail { run_id } if *run_id == data.run.id
                 ) =>
             {
@@ -542,9 +547,9 @@ impl App {
     pub(super) fn clamp_selection(&mut self) {
         let len = self.list_len();
         if len == 0 {
-            self.list_selection = 0;
-        } else if self.list_selection >= len {
-            self.list_selection = len - 1;
+            self.current_frame.state.list_selection = 0;
+        } else if self.current_frame.state.list_selection >= len {
+            self.current_frame.state.list_selection = len - 1;
         }
     }
 }
@@ -909,7 +914,7 @@ mod tests {
     fn scope_transition_invalidates_every_cache_without_moving_selection() {
         let mut app = App::new(test_config());
         seed_all_caches(&mut app);
-        app.list_selection = 7;
+        app.current_frame.state.list_selection = 7;
         let scope = Scope::for_org(Uuid::new_v4());
 
         assert!(app.transition_scope(scope));
@@ -921,14 +926,14 @@ mod tests {
         assert!(app.workflows.is_none());
         assert!(app.workflow_detail.is_none());
         assert!(app.definitions.is_none());
-        assert_eq!(app.list_selection, 7);
+        assert_eq!(app.current_frame.state.list_selection, 7);
     }
 
     #[test]
     fn queue_status_transition_invalidates_only_jobs_and_preserves_selection() {
         let mut app = App::new(test_config());
         seed_all_caches(&mut app);
-        app.list_selection = 7;
+        app.current_frame.state.list_selection = 7;
 
         assert!(app.transition_queue_status_filter(QueueStatusFilter::Pending));
 
@@ -939,14 +944,14 @@ mod tests {
         assert!(app.workflows.is_some());
         assert!(app.workflow_detail.is_some());
         assert!(app.definitions.is_some());
-        assert_eq!(app.list_selection, 7);
+        assert_eq!(app.current_frame.state.list_selection, 7);
     }
 
     #[test]
     fn job_type_transition_invalidates_jobs_and_definitions_and_preserves_selection() {
         let mut app = App::new(test_config());
         seed_all_caches(&mut app);
-        app.list_selection = 7;
+        app.current_frame.state.list_selection = 7;
 
         assert!(app.transition_job_type_filter(Some("jobs.filtered".to_owned())));
 
@@ -957,14 +962,14 @@ mod tests {
         assert!(app.job_detail.is_some());
         assert!(app.workflows.is_some());
         assert!(app.workflow_detail.is_some());
-        assert_eq!(app.list_selection, 7);
+        assert_eq!(app.current_frame.state.list_selection, 7);
     }
 
     #[test]
     fn workflow_type_transition_invalidates_only_workflows_and_preserves_selection() {
         let mut app = App::new(test_config());
         seed_all_caches(&mut app);
-        app.list_selection = 7;
+        app.current_frame.state.list_selection = 7;
 
         assert!(app.transition_workflow_type_filter(Some("workflows.filtered".to_owned())));
 
@@ -978,14 +983,14 @@ mod tests {
         assert!(app.job_detail.is_some());
         assert!(app.workflow_detail.is_some());
         assert!(app.definitions.is_some());
-        assert_eq!(app.list_selection, 7);
+        assert_eq!(app.current_frame.state.list_selection, 7);
     }
 
     #[test]
     fn table_search_transition_reuses_caches_and_resets_selection_without_refresh() {
         let mut app = App::new(test_config());
         seed_all_caches(&mut app);
-        app.list_selection = 7;
+        app.current_frame.state.list_selection = 7;
 
         assert!(!app.transition_table_search(Some("needle".to_owned())));
 
@@ -996,7 +1001,7 @@ mod tests {
         assert!(app.workflows.is_some());
         assert!(app.workflow_detail.is_some());
         assert!(app.definitions.is_some());
-        assert_eq!(app.list_selection, 0);
+        assert_eq!(app.current_frame.state.list_selection, 0);
     }
 
     #[test]
@@ -1026,31 +1031,31 @@ mod tests {
 
         assert!(app.handle_key(key(crossterm::event::KeyCode::Enter)));
 
-        assert_eq!(app.screen, Screen::Queue);
+        assert_eq!(app.current_frame.screen, Screen::Queue);
         assert_eq!(app.job_type_filter.as_deref(), Some(target_job_type));
         assert_eq!(app.queue_filter, QueueStatusFilter::All);
         assert!(app.jobs.is_none());
         assert!(app.definitions.is_none());
-        assert_eq!(app.list_selection, 2);
+        assert_eq!(app.current_frame.state.list_selection, 2);
     }
 
     #[test]
     fn clearing_definition_job_type_filter_invalidates_queue_and_definition_caches() {
         let mut app = App::new(test_config());
-        app.screen = Screen::Definitions;
+        app.current_frame.screen = Screen::Definitions;
         app.job_type_filter = Some("jobs.filtered".to_owned());
         app.jobs = Some(JobsData { jobs: Vec::new() });
         app.definitions = Some(DefinitionsData {
             definitions: Vec::new(),
         });
-        app.list_selection = 7;
+        app.current_frame.state.list_selection = 7;
 
         assert!(app.handle_key(key(crossterm::event::KeyCode::Char('c'))));
 
         assert!(app.job_type_filter.is_none());
         assert!(app.jobs.is_none());
         assert!(app.definitions.is_none());
-        assert_eq!(app.list_selection, 0);
+        assert_eq!(app.current_frame.state.list_selection, 0);
     }
 
     #[test]
@@ -1075,7 +1080,7 @@ mod tests {
         assert!(app.jobs.is_none());
         assert!(app.definitions.is_none());
 
-        app.screen = Screen::Workflows;
+        app.current_frame.screen = Screen::Workflows;
         app.workflows = Some(WorkflowsData { runs: Vec::new() });
         app.handle_key(key(crossterm::event::KeyCode::Char('t')));
         assert_eq!(
@@ -1094,10 +1099,10 @@ mod tests {
     #[test]
     fn search_input_edits_without_scheduling_a_fetch_and_resets_selection() {
         let mut app = App::new(test_config());
-        app.screen = Screen::Queue;
+        app.current_frame.screen = Screen::Queue;
         app.jobs = Some(JobsData { jobs: Vec::new() });
         app.table_search = Some("saved".to_owned());
-        app.list_selection = 9;
+        app.current_frame.state.list_selection = 9;
 
         app.handle_key(key(crossterm::event::KeyCode::Char('/')));
         assert_eq!(
@@ -1111,7 +1116,7 @@ mod tests {
         assert!(!app.handle_key(key(crossterm::event::KeyCode::Enter)));
 
         assert_eq!(app.table_search.as_deref(), Some("saved"));
-        assert_eq!(app.list_selection, 0);
+        assert_eq!(app.current_frame.state.list_selection, 0);
         assert_eq!(app.active_input(), &ActiveInput::None);
     }
 
@@ -1138,7 +1143,7 @@ mod tests {
     fn workflow_detail_open_hint_tracks_selected_step_job() {
         let mut app = App::new(test_config());
         let external_detail = workflow_detail_with_step(None);
-        app.screen = Screen::WorkflowDetail {
+        app.current_frame.screen = Screen::WorkflowDetail {
             run_id: external_detail.run.id,
         };
         app.workflow_detail = Some(external_detail);
@@ -1146,7 +1151,7 @@ mod tests {
         assert!(!app.key_hint_line().contains("open job"));
 
         let job_detail = workflow_detail_with_step(Some(Uuid::new_v4()));
-        app.screen = Screen::WorkflowDetail {
+        app.current_frame.screen = Screen::WorkflowDetail {
             run_id: job_detail.run.id,
         };
         app.workflow_detail = Some(job_detail);
@@ -1170,7 +1175,7 @@ mod tests {
         detail.steps_total = 2;
 
         let mut app = App::new(test_config());
-        app.screen = Screen::WorkflowDetail {
+        app.current_frame.screen = Screen::WorkflowDetail {
             run_id: detail.run.id,
         };
         app.workflow_detail = Some(detail);
@@ -1179,7 +1184,7 @@ mod tests {
         assert_eq!(app.list_len(), 1);
         app.handle_key(key(crossterm::event::KeyCode::Enter));
         assert_eq!(
-            app.screen,
+            app.current_frame.screen,
             Screen::JobDetail {
                 job_id: target_job_id
             }
@@ -1192,8 +1197,8 @@ mod tests {
 
         let job_id = Uuid::new_v4();
         let mut app = App::new(test_config());
-        app.screen = Screen::JobDetail { job_id };
-        app.job_detail_pane = JobDetailPane::Events;
+        app.current_frame.screen = Screen::JobDetail { job_id };
+        app.current_frame.state.job_detail_pane = JobDetailPane::Events;
         app.table_search = Some(SEARCH_SENTINEL.to_owned());
         app.job_detail = Some(JobDetailData {
             job: job_record_with_payload(job_id, serde_json::json!({})),
@@ -1220,7 +1225,10 @@ mod tests {
 
         assert_eq!(app.list_len(), matching_event_ids.len());
         assert_eq!(matching_event_ids, vec![11]);
-        assert_eq!(matching_event_ids[app.list_selection], 11);
+        assert_eq!(
+            matching_event_ids[app.current_frame.state.list_selection],
+            11
+        );
     }
 
     #[test]
@@ -1276,7 +1284,7 @@ mod tests {
             ));
 
             assert!(refresh, "query {query}");
-            assert_eq!(app.screen, Screen::Queue, "query {query}");
+            assert_eq!(app.current_frame.screen, Screen::Queue, "query {query}");
             assert_eq!(
                 app.job_type_filter.as_deref(),
                 Some(TARGET_JOB_TYPE),
@@ -1311,7 +1319,7 @@ mod tests {
             crossterm::event::KeyModifiers::NONE,
         ));
         assert!(refresh);
-        assert_eq!(app.screen, Screen::Queue);
+        assert_eq!(app.current_frame.screen, Screen::Queue);
         assert_eq!(
             app.job_type_filter.as_deref(),
             Some("jobs.no_duration_target")
@@ -1325,8 +1333,8 @@ mod tests {
             "lines": (0..30).collect::<Vec<_>>()
         });
         let mut app = App::new(test_config());
-        app.screen = Screen::JobDetail { job_id };
-        app.job_detail_pane = JobDetailPane::Payload;
+        app.current_frame.screen = Screen::JobDetail { job_id };
+        app.current_frame.state.job_detail_pane = JobDetailPane::Payload;
         app.job_detail = Some(JobDetailData {
             job: job_record_with_payload(job_id, payload),
             events: Vec::new(),
@@ -1334,23 +1342,29 @@ mod tests {
             workflow_run_id: None,
         });
 
-        app.job_detail_viewport.visible_rows = 8;
+        app.current_frame.state.job_detail_viewport.visible_rows = 8;
         let max_scroll = app.payload_scroll_max();
         assert!(max_scroll > 0);
 
         for _ in 0..(max_scroll + 10) {
             app.move_selection(1);
         }
-        assert_eq!(app.job_detail_viewport.scroll, max_scroll);
+        assert_eq!(
+            app.current_frame.state.job_detail_viewport.scroll,
+            max_scroll
+        );
 
         app.move_selection(-1);
-        assert_eq!(app.job_detail_viewport.scroll, max_scroll - 1);
+        assert_eq!(
+            app.current_frame.state.job_detail_viewport.scroll,
+            max_scroll - 1
+        );
     }
 
     #[test]
     fn top_navigation_preserves_selection_for_cached_screens() {
         let mut app = App::new(test_config());
-        app.screen = Screen::Queue;
+        app.current_frame.screen = Screen::Queue;
         app.jobs = Some(JobsData {
             jobs: vec![
                 job_record_with_payload(Uuid::new_v4(), serde_json::json!({"i": 0})),
@@ -1358,34 +1372,103 @@ mod tests {
                 job_record_with_payload(Uuid::new_v4(), serde_json::json!({"i": 2})),
             ],
         });
-        app.list_selection = 2;
+        let queue_state = ViewState {
+            list_selection: 2,
+            job_detail_viewport: JobDetailViewport {
+                scroll: 7,
+                visible_rows: 11,
+            },
+            job_detail_pane: JobDetailPane::Logs,
+        };
+        app.current_frame.state = queue_state;
 
         app.navigate_top(TopScreen::Dashboard);
-        assert_eq!(app.screen, Screen::Dashboard);
+        assert_eq!(app.current_frame.screen, Screen::Dashboard);
 
         app.navigate_top(TopScreen::Queue);
-        assert_eq!(app.screen, Screen::Queue);
-        assert_eq!(app.list_selection, 2);
+        assert_eq!(app.current_frame.screen, Screen::Queue);
+        assert_eq!(app.current_frame.state, queue_state);
     }
 
     #[test]
-    fn popping_detail_restores_parent_selection() {
-        let job_ids = [Uuid::new_v4(), Uuid::new_v4()];
-        let mut app = App::new(test_config());
-        app.screen = Screen::Queue;
-        app.jobs = Some(JobsData {
-            jobs: vec![
-                job_record_with_payload(job_ids[0], serde_json::json!({"i": 0})),
-                job_record_with_payload(job_ids[1], serde_json::json!({"i": 1})),
-            ],
-        });
-        app.list_selection = 1;
+    fn nested_forward_and_back_navigation_restores_every_frame_state_and_filter() {
+        let job_id = Uuid::new_v4();
+        let mut workflow_detail = workflow_detail_with_step(Some(job_id));
+        let run_id = workflow_detail.run.id;
+        let mut second_step = workflow_detail.steps[0].clone();
+        second_step.id = Uuid::new_v4();
+        second_step.step_key = StepKeyName::new("step.second").expect("valid step key");
+        workflow_detail.steps.push(second_step);
+        workflow_detail.steps_total = 2;
 
-        app.push_job_detail(job_ids[1]);
-        assert_eq!(app.list_selection, 0);
+        let other_run = workflow_detail_with_step(None).run;
+        let mut app = App::new(test_config());
+        app.current_frame.screen = Screen::Workflows;
+        app.workflows = Some(WorkflowsData {
+            runs: vec![other_run, workflow_detail.run.clone()],
+        });
+        app.queue_filter = QueueStatusFilter::Pending;
+        app.job_type_filter = Some("jobs.filtered".to_owned());
+        app.workflow_type_filter = Some("workflows.test".to_owned());
+        let workflows_state = ViewState {
+            list_selection: 1,
+            job_detail_viewport: JobDetailViewport {
+                scroll: 3,
+                visible_rows: 5,
+            },
+            job_detail_pane: JobDetailPane::Logs,
+        };
+        app.current_frame.state = workflows_state;
+
+        app.push_workflow_detail(run_id);
+        app.workflow_detail = Some(workflow_detail);
+        assert_eq!(
+            app.current_frame,
+            ScreenFrame {
+                screen: Screen::WorkflowDetail { run_id },
+                state: ViewState {
+                    list_selection: 0,
+                    ..workflows_state
+                },
+            }
+        );
+
+        let workflow_detail_state = ViewState {
+            list_selection: 1,
+            job_detail_viewport: JobDetailViewport {
+                scroll: 9,
+                visible_rows: 13,
+            },
+            job_detail_pane: JobDetailPane::Events,
+        };
+        app.current_frame.state = workflow_detail_state;
+
+        app.push_job_detail(job_id);
+        assert_eq!(
+            app.current_frame,
+            ScreenFrame::new(Screen::JobDetail { job_id })
+        );
 
         app.pop_screen();
-        assert_eq!(app.screen, Screen::Queue);
-        assert_eq!(app.list_selection, 1);
+        assert_eq!(
+            app.current_frame,
+            ScreenFrame {
+                screen: Screen::WorkflowDetail { run_id },
+                state: workflow_detail_state,
+            }
+        );
+
+        app.pop_screen();
+        assert_eq!(
+            app.current_frame,
+            ScreenFrame {
+                screen: Screen::Workflows,
+                state: workflows_state,
+            }
+        );
+        assert!(app.screen_stack.is_empty());
+        assert_eq!(app.queue_filter, QueueStatusFilter::Pending);
+        assert_eq!(app.job_type_filter.as_deref(), Some("jobs.filtered"));
+        assert_eq!(app.workflow_type_filter.as_deref(), Some("workflows.test"));
     }
 }
