@@ -12,8 +12,9 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::{
     self, CompareAndReplaySucceededJob, CompareAndReplaySucceededJobOutcome, CompareAndRequeueJob,
     CompareAndRequeueJobOutcome, JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition,
-    JobEnqueueIntent, JobEnqueueIntentStatus, JobListFilter, JobQueueRecord, JobRequeueStatePolicy,
-    JobScope, compare_and_replay_succeeded_job, compare_and_replay_succeeded_job_tx,
+    JobEnqueueIntent, JobEnqueueIntentStatus, JobListFilter, JobQueueRecord,
+    JobCancellationScope, JobRequeueStatePolicy, JobScope, cancel_job_with_scope,
+    compare_and_replay_succeeded_job, compare_and_replay_succeeded_job_tx,
     compare_and_requeue_job, compare_and_requeue_job_tx, enqueue_job_with_outcome_tx,
     get_job_by_id, get_job_continuation_metrics, get_job_enqueue_intent_by_id,
     record_job_enqueue_intent_tx, upsert_job_definition_tx,
@@ -163,9 +164,9 @@ async fn packaged_crates_support_external_consumer_embedding() {
         .commit()
         .await
         .expect("commit recovery enqueue");
-    jobs::cancel_job(
+    cancel_job_with_scope(
         &pool,
-        None,
+        JobCancellationScope::Global,
         inserted_recovery.job_id,
         Some("external smoke recovery"),
     )
@@ -207,9 +208,9 @@ async fn packaged_crates_support_external_consumer_embedding() {
     ));
 
     let transactional_recovery_job_id = enqueue_payload(&pool, &recovery_payload).await;
-    jobs::cancel_job(
+    cancel_job_with_scope(
         &pool,
-        None,
+        JobCancellationScope::Global,
         transactional_recovery_job_id,
         Some("external smoke transactional recovery"),
     )

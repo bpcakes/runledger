@@ -235,46 +235,6 @@ async fn handler_continuation_closes_attempt_and_starts_a_fresh_run() {
     assert_eq!(terminal_metrics.active_continued_count, 0);
     assert_eq!(terminal_metrics.max_active_run_number, 0);
 
-    #[expect(
-        deprecated,
-        reason = "the regression test exercises the legacy admin requeue compatibility entrypoint"
-    )]
-    let admin_requeued = runledger_postgres::jobs::requeue_job(
-        &pool,
-        None,
-        job_id,
-        Some("ordinary admin replay after terminal success"),
-    )
-    .await
-    .expect("legacy admin requeue continued terminal job");
-    assert_eq!(admin_requeued.status, JobStatus::Pending);
-    assert_eq!(admin_requeued.run_number, 3);
-    let admin_events = list_job_events(&pool, None, job_id, 10, None)
-        .await
-        .expect("list ordinary admin requeue events");
-    let admin_event = admin_events.last().expect("ordinary admin requeue event");
-    match admin_event.decoded_payload() {
-        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::Basic { reason, .. }) => {
-            assert_eq!(reason, "ordinary admin replay after terminal success")
-        }
-        payload => panic!("expected decoded basic requeue payload, got {payload:?}"),
-    }
-    assert_eq!(
-        admin_event
-            .payload
-            .get("requeue_kind")
-            .and_then(Value::as_str),
-        Some("BASIC")
-    );
-    let admin_requeue_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
-        .await
-        .expect("load metrics after ordinary admin requeue")
-        .pop()
-        .expect("registered job type has continuation metrics");
-    assert_eq!(admin_requeue_metrics.continued_24h, 1);
-    assert_eq!(admin_requeue_metrics.active_continued_count, 0);
-    assert_eq!(admin_requeue_metrics.max_active_run_number, 0);
-
     let collision_job_id = enqueue_test_job(
         &pool,
         JOB_TYPE,

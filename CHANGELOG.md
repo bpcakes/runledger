@@ -4,6 +4,9 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-24
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.1...v0.11.0)
+
 ### Added
 
 - Add typed `JobRunningUpdate` / `mark_job_running{,_for_lease}` transitions
@@ -16,6 +19,39 @@ All notable changes to this workspace are documented here.
 - Deprecate stage-bearing `JobProgressUpdate` and
   `update_job_progress{,_for_lease}`. They remain source-compatible migration
   paths until downstream callers adopt the typed lifecycle APIs.
+
+### Changed
+
+- Make `workflow_steps.job_id` the sole stored workflow-step/job relationship.
+  The paired `202608240001_expand_workflow_step_job_link` and
+  `202608240002_contract_workflow_step_job_link` migrations support an
+  expand/drain/contract rollout while old 0.10 writers are retired.
+- Use one authoritative filtered/unfiltered claim statement after PostgreSQL 18
+  custom-plan, generic-plan, cardinality, skew, and contention benchmarks
+  demonstrated plan and throughput parity.
+
+### Removed
+
+- Breaking: remove the deprecated in-place `requeue_job` API and its wildcard
+  nullable scope. Recover canceled or dead-lettered direct jobs through
+  `compare_and_requeue_job` or `compare_and_requeue_job_tx`; replay successful
+  direct jobs into a new lineage-linked job through
+  `compare_and_replay_succeeded_job` or its transaction form.
+
+### Upgrade notes
+
+- Before upgrading source to 0.11, migrate every `requeue_job` caller. Observe
+  and authorize the exact job scope; `organization_id: None` was an admin
+  wildcard and must not become `JobScope::Global`. For canceled or
+  dead-lettered jobs, derive `CompareAndRequeueJob` from the observed row,
+  choose an explicit progress/checkpoint policy, and handle every typed
+  no-mutation outcome. For `SUCCEEDED`, provide a stable replay request key and
+  use successful replay so the source row and output remain immutable.
+- Apply `202608240001_expand_workflow_step_job_link` first, deploy 0.11, and
+  drain all 0.10 writers and leases before applying
+  `202608240002_contract_workflow_step_job_link`. See the staged migration
+  procedure in the README; applying the contract migration is the rollback
+  boundary for 0.10 binaries.
 
 ## [0.10.1] - 2026-08-20
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.0...v0.10.1)

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH eligible_resource_jobs AS MATERIALIZED (\n    SELECT\n        jq.id,\n        jq.execution_resource_key,\n        jq.priority,\n        jq.next_run_at,\n        jq.created_at\n    FROM job_queue jq\n    WHERE jq.status = 'PENDING'\n      AND jq.next_run_at <= now()\n      AND ($4::text[] IS NULL OR jq.job_type = ANY($4::text[]))\n      AND jq.execution_resource_key IS NOT NULL\n      AND NOT EXISTS (\n          SELECT 1\n          FROM job_execution_resource_claims rc\n          WHERE rc.resource_key = jq.execution_resource_key\n      )\n    ORDER BY\n        jq.priority DESC,\n        jq.next_run_at ASC,\n        jq.created_at ASC,\n        jq.id ASC\n    LIMIT $5\n),\nresource_heads AS MATERIALIZED (\n    SELECT DISTINCT ON (eligible.execution_resource_key)\n        eligible.id\n    FROM eligible_resource_jobs eligible\n    ORDER BY\n        eligible.execution_resource_key,\n        eligible.priority DESC,\n        eligible.next_run_at ASC,\n        eligible.created_at ASC,\n        eligible.id ASC\n),\ncandidates AS MATERIALIZED (\n    SELECT\n        jq.id,\n        jq.execution_resource_key,\n        jq.run_number,\n        jq.attempt,\n        jq.priority,\n        jq.next_run_at,\n        jq.created_at\n    FROM job_queue jq\n    WHERE jq.status = 'PENDING'\n      AND jq.next_run_at <= now()\n      AND ($4::text[] IS NULL OR jq.job_type = ANY($4::text[]))\n      AND (\n          jq.execution_resource_key IS NULL\n          OR (\n              NOT EXISTS (\n                  SELECT 1\n                  FROM job_execution_resource_claims rc\n                  WHERE rc.resource_key = jq.execution_resource_key\n              )\n              AND jq.id IN (SELECT id FROM resource_heads)\n          )\n      )\n    ORDER BY\n        jq.priority DESC,\n        jq.next_run_at ASC,\n        jq.created_at ASC,\n        jq.id ASC\n    FOR UPDATE OF jq SKIP LOCKED\n    LIMIT $1\n),\nacquired AS (\n    INSERT INTO job_execution_resource_claims (\n        resource_key,\n        job_id,\n        run_number,\n        attempt,\n        worker_id,\n        lease_expires_at\n    )\n    SELECT\n        execution_resource_key,\n        id,\n        run_number,\n        attempt + 1,\n        $2,\n        now() + make_interval(secs => $3::int4)\n    FROM candidates\n    WHERE execution_resource_key IS NOT NULL\n    ORDER BY execution_resource_key\n    ON CONFLICT DO NOTHING\n    RETURNING job_id\n)\nSELECT c.id AS \"id!\"\nFROM candidates c\nLEFT JOIN acquired a ON a.job_id = c.id\nWHERE c.execution_resource_key IS NULL OR a.job_id IS NOT NULL\nORDER BY\n    c.priority DESC,\n    c.next_run_at ASC,\n    c.created_at ASC,\n    c.id ASC\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int4",
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b7ee4c268e7e51c293b75a5809fb342db2335af4f1cf3c4f2ccbcb4488df8f65"
+}

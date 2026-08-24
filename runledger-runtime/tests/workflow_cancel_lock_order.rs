@@ -1746,10 +1746,9 @@ async fn release_blocked_job_step_for_test(
             max_attempts,
             timeout_seconds,
             next_run_at,
-            workflow_step_id,
             stage
          )
-         VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8)
+         VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7)
          RETURNING id",
         job_type,
         step.organization_id,
@@ -1757,7 +1756,6 @@ async fn release_blocked_job_step_for_test(
         priority,
         max_attempts,
         timeout_seconds,
-        step.id,
         stage.as_db_value(),
     )
     .fetch_one(&mut *tx)

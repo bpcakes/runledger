@@ -57,7 +57,7 @@ handlers, process model, and admin surface.
   - [Active workflow keys](#active-workflow-keys)
   - [Durable execution resources](#durable-execution-resources)
   - [Workflow recovery](#workflow-recovery)
-  - [Upgrade map for releases 0.6 through 0.10](#upgrade-map-for-releases-06-through-010)
+  - [Upgrade map for releases 0.6 through 0.11](#upgrade-map-for-releases-06-through-011)
   - [0.7 to 0.8 activation and rollback](#07-to-08-activation-and-rollback)
   - [Schedules](#schedules)
   - [Job definition catalog](#job-definition-catalog)
@@ -771,10 +771,10 @@ the function neither commits nor rolls back it. A source must be terminal.
 Recovery of an active-key workflow can remain blocked until its old claim is
 quiescent, or while another run owns that key.
 
-### Upgrade map for releases 0.6 through 0.10
+### Upgrade map for releases 0.6 through 0.11
 
-The `0.10` release line includes the contracts introduced in the preceding
-four releases. When skipping versions, preserve each release's schema and
+The `0.11` release line includes the contracts introduced in the preceding
+releases. When skipping versions, preserve each release's schema and
 runtime fence:
 
 | Release | Schema requirement | Activation requirement |
@@ -784,6 +784,7 @@ runtime fence:
 | `0.8` | Apply `202607250001_harden_continuation_metrics_payload_validation` and `202607280001` through `202607280005` before any 0.8 runtime loop or persistence API runs. | Deploy every 0.8 writer with new paths unused, quiesce all older processes and leases, then canary workflow continuation, active keys, resources, retry hints, and workflow recovery. |
 | `0.9` | No migration after 0.8.0. | Custom runtimes may adopt `JobLeaseIdentity` and its `_for_lease` lifecycle APIs without a coordinated schema or source migration; the positional functions remain available. |
 | `0.10` | Apply `202608180001_job_enqueue_intents` before any process records or promotes enqueue intents. | Deploy exact-ID retention cleanup to every queue-retention caller before enabling intent writers. Keep at least one promoter for every intent type, and budget for each enabled supervisor's independent idle polling. |
+| `0.11` | Apply `202608240001_expand_workflow_step_job_link`, deploy 0.11, drain every 0.10 writer and lease, then apply `202608240002_contract_workflow_step_job_link`. | Migrate every removed `requeue_job` call before compiling 0.11: use exact-scope compare-and-requeue for canceled/dead-lettered jobs and fresh-job successful replay for `SUCCEEDED`. The contract migration is the 0.10 rollback boundary. |
 
 For 0.8 source upgrades, construct `WorkflowDagStepValidationInput` with
 `WorkflowDagStepValidationInput::new(...)` and its option setters; it is now
@@ -1174,14 +1175,40 @@ forward migrations:
   transactional handoff records, promotion/conflict state, backlog indexes,
   and promoted-row retention support. It is additive and intentionally remains
   outside the custom compatibility fence during the expand-first rollout.
+- `202608240001_expand_workflow_step_job_link` — audits and backfills reciprocal
+  workflow-step/job links, then makes `workflow_steps.job_id` authoritative
+  while maintaining `job_queue.workflow_step_id` as a trigger-backed projection
+  for mixed-version writers and readers. It is intentionally outside the custom
+  compatibility fence during the rolling-deployment window.
+- `202608240002_contract_workflow_step_job_link` — re-runs both relationship
+  anti-joins, removes the compatibility triggers, reciprocal FK/unique
+  constraint, and `job_queue.workflow_step_id`, then advances the custom
+  compatibility fence so pre-contract binaries refuse the destructive schema.
 
 Every forward migration from
 `202607190001_job_replays_and_continuation_metrics` through
-`202608180001_job_enqueue_intents` is recorded and checksum-validated in
+`202608240001_expand_workflow_step_job_link` is recorded and checksum-validated in
 `_sqlx_migrations` but deliberately omitted from the custom
 `runledger_migration_history` compatibility fence. This lets released filtered
 startup helpers coexist during the documented expand-first windows; it does
 not make a raw migrator from an older crate tolerate unknown SQLx history rows.
+
+The workflow-step/job cutover is deliberately staged for rolling deployments:
+
+1. Apply migrations through `202608240001_expand_workflow_step_job_link` with
+   externally managed DDL. Keep both relationship anti-joins empty.
+2. Roll every application instance to code that reads and writes ownership only
+   through `workflow_steps.job_id`. The expand triggers keep the deprecated
+   projection usable by any not-yet-replaced instance.
+3. After the old instances are drained, apply
+   `202608240002_contract_workflow_step_job_link`. This step takes exclusive
+   locks on `job_queue` and `workflow_steps`, removes the projection, and is the
+   breaking rollback boundary. Do not start a pre-contract binary afterward.
+
+`migrate_after_idempotency_cutover` applies the complete bundled set, including
+the contract migration. Deployments that need a mixed-version window must use
+externally managed DDL plus `ensure_schema_compatible_after_idempotency_cutover`
+during the expand phase, then apply the contract explicitly after the drain.
 
 Treat the flattened baseline as a from-scratch schema definition, not an
 in-place upgrade from the older multi-file standalone history; apply later
@@ -1295,7 +1322,7 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   rather than to another worker. Once `lease_expires_at` passes there is no
   owner grace period for heartbeat/progress/success/failure/continuation writes.
   Release 0.9.0 added `JobLeaseIdentity` for typed lifecycle lease fencing.
-  In 0.10.2 and later, use `mark_job_running_for_lease` with
+  In 0.11.0 and later, use `mark_job_running_for_lease` with
   `JobRunningUpdate` to commit `RUNNING` and its initial checkpoint/progress
   atomically, then use `update_job_ordinary_progress_for_lease` with
   `JobOrdinaryProgressUpdate` for stage-free progress. Reuse one identity
@@ -1325,18 +1352,13 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   Every request must choose `JobRequeueStatePolicy::PreserveProgressAndCheckpoint`
   to resume from committed state or `ResetProgressAndCheckpoint` to restart
   from scratch; the selected policy is recorded in the `REQUEUED` event.
-  The older pool-owning `requeue_job` API is deprecated for 0.6 compatibility;
-  its `organization_id: None` is an unconstrained lookup, not
-  `JobScope::Global`, and its behavior corresponds to
-  `ResetProgressAndCheckpoint`. Migrate every compatibility caller deliberately
-  and handle `NotFound`, `ExpectationMismatch`, and
-  `CancellationNotQuiesced` as no-mutation outcomes. The typed API intentionally
-  does not replay `SUCCEEDED` jobs in place; use the separate successful-replay
-  API described below.
-  When a canceled handler's retained lease is still active, the compatibility
-  API returns the
-  conflict code `job.cancellation_not_quiesced` so compatibility callers know
-  the recovery may be retried after lease expiry.
+  Version 0.11 removes the deprecated pool-owning `requeue_job` API. Its
+  `organization_id: None` was an unconstrained lookup, not `JobScope::Global`,
+  so migration requires observing and authorizing the row's exact scope.
+  `ResetProgressAndCheckpoint` matches its old state-reset behavior; callers
+  must also handle `NotFound`, `ExpectationMismatch`, and
+  `CancellationNotQuiesced` as normal no-mutation outcomes. The typed recovery
+  API intentionally does not accept `SUCCEEDED`; use successful replay below.
 - **Successful replay.** `compare_and_replay_succeeded_job` creates an
   idempotent fresh job from an exactly scoped successful direct-job run;
   `compare_and_replay_succeeded_job_tx` composes the same operation with a
@@ -1493,7 +1515,7 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.10.1
+./scripts/prepare-release.sh 0.11.0
 ```
 
 The preparation script starts from a clean working tree or resumes an existing
@@ -1510,7 +1532,7 @@ crate archive contains the repository license. If publishing manually, run
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.10.1
+./scripts/publish-release.sh 0.11.0
 ```
 
 Before publishing any crate, the publish script confirms that the release tag
@@ -1519,24 +1541,22 @@ point at the exact local commit, and verifies that commit's completed GitHub
 Actions `CI` run and every job succeeded. It then dry-runs the branch and tag
 push, publishes crates in dependency order, and dry-runs each once its
 workspace dependencies are indexed. Finally, it atomically pushes `HEAD` as
-both the current branch and remote `v0.10.1` tag, then creates or reconciles the
+both the current branch and remote `v0.11.0` tag, then creates or reconciles the
 local lightweight tag. A local-only tag left by an older failed release does
 not block a retry. The publication preflight requires an authenticated GitHub
 CLI. Set `PUBLISH_REMOTE` to override the git remote for the final push.
 
 Observable contract changes to call out in release notes for this line:
 
-- Migration `202608180001_job_enqueue_intents` adds durable, strictly
-  idempotent transactional handoff before a job definition exists.
-- Intent promotion is enabled by default for worker-enabled supervisors and
-  has independent polling controls; retain promoter coverage for every intent
-  type while accounting for each enabled supervisor's idle query rate.
-- Queue retention must remove exact promoted-intent links in the same
-  `READ COMMITTED` transaction before deleting linked jobs. Deploy that path to
-  every retention caller before enabling intent writers.
-- Unix-like operating systems are now the only supported platforms. Deferred
-  reaper query-error logs also replace the previous internal/source fields with
-  the sanitized `error_constraint` field.
+- The deprecated `requeue_job` symbol is removed. Migrate canceled and
+  dead-lettered recovery to the exact-scope compare-and-requeue APIs, and
+  migrate successful work to fresh-job replay before compiling 0.11.
+- The workflow-step/job link uses an expand/drain/contract migration. Apply
+  `202608240001` before deploying 0.11 and `202608240002` only after all 0.10
+  writers and leases have drained.
+- Typed running and ordinary-progress APIs replace ambiguous stage-bearing
+  progress writes; the older progress wrappers remain deprecated migration
+  paths for this release.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

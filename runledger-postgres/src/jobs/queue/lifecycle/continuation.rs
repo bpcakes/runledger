@@ -127,10 +127,7 @@ pub async fn complete_job_continuation_with_outcome_for_lease(
         )
         .await;
     };
-    if let Some(workflow_step_id) = lookup.workflow_step_id
-        && let Err(error) =
-            on_handler_continuation(&mut tx, identity.job_id, workflow_step_id).await
-    {
+    if let Err(error) = on_handler_continuation(&mut tx, identity.job_id).await {
         ensure_rejection_rollback_succeeded(tx.rollback().await)?;
         return Err(error);
     }

@@ -34,6 +34,8 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;
 type RunledgerMigrationMap = HashMap<i64, &'static sqlx::migrate::Migration>;
 
+const WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION: i64 = 202608240002;
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SchemaCompatibilityError {
@@ -44,6 +46,10 @@ pub enum SchemaCompatibilityError {
     LegacyIdempotencySnapshotsMissing {
         job_count: i64,
         workflow_count: i64,
+    },
+    WorkflowJobLinkExpandInvalid {
+        compatibility_trigger_count: i64,
+        inconsistent_link_count: i64,
     },
     Incompatible(MigrateError),
     MigrationUnlock(MigrateError),
@@ -69,6 +75,13 @@ impl fmt::Display for SchemaCompatibilityError {
                 f,
                 "Runledger idempotency cutover requires enqueue_request snapshots for all keyed rows; found {job_count} legacy job rows and {workflow_count} legacy workflow rows"
             ),
+            Self::WorkflowJobLinkExpandInvalid {
+                compatibility_trigger_count,
+                inconsistent_link_count,
+            } => write!(
+                f,
+                "Runledger workflow-step/job expand schema requires both compatibility triggers and empty reciprocal anti-joins before the contract migration; found {compatibility_trigger_count} triggers and {inconsistent_link_count} inconsistent relationships"
+            ),
             Self::Incompatible(error) => write!(f, "{error}"),
             Self::MigrationUnlock(error) => {
                 write!(
@@ -86,6 +99,7 @@ impl std::error::Error for SchemaCompatibilityError {
             Self::Query(error) => Some(error),
             Self::MissingMigrationHistory { .. } => None,
             Self::LegacyIdempotencySnapshotsMissing { .. } => None,
+            Self::WorkflowJobLinkExpandInvalid { .. } => None,
             Self::Incompatible(error) | Self::MigrationUnlock(error) => Some(error),
         }
     }
@@ -179,6 +193,8 @@ pub async fn migrate(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
 /// fence to detect newer releases whose schema is not declared backward
 /// compatible. Additive migrations may deliberately rely only on SQLx history
 /// so older guards can coexist during expand-first rollout.
+/// The workflow-step/job contract migration may also remain pending while its
+/// expand migration's compatibility projection is present and consistent.
 /// This differs from invoking raw [`MIGRATOR`] execution, which rejects any
 /// applied migration version absent from that exact binary's bundle.
 ///
@@ -241,6 +257,9 @@ pub async fn ensure_schema_compatible_after_idempotency_cutover(
                     .map_err(SchemaCompatibilityError::from)?
             }
             None => {
+                if migration.version == WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION {
+                    continue;
+                }
                 return Err(SchemaCompatibilityError::Incompatible(
                     MigrateError::VersionTooNew(
                         migration.version,
@@ -251,6 +270,7 @@ pub async fn ensure_schema_compatible_after_idempotency_cutover(
         }
     }
 
+    validate_workflow_job_link_expand_schema(&mut conn).await?;
     reject_legacy_idempotency_rows(&mut conn).await
 }
 
@@ -342,6 +362,75 @@ async fn reject_legacy_idempotency_rows(
             workflow_count: row.workflow_count,
         },
     )
+}
+
+async fn validate_workflow_job_link_expand_schema(
+    conn: &mut PgPoolConnection,
+) -> Result<(), SchemaCompatibilityError> {
+    let deprecated_column_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'job_queue'
+              AND column_name = 'workflow_step_id'
+         )",
+    )
+    .fetch_one(&mut **conn)
+    .await?;
+    if !deprecated_column_exists {
+        return Ok(());
+    }
+
+    let compatibility_trigger_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM pg_trigger
+         WHERE tgname IN (
+            'trg_job_queue_workflow_step_linkage_symmetry',
+            'trg_workflow_steps_job_linkage_symmetry',
+            'trg_workflow_steps_job_linkage_compatibility'
+         )
+           AND NOT tgisinternal",
+    )
+    .fetch_one(&mut **conn)
+    .await?;
+    let inconsistent_link_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM (
+            SELECT jq.id
+            FROM job_queue jq
+            WHERE jq.workflow_step_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM workflow_steps ws
+                  WHERE ws.id = jq.workflow_step_id
+                    AND ws.job_id = jq.id
+              )
+
+            UNION ALL
+
+            SELECT ws.id
+            FROM workflow_steps ws
+            WHERE ws.job_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM job_queue jq
+                  WHERE jq.id = ws.job_id
+                    AND jq.workflow_step_id = ws.id
+              )
+         ) inconsistencies",
+    )
+    .fetch_one(&mut **conn)
+    .await?;
+
+    if compatibility_trigger_count == 3 && inconsistent_link_count == 0 {
+        return Ok(());
+    }
+
+    Err(SchemaCompatibilityError::WorkflowJobLinkExpandInvalid {
+        compatibility_trigger_count,
+        inconsistent_link_count,
+    })
 }
 
 async fn validate_idempotency_cutover_constraints(

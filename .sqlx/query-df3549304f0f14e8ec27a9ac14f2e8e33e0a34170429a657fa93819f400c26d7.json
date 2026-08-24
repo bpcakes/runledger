@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job_queue (\n            job_type,\n            organization_id,\n            payload,\n            priority,\n            max_attempts,\n            timeout_seconds,\n            next_run_at,\n            stage\n         )\n         VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7)\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Jsonb",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "df3549304f0f14e8ec27a9ac14f2e8e33e0a34170429a657fa93819f400c26d7"
+}

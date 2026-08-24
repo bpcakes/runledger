@@ -33,7 +33,7 @@ struct JobPayloadUuidArrayFieldUpdateCandidate {
     status: String,
     worker_id: Option<String>,
     lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    workflow_step_id: Option<Uuid>,
+    workflow_managed: bool,
     idempotency_key: Option<String>,
     enqueue_request: Option<Value>,
 }
@@ -66,7 +66,11 @@ pub async fn update_job_payload_uuid_array_field(
              status::text AS status,
              worker_id,
              lease_expires_at,
-             workflow_step_id,
+             EXISTS (
+                 SELECT 1
+                 FROM workflow_steps ws
+                 WHERE ws.job_id = job_queue.id
+             ) AS workflow_managed,
              idempotency_key,
              enqueue_request
            FROM job_queue
@@ -111,7 +115,7 @@ pub async fn update_job_payload_uuid_array_field(
 
     // Order matters: workflow-managed jobs can also carry request snapshots, so
     // return the ownership rejection before the snapshot-consistency rejection.
-    let rejection = if row.workflow_step_id.is_some() {
+    let rejection = if row.workflow_managed {
         Some(JobPayloadUuidArrayFieldUpdateRejection::WorkflowManaged)
     } else if row.idempotency_key.is_some() || row.enqueue_request.is_some() {
         Some(JobPayloadUuidArrayFieldUpdateRejection::IdempotentRequestSnapshot)
