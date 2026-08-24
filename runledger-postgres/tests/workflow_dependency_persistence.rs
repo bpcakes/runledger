@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use runledger_core::jobs::{
     JobType, StepKey, WorkflowDependencyReleaseMode, WorkflowRunEnqueueBuilder,
-    WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
+    WorkflowStepDependencySpec, WorkflowStepEnqueueBuilder, WorkflowStepStatus, WorkflowType,
 };
 use runledger_postgres::jobs::{
     AppendWorkflowStepsInput, CompleteExternalWorkflowStepInput,
@@ -205,7 +205,10 @@ async fn dependency_writes_preserve_edge_orientation_and_release_modes_for_appen
         .expect("build append-window gate");
     let initial_dependent =
         WorkflowStepEnqueueBuilder::new_external(StepKey::new("initial-dependent"), &payload)
-            .depends_on_terminal(&[StepKey::new("gate")])
+            .dependency(WorkflowStepDependencySpec {
+                prerequisite_step_key: StepKey::new("gate"),
+                release_mode: None,
+            })
             .try_build()
             .expect("build initial dependent");
     let workflow = WorkflowRunEnqueueBuilder::new(

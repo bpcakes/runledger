@@ -253,31 +253,27 @@ pub(in crate::jobs) async fn find_active_schedule_for_job_types_tx(
         .transpose()
 }
 
-pub(in crate::jobs) async fn find_active_schedule_for_enabled_absent_job_types_tx(
+pub(in crate::jobs) async fn find_active_schedule_for_enabled_job_types_tx(
     tx: &mut DbTx<'_>,
-    catalog_job_types: &[JobTypeName],
-    scope_job_types: &[JobTypeName],
+    job_types: &[JobTypeName],
 ) -> Result<Option<JobScheduleJobTypeReference>> {
-    if scope_job_types.is_empty() {
+    if job_types.is_empty() {
         return Ok(None);
     }
 
-    let catalog_job_types = job_type_strings(catalog_job_types);
-    let scope_job_types = job_type_strings(scope_job_types);
+    let job_types = job_type_strings(job_types);
     let row = sqlx::query_as::<_, (String, String)>(
         "SELECT job_schedules.name, job_schedules.job_type
          FROM job_schedules
          INNER JOIN job_definitions
             ON job_definitions.job_type = job_schedules.job_type
          WHERE job_schedules.is_active = true
-           AND job_schedules.job_type <> ALL($1::text[])
-           AND job_schedules.job_type = ANY($2::text[])
+           AND job_schedules.job_type = ANY($1::text[])
            AND job_definitions.is_enabled = true
          ORDER BY job_schedules.name ASC
          LIMIT 1",
     )
-    .bind(catalog_job_types.as_slice())
-    .bind(scope_job_types.as_slice())
+    .bind(job_types.as_slice())
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| {

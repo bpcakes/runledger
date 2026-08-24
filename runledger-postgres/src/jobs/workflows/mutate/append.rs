@@ -4,7 +4,6 @@ use runledger_core::jobs::{
     StepKey, WorkflowDependencyReleaseMode, WorkflowRunStatus, WorkflowStepEnqueue,
     WorkflowStepExecutionKind, WorkflowStepStatus, validate_workflow_step_append,
 };
-use serde_json::Value as JsonValue;
 use sqlx::types::Uuid;
 
 use crate::jobs::row_decode::{
@@ -34,7 +33,7 @@ use super::super::release::{
     StepReleaseCandidate, StepReleaseCandidateInit, release_candidate_step_tx,
 };
 use super::super::runtime::{recompute_workflow_run_status_tx, resolve_terminal_step_queue_tx};
-use super::super::snapshot::{canonical_append_request, deserialize_stored_append_request};
+use super::super::snapshot::{CanonicalAppendRequest, canonical_append_request};
 use super::super::steps::{
     WorkflowStepDependencyWriteContext, WorkflowStepIdsByKey, dependency_count_total,
     fetch_job_definition_defaults_tx, insert_workflow_step_dependencies_tx,
@@ -105,9 +104,7 @@ async fn append_workflow_steps_read_committed_tx(
         input.append_window_step_key,
         workflow_run.organization_id,
         &input.steps,
-    )?;
-    let comparable_request =
-        deserialize_stored_append_request(&canonical_request, workflow_run.organization_id)?;
+    );
 
     if let Some(existing_request) =
         load_existing_mutation_request_tx(tx, workflow_run.id, input.mutation_key).await?
@@ -116,7 +113,7 @@ async fn append_workflow_steps_read_committed_tx(
             tx,
             &existing_request,
             workflow_run.organization_id,
-            &comparable_request,
+            &canonical_request,
         )
         .await?
         {
@@ -235,7 +232,7 @@ async fn persist_appended_step_dependencies_and_mutation_tx(
     tx: &mut DbTx<'_>,
     workflow_run_id: Uuid,
     input: &AppendWorkflowStepsInputRecord<'_>,
-    canonical_request: &JsonValue,
+    canonical_request: &CanonicalAppendRequest,
     step_id_by_key: &WorkflowStepIdsByKey,
 ) -> Result<()> {
     insert_workflow_step_dependencies_tx(
@@ -318,9 +315,7 @@ fn initial_dependency_counters(
     let mut dependency_count_unsatisfied = 0i32;
 
     for dependency in step.dependencies() {
-        let release_mode = dependency
-            .release_mode
-            .unwrap_or(WorkflowDependencyReleaseMode::OnTerminal);
+        let release_mode = dependency.effective_release_mode();
         if let Some(status) =
             existing_statuses_by_key.get(dependency.prerequisite_step_key.as_str())
         {

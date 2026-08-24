@@ -112,7 +112,7 @@ async fn read_schedule_sql_state_tx(tx: &mut DbTx<'_>, name: &str) -> PersistedS
     .expect("read persisted schedule SQL state")
 }
 
-async fn record_schedule_policy_postgres_version(pool: &DbPool) {
+async fn record_postgres_18_server_version(pool: &DbPool, diagnostic: &str) {
     let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
         .fetch_one(pool)
         .await
@@ -123,13 +123,13 @@ async fn record_schedule_policy_postgres_version(pool: &DbPool) {
             .await
             .expect("read PostgreSQL server_version_num");
     eprintln!(
-        "schedule active-state policy PostgreSQL server_version={server_version}, \
+        "{diagnostic} PostgreSQL server_version={server_version}, \
          server_version_num={server_version_num}"
     );
     assert_eq!(
         server_version_num / 10_000,
         18,
-        "schedule active-state policy validation must run on PostgreSQL 18"
+        "{diagnostic} validation must run on PostgreSQL 18"
     );
 }
 
@@ -241,6 +241,86 @@ async fn exact_catalog_definition_sync_rejects_empty_catalog_and_scope() {
         definition.is_none(),
         "invalid exact sync should not write definitions"
     );
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn definition_catalog_sync_reports_empty_partial_all_absent_and_additive_cases() {
+    const ALPHA: &str = "jobs.definition.absent_set.alpha";
+    const BETA: &str = "jobs.definition.absent_set.beta";
+    const GAMMA: &str = "jobs.definition.absent_set.gamma";
+    const OUTSIDE: &str = "jobs.definition.absent_set.outside";
+
+    let (pool, database) = setup_ephemeral_pool("postgres_definition_absent_set", 4).await;
+    record_postgres_18_server_version(&pool, "definition catalog absent-set regression").await;
+
+    let alpha = definition_upsert(ALPHA, true);
+    let beta = definition_upsert(BETA, true);
+    let gamma = definition_upsert(GAMMA, true);
+    let outside = definition_upsert(OUTSIDE, true);
+    let alpha_name = JobTypeName::new(ALPHA).expect("valid alpha job type");
+    let beta_name = JobTypeName::new(BETA).expect("valid beta job type");
+    let gamma_name = JobTypeName::new(GAMMA).expect("valid gamma job type");
+
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin definition catalog sync tx");
+    let additive_report = sync_catalog_job_definitions_tx(
+        &mut tx,
+        &[alpha.clone(), beta.clone(), gamma.clone()],
+        JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState,
+    )
+    .await
+    .expect("seed definitions additively");
+    assert!(additive_report.disabled_absent_job_types.is_empty());
+    assert!(additive_report.disabled_catalog_job_types.is_empty());
+
+    let empty_absent_report = sync_catalog_job_definitions_exact_tx(
+        &mut tx,
+        &[alpha.clone(), beta.clone(), gamma.clone()],
+        &[gamma_name.clone(), alpha_name.clone(), beta_name.clone()],
+    )
+    .await
+    .expect("exact sync with no absent definitions");
+    assert!(empty_absent_report.disabled_absent_job_types.is_empty());
+
+    let partial_absent_report = sync_catalog_job_definitions_exact_tx(
+        &mut tx,
+        &[alpha.clone(), gamma.clone()],
+        &[gamma_name.clone(), beta_name.clone(), alpha_name],
+    )
+    .await
+    .expect("exact sync with one absent definition");
+    assert_eq!(
+        partial_absent_report.disabled_absent_job_types,
+        vec![beta_name.clone()]
+    );
+
+    let restore_report = sync_catalog_job_definitions_tx(
+        &mut tx,
+        &[beta.clone()],
+        JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState,
+    )
+    .await
+    .expect("restore partial absent definition additively");
+    assert!(restore_report.disabled_absent_job_types.is_empty());
+
+    let all_absent_report = sync_catalog_job_definitions_exact_tx(
+        &mut tx,
+        &[outside],
+        &[gamma_name.clone(), beta_name.clone()],
+    )
+    .await
+    .expect("exact sync with every scoped definition absent");
+    assert_eq!(
+        all_absent_report.disabled_absent_job_types,
+        vec![beta_name, gamma_name]
+    );
+    tx.commit()
+        .await
+        .expect("commit definition catalog sync tx");
 
     teardown_ephemeral_pool(pool, database).await;
 }
@@ -771,7 +851,7 @@ async fn schedule_upsert_returns_active_state_preserved_on_conflict() {
 #[tokio::test]
 async fn schedule_active_state_policy_matrix_preserves_result_and_sql_parity() {
     let (pool, database) = setup_ephemeral_pool("postgres_schedule_active_state_policy", 4).await;
-    record_schedule_policy_postgres_version(&pool).await;
+    record_postgres_18_server_version(&pool, "schedule active-state policy").await;
 
     let mut definition_tx = pool.begin().await.expect("begin job definition tx");
     upsert_job_definition_tx(&mut definition_tx, &definition_upsert(SCHEDULE_JOB, true))

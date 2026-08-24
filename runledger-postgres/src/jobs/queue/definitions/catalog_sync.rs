@@ -134,24 +134,18 @@ impl StdError for JobDefinitionCatalogSyncError {
     }
 }
 
-enum ValidatedDefinitionCatalogSyncScope<'scope> {
-    Additive {
-        mode: JobDefinitionCatalogSyncMode,
-    },
-    Exact {
-        scope_job_types: &'scope [JobTypeName],
-        catalog_job_types: Vec<JobTypeName>,
-        has_absent_scope_job_types: bool,
-    },
+enum ValidatedDefinitionCatalogSyncScope {
+    Additive { mode: JobDefinitionCatalogSyncMode },
+    Exact { absent_job_types: Vec<JobTypeName> },
 }
 
-struct DefinitionCatalogSync<'definitions, 'payload, 'scope> {
+struct DefinitionCatalogSync<'definitions, 'payload> {
     definitions: &'definitions [JobDefinitionUpsert<'payload>],
     disabled_job_types: Vec<JobTypeName>,
-    scope: ValidatedDefinitionCatalogSyncScope<'scope>,
+    scope: ValidatedDefinitionCatalogSyncScope,
 }
 
-impl<'definitions, 'payload, 'scope> DefinitionCatalogSync<'definitions, 'payload, 'scope> {
+impl<'definitions, 'payload> DefinitionCatalogSync<'definitions, 'payload> {
     fn additive(
         definitions: &'definitions [JobDefinitionUpsert<'payload>],
         mode: JobDefinitionCatalogSyncMode,
@@ -171,7 +165,7 @@ impl<'definitions, 'payload, 'scope> DefinitionCatalogSync<'definitions, 'payloa
 
     fn exact(
         definitions: &'definitions [JobDefinitionUpsert<'payload>],
-        scope_job_types: &'scope [JobTypeName],
+        scope_job_types: &[JobTypeName],
     ) -> std::result::Result<Self, JobDefinitionCatalogSyncError> {
         let catalog_job_types = definition_job_type_names(definitions.iter())?;
         validate_non_empty_job_types("exact catalog sync job definitions", &catalog_job_types)
@@ -184,18 +178,12 @@ impl<'definitions, 'payload, 'scope> DefinitionCatalogSync<'definitions, 'payloa
                 .iter()
                 .filter(|definition| !definition.is_enabled),
         )?;
-        let has_absent_scope_job_types = scope_job_types
-            .iter()
-            .any(|job_type| !catalog_job_types.contains(job_type));
+        let absent_job_types = job_types_absent_from_catalog(scope_job_types, &catalog_job_types);
 
         Ok(Self {
             definitions,
             disabled_job_types,
-            scope: ValidatedDefinitionCatalogSyncScope::Exact {
-                scope_job_types,
-                catalog_job_types,
-                has_absent_scope_job_types,
-            },
+            scope: ValidatedDefinitionCatalogSyncScope::Exact { absent_job_types },
         })
     }
 
@@ -227,9 +215,9 @@ impl<'definitions, 'payload, 'scope> DefinitionCatalogSync<'definitions, 'payloa
             || matches!(
                 &self.scope,
                 ValidatedDefinitionCatalogSyncScope::Exact {
-                    has_absent_scope_job_types: true,
-                    ..
+                    absent_job_types,
                 }
+                if !absent_job_types.is_empty()
             )
     }
 
@@ -256,20 +244,17 @@ impl<'definitions, 'payload, 'scope> DefinitionCatalogSync<'definitions, 'payloa
         &self,
         tx: &mut DbTx<'_>,
     ) -> std::result::Result<(), JobDefinitionCatalogSyncError> {
-        let ValidatedDefinitionCatalogSyncScope::Exact {
-            scope_job_types,
-            catalog_job_types,
-            has_absent_scope_job_types: true,
-        } = &self.scope
-        else {
+        let ValidatedDefinitionCatalogSyncScope::Exact { absent_job_types } = &self.scope else {
             return Ok(());
         };
+        if absent_job_types.is_empty() {
+            return Ok(());
+        }
 
         if let Some(reference) =
-            schedule_definition_guard::find_active_schedule_for_enabled_absent_job_types_tx(
+            schedule_definition_guard::find_active_schedule_for_enabled_job_types_tx(
                 tx,
-                catalog_job_types,
-                scope_job_types,
+                absent_job_types,
             )
             .await
             .map_err(|error| JobDefinitionCatalogSyncError::ScheduleCheckFailure(Box::new(error)))?
@@ -325,16 +310,14 @@ impl<'definitions, 'payload, 'scope> DefinitionCatalogSync<'definitions, 'payloa
         &self,
         tx: &mut DbTx<'_>,
     ) -> std::result::Result<Vec<JobTypeName>, JobDefinitionCatalogSyncError> {
-        let ValidatedDefinitionCatalogSyncScope::Exact {
-            scope_job_types,
-            catalog_job_types,
-            has_absent_scope_job_types: true,
-        } = &self.scope
-        else {
+        let ValidatedDefinitionCatalogSyncScope::Exact { absent_job_types } = &self.scope else {
             return Ok(Vec::new());
         };
+        if absent_job_types.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        disable_enabled_job_definitions_except_tx(tx, catalog_job_types, scope_job_types)
+        disable_enabled_job_definitions_tx(tx, absent_job_types)
             .await
             .map_err(|error| JobDefinitionCatalogSyncError::DisableAbsentFailure(Box::new(error)))
     }
@@ -383,26 +366,21 @@ async fn list_job_types_missing_or_enabled_definitions_tx(
     parse_job_type_rows(rows)
 }
 
-async fn disable_enabled_job_definitions_except_tx(
+async fn disable_enabled_job_definitions_tx(
     tx: &mut DbTx<'_>,
-    keep_job_types: &[JobTypeName],
-    scope_job_types: &[JobTypeName],
+    job_types: &[JobTypeName],
 ) -> Result<Vec<JobTypeName>> {
-    validate_non_empty_job_types("disable enabled job definitions keep list", keep_job_types)?;
-    validate_non_empty_job_types("disable enabled job definitions scope", scope_job_types)?;
+    validate_non_empty_job_types("disable enabled job definitions list", job_types)?;
 
-    let keep_job_types = job_type_strings(keep_job_types);
-    let scope_job_types = job_type_strings(scope_job_types);
+    let job_types = job_type_strings(job_types);
     let rows = sqlx::query_scalar!(
         "UPDATE job_definitions
          SET is_enabled = false,
              updated_at = now()
          WHERE is_enabled = true
-           AND job_type <> ALL($1::text[])
-           AND job_type = ANY($2::text[])
+           AND job_type = ANY($1::text[])
          RETURNING job_type",
-        keep_job_types.as_slice(),
-        scope_job_types.as_slice(),
+        job_types.as_slice(),
     )
     .fetch_all(&mut **tx)
     .await
@@ -411,6 +389,20 @@ async fn disable_enabled_job_definitions_except_tx(
     })?;
 
     parse_job_type_rows(rows)
+}
+
+fn job_types_absent_from_catalog(
+    scope_job_types: &[JobTypeName],
+    catalog_job_types: &[JobTypeName],
+) -> Vec<JobTypeName> {
+    let mut absent_job_types = scope_job_types
+        .iter()
+        .filter(|job_type| !catalog_job_types.contains(job_type))
+        .cloned()
+        .collect::<Vec<_>>();
+    absent_job_types.sort();
+    absent_job_types.dedup();
+    absent_job_types
 }
 
 fn job_type_strings(job_types: &[JobTypeName]) -> Vec<String> {
@@ -497,4 +489,46 @@ fn validate_non_empty_job_types(context: &'static str, job_types: &[JobTypeName]
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use runledger_core::jobs::JobTypeName;
+
+    use super::job_types_absent_from_catalog;
+
+    fn job_types(values: &[&str]) -> Vec<JobTypeName> {
+        values
+            .iter()
+            .map(|value| JobTypeName::new(*value).expect("valid job type"))
+            .collect()
+    }
+
+    #[test]
+    fn absent_job_types_are_empty_when_catalog_covers_scope() {
+        let scope = job_types(&["jobs.test.alpha", "jobs.test.beta"]);
+        let catalog = job_types(&["jobs.test.alpha", "jobs.test.beta"]);
+
+        assert!(job_types_absent_from_catalog(&scope, &catalog).is_empty());
+    }
+
+    #[test]
+    fn absent_job_types_capture_partial_and_all_absent_scopes_deterministically() {
+        let scope = job_types(&[
+            "jobs.test.gamma",
+            "jobs.test.alpha",
+            "jobs.test.beta",
+            "jobs.test.gamma",
+        ]);
+        let partial_catalog = job_types(&["jobs.test.beta"]);
+
+        assert_eq!(
+            job_types_absent_from_catalog(&scope, &partial_catalog),
+            job_types(&["jobs.test.alpha", "jobs.test.gamma"])
+        );
+        assert_eq!(
+            job_types_absent_from_catalog(&scope, &[]),
+            job_types(&["jobs.test.alpha", "jobs.test.beta", "jobs.test.gamma"])
+        );
+    }
 }

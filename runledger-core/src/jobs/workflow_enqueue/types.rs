@@ -353,3 +353,17 @@ pub struct WorkflowStepDependencySpec<'a> {
     pub prerequisite_step_key: StepKey<'a>,
     pub release_mode: Option<WorkflowDependencyReleaseMode>,
 }
+
+impl WorkflowStepDependencySpec<'_> {
+    /// The release mode used when evaluating or persisting this dependency.
+    ///
+    /// An omitted mode retains the historical `ON_TERMINAL` behavior while
+    /// [`Self::release_mode`] remains unchanged for canonical input handling.
+    #[must_use]
+    pub const fn effective_release_mode(&self) -> WorkflowDependencyReleaseMode {
+        match self.release_mode {
+            Some(release_mode) => release_mode,
+            None => WorkflowDependencyReleaseMode::OnTerminal,
+        }
+    }
+}

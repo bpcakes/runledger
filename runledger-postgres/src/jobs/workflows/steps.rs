@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use runledger_core::jobs::{
-    JobStage, WorkflowDependencyReleaseMode, WorkflowJobStepExecution, WorkflowRunEnqueue,
-    WorkflowStepEnqueue, WorkflowStepExecution,
+    JobStage, WorkflowJobStepExecution, WorkflowRunEnqueue, WorkflowStepEnqueue,
+    WorkflowStepExecution,
 };
 use sqlx::types::Uuid;
 
@@ -253,10 +253,7 @@ pub(in crate::jobs::workflows) async fn insert_workflow_step_dependencies_tx(
                 dependency.prerequisite_step_key.as_str(),
                 context.missing_prerequisite_step_id_error(),
             )?;
-            let release_mode = dependency
-                .release_mode
-                .unwrap_or(WorkflowDependencyReleaseMode::OnTerminal)
-                .as_db_value();
+            let release_mode = dependency.effective_release_mode().as_db_value();
             insert_workflow_step_dependency_record_tx(
                 tx,
                 workflow_run_id,
