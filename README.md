@@ -1521,13 +1521,14 @@ Prepare a release:
 The preparation script starts from a clean working tree or resumes an existing
 generated release diff whose manifests are already at the requested version.
 It rejects changes outside the files it generates. The script bumps publishable
-crate and root workspace dependency versions, refreshes the root and standalone
-smoke lockfiles plus SQLx offline metadata, runs workspace tests and the locked
-packaged smoke test, dry-runs `runledger-core`, packages the library crates, and
-build-verifies the packaged `runledger-tui` binary. It also verifies that every
-crate archive contains the repository license. If publishing manually, run
-`./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres` or
-`runledger-runtime` and commit any resulting `.sqlx/` changes.
+crates through their shared workspace package version, updates the explicit
+published workspace dependency pins, refreshes the root and standalone smoke
+lockfiles plus SQLx offline metadata, runs workspace tests and the locked
+packaged smoke test, dry-runs `runledger-core`, packages the library crates,
+and build-verifies the packaged `runledger-tui` binary. It also verifies that
+every crate archive contains the repository license. If publishing manually,
+run `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres`
+or `runledger-runtime` and commit any resulting `.sqlx/` changes.
 
 After reviewing and committing the prepared diff:
 

@@ -19,6 +19,9 @@ default-members = [
     "runledger-runtime",
 ]
 
+[workspace.package]
+version = "0.11.0"
+
 [workspace.lints.rust]
 warnings = "deny"
 unsafe_code = "deny"
