@@ -35,6 +35,127 @@ type PgPoolConnection = sqlx::pool::PoolConnection<sqlx::Postgres>;
 type RunledgerMigrationMap = HashMap<i64, &'static sqlx::migrate::Migration>;
 
 const WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION: i64 = 202608240002;
+const AFTER_ROW_INSERT_OR_UPDATE_TRIGGER_TYPE: i16 = 21;
+
+// Trigger names remain exact because the contract migration drops these named
+// objects before removing job_queue.workflow_step_id. The validator below
+// otherwise checks the safety properties needed during the mixed-version
+// window, not byte-for-byte DDL identity: firing on additional UPDATE columns
+// is safe, while changing events, timing, functions, or deferral is not.
+// Migration checksums establish the function source applied initially. This
+// read-only guard validates live catalog wiring and reciprocal data; it does
+// not try to detect privileged post-migration function-body replacement by
+// embedding a second, brittle copy of each PL/pgSQL body.
+#[derive(Clone, Copy)]
+struct WorkflowJobLinkTriggerSpec {
+    table_name: &'static str,
+    trigger_name: &'static str,
+    function_name: &'static str,
+    update_column_name: &'static str,
+    constraint_mode: WorkflowJobLinkTriggerConstraintMode,
+}
+
+#[derive(Clone, Copy)]
+enum WorkflowJobLinkTriggerConstraintMode {
+    Deferred,
+    Ordinary,
+}
+
+const WORKFLOW_JOB_LINK_EXPAND_TRIGGER_SPECS: [WorkflowJobLinkTriggerSpec; 3] = [
+    WorkflowJobLinkTriggerSpec {
+        table_name: "job_queue",
+        trigger_name: "trg_job_queue_workflow_step_linkage_symmetry",
+        function_name: "enforce_workflow_job_linkage_symmetry",
+        update_column_name: "workflow_step_id",
+        constraint_mode: WorkflowJobLinkTriggerConstraintMode::Deferred,
+    },
+    WorkflowJobLinkTriggerSpec {
+        table_name: "workflow_steps",
+        trigger_name: "trg_workflow_steps_job_linkage_symmetry",
+        function_name: "enforce_workflow_job_linkage_symmetry",
+        update_column_name: "job_id",
+        constraint_mode: WorkflowJobLinkTriggerConstraintMode::Deferred,
+    },
+    WorkflowJobLinkTriggerSpec {
+        table_name: "workflow_steps",
+        trigger_name: "trg_workflow_steps_job_linkage_compatibility",
+        function_name: "project_workflow_step_job_linkage_compatibility",
+        update_column_name: "job_id",
+        constraint_mode: WorkflowJobLinkTriggerConstraintMode::Ordinary,
+    },
+];
+
+/// One reason an expand-window workflow/job-link trigger is unsafe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum WorkflowJobLinkTriggerProblem {
+    Missing,
+    WrongFunction,
+    NotEnabledForOriginWrites,
+    InternallyGenerated,
+    WrongFiringEvents,
+    UpdateColumnNotCovered,
+    UnexpectedTriggerArguments,
+    UnexpectedWhenCondition,
+    WrongConstraintMode,
+}
+
+impl fmt::Display for WorkflowJobLinkTriggerProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Missing => "missing from the expected public table",
+            Self::WrongFunction => {
+                "does not call the expected public zero-argument trigger function"
+            }
+            Self::NotEnabledForOriginWrites => "does not fire for origin/local writes",
+            Self::InternallyGenerated => "is internally generated instead of user-defined",
+            Self::WrongFiringEvents => "is not an AFTER ROW INSERT OR UPDATE trigger",
+            Self::UpdateColumnNotCovered => "does not fire when the relationship column is updated",
+            Self::UnexpectedTriggerArguments => "passes unexpected trigger arguments",
+            Self::UnexpectedWhenCondition => "has an unexpected WHEN condition",
+            Self::WrongConstraintMode => "has the wrong constraint or deferral mode",
+        })
+    }
+}
+
+/// Validation details for one unsafe expand-window workflow/job-link trigger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct WorkflowJobLinkTriggerDiagnostic {
+    table_name: &'static str,
+    trigger_name: &'static str,
+    problems: Vec<WorkflowJobLinkTriggerProblem>,
+}
+
+impl WorkflowJobLinkTriggerDiagnostic {
+    #[must_use]
+    pub const fn table_name(&self) -> &str {
+        self.table_name
+    }
+
+    #[must_use]
+    pub const fn trigger_name(&self) -> &str {
+        self.trigger_name
+    }
+
+    #[must_use]
+    pub fn problems(&self) -> &[WorkflowJobLinkTriggerProblem] {
+        &self.problems
+    }
+}
+
+impl fmt::Display for WorkflowJobLinkTriggerDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "public.{}.{}: ", self.table_name, self.trigger_name)?;
+        for (index, problem) in self.problems.iter().enumerate() {
+            if index != 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{problem}")?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -49,6 +170,10 @@ pub enum SchemaCompatibilityError {
     },
     WorkflowJobLinkExpandInvalid {
         compatibility_trigger_count: i64,
+        inconsistent_link_count: i64,
+    },
+    WorkflowJobLinkExpandTriggersInvalid {
+        trigger_diagnostics: Vec<WorkflowJobLinkTriggerDiagnostic>,
         inconsistent_link_count: i64,
     },
     Incompatible(MigrateError),
@@ -80,8 +205,26 @@ impl fmt::Display for SchemaCompatibilityError {
                 inconsistent_link_count,
             } => write!(
                 f,
-                "Runledger workflow-step/job expand schema requires both compatibility triggers and empty reciprocal anti-joins before the contract migration; found {compatibility_trigger_count} triggers and {inconsistent_link_count} inconsistent relationships"
+                "Runledger workflow-step/job expand schema requires all three expand-window triggers and empty reciprocal anti-joins before the contract migration; found {compatibility_trigger_count} valid triggers and {inconsistent_link_count} inconsistent relationships"
             ),
+            Self::WorkflowJobLinkExpandTriggersInvalid {
+                trigger_diagnostics,
+                inconsistent_link_count,
+            } => {
+                f.write_str(
+                    "Runledger workflow-step/job expand schema has invalid expand-window triggers: ",
+                )?;
+                for (index, diagnostic) in trigger_diagnostics.iter().enumerate() {
+                    if index != 0 {
+                        f.write_str("; ")?;
+                    }
+                    write!(f, "{diagnostic}")?;
+                }
+                write!(
+                    f,
+                    "; found {inconsistent_link_count} inconsistent relationships"
+                )
+            }
             Self::Incompatible(error) => write!(f, "{error}"),
             Self::MigrationUnlock(error) => {
                 write!(
@@ -99,7 +242,8 @@ impl std::error::Error for SchemaCompatibilityError {
             Self::Query(error) => Some(error),
             Self::MissingMigrationHistory { .. } => None,
             Self::LegacyIdempotencySnapshotsMissing { .. } => None,
-            Self::WorkflowJobLinkExpandInvalid { .. } => None,
+            Self::WorkflowJobLinkExpandInvalid { .. }
+            | Self::WorkflowJobLinkExpandTriggersInvalid { .. } => None,
             Self::Incompatible(error) | Self::MigrationUnlock(error) => Some(error),
         }
     }
@@ -130,6 +274,7 @@ impl From<sqlx::Error> for SchemaCompatibilityError {
 /// drain all 0.10 writers and leases, then apply the contract migration; use
 /// [`ensure_schema_compatible_after_idempotency_cutover`] for startup checks
 /// during that staged rollout.
+///
 /// Unlike raw [`MIGRATOR`] execution, this filters shared SQLx history through
 /// Runledger's migration compatibility fence so declared additive migrations
 /// can coexist with older compatible startup code.
@@ -389,81 +534,8 @@ async fn validate_workflow_job_link_expand_schema(
         return Ok(());
     }
 
-    let compatibility_trigger_count = sqlx::query_scalar::<_, i64>(
-        "WITH expected (
-            table_name,
-            trigger_name,
-            function_name,
-            update_column_name,
-            is_constraint,
-            is_deferrable,
-            is_initially_deferred
-         ) AS (
-            VALUES
-                (
-                    'job_queue',
-                    'trg_job_queue_workflow_step_linkage_symmetry',
-                    'enforce_workflow_job_linkage_symmetry',
-                    'workflow_step_id',
-                    true,
-                    true,
-                    true
-                ),
-                (
-                    'workflow_steps',
-                    'trg_workflow_steps_job_linkage_symmetry',
-                    'enforce_workflow_job_linkage_symmetry',
-                    'job_id',
-                    true,
-                    true,
-                    true
-                ),
-                (
-                    'workflow_steps',
-                    'trg_workflow_steps_job_linkage_compatibility',
-                    'project_workflow_step_job_linkage_compatibility',
-                    'job_id',
-                    false,
-                    false,
-                    false
-                )
-         )
-         SELECT count(*)
-         FROM expected
-         JOIN pg_namespace AS table_namespace
-           ON table_namespace.nspname = 'public'
-         JOIN pg_class AS relation
-           ON relation.relnamespace = table_namespace.oid
-          AND relation.relname = expected.table_name
-          AND relation.relkind IN ('r', 'p')
-         JOIN pg_trigger AS trigger_row
-           ON trigger_row.tgrelid = relation.oid
-          AND trigger_row.tgname = expected.trigger_name
-         JOIN pg_proc AS function_row
-           ON function_row.oid = trigger_row.tgfoid
-          AND function_row.proname = expected.function_name
-          AND function_row.pronargs = 0
-          AND function_row.prorettype = 'pg_catalog.trigger'::regtype
-         JOIN pg_namespace AS function_namespace
-           ON function_namespace.oid = function_row.pronamespace
-          AND function_namespace.nspname = 'public'
-         JOIN pg_attribute AS update_column
-           ON update_column.attrelid = relation.oid
-          AND update_column.attname = expected.update_column_name
-          AND NOT update_column.attisdropped
-         WHERE NOT trigger_row.tgisinternal
-           AND trigger_row.tgenabled IN ('O', 'A')
-           -- ROW + INSERT + UPDATE, with no BEFORE or INSTEAD OF bit.
-           AND trigger_row.tgtype = 21
-           AND trigger_row.tgattr::text = update_column.attnum::text
-           AND trigger_row.tgnargs = 0
-           AND trigger_row.tgqual IS NULL
-           AND (trigger_row.tgconstraint <> 0) = expected.is_constraint
-           AND trigger_row.tgdeferrable = expected.is_deferrable
-           AND trigger_row.tginitdeferred = expected.is_initially_deferred",
-    )
-    .fetch_one(&mut **conn)
-    .await?;
+    let trigger_catalog = workflow_job_link_trigger_catalog(conn).await?;
+    let trigger_diagnostics = workflow_job_link_trigger_diagnostics(&trigger_catalog);
     let inconsistent_link_count = sqlx::query_scalar::<_, i64>(
         "SELECT count(*)
          FROM (
@@ -493,14 +565,180 @@ async fn validate_workflow_job_link_expand_schema(
     .fetch_one(&mut **conn)
     .await?;
 
-    if compatibility_trigger_count == 3 && inconsistent_link_count == 0 {
+    if !trigger_diagnostics.is_empty() {
+        return Err(
+            SchemaCompatibilityError::WorkflowJobLinkExpandTriggersInvalid {
+                trigger_diagnostics,
+                inconsistent_link_count,
+            },
+        );
+    }
+
+    if inconsistent_link_count == 0 {
         return Ok(());
     }
 
     Err(SchemaCompatibilityError::WorkflowJobLinkExpandInvalid {
-        compatibility_trigger_count,
+        compatibility_trigger_count: i64::try_from(WORKFLOW_JOB_LINK_EXPAND_TRIGGER_SPECS.len())
+            .expect("workflow job-link trigger count fits i64"),
         inconsistent_link_count,
     })
+}
+
+#[derive(Clone, Debug, sqlx::FromRow)]
+struct WorkflowJobLinkTriggerCatalogRow {
+    table_name: String,
+    trigger_name: String,
+    function_schema: String,
+    function_name: String,
+    function_argument_count: i16,
+    returns_trigger: bool,
+    enabled_mode: String,
+    is_internal: bool,
+    trigger_type: i16,
+    update_column_names: Vec<String>,
+    trigger_argument_count: i16,
+    has_when_condition: bool,
+    is_constraint: bool,
+    is_deferrable: bool,
+    is_initially_deferred: bool,
+}
+
+async fn workflow_job_link_trigger_catalog(
+    conn: &mut PgPoolConnection,
+) -> Result<Vec<WorkflowJobLinkTriggerCatalogRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT
+            relation.relname::text AS table_name,
+            trigger_row.tgname::text AS trigger_name,
+            function_namespace.nspname::text AS function_schema,
+            function_row.proname::text AS function_name,
+            function_row.pronargs AS function_argument_count,
+            function_row.prorettype = 'pg_catalog.trigger'::regtype AS returns_trigger,
+            trigger_row.tgenabled::text AS enabled_mode,
+            trigger_row.tgisinternal AS is_internal,
+            trigger_row.tgtype AS trigger_type,
+            ARRAY(
+                SELECT attribute.attname::text
+                FROM unnest(trigger_row.tgattr::smallint[]) WITH ORDINALITY
+                    AS trigger_column(attnum, ordinal)
+                JOIN pg_attribute AS attribute
+                  ON attribute.attrelid = relation.oid
+                 AND attribute.attnum = trigger_column.attnum
+                 AND NOT attribute.attisdropped
+                ORDER BY trigger_column.ordinal
+            ) AS update_column_names,
+            trigger_row.tgnargs AS trigger_argument_count,
+            trigger_row.tgqual IS NOT NULL AS has_when_condition,
+            trigger_row.tgconstraint <> 0 AS is_constraint,
+            trigger_row.tgdeferrable AS is_deferrable,
+            trigger_row.tginitdeferred AS is_initially_deferred
+         FROM pg_namespace AS table_namespace
+         JOIN pg_class AS relation
+           ON relation.relnamespace = table_namespace.oid
+          AND relation.relkind IN ('r', 'p')
+         JOIN pg_trigger AS trigger_row
+           ON trigger_row.tgrelid = relation.oid
+         JOIN pg_proc AS function_row
+           ON function_row.oid = trigger_row.tgfoid
+         JOIN pg_namespace AS function_namespace
+           ON function_namespace.oid = function_row.pronamespace
+         WHERE table_namespace.nspname = 'public'
+           AND (
+                (relation.relname, trigger_row.tgname) = (
+                    'job_queue',
+                    'trg_job_queue_workflow_step_linkage_symmetry'
+                )
+                OR (relation.relname, trigger_row.tgname) = (
+                    'workflow_steps',
+                    'trg_workflow_steps_job_linkage_symmetry'
+                )
+                OR (relation.relname, trigger_row.tgname) = (
+                    'workflow_steps',
+                    'trg_workflow_steps_job_linkage_compatibility'
+                )
+           )",
+    )
+    .fetch_all(&mut **conn)
+    .await
+}
+
+fn workflow_job_link_trigger_diagnostics(
+    catalog: &[WorkflowJobLinkTriggerCatalogRow],
+) -> Vec<WorkflowJobLinkTriggerDiagnostic> {
+    WORKFLOW_JOB_LINK_EXPAND_TRIGGER_SPECS
+        .iter()
+        .filter_map(|spec| {
+            let Some(trigger) = catalog.iter().find(|trigger| {
+                trigger.table_name == spec.table_name && trigger.trigger_name == spec.trigger_name
+            }) else {
+                return Some(WorkflowJobLinkTriggerDiagnostic {
+                    table_name: spec.table_name,
+                    trigger_name: spec.trigger_name,
+                    problems: vec![WorkflowJobLinkTriggerProblem::Missing],
+                });
+            };
+
+            let problems = workflow_job_link_trigger_problems(spec, trigger);
+            (!problems.is_empty()).then_some(WorkflowJobLinkTriggerDiagnostic {
+                table_name: spec.table_name,
+                trigger_name: spec.trigger_name,
+                problems,
+            })
+        })
+        .collect()
+}
+
+fn workflow_job_link_trigger_problems(
+    spec: &WorkflowJobLinkTriggerSpec,
+    trigger: &WorkflowJobLinkTriggerCatalogRow,
+) -> Vec<WorkflowJobLinkTriggerProblem> {
+    let mut problems = Vec::new();
+
+    if trigger.function_schema != "public"
+        || trigger.function_name != spec.function_name
+        || trigger.function_argument_count != 0
+        || !trigger.returns_trigger
+    {
+        problems.push(WorkflowJobLinkTriggerProblem::WrongFunction);
+    }
+    if !matches!(trigger.enabled_mode.as_str(), "O" | "A") {
+        problems.push(WorkflowJobLinkTriggerProblem::NotEnabledForOriginWrites);
+    }
+    if trigger.is_internal {
+        problems.push(WorkflowJobLinkTriggerProblem::InternallyGenerated);
+    }
+    if trigger.trigger_type != AFTER_ROW_INSERT_OR_UPDATE_TRIGGER_TYPE {
+        problems.push(WorkflowJobLinkTriggerProblem::WrongFiringEvents);
+    }
+    if !trigger.update_column_names.is_empty()
+        && !trigger
+            .update_column_names
+            .iter()
+            .any(|column_name| column_name == spec.update_column_name)
+    {
+        problems.push(WorkflowJobLinkTriggerProblem::UpdateColumnNotCovered);
+    }
+    if trigger.trigger_argument_count != 0 {
+        problems.push(WorkflowJobLinkTriggerProblem::UnexpectedTriggerArguments);
+    }
+    if trigger.has_when_condition {
+        problems.push(WorkflowJobLinkTriggerProblem::UnexpectedWhenCondition);
+    }
+
+    let constraint_mode_is_valid = match spec.constraint_mode {
+        WorkflowJobLinkTriggerConstraintMode::Deferred => {
+            trigger.is_constraint && trigger.is_deferrable && trigger.is_initially_deferred
+        }
+        WorkflowJobLinkTriggerConstraintMode::Ordinary => {
+            !trigger.is_constraint && !trigger.is_deferrable && !trigger.is_initially_deferred
+        }
+    };
+    if !constraint_mode_is_valid {
+        problems.push(WorkflowJobLinkTriggerProblem::WrongConstraintMode);
+    }
+
+    problems
 }
 
 async fn validate_idempotency_cutover_constraints(
@@ -698,4 +936,159 @@ fn validate_checksum(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod workflow_job_link_trigger_validation_tests {
+    use super::*;
+
+    #[test]
+    fn valid_catalog_rows_have_no_diagnostics() {
+        let catalog = WORKFLOW_JOB_LINK_EXPAND_TRIGGER_SPECS
+            .iter()
+            .map(valid_catalog_row)
+            .collect::<Vec<_>>();
+
+        assert!(workflow_job_link_trigger_diagnostics(&catalog).is_empty());
+    }
+
+    #[test]
+    fn missing_triggers_are_reported_individually() {
+        let diagnostics = workflow_job_link_trigger_diagnostics(&[]);
+
+        assert_eq!(
+            diagnostics.len(),
+            WORKFLOW_JOB_LINK_EXPAND_TRIGGER_SPECS.len()
+        );
+        for (diagnostic, spec) in diagnostics
+            .iter()
+            .zip(WORKFLOW_JOB_LINK_EXPAND_TRIGGER_SPECS)
+        {
+            assert_eq!(diagnostic.table_name(), spec.table_name);
+            assert_eq!(diagnostic.trigger_name(), spec.trigger_name);
+            assert_eq!(
+                diagnostic.problems(),
+                &[WorkflowJobLinkTriggerProblem::Missing]
+            );
+        }
+    }
+
+    #[test]
+    fn every_unsafe_catalog_property_has_a_typed_problem() {
+        let spec = &WORKFLOW_JOB_LINK_EXPAND_TRIGGER_SPECS[0];
+        let valid = valid_catalog_row(spec);
+
+        let mut trigger = valid.clone();
+        trigger.function_schema = "shadow".to_owned();
+        assert_only_problem(spec, &trigger, WorkflowJobLinkTriggerProblem::WrongFunction);
+
+        let mut trigger = valid.clone();
+        trigger.enabled_mode = "R".to_owned();
+        assert_only_problem(
+            spec,
+            &trigger,
+            WorkflowJobLinkTriggerProblem::NotEnabledForOriginWrites,
+        );
+
+        let mut trigger = valid.clone();
+        trigger.is_internal = true;
+        assert_only_problem(
+            spec,
+            &trigger,
+            WorkflowJobLinkTriggerProblem::InternallyGenerated,
+        );
+
+        let mut trigger = valid.clone();
+        trigger.trigger_type = 20;
+        assert_only_problem(
+            spec,
+            &trigger,
+            WorkflowJobLinkTriggerProblem::WrongFiringEvents,
+        );
+
+        let mut trigger = valid.clone();
+        trigger.update_column_names = vec!["stage".to_owned()];
+        assert_only_problem(
+            spec,
+            &trigger,
+            WorkflowJobLinkTriggerProblem::UpdateColumnNotCovered,
+        );
+
+        let mut trigger = valid.clone();
+        trigger.trigger_argument_count = 1;
+        assert_only_problem(
+            spec,
+            &trigger,
+            WorkflowJobLinkTriggerProblem::UnexpectedTriggerArguments,
+        );
+
+        let mut trigger = valid.clone();
+        trigger.has_when_condition = true;
+        assert_only_problem(
+            spec,
+            &trigger,
+            WorkflowJobLinkTriggerProblem::UnexpectedWhenCondition,
+        );
+
+        let mut trigger = valid;
+        trigger.is_deferrable = false;
+        trigger.is_initially_deferred = false;
+        assert_only_problem(
+            spec,
+            &trigger,
+            WorkflowJobLinkTriggerProblem::WrongConstraintMode,
+        );
+    }
+
+    #[test]
+    fn safe_update_column_supersets_and_always_enabled_mode_are_accepted() {
+        let spec = &WORKFLOW_JOB_LINK_EXPAND_TRIGGER_SPECS[2];
+
+        let mut all_updates = valid_catalog_row(spec);
+        all_updates.update_column_names.clear();
+        assert!(workflow_job_link_trigger_problems(spec, &all_updates).is_empty());
+
+        let mut additional_columns = valid_catalog_row(spec);
+        additional_columns
+            .update_column_names
+            .push("stage".to_owned());
+        additional_columns.enabled_mode = "A".to_owned();
+        assert!(workflow_job_link_trigger_problems(spec, &additional_columns).is_empty());
+    }
+
+    fn valid_catalog_row(spec: &WorkflowJobLinkTriggerSpec) -> WorkflowJobLinkTriggerCatalogRow {
+        let (is_constraint, is_deferrable, is_initially_deferred) = match spec.constraint_mode {
+            WorkflowJobLinkTriggerConstraintMode::Deferred => (true, true, true),
+            WorkflowJobLinkTriggerConstraintMode::Ordinary => (false, false, false),
+        };
+
+        WorkflowJobLinkTriggerCatalogRow {
+            table_name: spec.table_name.to_owned(),
+            trigger_name: spec.trigger_name.to_owned(),
+            function_schema: "public".to_owned(),
+            function_name: spec.function_name.to_owned(),
+            function_argument_count: 0,
+            returns_trigger: true,
+            enabled_mode: "O".to_owned(),
+            is_internal: false,
+            trigger_type: AFTER_ROW_INSERT_OR_UPDATE_TRIGGER_TYPE,
+            update_column_names: vec![spec.update_column_name.to_owned()],
+            trigger_argument_count: 0,
+            has_when_condition: false,
+            is_constraint,
+            is_deferrable,
+            is_initially_deferred,
+        }
+    }
+
+    fn assert_only_problem(
+        spec: &WorkflowJobLinkTriggerSpec,
+        trigger: &WorkflowJobLinkTriggerCatalogRow,
+        expected: WorkflowJobLinkTriggerProblem,
+    ) {
+        assert_eq!(
+            workflow_job_link_trigger_problems(spec, trigger),
+            vec![expected]
+        );
+    }
 }

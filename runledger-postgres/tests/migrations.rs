@@ -9,8 +9,8 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::jobs::{enqueue_workflow_run, list_workflow_steps};
 use runledger_postgres::{
-    MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
-    migrate_after_idempotency_cutover,
+    MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerProblem,
+    ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
 };
 use runledger_test_support::{
     EphemeralDatabase, acquire_test_db_connection_budget, setup_unmigrated_ephemeral_pool,
@@ -617,6 +617,8 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
     assert_workflow_job_link_expand_schema_rejected(
         &harness.pool,
         "an incomplete expand projection",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::Missing,
     )
     .await;
 
@@ -638,6 +640,8 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
     assert_workflow_job_link_expand_schema_rejected(
         &harness.pool,
         "a wrong-schema trigger lookalike",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::Missing,
     )
     .await;
     sqlx::query("DROP SCHEMA workflow_job_link_shadow CASCADE")
@@ -657,6 +661,8 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
     assert_workflow_job_link_expand_schema_rejected(
         &harness.pool,
         "a trigger invoking the wrong function",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::WrongFunction,
     )
     .await;
     sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
@@ -680,7 +686,13 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
     .execute(&harness.pool)
     .await
     .expect("disable expand compatibility trigger");
-    assert_workflow_job_link_expand_schema_rejected(&harness.pool, "a disabled trigger").await;
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a disabled trigger",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::NotEnabledForOriginWrites,
+    )
+    .await;
     sqlx::query(
         "ALTER TABLE workflow_steps
          ENABLE REPLICA TRIGGER trg_workflow_steps_job_linkage_compatibility",
@@ -688,7 +700,13 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
     .execute(&harness.pool)
     .await
     .expect("make expand compatibility trigger replica-only");
-    assert_workflow_job_link_expand_schema_rejected(&harness.pool, "a replica-only trigger").await;
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a replica-only trigger",
+        "trg_workflow_steps_job_linkage_compatibility",
+        WorkflowJobLinkTriggerProblem::NotEnabledForOriginWrites,
+    )
+    .await;
     sqlx::query(
         "ALTER TABLE workflow_steps
          ENABLE TRIGGER trg_workflow_steps_job_linkage_compatibility",
@@ -699,6 +717,77 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
     ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
         .expect("current guard accepts all correctly defined and enabled expand triggers");
+
+    // Firing on a safe superset of UPDATE statements still protects every
+    // relationship-column mutation and should not be rejected as schema drift.
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove column-specific compatibility trigger");
+    sqlx::query(
+        "CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
+         AFTER INSERT OR UPDATE ON workflow_steps
+         FOR EACH ROW
+         EXECUTE FUNCTION project_workflow_step_job_linkage_compatibility()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("create safe all-updates compatibility trigger");
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current guard accepts a trigger firing on a safe update superset");
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove safe all-updates compatibility trigger");
+    sqlx::query(
+        "CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
+         AFTER INSERT OR UPDATE OF job_id ON workflow_steps
+         FOR EACH ROW
+         EXECUTE FUNCTION project_workflow_step_job_linkage_compatibility()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("restore column-specific compatibility trigger");
+
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_symmetry ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove deferred workflow-step symmetry trigger");
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER trg_workflow_steps_job_linkage_symmetry
+         AFTER INSERT OR UPDATE OF job_id ON workflow_steps
+         NOT DEFERRABLE
+         FOR EACH ROW
+         EXECUTE FUNCTION enforce_workflow_job_linkage_symmetry()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("create non-deferrable workflow-step symmetry trigger");
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a non-deferrable symmetry trigger",
+        "trg_workflow_steps_job_linkage_symmetry",
+        WorkflowJobLinkTriggerProblem::WrongConstraintMode,
+    )
+    .await;
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_symmetry ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove non-deferrable workflow-step symmetry trigger");
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER trg_workflow_steps_job_linkage_symmetry
+         AFTER INSERT OR UPDATE OF job_id ON workflow_steps
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW
+         EXECUTE FUNCTION enforce_workflow_job_linkage_symmetry()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("restore deferred workflow-step symmetry trigger");
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current guard accepts restored deferred symmetry semantics");
 
     // Give PostgreSQL enough cardinality to compare actual indexed point plans
     // instead of choosing tiny-table sequential scans.
@@ -2377,19 +2466,41 @@ async fn workflow_job_link_anti_join_count(pool: &PgPool) -> i64 {
     .expect("count reciprocal workflow job-link anti-joins")
 }
 
-async fn assert_workflow_job_link_expand_schema_rejected(pool: &PgPool, invalid_case: &str) {
+async fn assert_workflow_job_link_expand_schema_rejected(
+    pool: &PgPool,
+    invalid_case: &str,
+    expected_trigger_name: &str,
+    expected_problem: WorkflowJobLinkTriggerProblem,
+) {
     let error = ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect_err("workflow job-link expand schema should be rejected");
+    let SchemaCompatibilityError::WorkflowJobLinkExpandTriggersInvalid {
+        trigger_diagnostics,
+        inconsistent_link_count,
+    } = &error
+    else {
+        panic!("unexpected schema compatibility result for {invalid_case}: {error}");
+    };
+    assert_eq!(*inconsistent_link_count, 0, "invalid case: {invalid_case}");
+    assert_eq!(
+        trigger_diagnostics.len(),
+        1,
+        "unexpected trigger diagnostics for {invalid_case}: {error}"
+    );
+    assert_eq!(
+        trigger_diagnostics[0].trigger_name(),
+        expected_trigger_name,
+        "invalid case: {invalid_case}"
+    );
+    assert_eq!(
+        trigger_diagnostics[0].problems(),
+        &[expected_problem],
+        "invalid case: {invalid_case}"
+    );
     assert!(
-        matches!(
-            error,
-            SchemaCompatibilityError::WorkflowJobLinkExpandInvalid {
-                compatibility_trigger_count: 2,
-                inconsistent_link_count: 0,
-            }
-        ),
-        "unexpected schema compatibility result for {invalid_case}: {error}"
+        error.to_string().contains(expected_trigger_name),
+        "diagnostic should identify the invalid trigger for {invalid_case}: {error}"
     );
 }
 

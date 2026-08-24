@@ -332,7 +332,8 @@ pub use error::{
     classify_query_error_with_constraint_classifier, has_framework_constraint_classifier,
 };
 pub use migrations::{
-    MIGRATOR, SchemaCompatibilityError, ensure_schema_compatible_after_idempotency_cutover,
+    MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
+    WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
     migrate_after_idempotency_cutover,
 };
 #[allow(
@@ -429,8 +430,9 @@ pub mod prelude {
     };
     pub use crate::{
         DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, QueryError, QueryErrorCategory,
-        QueryErrorKind, SchemaCompatibilityError,
-        ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
+        QueryErrorKind, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
+        WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
+        migrate_after_idempotency_cutover,
     };
 }
 
