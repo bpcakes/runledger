@@ -614,19 +614,56 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
         .execute(&harness.pool)
         .await
         .expect("remove one expand compatibility trigger for guard regression");
-    let invalid_expand_error = ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "an incomplete expand projection",
+    )
+    .await;
+
+    sqlx::raw_sql(
+        "CREATE SCHEMA workflow_job_link_shadow;
+         CREATE TABLE workflow_job_link_shadow.workflow_steps (
+            id uuid PRIMARY KEY,
+            job_id uuid
+         );
+         CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
+         AFTER INSERT OR UPDATE OF job_id
+         ON workflow_job_link_shadow.workflow_steps
+         FOR EACH ROW
+         EXECUTE FUNCTION public.project_workflow_step_job_linkage_compatibility();",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("create wrong-schema trigger lookalike");
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a wrong-schema trigger lookalike",
+    )
+    .await;
+    sqlx::query("DROP SCHEMA workflow_job_link_shadow CASCADE")
+        .execute(&harness.pool)
         .await
-        .expect_err("current guard rejects an incomplete expand projection");
-    assert!(
-        matches!(
-            invalid_expand_error,
-            SchemaCompatibilityError::WorkflowJobLinkExpandInvalid {
-                compatibility_trigger_count: 2,
-                inconsistent_link_count: 0,
-            }
-        ),
-        "unexpected invalid expand schema error: {invalid_expand_error}"
-    );
+        .expect("remove wrong-schema trigger lookalike");
+
+    sqlx::query(
+        "CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
+         AFTER INSERT OR UPDATE OF job_id ON workflow_steps
+         FOR EACH ROW
+         EXECUTE FUNCTION enforce_workflow_job_linkage_symmetry()",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("create wrong-function trigger lookalike");
+    assert_workflow_job_link_expand_schema_rejected(
+        &harness.pool,
+        "a trigger invoking the wrong function",
+    )
+    .await;
+    sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
+        .execute(&harness.pool)
+        .await
+        .expect("remove wrong-function trigger lookalike");
+
     sqlx::query(
         "CREATE TRIGGER trg_workflow_steps_job_linkage_compatibility
          AFTER INSERT OR UPDATE OF job_id ON workflow_steps
@@ -636,6 +673,32 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
     .execute(&harness.pool)
     .await
     .expect("restore expand compatibility trigger after guard regression");
+    sqlx::query(
+        "ALTER TABLE workflow_steps
+         DISABLE TRIGGER trg_workflow_steps_job_linkage_compatibility",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("disable expand compatibility trigger");
+    assert_workflow_job_link_expand_schema_rejected(&harness.pool, "a disabled trigger").await;
+    sqlx::query(
+        "ALTER TABLE workflow_steps
+         ENABLE REPLICA TRIGGER trg_workflow_steps_job_linkage_compatibility",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("make expand compatibility trigger replica-only");
+    assert_workflow_job_link_expand_schema_rejected(&harness.pool, "a replica-only trigger").await;
+    sqlx::query(
+        "ALTER TABLE workflow_steps
+         ENABLE TRIGGER trg_workflow_steps_job_linkage_compatibility",
+    )
+    .execute(&harness.pool)
+    .await
+    .expect("restore expand compatibility trigger to origin mode");
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("current guard accepts all correctly defined and enabled expand triggers");
 
     // Give PostgreSQL enough cardinality to compare actual indexed point plans
     // instead of choosing tiny-table sequential scans.
@@ -2312,6 +2375,22 @@ async fn workflow_job_link_anti_join_count(pool: &PgPool) -> i64 {
     .fetch_one(pool)
     .await
     .expect("count reciprocal workflow job-link anti-joins")
+}
+
+async fn assert_workflow_job_link_expand_schema_rejected(pool: &PgPool, invalid_case: &str) {
+    let error = ensure_schema_compatible_after_idempotency_cutover(pool)
+        .await
+        .expect_err("workflow job-link expand schema should be rejected");
+    assert!(
+        matches!(
+            error,
+            SchemaCompatibilityError::WorkflowJobLinkExpandInvalid {
+                compatibility_trigger_count: 2,
+                inconsistent_link_count: 0,
+            }
+        ),
+        "unexpected schema compatibility result for {invalid_case}: {error}"
+    );
 }
 
 async fn job_queue_workflow_step_id_exists(pool: &PgPool) -> bool {

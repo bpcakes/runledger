@@ -123,6 +123,13 @@ impl From<sqlx::Error> for SchemaCompatibilityError {
 /// This is intentionally named as a hard-cutover API. Downstream applications
 /// upgrading from older Runledger versions must update their startup code and
 /// verify no keyed legacy rows remain without `enqueue_request` snapshots.
+/// This function applies every pending bundled migration immediately, including
+/// the workflow-step/job-link contract migration that removes
+/// `job_queue.workflow_step_id` and crosses the 0.10 rollback boundary. For a
+/// mixed-version rollout, apply the expand migration externally, deploy and
+/// drain all 0.10 writers and leases, then apply the contract migration; use
+/// [`ensure_schema_compatible_after_idempotency_cutover`] for startup checks
+/// during that staged rollout.
 /// Unlike raw [`MIGRATOR`] execution, this filters shared SQLx history through
 /// Runledger's migration compatibility fence so declared additive migrations
 /// can coexist with older compatible startup code.
@@ -383,14 +390,77 @@ async fn validate_workflow_job_link_expand_schema(
     }
 
     let compatibility_trigger_count = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)
-         FROM pg_trigger
-         WHERE tgname IN (
-            'trg_job_queue_workflow_step_linkage_symmetry',
-            'trg_workflow_steps_job_linkage_symmetry',
-            'trg_workflow_steps_job_linkage_compatibility'
+        "WITH expected (
+            table_name,
+            trigger_name,
+            function_name,
+            update_column_name,
+            is_constraint,
+            is_deferrable,
+            is_initially_deferred
+         ) AS (
+            VALUES
+                (
+                    'job_queue',
+                    'trg_job_queue_workflow_step_linkage_symmetry',
+                    'enforce_workflow_job_linkage_symmetry',
+                    'workflow_step_id',
+                    true,
+                    true,
+                    true
+                ),
+                (
+                    'workflow_steps',
+                    'trg_workflow_steps_job_linkage_symmetry',
+                    'enforce_workflow_job_linkage_symmetry',
+                    'job_id',
+                    true,
+                    true,
+                    true
+                ),
+                (
+                    'workflow_steps',
+                    'trg_workflow_steps_job_linkage_compatibility',
+                    'project_workflow_step_job_linkage_compatibility',
+                    'job_id',
+                    false,
+                    false,
+                    false
+                )
          )
-           AND NOT tgisinternal",
+         SELECT count(*)
+         FROM expected
+         JOIN pg_namespace AS table_namespace
+           ON table_namespace.nspname = 'public'
+         JOIN pg_class AS relation
+           ON relation.relnamespace = table_namespace.oid
+          AND relation.relname = expected.table_name
+          AND relation.relkind IN ('r', 'p')
+         JOIN pg_trigger AS trigger_row
+           ON trigger_row.tgrelid = relation.oid
+          AND trigger_row.tgname = expected.trigger_name
+         JOIN pg_proc AS function_row
+           ON function_row.oid = trigger_row.tgfoid
+          AND function_row.proname = expected.function_name
+          AND function_row.pronargs = 0
+          AND function_row.prorettype = 'pg_catalog.trigger'::regtype
+         JOIN pg_namespace AS function_namespace
+           ON function_namespace.oid = function_row.pronamespace
+          AND function_namespace.nspname = 'public'
+         JOIN pg_attribute AS update_column
+           ON update_column.attrelid = relation.oid
+          AND update_column.attname = expected.update_column_name
+          AND NOT update_column.attisdropped
+         WHERE NOT trigger_row.tgisinternal
+           AND trigger_row.tgenabled IN ('O', 'A')
+           -- ROW + INSERT + UPDATE, with no BEFORE or INSTEAD OF bit.
+           AND trigger_row.tgtype = 21
+           AND trigger_row.tgattr::text = update_column.attnum::text
+           AND trigger_row.tgnargs = 0
+           AND trigger_row.tgqual IS NULL
+           AND (trigger_row.tgconstraint <> 0) = expected.is_constraint
+           AND trigger_row.tgdeferrable = expected.is_deferrable
+           AND trigger_row.tginitdeferred = expected.is_initially_deferred",
     )
     .fetch_one(&mut **conn)
     .await?;
