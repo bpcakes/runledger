@@ -300,7 +300,8 @@ impl ClaimedJobExecution {
             Instant::now() + Duration::from_secs(self.job.timeout_seconds.max(1) as u64);
         let mut timeout = Box::pin(sleep_until(timeout_deadline));
 
-        let mut ticker = tokio::time::interval(heartbeat_interval(self.lease_ttl_seconds));
+        let heartbeat_budget = heartbeat_maintenance_budget(self.lease_ttl_seconds);
+        let mut ticker = tokio::time::interval(heartbeat_budget);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ticker.tick().await;
         let mut pending_heartbeats = FuturesUnordered::new();
@@ -322,6 +323,20 @@ impl ClaimedJobExecution {
                     )));
                 }
                 Some(result) = pending_heartbeats.next(), if !pending_heartbeats.is_empty() => {
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(
+                                job_id = %self.job.id,
+                                attempt = self.job.attempt,
+                                heartbeat_budget_ms = heartbeat_budget.as_millis(),
+                                "aborting job because lease heartbeat exceeded its maintenance budget"
+                            );
+                            return Err(JobExecutionFailure::LeaseMaintenance(
+                                lease_maintenance_failure(),
+                            ));
+                        }
+                    };
                     if let Err(error) = result {
                         let lease_owner_mismatch = is_lease_owner_mismatch_error(&error);
                         let error = WorkerError::Heartbeat {
@@ -352,10 +367,17 @@ impl ClaimedJobExecution {
                     // awaiting it inside this branch. A handler can be waiting
                     // to finish and commit a progress transaction that owns the
                     // same job-row lock the heartbeat needs.
-                    pending_heartbeats.push(jobs::heartbeat_job_for_lease(
-                        &self.pool,
-                        self.lease_identity(),
-                        self.lease_ttl_seconds,
+                    // Bound the entire attempt, including pool acquisition, to
+                    // one third of the lease. A timed-out SQLx transaction may
+                    // still need asynchronous rollback cleanup, but handler
+                    // polling stops with another third of the lease available.
+                    pending_heartbeats.push(tokio::time::timeout(
+                        heartbeat_budget,
+                        jobs::heartbeat_job_for_lease(
+                            &self.pool,
+                            self.lease_identity(),
+                            self.lease_ttl_seconds,
+                        ),
                     ));
                 }
             }
@@ -430,9 +452,21 @@ fn is_unstarted_claim_release_not_applicable_error(error: &runledger_postgres::E
     has_query_error_kind(error, QueryErrorKind::JobUnstartedClaimReleaseNotApplicable)
 }
 
-fn heartbeat_interval(lease_ttl_seconds: i32) -> Duration {
-    // Renew at one-third of the lease TTL so a delayed heartbeat still leaves
-    // time for subsequent renewals before the lease expires.
-    let seconds = (lease_ttl_seconds.max(1) / 3).max(1) as u64;
-    Duration::from_secs(seconds)
+fn heartbeat_maintenance_budget(lease_ttl_seconds: i32) -> Duration {
+    // Use millisecond precision so directly constructed one- and two-second
+    // configurations retain the same three-part lease budget as longer TTLs.
+    let lease_ttl_millis = lease_ttl_seconds.max(1) as u64 * 1_000;
+    Duration::from_millis((lease_ttl_millis / 3).max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_budget_preserves_one_third_for_short_and_default_leases() {
+        assert_eq!(heartbeat_maintenance_budget(1), Duration::from_millis(333));
+        assert_eq!(heartbeat_maintenance_budget(2), Duration::from_millis(666));
+        assert_eq!(heartbeat_maintenance_budget(60), Duration::from_secs(20));
+    }
 }

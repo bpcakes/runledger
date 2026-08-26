@@ -172,11 +172,11 @@ async fn pending_heartbeat_keeps_polling_handler_that_owns_the_job_row_lock() {
 }
 
 #[tokio::test]
-async fn heartbeat_lock_timeout_aborts_handler_and_leaves_attempt_for_reaper() {
+async fn heartbeat_budget_aborts_handler_before_short_lease_expires() {
     const TIMEOUT_TEST_LEASE_TTL_SECONDS: i32 = 3;
 
     let (pool, database) = setup_ephemeral_pool("jobs_worker_heartbeat_timeout", 8).await;
-    record_postgres_server_version(&pool, "heartbeat lock-timeout recovery regression").await;
+    record_postgres_server_version(&pool, "heartbeat lease-budget recovery regression").await;
     let (job_id, claimed_job) = enqueue_and_claim_job_with_lease_ttl(
         &pool,
         TIMEOUT_JOB_TYPE,
@@ -191,11 +191,14 @@ async fn heartbeat_lock_timeout_aborts_handler_and_leaves_attempt_for_reaper() {
         .max_connections(1)
         .connect(database.url())
         .await
-        .expect("connect lock-timeout worker pool");
-    sqlx::query("SET SESSION lock_timeout = '100ms'")
-        .execute(&worker_pool)
-        .await
-        .expect("set strict worker lock timeout");
+        .expect("connect heartbeat-budget worker pool");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SHOW lock_timeout")
+            .fetch_one(&worker_pool)
+            .await
+            .expect("read default worker lock timeout"),
+        "0"
+    );
 
     let started = Arc::new(Notify::new());
     let drops = Arc::new(AtomicUsize::new(0));
@@ -232,8 +235,8 @@ async fn heartbeat_lock_timeout_aborts_handler_and_leaves_attempt_for_reaper() {
     await_spawned_task(
         &mut process_task,
         Duration::from_secs(3),
-        "worker should abort after the effective heartbeat lock timeout",
-        "heartbeat lock-timeout worker task should not panic",
+        "worker should abort within the lease-aware heartbeat budget",
+        "heartbeat-budget worker task should not panic",
     )
     .await;
     wait_for_observer_count(
@@ -256,6 +259,10 @@ async fn heartbeat_lock_timeout_aborts_handler_and_leaves_attempt_for_reaper() {
         .expect("job exists after heartbeat timeout");
     assert_eq!(abandoned.status, JobStatus::Leased);
     assert_eq!(abandoned.attempt, 1);
+    assert!(
+        abandoned.lease_expires_at.expect("abandoned lease expiry") > Utc::now(),
+        "handler must stop before durable lease ownership expires"
+    );
 
     lock_tx.rollback().await.expect("release heartbeat blocker");
     expire_job_lease(&pool, job_id).await;
