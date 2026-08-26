@@ -12,6 +12,7 @@ use super::events::{
     RequeuedEventPayload, RequeuedJobEvent,
     insert_requeued_event_tx as insert_job_requeued_event_tx,
 };
+use super::lifecycle_timeouts::{cap_job_row_lock_timeout_tx, restore_job_row_lock_timeout_tx};
 
 #[derive(Clone, Copy)]
 pub(super) struct UnstartedClaimIdentity<'a> {
@@ -161,6 +162,16 @@ pub(super) async fn try_release_unstarted_job_claim_tx(
         return Ok(TryReleaseUnstartedClaimResult::NotApplicable);
     }
 
+    finish_unstarted_job_claim_release_tx(tx, identity, reason).await?;
+
+    Ok(TryReleaseUnstartedClaimResult::Released)
+}
+
+async fn finish_unstarted_job_claim_release_tx(
+    tx: &mut DbTx<'_>,
+    identity: UnstartedClaimIdentity<'_>,
+    reason: &str,
+) -> Result<()> {
     on_claim_released(tx, identity.job_id, identity.should_reset_started_at()).await?;
     delete_attempt_row_tx(tx, identity).await?;
     insert_job_requeued_event_tx(
@@ -178,7 +189,7 @@ pub(super) async fn try_release_unstarted_job_claim_tx(
     )
     .await?;
 
-    Ok(TryReleaseUnstartedClaimResult::Released)
+    Ok(())
 }
 
 async fn release_unstarted_job_claim_tx(
@@ -188,15 +199,24 @@ async fn release_unstarted_job_claim_tx(
     retry_delay_ms: i32,
 ) -> Result<()> {
     let identity = UnstartedClaimIdentity::from_live_lease(identity);
+    let previous_lock_timeout = cap_job_row_lock_timeout_tx(
+        tx,
+        "cap unstarted job claim release row-lock acquisition timeout",
+    )
+    .await?;
+    let updated = release_unstarted_job_queue_row_tx(tx, identity, retry_delay_ms).await?;
+    restore_job_row_lock_timeout_tx(
+        tx,
+        &previous_lock_timeout,
+        "restore unstarted job claim release row-lock timeout",
+    )
+    .await?;
 
-    if matches!(
-        try_release_unstarted_job_claim_tx(tx, identity, reason, retry_delay_ms).await?,
-        TryReleaseUnstartedClaimResult::Released
-    ) {
-        return Ok(());
+    if updated == 0 {
+        return Err(classify_unstarted_release_not_applicable_tx(tx, identity).await?);
     }
 
-    Err(classify_unstarted_release_not_applicable_tx(tx, identity).await?)
+    finish_unstarted_job_claim_release_tx(tx, identity, reason).await
 }
 
 /// Releases an exact live worker lease before execution has started.

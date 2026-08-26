@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use runledger_core::jobs::JobFailureKind;
 use runledger_postgres::jobs::{
-    JobContinuationUpdate, JobFailureUpdate, complete_job_continuation, complete_job_failure,
-    complete_job_success,
+    JobContinuationUpdate, JobFailureUpdate, claim_prestart_jobs, complete_job_continuation,
+    complete_job_failure, complete_job_success, release_unstarted_job_claim,
 };
 use runledger_postgres::{Error, QueryErrorCategory};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -46,6 +46,74 @@ async fn lock_job_row<'a>(
         .await
         .expect("hold job row lock");
     blocker
+}
+
+#[tokio::test]
+async fn unstarted_claim_release_row_lock_wait_preserves_stricter_database_timeout() {
+    let (pool, database) = setup_ephemeral_pool("postgres_unstarted_release_timeout", 4).await;
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(&pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(&pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "unstarted release timeout regression PostgreSQL server_version={server_version}, \
+         server_version_num={server_version_num}"
+    );
+    register_test_job_definition(&pool, JOB_TYPE).await;
+
+    enqueue_test_job(
+        &pool,
+        JOB_TYPE,
+        None,
+        &json!({"worker_id": "worker-unstarted-release-timeout"}),
+    )
+    .await;
+    let claimed = claim_prestart_jobs(&pool, "worker-unstarted-release-timeout", 30, 1)
+        .await
+        .expect("claim unstarted job")
+        .pop()
+        .expect("one unstarted job should be claimable");
+    let release_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database.url())
+        .await
+        .expect("connect unstarted release pool");
+    sqlx::query("SET SESSION lock_timeout = '100ms'")
+        .execute(&release_pool)
+        .await
+        .expect("set strict unstarted release lock timeout");
+
+    let blocker = lock_job_row(&pool, claimed.id).await;
+    let error = timeout(
+        Duration::from_secs(2),
+        release_unstarted_job_claim(
+            &release_pool,
+            runledger_postgres::jobs::JobLeaseIdentity::new(
+                claimed.id,
+                claimed.run_number,
+                claimed.attempt,
+                claimed.worker_id.as_deref().expect("claimed worker id"),
+            ),
+            "TEST_RELEASE_LOCK_TIMEOUT",
+            0,
+        ),
+    )
+    .await
+    .expect("unstarted claim release lock wait should be bounded")
+    .expect_err("unstarted claim release should report lock timeout");
+    assert_lock_timeout_error(error);
+
+    blocker
+        .rollback()
+        .await
+        .expect("release unstarted claim blocker");
+    release_pool.close().await;
+    teardown_ephemeral_pool(pool, database).await;
 }
 
 #[tokio::test]
