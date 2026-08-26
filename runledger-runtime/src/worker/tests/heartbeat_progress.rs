@@ -6,6 +6,7 @@ const LEASE_TTL_SECONDS: i32 = 10;
 
 struct ProgressDuringHeartbeatHandler {
     pool: PgPool,
+    settle_after_progress: Duration,
 }
 
 struct PendingHeartbeatTimeoutHandler {
@@ -38,6 +39,8 @@ impl JobHandler for ProgressDuringHeartbeatHandler {
         )
         .await
         .expect("persist progress while heartbeat is due");
+
+        sleep(self.settle_after_progress).await;
 
         Ok(JobCompletion::success())
     }
@@ -104,7 +107,10 @@ async fn pending_heartbeat_keeps_polling_handler_that_owns_the_job_row_lock() {
     )
     .await;
     let mut registry = JobRegistry::new();
-    registry.register(ProgressDuringHeartbeatHandler { pool: pool.clone() });
+    registry.register(ProgressDuringHeartbeatHandler {
+        pool: pool.clone(),
+        settle_after_progress: Duration::ZERO,
+    });
 
     // A ten-second lease TTL makes the first heartbeat due after three seconds,
     // while the trigger keeps the progress UPDATE holding the job-row lock for
@@ -168,6 +174,102 @@ async fn pending_heartbeat_keeps_polling_handler_that_owns_the_job_row_lock() {
         sleep(Duration::from_millis(20)).await;
     }
 
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn transient_heartbeat_lock_timeouts_retry_within_one_maintenance_budget() {
+    const RETRY_TEST_LEASE_TTL_SECONDS: i32 = 3;
+
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_heartbeat_lock_retry", 8).await;
+    record_postgres_server_version(&pool, "heartbeat lock-timeout retry regression").await;
+
+    sqlx::query(
+        "CREATE FUNCTION runledger_test_delay_retry_progress_update()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             IF NEW.progress_done IS DISTINCT FROM OLD.progress_done
+                AND NEW.progress_done = 1 THEN
+                 PERFORM pg_sleep(1.4);
+             END IF;
+             RETURN NEW;
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("create retry progress delay trigger function");
+    sqlx::query(
+        "CREATE TRIGGER runledger_test_delay_retry_progress_update
+         BEFORE UPDATE OF progress_done ON job_queue
+         FOR EACH ROW
+         EXECUTE FUNCTION runledger_test_delay_retry_progress_update()",
+    )
+    .execute(&pool)
+    .await
+    .expect("create retry progress delay trigger");
+
+    let (job_id, claimed_job) = enqueue_and_claim_job_with_lease_ttl(
+        &pool,
+        JOB_TYPE,
+        3,
+        json!({"kind": "heartbeat-lock-retry"}),
+        "worker-heartbeat-lock-retry",
+        RETRY_TEST_LEASE_TTL_SECONDS,
+    )
+    .await;
+    let worker_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database.url())
+        .await
+        .expect("connect heartbeat-retry worker pool");
+    sqlx::query("SET SESSION lock_timeout = '100ms'")
+        .execute(&worker_pool)
+        .await
+        .expect("set strict heartbeat retry lock timeout");
+
+    let mut registry = JobRegistry::new();
+    registry.register(ProgressDuringHeartbeatHandler {
+        pool: pool.clone(),
+        settle_after_progress: Duration::from_millis(500),
+    });
+    let process_pool = worker_pool.clone();
+    let mut process_task = tokio::spawn(async move {
+        process_claimed_job(
+            process_pool,
+            Arc::new(registry),
+            claimed_job,
+            RETRY_TEST_LEASE_TTL_SECONDS,
+        )
+        .await;
+    });
+
+    wait_for_heartbeat_to_block_on_job_lock(&pool).await;
+    await_spawned_task(
+        &mut process_task,
+        Duration::from_secs(4),
+        "worker did not recover from transient heartbeat lock contention",
+        "heartbeat-retry worker task should not panic",
+    )
+    .await;
+
+    let persisted = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job after heartbeat retry")
+        .expect("job exists after heartbeat retry");
+    assert_eq!(persisted.status, JobStatus::Succeeded);
+    assert!(
+        list_job_events(&pool, None, job_id, 20, None)
+            .await
+            .expect("list heartbeat-retry events")
+            .iter()
+            .any(|event| event.event_type == JobEventType::Heartbeat),
+        "a heartbeat should persist after transient lock timeouts clear"
+    );
+
+    worker_pool.close().await;
     teardown_ephemeral_pool(pool, database).await;
 }
 

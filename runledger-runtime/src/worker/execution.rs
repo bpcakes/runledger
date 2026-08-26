@@ -25,10 +25,16 @@ const LEASE_MAINTENANCE_FAILED_CODE: &str = "job.lease_maintenance_failed";
 const HANDLER_PANIC_CODE: &str = "job.handler_panic";
 const RUNNING_PROGRESS_PERSIST_FAILED_REASON: &str = "RUNNING_PROGRESS_PERSIST_FAILED";
 const UNSTARTED_CLAIM_RETRY_DELAY_MS: i32 = 1_000;
+const HEARTBEAT_LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 enum JobExecutionFailure {
     Handler(JobFailure),
     LeaseMaintenance(JobFailure),
+}
+
+enum HeartbeatMaintenanceError {
+    DeadlineElapsed,
+    Persistence(runledger_postgres::Error),
 }
 
 /// Executes one claimed job and owns all state that belongs to that claim.
@@ -323,9 +329,9 @@ impl ClaimedJobExecution {
                     )));
                 }
                 Some(result) = pending_heartbeats.next(), if !pending_heartbeats.is_empty() => {
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(_) => {
+                    let error = match result {
+                        Ok(()) => continue,
+                        Err(HeartbeatMaintenanceError::DeadlineElapsed) => {
                             warn!(
                                 job_id = %self.job.id,
                                 attempt = self.job.attempt,
@@ -336,31 +342,30 @@ impl ClaimedJobExecution {
                                 lease_maintenance_failure(),
                             ));
                         }
+                        Err(HeartbeatMaintenanceError::Persistence(error)) => error,
                     };
-                    if let Err(error) = result {
-                        let lease_owner_mismatch = is_lease_owner_mismatch_error(&error);
-                        let error = WorkerError::Heartbeat {
-                            job_id: self.job.id,
-                            attempt: self.job.attempt,
-                            source: error,
-                        };
+                    let lease_owner_mismatch = is_lease_owner_mismatch_error(&error);
+                    let error = WorkerError::Heartbeat {
+                        job_id: self.job.id,
+                        attempt: self.job.attempt,
+                        source: error,
+                    };
 
-                        if lease_owner_mismatch {
-                            warn!(%error, job_id = %self.job.id, "job heartbeat lost lease ownership");
-                            return Err(JobExecutionFailure::LeaseMaintenance(
-                                lease_owner_mismatch_failure(),
-                            ));
-                        }
-
-                        warn!(
-                            %error,
-                            job_id = %self.job.id,
-                            "aborting job because lease heartbeat could not be persisted"
-                        );
+                    if lease_owner_mismatch {
+                        warn!(%error, job_id = %self.job.id, "job heartbeat lost lease ownership");
                         return Err(JobExecutionFailure::LeaseMaintenance(
-                            lease_maintenance_failure(),
+                            lease_owner_mismatch_failure(),
                         ));
                     }
+
+                    warn!(
+                        %error,
+                        job_id = %self.job.id,
+                        "aborting job because lease heartbeat could not be persisted"
+                    );
+                    return Err(JobExecutionFailure::LeaseMaintenance(
+                        lease_maintenance_failure(),
+                    ));
                 }
                 _ = ticker.tick(), if pending_heartbeats.is_empty() => {
                     // Keep the heartbeat future in the select set instead of
@@ -371,16 +376,46 @@ impl ClaimedJobExecution {
                     // one third of the lease. A timed-out SQLx transaction may
                     // still need asynchronous rollback cleanup, but handler
                     // polling stops with another third of the lease available.
-                    pending_heartbeats.push(tokio::time::timeout(
+                    pending_heartbeats.push(heartbeat_within_maintenance_budget(
+                        &self.pool,
+                        self.lease_identity(),
+                        self.lease_ttl_seconds,
                         heartbeat_budget,
-                        jobs::heartbeat_job_for_lease(
-                            &self.pool,
-                            self.lease_identity(),
-                            self.lease_ttl_seconds,
-                        ),
                     ));
                 }
             }
+        }
+    }
+}
+
+async fn heartbeat_within_maintenance_budget(
+    pool: &runledger_postgres::DbPool,
+    identity: JobLeaseIdentity<'_>,
+    lease_ttl_seconds: i32,
+    budget: Duration,
+) -> Result<(), HeartbeatMaintenanceError> {
+    let deadline = Instant::now() + budget;
+
+    loop {
+        match tokio::time::timeout_at(
+            deadline,
+            jobs::heartbeat_job_for_lease(pool, identity, lease_ttl_seconds),
+        )
+        .await
+        {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) if is_postgres_lock_not_available_error(&error) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(HeartbeatMaintenanceError::DeadlineElapsed);
+                }
+                sleep_until((now + HEARTBEAT_LOCK_RETRY_DELAY).min(deadline)).await;
+                if Instant::now() >= deadline {
+                    return Err(HeartbeatMaintenanceError::DeadlineElapsed);
+                }
+            }
+            Ok(Err(error)) => return Err(HeartbeatMaintenanceError::Persistence(error)),
+            Err(_) => return Err(HeartbeatMaintenanceError::DeadlineElapsed),
         }
     }
 }
@@ -446,6 +481,10 @@ fn has_query_error_kind(error: &runledger_postgres::Error, expected_kind: QueryE
 
 pub(super) fn is_lease_owner_mismatch_error(error: &runledger_postgres::Error) -> bool {
     has_query_error_kind(error, QueryErrorKind::JobLeaseOwnerMismatch)
+}
+
+fn is_postgres_lock_not_available_error(error: &runledger_postgres::Error) -> bool {
+    has_query_error_kind(error, QueryErrorKind::PostgresLockNotAvailable)
 }
 
 fn is_unstarted_claim_release_not_applicable_error(error: &runledger_postgres::Error) -> bool {
