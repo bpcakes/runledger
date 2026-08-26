@@ -366,6 +366,17 @@ async fn heartbeat_budget_aborts_handler_before_short_lease_expires() {
         "handler must stop before durable lease ownership expires"
     );
 
+    assert_eq!(
+        timeout(
+            Duration::from_secs(6),
+            sqlx::query_scalar::<_, String>("SHOW lock_timeout").fetch_one(&worker_pool),
+        )
+        .await
+        .expect("timed-out heartbeat connection should become reusable while the blocker is held")
+        .expect("probe recovered heartbeat worker connection"),
+        "0"
+    );
+
     lock_tx.rollback().await.expect("release heartbeat blocker");
     expire_job_lease(&pool, job_id).await;
     assert_eq!(

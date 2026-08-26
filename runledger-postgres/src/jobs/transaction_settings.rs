@@ -334,8 +334,8 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{
-        PostgresTimeout, cap_local_lock_timeout_duration_tx,
-        cap_local_transaction_timeout_duration_tx,
+        PostgresTimeout, cap_local_lock_and_transaction_timeouts_duration_tx,
+        cap_local_lock_timeout_duration_tx, cap_local_transaction_timeout_duration_tx,
     };
 
     #[test]
@@ -464,6 +464,73 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_millis(1_500),
             "transaction timeout did not replace the looser active timer: {:?}",
+            started.elapsed()
+        );
+        drop(tx);
+        teardown_ephemeral_pool(pool, database).await;
+    }
+
+    #[tokio::test]
+    async fn combined_timeout_cap_rearms_a_looser_active_transaction_timer() {
+        let (pool, database) =
+            setup_ephemeral_pool("postgres_combined_transaction_timeout_rearm", 1).await;
+        let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+            .fetch_one(&pool)
+            .await
+            .expect("read PostgreSQL server_version");
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+                .fetch_one(&pool)
+                .await
+                .expect("read PostgreSQL server_version_num");
+        eprintln!(
+            "combined transaction timeout rearm PostgreSQL server_version={server_version}, \
+             server_version_num={server_version_num}"
+        );
+
+        sqlx::query("SET SESSION transaction_timeout = '5s'")
+            .execute(&pool)
+            .await
+            .expect("set loose session transaction timeout");
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin combined capped transaction");
+        let previous = cap_local_lock_and_transaction_timeouts_duration_tx(
+            &mut tx,
+            PostgresTimeout::new(Duration::from_secs(1)),
+            PostgresTimeout::new(Duration::from_millis(300)),
+            "cap combined timeouts in regression test",
+        )
+        .await
+        .expect("cap active transaction with combined helper");
+        assert_eq!(previous, ("0".to_string(), "5s".to_string()));
+        assert_eq!(
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read combined capped timeouts"),
+            ("1s".to_string(), "300ms".to_string())
+        );
+
+        let started = Instant::now();
+        let _error = timeout(
+            Duration::from_millis(1_500),
+            sqlx::query("SELECT pg_sleep(2)").execute(&mut *tx),
+        )
+        .await
+        .expect("combined PostgreSQL transaction timeout must beat the test guard")
+        .expect_err("combined over-budget transaction must terminate its connection");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "combined transaction timeout fired too early: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(1_500),
+            "combined helper did not replace the looser active timer: {:?}",
             started.elapsed()
         );
         drop(tx);

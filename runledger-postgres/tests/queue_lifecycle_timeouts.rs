@@ -11,7 +11,7 @@ use runledger_postgres::{Error, QueryErrorCategory, QueryErrorKind};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout};
 
 use support::{claim_one_job, enqueue_test_job, register_test_job_definition};
 
@@ -117,6 +117,73 @@ async fn unstarted_claim_release_row_lock_wait_preserves_stricter_database_timeo
         .await
         .expect("release unstarted claim blocker");
     release_pool.close().await;
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn completion_row_lock_wait_uses_default_five_second_cap() {
+    let (pool, database) = setup_ephemeral_pool("postgres_default_completion_timeout", 4).await;
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(&pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(&pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "default completion timeout regression PostgreSQL server_version={server_version}, \
+         server_version_num={server_version_num}"
+    );
+    register_test_job_definition(&pool, JOB_TYPE).await;
+
+    let claimed = enqueue_and_claim(&pool, "worker-default-completion-timeout").await;
+    let completion_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database.url())
+        .await
+        .expect("connect default completion pool");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SHOW lock_timeout")
+            .fetch_one(&completion_pool)
+            .await
+            .expect("read default completion lock timeout"),
+        "0"
+    );
+
+    let blocker = lock_job_row(&pool, claimed.id).await;
+    let started = Instant::now();
+    let error = timeout(
+        Duration::from_secs(7),
+        complete_job_success(
+            &completion_pool,
+            claimed.id,
+            claimed.run_number,
+            claimed.attempt,
+            claimed.worker_id.as_deref().expect("claimed worker id"),
+            None,
+        ),
+    )
+    .await
+    .expect("default completion lock cap must beat the test guard")
+    .expect_err("blocked completion should report the default lock timeout");
+    let elapsed = started.elapsed();
+    assert_lock_timeout_error(error);
+    assert!(
+        elapsed >= Duration::from_millis(4_500),
+        "default completion lock timeout fired too early: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(7),
+        "default completion lock timeout did not cap the wait: {elapsed:?}"
+    );
+
+    blocker
+        .rollback()
+        .await
+        .expect("release default completion blocker");
+    completion_pool.close().await;
     teardown_ephemeral_pool(pool, database).await;
 }
 
