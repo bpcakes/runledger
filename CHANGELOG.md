@@ -11,11 +11,13 @@ All notable changes to this workspace are documented here.
   worker from self-deadlocking and exhausting its database pool. The runtime
   schedules and bounds each complete heartbeat attempt at one third of the
   configured lease TTL, including for directly configured one- and two-second
-  leases. Heartbeat, progress, and handler-completion transactions preserve
-  stricter database settings while applying defensive database-side caps. A
-  heartbeat that exhausts its lease-maintenance budget stops the handler and
-  leaves its consumed attempt for ordinary reaper retry or dead-letter recovery
-  on the PostgreSQL 18 baseline.
+  leases. Heartbeat and progress transactions preserve stricter database
+  settings while applying a five-second row-lock cap and thirty-second
+  transaction cap. Handler completion scopes the five-second cap to initial
+  `job_queue` row acquisition, then restores the caller's lock policy before
+  workflow propagation. A heartbeat that exhausts its lease-maintenance budget
+  stops the handler and leaves its consumed attempt for ordinary reaper retry
+  or dead-letter recovery on the PostgreSQL 18 baseline.
 
 ## [0.11.0] - 2026-08-24
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.1...v0.11.0)

@@ -1328,12 +1328,17 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   on a concurrent progress write. It schedules and bounds each complete
   heartbeat attempt at one third of the configured lease TTL, including pool
   acquisition, so directly configured one- and two-second leases retain time
-  to stop handler polling before ownership expires. Database-side lifecycle
-  timeouts remain defense in depth and preserve stricter settings configured by
-  the embedding service. If a heartbeat still cannot be persisted, the runtime
-  stops the handler and reports lease loss rather than continuing without
-  durable ownership. The live lease remains for ordinary reaper retry or
-  dead-letter recovery, and an attempt that reached `RUNNING` remains consumed.
+  to stop handler polling before ownership expires. Heartbeat and progress
+  transactions also cap job-row lock waits at five seconds and total
+  transaction lifetime at thirty seconds. Handler completion applies the
+  five-second cap only while acquiring its initial `job_queue` row, then
+  restores the embedding service's lock policy before atomic workflow
+  propagation; it does not impose a library transaction deadline on workflow
+  size. Stricter caller settings remain in force throughout. If a heartbeat
+  still cannot be persisted, the runtime stops the handler and reports lease
+  loss rather than continuing without durable ownership. The live lease remains
+  for ordinary reaper retry or dead-letter recovery, and an attempt that reached
+  `RUNNING` remains consumed.
   Release 0.9.0 added `JobLeaseIdentity` for typed lifecycle lease fencing.
   In 0.11.0 and later, use `mark_job_running_for_lease` with
   `JobRunningUpdate` to commit `RUNNING` and its initial checkpoint/progress

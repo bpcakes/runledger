@@ -163,3 +163,141 @@ async fn completion_row_lock_waits_preserve_stricter_database_timeout() {
     completion_pool.close().await;
     teardown_ephemeral_pool(pool, database).await;
 }
+
+#[tokio::test]
+async fn completion_restores_caller_timeouts_after_job_row_acquisition() {
+    let (pool, database) = setup_ephemeral_pool("postgres_completion_timeout_scope", 4).await;
+    let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+        .fetch_one(&pool)
+        .await
+        .expect("read PostgreSQL server_version");
+    let server_version_num =
+        sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+            .fetch_one(&pool)
+            .await
+            .expect("read PostgreSQL server_version_num");
+    eprintln!(
+        "completion timeout scope regression PostgreSQL server_version={server_version}, \
+         server_version_num={server_version_num}"
+    );
+    register_test_job_definition(&pool, JOB_TYPE).await;
+
+    for statement in [
+        "CREATE TABLE runledger_test_completion_timeout_observations (
+            lock_timeout text NOT NULL,
+            transaction_timeout text NOT NULL
+         )",
+        "CREATE FUNCTION runledger_test_observe_completion_timeouts()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             INSERT INTO runledger_test_completion_timeout_observations (
+                 lock_timeout,
+                 transaction_timeout
+             )
+             VALUES (
+                 current_setting('lock_timeout'),
+                 current_setting('transaction_timeout')
+             );
+             RETURN NEW;
+         END;
+         $$",
+        "CREATE TRIGGER runledger_test_observe_completion_timeouts
+         AFTER UPDATE OF finished_at ON job_attempts
+         FOR EACH ROW
+         WHEN (NEW.finished_at IS NOT NULL)
+         EXECUTE FUNCTION runledger_test_observe_completion_timeouts()",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("install completion timeout observation trigger");
+    }
+
+    let success = enqueue_and_claim(&pool, "worker-completion-timeout-scope-success").await;
+    let failure = enqueue_and_claim(&pool, "worker-completion-timeout-scope-failure").await;
+    let continuation =
+        enqueue_and_claim(&pool, "worker-completion-timeout-scope-continuation").await;
+    let completion_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database.url())
+        .await
+        .expect("connect timeout-scope completion pool");
+    sqlx::query(
+        "SELECT
+            set_config('lock_timeout', '1min', false),
+            set_config('transaction_timeout', '2min', false)",
+    )
+    .execute(&completion_pool)
+    .await
+    .expect("set caller completion timeouts");
+
+    complete_job_success(
+        &completion_pool,
+        success.id,
+        success.run_number,
+        success.attempt,
+        success.worker_id.as_deref().expect("success worker id"),
+        None,
+    )
+    .await
+    .expect("complete job after scoped row-lock timeout");
+
+    let failure_update = JobFailureUpdate::new(
+        JobFailureKind::Retryable,
+        "job.test.completion_timeout_scope",
+        "completion timeout scope regression",
+        Some(1_000),
+    );
+    complete_job_failure(
+        &completion_pool,
+        failure.id,
+        failure.run_number,
+        failure.attempt,
+        failure.worker_id.as_deref().expect("failure worker id"),
+        &failure_update,
+    )
+    .await
+    .expect("fail job after scoped row-lock timeout");
+
+    complete_job_continuation(
+        &completion_pool,
+        continuation.id,
+        continuation.run_number,
+        continuation.attempt,
+        continuation
+            .worker_id
+            .as_deref()
+            .expect("continuation worker id"),
+        &JobContinuationUpdate {
+            delay: Duration::ZERO,
+            progress_done: None,
+            progress_total: None,
+            checkpoint: None,
+        },
+    )
+    .await
+    .expect("continue job after scoped row-lock timeout");
+
+    let (observed, unexpected) = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT
+            count(*) FILTER (
+                WHERE lock_timeout = '1min'
+                  AND transaction_timeout = '2min'
+            ),
+            count(*) FILTER (
+                WHERE lock_timeout <> '1min'
+                   OR transaction_timeout <> '2min'
+            )
+         FROM runledger_test_completion_timeout_observations",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read downstream completion timeout settings");
+    assert_eq!(observed, 3);
+    assert_eq!(unexpected, 0);
+
+    completion_pool.close().await;
+    teardown_ephemeral_pool(pool, database).await;
+}

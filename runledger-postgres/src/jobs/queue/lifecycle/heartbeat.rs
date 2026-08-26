@@ -5,7 +5,7 @@ use crate::{DbPool, Error, Result};
 use super::super::super::errors::validate_positive_lease_duration;
 use super::super::super::types::JobLeaseIdentity;
 use super::common::{
-    HEARTBEAT_LEASE_MISMATCH_CONTEXT, cap_owned_job_lifecycle_timeouts_tx,
+    HEARTBEAT_LEASE_MISMATCH_CONTEXT, cap_bounded_job_lifecycle_timeouts_tx,
     rollback_and_return_lease_mismatch,
 };
 
@@ -37,7 +37,7 @@ pub async fn heartbeat_job_for_lease(
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
-    cap_owned_job_lifecycle_timeouts_tx(&mut tx, "cap heartbeat lifecycle timeouts").await?;
+    cap_bounded_job_lifecycle_timeouts_tx(&mut tx, "cap heartbeat lifecycle timeouts").await?;
 
     let updated = sqlx::query!(
         "WITH locked_job AS MATERIALIZED (

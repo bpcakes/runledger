@@ -8,13 +8,17 @@ use crate::{DbTx, Error, Result};
 use super::super::super::errors::{lease_owner_mismatch_error, validate_completion_progress};
 use super::super::super::transaction_settings::{
     PostgresTimeout, cap_local_lock_and_transaction_timeouts_duration_tx,
+    cap_local_lock_timeout_duration_tx, set_local_lock_timeout_tx,
 };
 use super::super::super::types::JobLeaseIdentity;
 
-// Lifecycle mutations are expected to be short. The lock cap prevents one
-// worker connection from waiting indefinitely behind an abandoned job-row
-// transaction, while the transaction cap also covers a connection left idle
-// after acquiring that row lock. Stricter consumer settings remain in force.
+// Heartbeat and progress mutations are bounded lifecycle operations. Their lock
+// cap prevents a worker connection from waiting indefinitely behind an
+// abandoned job-row transaction, while the transaction cap also covers a
+// connection left idle after acquiring that row lock. Completion transactions
+// can include unbounded workflow propagation and therefore apply only the lock
+// cap, scoped to their initial job-row acquisition. Stricter consumer settings
+// remain in force in both cases.
 const JOB_LIFECYCLE_LOCK_TIMEOUT: PostgresTimeout = PostgresTimeout::new(Duration::from_secs(5));
 const JOB_LIFECYCLE_TRANSACTION_TIMEOUT: PostgresTimeout =
     PostgresTimeout::new(Duration::from_secs(30));
@@ -33,7 +37,7 @@ pub(super) const COMPLETE_CONTINUATION_LEASE_MISMATCH_CONTEXT: &str =
 pub(super) const COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT: &str =
     "complete job failure transaction missing leased row";
 
-pub(super) async fn cap_owned_job_lifecycle_timeouts_tx(
+pub(super) async fn cap_bounded_job_lifecycle_timeouts_tx(
     tx: &mut DbTx<'_>,
     context: &'static str,
 ) -> Result<()> {
@@ -47,6 +51,21 @@ pub(super) async fn cap_owned_job_lifecycle_timeouts_tx(
     )
     .await?;
     Ok(())
+}
+
+pub(super) async fn cap_completion_job_row_lock_timeout_tx(
+    tx: &mut DbTx<'_>,
+    context: &'static str,
+) -> Result<String> {
+    cap_local_lock_timeout_duration_tx(tx, JOB_LIFECYCLE_LOCK_TIMEOUT, context).await
+}
+
+pub(super) async fn restore_completion_job_row_lock_timeout_tx(
+    tx: &mut DbTx<'_>,
+    previous_lock_timeout: &str,
+    context: &'static str,
+) -> Result<()> {
+    set_local_lock_timeout_tx(tx, previous_lock_timeout, context).await
 }
 
 pub(super) struct CompletionLeaseRow {
@@ -63,7 +82,12 @@ pub(super) async fn lock_live_completion_lease_tx(
     identity: JobLeaseIdentity<'_>,
     error_context: &'static str,
 ) -> Result<Option<CompletionLeaseRow>> {
-    sqlx::query_as!(
+    let previous_lock_timeout = cap_completion_job_row_lock_timeout_tx(
+        tx,
+        "cap job completion row-lock acquisition timeout",
+    )
+    .await?;
+    let row = sqlx::query_as!(
         CompletionLeaseRow,
         r#"SELECT
             job_type AS "job_type!",
@@ -88,7 +112,14 @@ pub(super) async fn lock_live_completion_lease_tx(
     )
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| Error::from_query_sqlx_with_context(error_context, error))
+    .map_err(|error| Error::from_query_sqlx_with_context(error_context, error))?;
+    restore_completion_job_row_lock_timeout_tx(
+        tx,
+        &previous_lock_timeout,
+        "restore job completion row-lock timeout",
+    )
+    .await?;
+    Ok(row)
 }
 
 pub(super) fn coalesce_completion_progress(
@@ -165,7 +196,7 @@ mod tests {
         );
 
         let mut tx = pool.begin().await.expect("begin lifecycle timeout tx");
-        cap_owned_job_lifecycle_timeouts_tx(&mut tx, "cap lifecycle timeouts in regression test")
+        cap_bounded_job_lifecycle_timeouts_tx(&mut tx, "cap lifecycle timeouts in regression test")
             .await
             .expect("cap lifecycle transaction timeouts");
 
@@ -200,7 +231,7 @@ mod tests {
         .execute(&mut *strict_tx)
         .await
         .expect("set stricter lifecycle timeouts");
-        cap_owned_job_lifecycle_timeouts_tx(
+        cap_bounded_job_lifecycle_timeouts_tx(
             &mut strict_tx,
             "preserve strict lifecycle timeouts in regression test",
         )

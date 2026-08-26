@@ -17,8 +17,8 @@ use super::super::failure_transition::{
     DeadLetterSnapshot, FailureDetails, HandlerFailureTransition, ResolvedRetryTiming,
 };
 use super::common::{
-    COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT, cap_owned_job_lifecycle_timeouts_tx,
-    rollback_and_return_lease_mismatch,
+    COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT, cap_completion_job_row_lock_timeout_tx,
+    restore_completion_job_row_lock_timeout_tx, rollback_and_return_lease_mismatch,
 };
 
 struct FailureLookupRow {
@@ -42,6 +42,9 @@ async fn load_failure_lookup_row(
     tx: &mut DbTx<'_>,
     identity: JobLeaseIdentity<'_>,
 ) -> Result<Option<FailureLookupRow>> {
+    let previous_lock_timeout =
+        cap_completion_job_row_lock_timeout_tx(tx, "cap job failure row-lock acquisition timeout")
+            .await?;
     let row = sqlx::query!(
         "WITH locked_job AS MATERIALIZED (
              SELECT max_attempts, payload, checkpoint, job_type, organization_id, lease_expires_at
@@ -71,6 +74,12 @@ async fn load_failure_lookup_row(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("complete job failure lookup", error))?;
+    restore_completion_job_row_lock_timeout_tx(
+        tx,
+        &previous_lock_timeout,
+        "restore job failure row-lock timeout",
+    )
+    .await?;
 
     row.map(|row| {
         Ok(FailureLookupRow {
@@ -284,8 +293,6 @@ pub async fn complete_job_failure_with_outcome_for_lease(
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
-    cap_owned_job_lifecycle_timeouts_tx(&mut tx, "cap job failure lifecycle timeouts").await?;
-
     let Some(lookup) = load_failure_lookup_row(&mut tx, identity).await? else {
         return rollback_and_return_lease_mismatch(tx, COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT)
             .await;
