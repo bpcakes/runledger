@@ -7,7 +7,7 @@ use runledger_postgres::jobs::{
     JobContinuationUpdate, JobFailureUpdate, claim_prestart_jobs, complete_job_continuation,
     complete_job_failure, complete_job_success, release_unstarted_job_claim,
 };
-use runledger_postgres::{Error, QueryErrorCategory};
+use runledger_postgres::{Error, QueryErrorCategory, QueryErrorKind};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -21,6 +21,10 @@ fn assert_lock_timeout_error(error: Error) {
     match error {
         Error::QueryError(query_error) => {
             assert_eq!(query_error.category(), QueryErrorCategory::Internal);
+            assert_eq!(
+                query_error.kind(),
+                Some(QueryErrorKind::PostgresLockNotAvailable)
+            );
             assert_eq!(query_error.sqlstate(), Some("55P03"));
         }
         other => panic!("expected lock-timeout query error, got {other:?}"),

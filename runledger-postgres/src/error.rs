@@ -27,6 +27,7 @@ pub enum QueryErrorKind {
     JobUnstartedClaimReleaseNotApplicable,
     JobWorkflowHandlerContinuationNotEnabled,
     JobWorkflowRequeueNotSupported,
+    PostgresLockNotAvailable,
     WorkflowReleaseConflict,
 }
 
@@ -61,10 +62,18 @@ impl QueryErrorKind {
                 "job.workflow_requeue_not_supported",
                 "Workflow-managed jobs cannot be requeued directly.",
             ),
+            Self::PostgresLockNotAvailable => QueryErrorSpec::internal(),
             Self::WorkflowReleaseConflict => QueryErrorSpec::conflict(
                 "workflow.release_conflict",
                 "Workflow step release conflicted with another workflow mutation.",
             ),
+        }
+    }
+
+    fn from_sqlstate(sqlstate: Option<&str>) -> Option<Self> {
+        match sqlstate {
+            Some("55P03") => Some(Self::PostgresLockNotAvailable),
+            _ => None,
         }
     }
 }
@@ -267,12 +276,17 @@ impl QueryError {
             None => raw_message,
         };
 
-        Self {
-            classification: QueryErrorClassification::Classified(QueryErrorSpec {
+        let classification = match QueryErrorKind::from_sqlstate(sqlstate.as_deref()) {
+            Some(kind) => QueryErrorClassification::Fixed(kind),
+            None => QueryErrorClassification::Classified(QueryErrorSpec {
                 category: spec.category(),
                 code: spec.code(),
                 client_message: spec.client_message(),
             }),
+        };
+
+        Self {
+            classification,
             sqlstate,
             constraint,
             message,
@@ -811,6 +825,12 @@ mod tests {
                 "Workflow-managed jobs cannot be requeued directly.",
             ),
             (
+                QueryErrorKind::PostgresLockNotAvailable,
+                QueryErrorCategory::Internal,
+                "db.query_failed",
+                "Database operation failed.",
+            ),
+            (
                 QueryErrorKind::WorkflowReleaseConflict,
                 QueryErrorCategory::Conflict,
                 "workflow.release_conflict",
@@ -826,6 +846,16 @@ mod tests {
             assert_eq!(error.code(), expected_code);
             assert_eq!(error.client_message(), expected_client_message);
         }
+    }
+
+    #[test]
+    fn maps_only_postgres_lock_not_available_to_a_runtime_policy_kind() {
+        assert_eq!(
+            QueryErrorKind::from_sqlstate(Some("55P03")),
+            Some(QueryErrorKind::PostgresLockNotAvailable)
+        );
+        assert_eq!(QueryErrorKind::from_sqlstate(Some("57014")), None);
+        assert_eq!(QueryErrorKind::from_sqlstate(None), None);
     }
 
     #[test]

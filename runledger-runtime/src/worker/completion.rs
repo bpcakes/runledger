@@ -605,6 +605,7 @@ fn invalid_continuation_failure_from_error(
             | QueryErrorKind::JobInvalidRetryTiming
             | QueryErrorKind::JobUnstartedClaimReleaseNotApplicable
             | QueryErrorKind::JobWorkflowRequeueNotSupported
+            | QueryErrorKind::PostgresLockNotAvailable
             | QueryErrorKind::WorkflowReleaseConflict,
         )
         | None => None,
