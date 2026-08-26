@@ -7,6 +7,7 @@ pub(crate) mod events;
 mod failure_transition;
 mod intents;
 mod lifecycle;
+mod lifecycle_timeouts;
 mod reaper;
 mod release;
 
