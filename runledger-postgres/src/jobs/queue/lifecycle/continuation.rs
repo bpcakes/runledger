@@ -18,8 +18,8 @@ use super::super::events::{
     HANDLER_CONTINUATION_REASON, RequeuedEventPayload, RequeuedJobEvent, insert_requeued_event_tx,
 };
 use super::common::{
-    COMPLETE_CONTINUATION_LEASE_MISMATCH_CONTEXT, coalesce_completion_progress,
-    finish_successful_attempt_tx, lock_live_completion_lease_tx,
+    COMPLETE_CONTINUATION_LEASE_MISMATCH_CONTEXT, cap_owned_job_lifecycle_timeouts_tx,
+    coalesce_completion_progress, finish_successful_attempt_tx, lock_live_completion_lease_tx,
     rollback_and_return_lease_mismatch,
 };
 
@@ -117,6 +117,7 @@ pub async fn complete_job_continuation_with_outcome_for_lease(
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    cap_owned_job_lifecycle_timeouts_tx(&mut tx, "cap job continuation lifecycle timeouts").await?;
 
     let Some(lookup) =
         lock_live_completion_lease_tx(&mut tx, identity, "lock job continuation").await?

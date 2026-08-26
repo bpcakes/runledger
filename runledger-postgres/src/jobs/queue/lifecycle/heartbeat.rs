@@ -37,12 +37,7 @@ pub async fn heartbeat_job_for_lease(
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
-    cap_owned_job_lifecycle_timeouts_tx(
-        &mut tx,
-        "cap heartbeat transaction timeout",
-        "cap heartbeat lock timeout",
-    )
-    .await?;
+    cap_owned_job_lifecycle_timeouts_tx(&mut tx, "cap heartbeat lifecycle timeouts").await?;
 
     let updated = sqlx::query!(
         "WITH locked_job AS MATERIALIZED (

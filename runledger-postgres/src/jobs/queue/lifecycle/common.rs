@@ -7,7 +7,7 @@ use crate::{DbTx, Error, Result};
 
 use super::super::super::errors::{lease_owner_mismatch_error, validate_completion_progress};
 use super::super::super::transaction_settings::{
-    PostgresTimeout, cap_local_lock_timeout_duration_tx, cap_local_transaction_timeout_duration_tx,
+    PostgresTimeout, cap_local_lock_and_transaction_timeouts_duration_tx,
 };
 use super::super::super::types::JobLeaseIdentity;
 
@@ -35,18 +35,17 @@ pub(super) const COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT: &str =
 
 pub(super) async fn cap_owned_job_lifecycle_timeouts_tx(
     tx: &mut DbTx<'_>,
-    transaction_context: &'static str,
-    lock_context: &'static str,
+    context: &'static str,
 ) -> Result<()> {
-    // These are owned transactions, so both SET LOCAL values intentionally
-    // remain active until the operation commits or rolls back.
-    cap_local_transaction_timeout_duration_tx(
+    // These are owned transactions, so both transaction-local values
+    // intentionally remain active until the operation commits or rolls back.
+    cap_local_lock_and_transaction_timeouts_duration_tx(
         tx,
+        JOB_LIFECYCLE_LOCK_TIMEOUT,
         JOB_LIFECYCLE_TRANSACTION_TIMEOUT,
-        transaction_context,
+        context,
     )
     .await?;
-    cap_local_lock_timeout_duration_tx(tx, JOB_LIFECYCLE_LOCK_TIMEOUT, lock_context).await?;
     Ok(())
 }
 
@@ -149,7 +148,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn owned_lifecycle_transactions_cap_unlimited_database_timeouts() {
+    async fn owned_lifecycle_transactions_cap_and_preserve_database_timeouts() {
         let (pool, database) = setup_ephemeral_pool("postgres_owned_lifecycle_timeouts", 1).await;
         let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
             .fetch_one(&pool)
@@ -166,13 +165,9 @@ mod tests {
         );
 
         let mut tx = pool.begin().await.expect("begin lifecycle timeout tx");
-        cap_owned_job_lifecycle_timeouts_tx(
-            &mut tx,
-            "cap lifecycle transaction timeout in regression test",
-            "cap lifecycle lock timeout in regression test",
-        )
-        .await
-        .expect("cap lifecycle transaction timeouts");
+        cap_owned_job_lifecycle_timeouts_tx(&mut tx, "cap lifecycle timeouts in regression test")
+            .await
+            .expect("cap lifecycle transaction timeouts");
 
         let (lock_timeout, transaction_timeout) = sqlx::query_as::<_, (String, String)>(
             "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
@@ -192,6 +187,37 @@ mod tests {
         .expect("read restored session timeouts");
         assert_eq!(lock_timeout, "0");
         assert_eq!(transaction_timeout, "0");
+
+        let mut strict_tx = pool
+            .begin()
+            .await
+            .expect("begin strict lifecycle timeout tx");
+        sqlx::query(
+            "SELECT
+                set_config('lock_timeout', '100ms', true),
+                set_config('transaction_timeout', '10s', true)",
+        )
+        .execute(&mut *strict_tx)
+        .await
+        .expect("set stricter lifecycle timeouts");
+        cap_owned_job_lifecycle_timeouts_tx(
+            &mut strict_tx,
+            "preserve strict lifecycle timeouts in regression test",
+        )
+        .await
+        .expect("preserve strict lifecycle timeouts");
+        let (lock_timeout, transaction_timeout) = sqlx::query_as::<_, (String, String)>(
+            "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+        )
+        .fetch_one(&mut *strict_tx)
+        .await
+        .expect("read strict lifecycle timeouts");
+        assert_eq!(lock_timeout, "100ms");
+        assert_eq!(transaction_timeout, "10s");
+        strict_tx
+            .rollback()
+            .await
+            .expect("roll back strict lifecycle timeout tx");
 
         teardown_ephemeral_pool(pool, database).await;
     }

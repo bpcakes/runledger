@@ -161,6 +161,83 @@ pub(in crate::jobs) async fn cap_local_transaction_timeout_duration_tx(
     cap_local_transaction_timeout_tx(tx, &setting_value, timeout.milliseconds(), context).await
 }
 
+/// Caps transaction-local `lock_timeout` and `transaction_timeout` in one
+/// database round trip while preserving stricter caller settings.
+pub(in crate::jobs) async fn cap_local_lock_and_transaction_timeouts_duration_tx(
+    tx: &mut DbTx<'_>,
+    lock_timeout: PostgresTimeout,
+    transaction_timeout: PostgresTimeout,
+    context: &'static str,
+) -> Result<(String, String)> {
+    let lock_timeout_value = lock_timeout.setting_value();
+    let transaction_timeout_value = transaction_timeout.setting_value();
+
+    // `previous` captures both settings before either is changed. The ordered
+    // MATERIALIZED CTEs are load-bearing: a looser active transaction timer
+    // must be disarmed and rearmed without a cancellation point, and the lock
+    // cap must not be applied until that sequence has completed.
+    sqlx::query_as::<_, (String, String)>(
+        "WITH previous AS MATERIALIZED (
+             SELECT
+                current_setting('lock_timeout') AS lock_timeout,
+                lock_setting.setting::bigint AS lock_timeout_ms,
+                current_setting('transaction_timeout') AS transaction_timeout,
+                transaction_setting.setting::bigint AS transaction_timeout_ms
+             FROM pg_settings AS lock_setting
+             CROSS JOIN pg_settings AS transaction_setting
+             WHERE lock_setting.name = 'lock_timeout'
+               AND transaction_setting.name = 'transaction_timeout'
+         ),
+         transaction_disarmed AS MATERIALIZED (
+             SELECT set_config(
+                 'transaction_timeout',
+                 CASE
+                     WHEN previous.transaction_timeout_ms > $4 THEN '0'
+                     ELSE previous.transaction_timeout
+                 END,
+                 true
+             ) AS timeout
+             FROM previous
+         ),
+         transaction_applied AS MATERIALIZED (
+             SELECT set_config(
+                 'transaction_timeout',
+                 CASE
+                     WHEN previous.transaction_timeout_ms = 0
+                          OR previous.transaction_timeout_ms > $4 THEN $3
+                     ELSE previous.transaction_timeout
+                 END,
+                 true
+             ) AS timeout
+             FROM previous
+             CROSS JOIN transaction_disarmed
+         ),
+         lock_applied AS MATERIALIZED (
+             SELECT set_config(
+                 'lock_timeout',
+                 CASE
+                     WHEN previous.lock_timeout_ms = 0
+                          OR previous.lock_timeout_ms > $2 THEN $1
+                     ELSE previous.lock_timeout
+                 END,
+                 true
+             ) AS timeout
+             FROM previous
+             CROSS JOIN transaction_applied
+         )
+         SELECT previous.lock_timeout, previous.transaction_timeout
+         FROM previous
+         CROSS JOIN lock_applied",
+    )
+    .bind(lock_timeout_value)
+    .bind(lock_timeout.milliseconds())
+    .bind(transaction_timeout_value)
+    .bind(transaction_timeout.milliseconds())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context(context, error))
+}
+
 /// Caps timeouts whose effective deadline is evaluated when a statement or
 /// lock wait starts. Transaction-lifecycle timeouts must use their dedicated
 /// helper above so their already-armed timer is handled correctly.

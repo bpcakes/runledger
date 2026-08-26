@@ -188,12 +188,7 @@ async fn persist_progress_mutation_for_lease(
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
-    cap_owned_job_lifecycle_timeouts_tx(
-        &mut tx,
-        "cap progress transaction timeout",
-        "cap progress lock timeout",
-    )
-    .await?;
+    cap_owned_job_lifecycle_timeouts_tx(&mut tx, "cap progress lifecycle timeouts").await?;
 
     let updated = update_job_progress_row_tx(&mut tx, identity, progress).await?;
 

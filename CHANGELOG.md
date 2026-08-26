@@ -8,10 +8,13 @@ All notable changes to this workspace are documented here.
 
 - Keep polling a job handler and its timeout while a lease heartbeat waits on
   the same `job_queue` row as an in-flight progress transaction, preventing the
-  worker from self-deadlocking and exhausting its database pool. Heartbeat and
-  progress transactions now preserve stricter database settings while capping
-  row-lock waits at five seconds and total transaction lifetime at thirty
-  seconds on the PostgreSQL 18 baseline.
+  worker from self-deadlocking and exhausting its database pool. Heartbeat,
+  progress, and handler-completion transactions now preserve stricter database
+  settings while applying a five-second row-lock cap and thirty-second
+  total-transaction cap in one database round trip. A heartbeat that reaches
+  its effective lock timeout stops the handler and leaves its consumed attempt
+  for ordinary reaper retry or dead-letter recovery on the PostgreSQL 18
+  baseline.
 
 ## [0.11.0] - 2026-08-24
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.1...v0.11.0)

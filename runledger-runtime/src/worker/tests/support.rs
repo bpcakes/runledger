@@ -7,6 +7,17 @@ pub(super) async fn enqueue_and_claim_job(
     payload: Value,
     worker_id: &str,
 ) -> (uuid::Uuid, runledger_postgres::jobs::JobQueueRecord) {
+    enqueue_and_claim_job_with_lease_ttl(pool, job_type, max_attempts, payload, worker_id, 30).await
+}
+
+pub(super) async fn enqueue_and_claim_job_with_lease_ttl(
+    pool: &PgPool,
+    job_type: JobType<'static>,
+    max_attempts: i32,
+    payload: Value,
+    worker_id: &str,
+    lease_ttl_seconds: i32,
+) -> (uuid::Uuid, runledger_postgres::jobs::JobQueueRecord) {
     let mut tx = pool.begin().await.expect("begin tx");
     upsert_job_definition_tx(
         &mut tx,
@@ -40,7 +51,10 @@ pub(super) async fn enqueue_and_claim_job(
     .await
     .expect("enqueue job");
 
-    let claimed_job = claim_one_job(pool, worker_id).await;
+    let mut claimed = claim_prestart_jobs(pool, worker_id, lease_ttl_seconds, 1)
+        .await
+        .expect("claim jobs with requested lease TTL");
+    let claimed_job = claimed.pop().expect("expected one claimed job");
     (job_id, claimed_job)
 }
 
@@ -72,7 +86,9 @@ pub(super) async fn wait_for_heartbeat_to_block_on_job_lock(pool: &PgPool) {
             "SELECT EXISTS (
                  SELECT 1
                  FROM pg_stat_activity
-                 WHERE wait_event_type = 'Lock'
+                 WHERE datname = current_database()
+                   AND pid <> pg_backend_pid()
+                   AND wait_event_type = 'Lock'
                    AND query LIKE '%UPDATE job_queue%'
                    AND query LIKE '%make_interval%'
                    AND query NOT LIKE '%pg_stat_activity%'

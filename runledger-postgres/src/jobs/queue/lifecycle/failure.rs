@@ -16,7 +16,10 @@ use super::super::failure_transition::RetryTimingSource;
 use super::super::failure_transition::{
     DeadLetterSnapshot, FailureDetails, HandlerFailureTransition, ResolvedRetryTiming,
 };
-use super::common::{COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT, rollback_and_return_lease_mismatch};
+use super::common::{
+    COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT, cap_owned_job_lifecycle_timeouts_tx,
+    rollback_and_return_lease_mismatch,
+};
 
 struct FailureLookupRow {
     max_attempts: i32,
@@ -281,6 +284,7 @@ pub async fn complete_job_failure_with_outcome_for_lease(
         .begin()
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    cap_owned_job_lifecycle_timeouts_tx(&mut tx, "cap job failure lifecycle timeouts").await?;
 
     let Some(lookup) = load_failure_lookup_row(&mut tx, identity).await? else {
         return rollback_and_return_lease_mismatch(tx, COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT)

@@ -1,9 +1,16 @@
 use super::*;
 
 const JOB_TYPE: JobType<'static> = JobType::new("jobs.test.heartbeat_progress_lock_race");
+const TIMEOUT_JOB_TYPE: JobType<'static> = JobType::new("jobs.test.heartbeat_lock_timeout");
+const LEASE_TTL_SECONDS: i32 = 10;
 
 struct ProgressDuringHeartbeatHandler {
     pool: PgPool,
+}
+
+struct PendingHeartbeatTimeoutHandler {
+    started: Arc<Notify>,
+    drops: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
@@ -36,6 +43,25 @@ impl JobHandler for ProgressDuringHeartbeatHandler {
     }
 }
 
+#[async_trait::async_trait]
+impl JobHandler for PendingHeartbeatTimeoutHandler {
+    fn job_type(&self) -> JobType<'static> {
+        TIMEOUT_JOB_TYPE
+    }
+
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        let _drop_notify = DropNotify {
+            drops: Arc::clone(&self.drops),
+        };
+        self.started.notify_one();
+        pending().await
+    }
+}
+
 #[tokio::test]
 async fn pending_heartbeat_keeps_polling_handler_that_owns_the_job_row_lock() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_heartbeat_progress_lock", 8).await;
@@ -49,7 +75,7 @@ async fn pending_heartbeat_keeps_polling_handler_that_owns_the_job_row_lock() {
          BEGIN
              IF NEW.progress_done IS DISTINCT FROM OLD.progress_done
                 AND NEW.progress_done = 1 THEN
-                 PERFORM pg_sleep(3);
+                 PERFORM pg_sleep(4);
              END IF;
              RETURN NEW;
          END;
@@ -68,24 +94,32 @@ async fn pending_heartbeat_keeps_polling_handler_that_owns_the_job_row_lock() {
     .await
     .expect("create progress delay trigger");
 
-    let (job_id, claimed_job) = enqueue_and_claim_job(
+    let (job_id, claimed_job) = enqueue_and_claim_job_with_lease_ttl(
         &pool,
         JOB_TYPE,
         3,
         json!({"kind": "heartbeat-progress-lock-race"}),
         "worker-heartbeat-progress-lock-race",
+        LEASE_TTL_SECONDS,
     )
     .await;
     let mut registry = JobRegistry::new();
     registry.register(ProgressDuringHeartbeatHandler { pool: pool.clone() });
 
-    // A three-second lease TTL makes the first heartbeat due after one second,
+    // A ten-second lease TTL makes the first heartbeat due after three seconds,
     // while the trigger keeps the progress UPDATE holding the job-row lock for
-    // three seconds. The pg_stat_activity observation proves the heartbeat and
-    // progress operations overlap on that exact lock.
+    // four seconds. Claim and processing use the same TTL, and the
+    // pg_stat_activity observation proves the heartbeat and progress operations
+    // overlap on that exact lock.
     let process_pool = pool.clone();
     let mut process_task = tokio::spawn(async move {
-        process_claimed_job(process_pool, Arc::new(registry), claimed_job, 3).await;
+        process_claimed_job(
+            process_pool,
+            Arc::new(registry),
+            claimed_job,
+            LEASE_TTL_SECONDS,
+        )
+        .await;
     });
     wait_for_heartbeat_to_block_on_job_lock(&pool).await;
 
@@ -134,5 +168,128 @@ async fn pending_heartbeat_keeps_polling_handler_that_owns_the_job_row_lock() {
         sleep(Duration::from_millis(20)).await;
     }
 
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn heartbeat_lock_timeout_aborts_handler_and_leaves_attempt_for_reaper() {
+    const TIMEOUT_TEST_LEASE_TTL_SECONDS: i32 = 3;
+
+    let (pool, database) = setup_ephemeral_pool("jobs_worker_heartbeat_timeout", 8).await;
+    record_postgres_server_version(&pool, "heartbeat lock-timeout recovery regression").await;
+    let (job_id, claimed_job) = enqueue_and_claim_job_with_lease_ttl(
+        &pool,
+        TIMEOUT_JOB_TYPE,
+        3,
+        json!({"kind": "heartbeat-lock-timeout"}),
+        "worker-heartbeat-lock-timeout",
+        TIMEOUT_TEST_LEASE_TTL_SECONDS,
+    )
+    .await;
+
+    let worker_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database.url())
+        .await
+        .expect("connect lock-timeout worker pool");
+    sqlx::query("SET SESSION lock_timeout = '100ms'")
+        .execute(&worker_pool)
+        .await
+        .expect("set strict worker lock timeout");
+
+    let started = Arc::new(Notify::new());
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut registry = JobRegistry::new();
+    registry.register(PendingHeartbeatTimeoutHandler {
+        started: Arc::clone(&started),
+        drops: Arc::clone(&drops),
+    });
+    let observer = RecordingObserver::default();
+    let process_observers = observer.lifecycle_observers();
+    let process_pool = worker_pool.clone();
+    let mut process_task = tokio::spawn(async move {
+        process_claimed_job_with_observer(
+            process_pool,
+            Arc::new(registry),
+            claimed_job,
+            TIMEOUT_TEST_LEASE_TTL_SECONDS,
+            process_observers,
+        )
+        .await;
+    });
+
+    timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("handler should start before its first heartbeat");
+    let mut lock_tx = pool.begin().await.expect("begin heartbeat blocker tx");
+    sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
+        .bind(job_id)
+        .fetch_one(&mut *lock_tx)
+        .await
+        .expect("hold heartbeat job-row lock");
+    wait_for_heartbeat_to_block_on_job_lock(&pool).await;
+
+    await_spawned_task(
+        &mut process_task,
+        Duration::from_secs(3),
+        "worker should abort after the effective heartbeat lock timeout",
+        "heartbeat lock-timeout worker task should not panic",
+    )
+    .await;
+    wait_for_observer_count(
+        || observer.lease_lost().len(),
+        1,
+        Duration::from_millis(500),
+    )
+    .await;
+
+    assert_eq!(drops.load(Ordering::SeqCst), 1, "handler should be dropped");
+    let lease_lost = observer.lease_lost();
+    assert_eq!(lease_lost.len(), 1);
+    assert_eq!(lease_lost[0].job.job_id, job_id);
+    assert_eq!(lease_lost[0].failure.kind, JobFailureKind::LeaseExpired);
+    assert_eq!(lease_lost[0].failure.code, "job.lease_maintenance_failed");
+
+    let abandoned = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load job after heartbeat timeout")
+        .expect("job exists after heartbeat timeout");
+    assert_eq!(abandoned.status, JobStatus::Leased);
+    assert_eq!(abandoned.attempt, 1);
+
+    lock_tx.rollback().await.expect("release heartbeat blocker");
+    expire_job_lease(&pool, job_id).await;
+    assert_eq!(
+        reap_expired_leases(&pool, 1, 1_000)
+            .await
+            .expect("reap heartbeat-timeout lease"),
+        1
+    );
+
+    let recovered = get_job_by_id(&pool, None, job_id)
+        .await
+        .expect("load reaped heartbeat-timeout job")
+        .expect("reaped job exists");
+    assert_eq!(recovered.status, JobStatus::Pending);
+    assert_eq!(recovered.attempt, 1, "the expired attempt remains recorded");
+    let (attempt_finished, attempt_outcome, attempt_error_code) =
+        sqlx::query_as::<_, (bool, Option<String>, Option<String>)>(
+            "SELECT finished_at IS NOT NULL, outcome::text, error_code
+             FROM job_attempts
+             WHERE job_id = $1
+               AND run_number = $2
+               AND attempt = $3",
+        )
+        .bind(job_id)
+        .bind(recovered.run_number)
+        .bind(recovered.attempt)
+        .fetch_one(&pool)
+        .await
+        .expect("load reaped attempt outcome");
+    assert!(attempt_finished);
+    assert_eq!(attempt_outcome.as_deref(), Some("LEASE_EXPIRED"));
+    assert_eq!(attempt_error_code.as_deref(), Some("job.lease_expired"));
+
+    worker_pool.close().await;
     teardown_ephemeral_pool(pool, database).await;
 }
