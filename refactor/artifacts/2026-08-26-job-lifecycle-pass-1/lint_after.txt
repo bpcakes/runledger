@@ -1,0 +1,2 @@
+Command: cargo clippy --workspace --all-targets -- -D warnings
+Result: exit 0; zero warnings.

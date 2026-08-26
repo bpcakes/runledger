@@ -1,0 +1,15 @@
+{
+  "run_id": "2026-08-26-job-lifecycle-pass-1",
+  "generated_at": "2026-08-26T13:06:03Z",
+  "tools_run": ["manual rg call-site census"],
+  "candidates": [],
+  "structural_observations": [
+    {
+      "id": "S1",
+      "description": "Move queue lifecycle timeout policy to the queue module boundary",
+      "commit": "3ef2900",
+      "source_line_delta": 8,
+      "loc_saving_candidate": false
+    }
+  ]
+}

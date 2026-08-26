@@ -1,0 +1,891 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running unittests src/lib.rs (target/debug/deps/runledger_postgres-8d021d868c4bc368)
+
+running 103 tests
+test error::tests::classifies_global_job_idempotency_constraint ... ok
+test error::tests::classifies_global_workflow_idempotency_constraint ... ok
+test error::tests::classifies_external_gate_downgrade_blocked_constraint ... ok
+test error::tests::classifies_job_idempotency_constraint ... ok
+test error::tests::classifies_job_organization_fk_constraint ... ok
+test error::tests::classifies_job_definition_fk_constraint ... ok
+test error::tests::classifies_job_runtime_config_definition_fk_constraint ... ok
+test error::tests::classifies_permission_denied ... ok
+test error::tests::classifies_workflow_idempotency_constraint ... ok
+test error::tests::classifies_workflow_linkage_compatibility_trigger_table_constraint ... ok
+test error::tests::classifies_workflow_linkage_symmetry_constraint ... ok
+test error::tests::classifies_workflow_linkage_cutover_audit_constraints ... ok
+test error::tests::classifies_workflow_linkage_symmetry_trigger_table_constraint ... ok
+test error::tests::custom_constraint_classifier_takes_precedence ... ok
+test error::tests::falls_back_to_internal_for_unmapped_errors ... ok
+test error::tests::fixed_query_error_kind_metadata_is_exhaustive_and_stable ... ok
+test error::tests::query_error_debug_omits_internal_message ... ok
+test error::tests::query_error_from_sqlx_uses_sanitized_display_and_debug ... ok
+test error::tests::sanitized_diagnostics_omit_internal_message_and_source ... ok
+test jobs::errors::tests::rejection_allows_domain_error_after_successful_rollback ... ok
+test error::tests::typed_query_error_from_classified_sqlx_preserves_source_without_leaking_display ... ok
+test jobs::errors::tests::rejection_returns_connection_error_when_rollback_fails ... ok
+test jobs::queue::claim::tests::resource_head_window_scales_with_claim_size_within_fixed_bounds ... ok
+test jobs::queue::definitions::catalog_sync::tests::absent_job_types_are_empty_when_catalog_covers_scope ... ok
+test jobs::queue::definitions::catalog_sync::tests::absent_job_types_capture_partial_and_all_absent_scopes_deterministically ... ok
+test jobs::queue::enqueue::idempotency_tests::prepared_enqueue_correlates_key_and_canonical_request ... ok
+test jobs::queue::intents::tests::promotion_failure_action_matrix_is_exhaustive ... ok
+test jobs::queue::intents::tests::query_failure_diagnostics_expose_only_sanitized_fields ... ok
+test jobs::queue::intents::tests::decodes_and_serializes_every_enqueue_intent_outcome_state ... ok
+test jobs::queue::enqueue::idempotency_tests::canonical_job_enqueue_request_v1_matches_golden_snapshot ... ok
+test jobs::queue::lifecycle::continuation::tests::continuation_delay_rounds_up_to_postgres_microsecond_precision ... ok
+test jobs::queue::intents::tests::rejects_impossible_enqueue_intent_outcome_rows ... ok
+test jobs::queue::lifecycle::continuation::tests::continuation_target_rejects_chrono_timestamp_overflow ... ok
+test jobs::queue::lifecycle::failure::tests::absolute_retry_before_postgres_range_falls_back_to_policy ... ok
+test jobs::queue::lifecycle::failure::tests::absolute_retry_rounding_rejects_max_timestamp_overflow ... ok
+test jobs::queue::lifecycle::failure::tests::exact_absolute_retry_time_is_preserved ... ok
+test jobs::queue::lifecycle::failure::tests::failure_outcome_uses_core_retry_eligibility ... ok
+test jobs::queue::lifecycle::failure::tests::policy_backoff_applies_without_a_handler_hint ... ok
+test jobs::queue::lifecycle::failure::tests::policy_backoff_wins_over_past_or_equal_handler_not_before ... ok
+test jobs::queue::lifecycle::failure::tests::retry_delay_rejects_zero_and_rounded_i32_overflow ... ok
+test jobs::queue::lifecycle::failure::tests::retry_delay_rounds_up_to_positive_milliseconds ... ok
+test jobs::queue::lifecycle::failure::tests::retry_resolution_rejects_timestamp_overflow ... ok
+test jobs::queue::lifecycle::failure::tests::sub_microsecond_absolute_retry_time_rounds_up ... ok
+test jobs::queue::lifecycle::failure::tests::zero_relative_retry_hint_falls_back_to_policy ... ok
+test jobs::row_decode::tests::parse_workflow_release_mode_returns_internal_error_for_invalid_value ... ok
+test jobs::row_decode::tests::parse_workflow_run_status_returns_internal_error_for_invalid_value ... ok
+test jobs::row_decode::tests::parse_workflow_step_execution_kind_returns_internal_error_for_invalid_value ... ok
+test jobs::row_decode::tests::parse_workflow_step_status_returns_internal_error_for_invalid_value ... ok
+test jobs::rows::enqueue_intent_state_tests::rejects_impossible_enqueue_intent_state_rows ... ok
+test jobs::rows::enqueue_intent_state_tests::decodes_and_serializes_every_enqueue_intent_state ... ok
+test jobs::transaction_settings::tests::postgres_timeout_derives_text_and_milliseconds_from_one_duration ... ok
+test jobs::schedules::validation::tests::validates_schedule_upsert_payload ... ok
+test jobs::transaction_settings::tests::postgres_timeout_rejects_fractional_milliseconds - should panic ... ok
+test jobs::transaction_settings::tests::postgres_timeout_rejects_milliseconds_above_postgresql_comparison_bound - should panic ... ok
+test jobs::types::events::decoded_event_payload_tests::malformed_known_payloads_fall_back_without_losing_the_raw_payload ... ok
+test jobs::types::events::decoded_event_payload_tests::kindless_requeue_payloads_preserve_legacy_decoding ... ok
+test jobs::types::events::decoded_event_payload_tests::present_unknown_or_non_string_discriminators_are_not_legacy_payloads ... ok
+test jobs::types::lifecycle::job_lease_identity_tests::construction_retains_each_lease_fence ... ok
+test jobs::workflows::enqueue::tests::canonical_workflow_enqueue_request_includes_result_step_key_when_present ... ok
+test jobs::workflows::handles::tests::instant_after_saturates_oversized_duration ... ok
+test jobs::workflows::enqueue::tests::canonical_workflow_enqueue_request_matches_golden_snapshot ... ok
+test jobs::workflows::handles::tests::listener_event_needs_lookup_for_match_or_elapsed_deadline ... ok
+test jobs::workflows::handles::tests::next_poll_wake_marks_elapsed_deadline_for_final_probe ... ok
+test jobs::workflows::handles::tests::poll_decision_uses_the_pre_sleep_wake_classification ... ok
+test jobs::workflows::handles::tests::standard_probe_pending_after_deadline_times_out ... ok
+test jobs::workflows::mutate::idempotency::tests::workflow_append_request_matches_legacy_request_without_step_scope ... ok
+test jobs::workflows::mutate::idempotency::tests::canonical_append_request_matches_golden_snapshot ... ok
+test jobs::workflows::mutate::idempotency::tests::workflow_append_request_matches_legacy_unsorted_steps ... ok
+test jobs::workflows::mutate::idempotency::tests::workflow_append_request_rejects_changed_step_organization_scope ... ok
+test jobs::workflows::mutate::idempotency::tests::workflow_append_request_treats_cleared_stage_as_queued ... ok
+test jobs::workflows::mutate::idempotency::tests::workflow_append_request_matches_reordered_steps ... ok
+test jobs::workflows::mutate::idempotency::tests::workflow_append_request_treats_implicit_and_explicit_run_scope_as_equal ... ok
+test jobs::workflows::recovery::tests::recovery_step_pairing_rejects_extra_source_steps_before_key_lookup ... ok
+test jobs::workflows::recovery::tests::recovery_step_pairing_accepts_legacy_snapshot_optional_fields ... ok
+test jobs::workflows::recovery::tests::recovery_step_pairing_orders_pairs_by_canonical_step_key ... ok
+test jobs::workflows::recovery::tests::recovery_step_pairing_rejects_mismatched_keys_after_equal_length_check ... ok
+test jobs::workflows::recovery::tests::recovery_step_validation_preserves_stage_before_dependency_error_precedence ... ok
+test jobs::workflows::recovery::tests::recovery_step_pairing_rejects_missing_source_steps_before_key_lookup ... ok
+test jobs::workflows::release::tests::release_candidate_converts_complete_job_shape_into_release_spec ... ok
+test jobs::workflows::release::tests::release_candidate_converts_external_shape_without_job_release_settings ... ok
+test jobs::workflows::runtime::terminal::tests::workflow_terminal_transition_requires_terminal_status ... ok
+test jobs::workflows::release::tests::release_candidate_preserves_job_shape_error_order ... ok
+test jobs::workflows::snapshot::tests::canonical_snapshot_persists_effective_dependency_release_modes ... ok
+test jobs::workflows::snapshot::tests::append_idempotency_is_legacy_tolerant_while_recovery_is_strict ... ok
+test jobs::workflows::validation::tests::maps_dag_errors_to_validation_query_errors ... ok
+test jobs::workflows::snapshot::tests::canonical_snapshot_preserves_execution_variant_persistence_shape ... ok
+test jobs::workflows::validation::tests::maps_dependency_overflow_to_validation_query_error ... ok
+test jobs::workflows::snapshot::tests::canonical_snapshots_round_trip_through_strict_recovery_decoders ... ok
+test jobs::queue::lifecycle::failure::tests::relative_retry_resolution_uses_the_database_completion_base ... ok
+test migrations::workflow_job_link_trigger_validation_tests::every_unsafe_catalog_property_has_a_typed_problem ... ok
+test migrations::workflow_job_link_trigger_validation_tests::missing_triggers_are_reported_individually ... ok
+test jobs::workflows::snapshot::tests::recovery_schema_rejects_unknown_structural_fields_and_keeps_opaque_json_open ... ok
+test migrations::workflow_job_link_trigger_validation_tests::safe_update_column_supersets_and_always_enabled_mode_are_accepted ... ok
+test migrations::workflow_job_link_trigger_validation_tests::valid_catalog_rows_have_no_diagnostics ... ok
+test jobs::workflows::locking::tests::cap_local_lock_timeout_preserves_stricter_existing_timeout ... ok
+test jobs::transaction_settings::tests::lock_timeout_cap_preserves_ordering_at_millisecond_boundaries ... ok
+test jobs::workflows::locking::tests::cap_local_lock_timeout_caps_unlimited_timeout_and_allows_restore ... ok
+test jobs::workflows::locking::tests::cap_local_lock_timeout_preserves_equal_cap_and_clamps_longer_timeout ... ok
+test jobs::queue::lifecycle::common::tests::owned_lifecycle_transactions_cap_and_preserve_database_timeouts ... ok
+test jobs::transaction_isolation::tests::owned_transaction_commits_success_and_rolls_back_operation_error ... ok
+test jobs::workflows::mutate::append::tests::ready_appended_candidates_filter_pending_preserve_input_order_and_skip_missing_rows ... ok
+test jobs::admin::recovery::tests::compare_and_requeue_retries_lock_when_later_snapshot_matches_expectation ... ok
+test jobs::transaction_settings::tests::transaction_timeout_cap_rearms_a_looser_active_timer ... ok
+
+test result: ok. 103 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+
+     Running tests/admin_payload_mutation.rs (target/debug/deps/admin_payload_mutation-fbce31597bbca75c)
+
+running 6 tests
+test admin_payload_update_reports_not_found_for_missing_job ... ok
+test admin_payload_update_allows_pending_non_idempotent_direct_job ... ok
+test admin_payload_update_rejects_idempotent_pending_job_without_snapshot_drift ... ok
+test admin_payload_update_rejects_workflow_managed_pending_job ... ok
+test admin_payload_update_rejects_leased_and_terminal_jobs ... ok
+test admin_payload_update_row_lock_wait_is_bounded_without_mutation ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s
+
+     Running tests/claim_plan_parity.rs (target/debug/deps/claim_plan_parity-16456fe412505a3a)
+
+running 1 test
+test nullable_filter_claim_plan_and_throughput_match_split_statements ... ignored, manual PostgreSQL 18 plan/throughput acceptance gate
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/compare_and_requeue.rs (target/debug/deps/compare_and_requeue-8c5f9c7b85b8099e)
+
+running 10 tests
+test pool_owned_compare_and_requeue_sets_read_committed_and_commits_job_and_event ... ok
+test compare_and_requeue_rejects_non_read_committed_transactions_up_front ... ok
+test live_expectation_mismatch_does_not_block_worker_heartbeat ... ok
+test observed_request_preserves_exact_identity_and_rejects_nonrequeueable_statuses ... ok
+test dead_lettered_status_is_requeueable_with_an_exact_run_match ... ok
+test compare_and_requeue_uses_exact_scope_expectations_and_caller_transaction ... ok
+test global_scope_matches_only_global_jobs ... ok
+test workflow_managed_job_is_rejected_from_the_locked_candidate ... ok
+test keyed_enqueue_composes_with_compare_and_requeue_without_lock_upgrade_deadlock ... ok
+test canceled_live_job_waits_for_its_original_lease_window_before_requeue ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s
+
+     Running tests/enqueue_outcome.rs (target/debug/deps/enqueue_outcome-2ce7194fd7ad6f04)
+
+running 3 tests
+test legacy_keyed_enqueue_keeps_concurrency_and_composes_with_requeue ... ok
+test unkeyed_transactional_enqueue_always_reports_inserted ... ok
+test transactional_enqueue_reports_inserted_or_existing_state ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+
+     Running tests/job_cancellation_scope.rs (target/debug/deps/job_cancellation_scope-d175a364818f865e)
+
+running 1 test
+test cancellation_scope_distinguishes_exact_tenants_from_admin ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running tests/job_continuation.rs (target/debug/deps/job_continuation-48b31716abe3c767)
+
+running 10 tests
+test handler_continuation_requires_the_exact_live_lease ... ok
+test handler_continuation_rejects_workflow_managed_jobs_without_mutation ... ok
+test handler_continuation_rejects_a_delay_beyond_the_schedulable_timestamp_range ... ok
+test workflow_step_continuation_event_failure_rolls_back_job_step_and_checkpoint ... ok
+test delayed_workflow_step_continuation_stays_active_and_unclaimable ... ok
+test continuing_prerequisite_keeps_on_terminal_dependent_blocked_until_final_success ... ok
+test continuing_prerequisite_keeps_on_success_dependent_blocked_until_final_success ... ok
+test continuation_metrics_filter_exact_tenants_and_aggregate_all_scopes ... ok
+test opted_in_workflow_step_continuation_atomically_requeues_job_and_step ... ok
+test handler_continuation_closes_attempt_and_starts_a_fresh_run ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.20s
+
+     Running tests/job_enqueue_intents.rs (target/debug/deps/job_enqueue_intents-8e82b9264b64871a)
+
+running 33 tests
+test exact_retention_rejects_stale_transaction_snapshots_before_locking ... ok
+test global_and_organization_scopes_keep_the_same_key_independent ... ok
+test duplicate_recording_does_not_wait_on_a_promoters_row_lock ... ok
+test idle_promotion_skips_the_retention_fence ... ok
+test intent_metrics_are_bounded_and_page_in_stable_job_type_order ... ok
+test database_rejects_impossible_enqueue_intent_lifecycle_shapes ... ok
+test exact_retention_validates_its_domain_batch_limit ... ok
+test promotion_transaction_timeout_terminates_and_rolls_back_the_session ... ignored, slow PostgreSQL 18 transaction-timeout regression (~25 seconds)
+test invalid_persisted_stage_conflicts_without_starving_valid_intent ... ok
+test concurrent_promoters_create_one_job ... ok
+test enqueue_event_failure_defers_only_failed_intent_and_rolls_back_its_job ... ok
+test concurrent_uncommitted_recorders_converge_after_unique_key_wait ... ok
+test definition_disabled_after_eligibility_leaves_intent_pending ... ok
+test intent_first_recorder_and_retention_share_one_lock_order ... ok
+test database_rejects_unicode_blank_intent_keys_and_stages ... ok
+test intent_metrics_bound_conflicts_to_the_recent_operational_window ... ok
+test jsonb_numeric_normalization_preserves_idempotency_and_promotion ... ok
+test recording_retries_when_a_conflicting_intent_disappears_before_lookup ... ok
+test promotion_creates_ordinary_job_event_metrics_and_cleanup_state ... ok
+test deferred_intent_retries_are_jittered_within_the_backoff_cap ... ok
+test records_without_definition_and_enforces_strict_transactional_idempotency ... ok
+test promotion_caps_savepoint_batch_below_postgres_subtransaction_cache ... ok
+test inverse_existing_job_order_is_serialized_with_retention ... ok
+test retention_cleanup_preserves_stricter_caller_lock_timeout ... ok
+test validates_inputs_and_does_not_wait_on_job_definition_locks ... ok
+test snapshot_drift_defers_without_starving_and_promotes_after_repair ... ok
+test retention_cleanup_serializes_concurrent_promotion ... ok
+test unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_conflict ... ok
+test worker_version_skips_newer_snapshot_versions_without_mutating_them ... ok
+test promotion_retention_fence_wait_is_bounded ... ok
+test promotion_row_lock_wait_is_bounded_while_holding_retention_fence ... ok
+test retention_delete_wait_is_bounded_while_holding_fence ... ok
+test retention_fence_budget_covers_total_promotion_critical_section ... ok
+
+test result: ok. 32 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 7.70s
+
+     Running tests/job_execution_resources.rs (target/debug/deps/job_execution_resources-f9aa93f55e954436)
+
+running 12 tests
+test keyed_enqueue_rejects_a_changed_execution_resource ... ok
+test database_rejects_whitespace_only_execution_resource_keys ... ok
+test identical_resource_keys_coordinate_globally_across_organizations ... ok
+test a_claimed_dense_key_does_not_starve_an_unrelated_resource ... ok
+test live_cancellation_holds_resource_until_the_lease_is_quiescent ... ok
+test bounded_reaper_does_not_release_a_resource_before_its_owner_is_reaped ... ok
+test filtered_claimers_acquire_resource_keys_in_one_deadlock_free_order ... ok
+test one_of_one_hundred_concurrent_claimers_owns_the_resource ... ok
+test an_expired_lease_cannot_leave_its_execution_resource_blocked ... ok
+test every_non_cancellation_lease_exit_releases_the_exact_resource_owner ... ok
+test duplicate_resource_keys_do_not_underfill_a_mixed_claim_batch ... ok
+test database_rejects_a_resource_lease_without_its_durable_claim ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s
+
+     Running tests/migrations.rs (target/debug/deps/migrations-5855f1a62081c399)
+
+running 21 tests
+test compatibility_fence_exemptions_are_explicit_bundled_migrations ... ok
+test ensure_schema_compatible_rejects_fresh_database_without_migrations ... ok
+test ensure_schema_compatible_rejects_conflicting_sqlx_version_namespace ... ok
+test migrate_applies_bundled_schema_to_fresh_database ... ok
+test ensure_schema_compatible_ignores_unrelated_sqlx_history ... ok
+test ensure_schema_compatible_ignores_unrelated_sqlx_history_with_runledger_description ... ok
+test migrate_ignores_unrelated_sqlx_history ... ok
+test migrate_rejects_newer_runledger_migration_history ... ok
+test ensure_schema_compatible_rejects_legacy_idempotency_rows ... ok
+test ensure_schema_compatible_rejects_newer_runledger_migration_history ... ok
+test vendored_migration_copies_match_root_migrations ... ok
+test enqueue_request_cutover_constraints_reject_new_legacy_idempotency_rows ... ok
+test continuation_metrics_require_well_typed_v0_6_or_v0_7_payloads ... ok
+test migrate_rejects_conflicting_sqlx_version_namespace ... ok
+test replay_metrics_down_drops_lineage_objects_but_preserves_queue_rows ... ok
+test migrate_after_idempotency_cutover_rejects_legacy_idempotency_rows ... ok
+test workflow_results_migration_preserves_existing_enqueue_request_snapshots ... ok
+test contracted_workflow_step_job_link_is_one_to_one_and_delete_safe ... ok
+test workflow_step_job_link_rollout_backfills_and_supports_mixed_writers ... ok
+test replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_boundary ... ok
+test raw_version_missing_strands_session_lock_until_pool_close_but_safe_path_unlocks ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s
+
+     Running tests/owned_transaction_wrappers.rs (target/debug/deps/owned_transaction_wrappers-1fd77437a318e5a7)
+
+running 2 tests
+test owned_transaction_wrappers_validate_before_classifying_begin_failures ... ok
+test owned_wrappers_override_session_isolation_while_tx_apis_enforce_it ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.85s
+
+     Running tests/pagination_validation.rs (target/debug/deps/pagination_validation-fc854c53cf27fd83)
+
+running 3 tests
+test invalid_pagination_rejects_before_database_access ... ok
+test valid_pagination_limits_still_execute_list_queries ... ok
+test workflow_detail_page_readers_decode_populated_rows ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+     Running tests/queue_completion_progress_validation.rs (target/debug/deps/queue_completion_progress_validation-e3f532e9852ec606)
+
+running 3 tests
+test successful_completion_rejects_progress_invalid_after_existing_progress_is_applied ... ok
+test successful_completion_rejects_invalid_progress_without_mutating_lease ... ok
+test complete_job_success_with_outcome_returns_coalesced_progress ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+
+     Running tests/queue_lease_expiry_metadata.rs (target/debug/deps/queue_lease_expiry_metadata-c99474f14cebe38e)
+
+running 1 test
+test lease_expiry_metadata_stays_in_parity_across_queue_attempt_and_audit_rows ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+
+     Running tests/queue_lease_validation.rs (target/debug/deps/queue_lease_validation-3063f6824b05a84a)
+
+running 3 tests
+test heartbeat_rejects_non_positive_lease_duration_without_mutating_lease ... ok
+test claim_rolls_back_all_phase_writes_when_event_recording_fails ... ok
+test claim_entrypoints_reject_non_positive_lease_duration_without_mutating_pending_jobs ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+
+     Running tests/queue_lifecycle_timeouts.rs (target/debug/deps/queue_lifecycle_timeouts-a588968cfe4a3d6a)
+
+running 2 tests
+test completion_restores_caller_timeouts_after_job_row_acquisition ... ok
+test completion_row_lock_waits_preserve_stricter_database_timeout ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.27s
+
+     Running tests/queue_reaper_errors.rs (target/debug/deps/queue_reaper_errors-3baf2183bfd2b53d)
+
+running 4 tests
+test reaper_treats_equal_heartbeat_and_execution_started_as_without_renewal ... ok
+test reaper_does_not_treat_progress_after_heartbeat_as_started_without_renewal ... ok
+test reaper_reports_legacy_direct_running_without_renewal_heartbeat ... ok
+test expired_lease_reaper_reports_deferred_row_error_and_continues_batch ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.10s
+
+     Running tests/queue_retry_delay_validation.rs (target/debug/deps/queue_retry_delay_validation-b4107498207539b4)
+
+running 7 tests
+test policy_only_retry_persists_coherent_attempt_and_event ... ok
+test absolute_retry_timing_preserves_provider_reset_time_without_a_delay_limit ... ok
+test past_handler_not_before_cannot_shorten_policy_backoff ... ok
+test expired_lease_reapers_reject_invalid_retry_delay_without_mutating_lease ... ok
+test shorter_handler_retry_hint_is_audited_while_policy_backoff_wins ... ok
+test retryable_failure_rejects_invalid_retry_timing_without_mutating_lease ... ok
+test terminal_panicked_and_exhausted_failures_ignore_invalid_retry_timing ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s
+
+     Running tests/queue_running_progress.rs (target/debug/deps/queue_running_progress-0caee08cefa4a437)
+
+running 4 tests
+test stage_bearing_progress_compatibility_path_preserves_arbitrary_stage_writes ... ok
+test running_transition_commits_checkpoint_progress_marker_and_audit_together ... ok
+test running_transition_rolls_back_as_one_crash_safe_unit_when_audit_fails ... ok
+test ordinary_progress_is_stage_free_and_does_not_mark_execution_started ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
+     Running tests/schedules.rs (target/debug/deps/schedules-6fa8438b70b9a278)
+
+running 18 tests
+test deactivate_schedules_absent_from_names_tx_returns_names_sorted ... ok
+test claim_due_schedules_waits_for_exact_sync_lock ... ok
+test enqueue_workflow_waits_for_concurrent_definition_disable ... ok
+test exact_catalog_definition_sync_rejects_empty_catalog_and_scope ... ok
+test definition_catalog_sync_reports_empty_partial_all_absent_and_additive_cases ... ok
+test mark_schedule_fired_reports_whether_row_existed ... ok
+test definition_disable_schedule_lock_uses_bounded_lock_wait ... ok
+test public_upsert_job_definition_rejects_disable_with_active_schedule ... ok
+test get_job_schedule_by_name_reads_schedule_without_mutation ... ok
+test definition_disable_definition_lock_uses_bounded_lock_wait ... ok
+test schedule_active_state_policy_matrix_preserves_result_and_sql_parity ... ok
+test enqueue_job_waits_for_concurrent_definition_disable ... ok
+test sync_catalog_job_schedules_tx_deactivates_when_is_active_is_false ... ok
+test schedule_upsert_returns_active_state_preserved_on_conflict ... ok
+test sync_catalog_job_schedules_tx_applies_is_active_on_conflict ... ok
+test update_job_definition_rejects_disable_with_active_schedule ... ok
+test deactivate_schedules_absent_from_names_tx_is_scope_bound ... ok
+test active_schedule_upsert_rejects_disabled_job_definition ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+
+     Running tests/succeeded_job_replay.rs (target/debug/deps/succeeded_job_replay-ea5d4431e41e6965)
+
+running 9 tests
+test transactional_replay_rolls_back_and_exact_observations_do_not_mutate ... ok
+test successful_replay_preserves_source_and_idempotently_creates_fresh_job ... ok
+test replay_request_identity_is_validated_before_source_lookup ... ok
+test conflicting_replay_request_does_not_lock_the_existing_replay ... ok
+test workflow_managed_success_cannot_be_replayed_as_a_direct_job ... ok
+test idempotent_existing_replay_holds_its_status_and_run_lock_until_commit ... ok
+test replay_retention_preserves_idempotency_until_the_source_is_deleted ... ok
+test concurrent_retries_resolve_to_one_replay_job ... ok
+test successful_replay_preserves_the_source_execution_resource ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+
+     Running tests/support.rs (target/debug/deps/support-1d30549d2734a36c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/workflow_active_claims.rs (target/debug/deps/workflow_active_claims-605a151f855d6635)
+
+running 7 tests
+test active_key_isolated_by_scope_and_idempotent_retry_is_classified_separately ... ok
+test canceling_the_only_job_holds_active_claim_until_its_lease_quiesces ... ok
+test canceled_live_lease_holds_active_claim_until_reaper_observes_quiescence ... ok
+test terminal_completion_and_active_enqueue_race_leaves_one_reusable_claim ... ok
+test active_key_apis_reject_payloads_for_the_wrong_enqueue_contract ... ok
+test reaper_reconciles_terminal_active_claims_marked_by_the_database_trigger ... ok
+test one_hundred_concurrent_active_enqueues_create_one_run_and_explicit_collisions ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.65s
+
+     Running tests/workflow_dependency_persistence.rs (target/debug/deps/workflow_dependency_persistence-83b99983bca41d69)
+
+running 5 tests
+test dependency_writes_preserve_edge_orientation_and_release_modes_for_appended_steps ... ok
+test append_resolves_only_immediately_ready_steps_and_cancels_born_unsatisfied_steps ... ok
+test concurrent_terminal_completions_update_shared_dependents_once_without_deadlock ... ok
+test terminal_propagation_batches_high_fan_out_and_preserves_breadth_first_cascade ... ok
+test malformed_cross_run_dependencies_fail_closed_before_dependent_mutation ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.27s
+
+     Running tests/workflow_ordering.rs (target/debug/deps/workflow_ordering-ca222d7f7fcfcb1c)
+
+running 1 test
+test workflow_run_reads_break_created_at_ties_by_id_desc ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running tests/workflow_read_scope.rs (target/debug/deps/workflow_read_scope-9f53b053f40a0c72)
+
+running 1 test
+test workflow_read_scope_is_exact_for_get_list_and_count_apis ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+     Running tests/workflow_recovery.rs (target/debug/deps/workflow_recovery-b7d8564bdcc4921b)
+
+running 10 tests
+test legacy_source_without_canonical_snapshot_is_rejected ... ok
+test recovery_rejects_non_read_committed_transactions_up_front ... ok
+test recovery_fails_closed_on_unknown_snapshot_fields_and_mutation_kinds ... ok
+test deleting_only_the_recovery_run_cannot_erase_request_idempotency ... ok
+test recovery_uses_the_source_steps_latest_persisted_payload ... ok
+test recovery_rejects_live_continuation_and_resource_setting_drift ... ok
+test recovery_replays_canonical_enqueue_and_append_history_without_reopening_source ... ok
+test oversized_recovery_request_key_is_rejected_before_storage ... ok
+test recovery_rejects_nonterminal_sources_foreign_steps_and_active_key_collisions ... ok
+test concurrent_equal_recovery_requests_create_exactly_one_new_run ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.89s
+
+     Running tests/workflow_results.rs (target/debug/deps/workflow_results-0fad5e76fe2e30f2)
+
+running 20 tests
+test workflow_handle_reports_missing_result_output ... ok
+test workflow_handle_reports_missing_result_declaration_before_terminal ... ok
+test workflow_handle_scope_controls_run_visibility ... ok
+test external_failed_completion_metadata_is_idempotent_and_conflicts_on_change ... ok
+test workflow_wait_options_default_is_bounded ... ok
+test external_result_output_idempotency_uses_jsonb_semantics ... ok
+test workflow_handle_reports_unsuccessful_terminal_run ... ok
+test workflow_handle_oversized_poll_interval_times_out_without_panic ... ok
+test workflow_handle_timeout_does_not_self_starve_single_connection_pool ... ok
+test cancel_after_success_preserves_workflow_result ... ok
+test external_canceled_completion_metadata_is_idempotent_and_conflicts_on_change ... ok
+test workflow_handle_reports_missing_result_declaration ... ok
+test external_result_output_is_idempotent_and_conflicts_on_change ... ok
+test workflow_handle_oversized_timeout_reads_committed_result ... ok
+test workflow_handle_initial_lookup_timeout_runs_final_probe ... ok
+test workflow_handle_waits_for_declared_job_result ... ok
+test workflow_handle_timeout_covers_initial_result_lookup ... ok
+test workflow_handle_pre_deadline_poll_timeout_runs_final_probe ... ok
+test workflow_handle_zero_timeout_reads_committed_result ... ok
+test workflow_handle_deadline_poll_observes_result_without_listener ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.95s
+
+     Running tests/workflow_step_defaults.rs (target/debug/deps/workflow_step_defaults-a4781e020eb86a8b)
+
+running 3 tests
+test initial_step_insertion_resolves_defaults_preserves_overrides_and_external_nullability ... ok
+test definition_prevalidation_prevents_partial_initial_and_append_step_rows ... ok
+test appended_step_insertion_resolves_defaults_preserves_overrides_and_external_nullability ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+
+     Running unittests src/lib.rs (target/debug/deps/runledger_runtime-6bc390a76a5bafbb)
+
+running 190 tests
+test catalog::tests::job_enqueue_rejects_disabled_catalog_defaults ... ok
+test catalog::tests::exact_sync_scope_rejects_empty_job_type_list ... ok
+test catalog::tests::job_enqueue_rejects_disabled_job_definition_overrides ... ok
+test catalog::tests::definition_overrides_apply_after_job_registration ... ok
+test catalog::tests::definition_overrides_reject_unknown_job_type ... ok
+test catalog::tests::exact_sync_scope_rejects_blank_job_type ... ok
+test catalog::tests::job_definition_overrides_take_precedence_over_disabled_catalog_defaults ... ok
+test catalog::tests::job_enqueue_rejects_unknown_job_type ... ok
+test catalog::tests::definition_overrides_reject_invalid_job_type ... ok
+test catalog::tests::rejects_blank_handler_job_type ... ok
+test catalog::tests::legacy_try_job_preserves_handler_job_type_mismatch_diagnostic ... ok
+test catalog::tests::legacy_try_job_rejects_blank_declared_job_type ... ok
+test catalog::tests::rejects_duplicate_job_type ... ok
+test catalog::tests::job_schedule_accepts_enabled_job_definition_override ... ok
+test catalog::tests::retry_override_rejects_blank_failure_code ... ok
+test catalog::tests::retry_override_rejects_non_positive_delay ... ok
+test catalog::tests::retry_override_rejects_unknown_job_type ... ok
+test catalog::tests::legacy_and_handler_registration_have_equivalent_identity ... ok
+test catalog::tests::retry_override_validates_job_type_before_override_values ... ok
+test catalog::tests::schedule_sync_scope_rejects_empty_registered_schedule_set ... ok
+test catalog::tests::try_definition_overrides_reject_invalid_values ... ok
+test catalog::tests::to_registry_preserves_handlers_and_retry_overrides ... ok
+test catalog::tests::try_schedule_rejects_excessive_jitter_before_database ... ok
+test catalog::tests::workflow_dag_propagates_blank_step_key_error ... ok
+test catalog::tests::try_schedule_rejects_invalid_cron_before_database ... ok
+test catalog::tests::workflow_dag_propagates_empty_workflow_error ... ok
+test catalog::tests::schedule_sync_scope_uses_registered_schedule_names ... ok
+test catalog::tests::workflow_dag_propagates_unknown_dependency_error ... ok
+test config::tests::intent_promoter_config_validates_independently ... ok
+test config::tests::validate_accepts_minimum_direct_config_values ... ok
+test config::tests::validate_rejects_invalid_direct_config_values ... ok
+test config::tests::from_env_clamps_non_interval_limits_and_falls_back_worker_id ... ok
+test config::tests::from_env_clamps_zero_intervals_to_non_zero_minimum ... ok
+test config::tests::intent_promoter_env_overrides_fall_back_to_jobs_config_independently ... ok
+test error::tests::scheduler_invalid_cron_variant_contains_schedule_metadata ... ok
+test config::tests::intent_promoter_from_env_uses_independent_controls ... ok
+test dead_letter_hook::tests::hook_policy_reports_completion ... ok
+test reaper::observers::tests::observer_task_returns_metadata_on_success ... ok
+test dead_letter_hook::tests::hook_policy_normalizes_panic ... ok
+test reaper::observers::tests::observer_task_normalizes_panic_and_returns_metadata ... ok
+test reaper::tests::notify_handlers_reports_lease_expiration_dead_letter_reason ... ok
+test reaper::tests::notify_handlers_delivers_terminal_hook_for_committed_batch ... ok
+test reaper::tests::notify_observers_shutdown_cancels_inflight_reaped_observer ... ok
+test reaper::tests::notify_observers_starts_multiple_reaped_callbacks_without_serial_timeout ... ok
+test reaper::tests::notify_handlers_survives_terminal_hook_panic ... ok
+test registry::tests::registered_types_returns_sorted_job_types ... ok
+test registry::tests::register_overwrites_duplicate_job_type ... ok
+test registry::tests::retry_delay_override_matches_job_type_and_failure_code ... ok
+test registry::tests::registered_handler_executes_successfully_via_trait_object ... ok
+test registry::tests::trait_register_boxed_overwrites_duplicate_job_type ... ok
+test registry::tests::retry_delay_override_rejects_zero_delay - should panic ... ok
+test registry::tests::try_register_boxed_rejects_duplicate_job_type_and_keeps_first_handler ... ok
+test registry::tests::try_register_rejects_duplicate_job_type_and_keeps_first_handler ... ok
+test scheduler::tests::compute_next_fire_at_with_stale_coalescing_moves_backlog_cursor_after_now ... ok
+test scheduler::tests::compute_next_fire_at_with_stale_coalescing_keeps_future_jittered_fire ... ok
+test scheduler::tests::compute_next_fire_at_with_stale_coalescing_chooses_earliest_jittered_fire ... ok
+test reaper::tests::reaper_side_effects_notify_terminal_hooks_before_slow_reaped_observers ... ok
+test scheduler::tests::compute_next_fire_at_utc_applies_deterministic_jitter ... ok
+test reaper::tests::notify_observers_reports_reaped_retryable_lease ... ok
+test reaper::tests::notify_handlers_drains_controlled_terminal_hook ... ok
+test reaper::tests::reaped_observer_task_owner_reclaims_completed_capacity ... ok
+test reaper::tests::reaped_observer_task_owner_drops_newest_callback_at_cap ... ok
+test reaper::tests::reaper_side_effects_shutdown_after_committed_terminal_batch_delivers_hook ... ok
+test reaper::tests::reaper_side_effects_closed_shutdown_channel_does_not_start_reaped_observer ... ok
+test shutdown::tests::concurrent_requests_converge_on_watch_state ... ok
+test shutdown::tests::repeated_requests_keep_watch_state_observable ... ok
+test shutdown::tests::request_is_retained_after_all_receivers_are_dropped ... ok
+test shutdown::tests::requested_or_closed_detects_request_before_sender_close ... ok
+test shutdown::tests::requested_or_closed_detects_sender_close_before_request ... ok
+test shutdown::tests::sender_and_receiver_clones_keep_channel_open_until_the_last_drop ... ok
+test shutdown::tests::wait_for_request_ignores_false_updates ... ok
+test shutdown::tests::wait_for_request_or_timeout_returns_false_on_timeout_or_false_update ... ok
+test shutdown::tests::wait_for_request_or_timeout_returns_true_on_request_or_closed_sender ... ok
+test supervisor::tests::all_disabled_supervisor_join_and_shutdown_succeed ... ok
+test supervisor::tests::builder_accepts_registry_for_worker_and_reaper_loops ... ok
+test supervisor::tests::builder_can_disable_each_loop ... ok
+test supervisor::tests::builder_defaults_enable_all_loops ... ok
+test supervisor::tests::builder_rejects_invalid_direct_config_values_before_spawning_loops ... ok
+test supervisor::tests::builder_rejects_mixed_registry_sources ... ok
+test supervisor::tests::builder_requires_registry_when_worker_or_reaper_is_enabled ... ok
+test supervisor::tests::builder_requires_tokio_runtime_before_cloning_pool ... ok
+test supervisor::tests::builder_spawns_only_enabled_tasks ... ok
+test supervisor::tests::builder_validates_config_before_rejecting_mixed_registry_sources ... ok
+test supervisor::tests::environment_builder_explicitly_configures_intent_promoter ... ok
+test supervisor::tests::registry_selection_transition_table_is_complete ... ok
+test supervisor::tests::repeated_shutdown_handle_requests_are_observable_before_join ... ok
+test scheduler::tests::bounded_stale_jitter_search_matches_reference_property_matrix ... ok
+test task_group::tests::early_normal_task_exit_is_unexpected ... ok
+test task_group::tests::invalid_config_task_exit_preserves_validation_source ... ok
+test task_group::tests::join_allows_shutdown_exit_when_shutdown_races_completion_poll ... ok
+test task_group::tests::join_reports_task_exit_when_shutdown_races_completion_poll ... ok
+test task_group::tests::join_reports_task_that_exited_before_late_shutdown_request ... ok
+test task_group::tests::panic_after_shutdown_request_is_reported ... ok
+test task_group::tests::panicked_task_maps_to_task_join_error ... ok
+test task_group::tests::pre_shutdown_sweep_allows_explicit_shutdown_exit ... ok
+test task_group::tests::pre_shutdown_sweep_consumes_all_already_finished_tasks ... ok
+test task_group::tests::run_until_shutdown_reports_task_exit_after_signal_before_deadline ... ok
+test task_group::tests::run_until_shutdown_reports_task_exit_before_signal ... ok
+test task_group::tests::run_until_shutdown_requests_shutdown_when_signal_resolves ... ok
+test reaper::tests::notify_handlers_survives_terminal_hook_timeout ... ok
+test reaper::tests::notify_handlers_shutdown_bounds_hanging_terminal_hook_batch ... ok
+test reaper::tests::notify_handlers_shutdown_after_entry_before_first_admission_uses_bounded_window ... ok
+test task_group::tests::shutdown_reports_task_that_exited_before_shutdown_request ... ok
+test task_group::tests::shutdown_after_repeated_handle_requests_allows_clean_task_exit ... ok
+test task_group::tests::shutdown_with_timeout_pre_shutdown_error_allows_remaining_task_to_exit ... ok
+test task_group::tests::shutdown_with_timeout_rejects_unrepresentable_deadline ... ok
+test dead_letter_hook::tests::hook_policy_bounds_execution_time ... ok
+test task_group::tests::shutdown_with_timeout_reports_timeout_after_pre_shutdown_error ... ok
+test task_group::tests::shutdown_with_timeout_succeeds_when_task_exits_cooperatively ... ok
+test task_group::tests::shutdown_with_zero_timeout_aborts_immediately ... ok
+test worker::execution::tests::heartbeat_budget_preserves_one_third_for_short_and_default_leases ... ok
+test worker::tests::capacity::crashed_job_task_is_drained_and_restores_capacity ... ok
+test worker::tests::capacity::join_set_occupancy_is_worker_capacity ... ok
+test supervisor::tests::run_until_shutdown_with_no_tasks_waits_for_signal ... ok
+test worker::tests::completion_and_retry::completion_persist_error_diagnostic_omits_internal_query_details ... ok
+test task_group::tests::run_until_shutdown_times_out_and_aborts_after_signal ... ok
+test worker::tests::capacity::shutdown_drain_waits_for_join_set_tasks ... ok
+test task_group::tests::shutdown_with_timeout_reports_task_error_when_remaining_task_misses_deadline ... ok
+test task_group::tests::shutdown_with_timeout_aborts_and_drains_stubborn_task ... ok
+test task_group::tests::run_until_shutdown_with_no_tasks_waits_for_signal ... ok
+test scheduler::tests::maximum_jitter_sparse_backlog_stops_at_the_best_candidate_bound ... ok
+test scheduler::tests::maximum_jitter_dense_backlog_retains_the_global_occurrence_cap ... ok
+test scheduler::tests::materialize_due_schedules_coalesces_stale_cursor_after_one_catchup ... ok
+test scheduler::tests::materialize_due_schedules_releases_savepoint_after_failed_materialization ... ok
+test scheduler::tests::materialize_due_schedules_includes_scheduled_for_metadata ... ok
+test scheduler::tests::materialize_due_schedules_skips_invalid_cron_without_enqueuing ... ok
+test scheduler::tests::materialize_due_schedules_defers_failures_to_avoid_starving_valid_work ... ok
+test scheduler::tests::materialize_due_schedules_ignores_disabled_job_definition ... ok
+test scheduler::tests::materialize_claimed_schedules_rolls_back_enqueue_when_schedule_missing ... ok
+test worker::tests::completion_and_retry::process_claimed_job_dead_letter_hook_is_not_delayed_by_slow_running_observers ... ok
+test worker::tests::completion_and_retry::continuation_lease_mismatch_reports_lease_loss_instead_of_persist_failure ... ok
+test worker::tests::completion_and_retry::process_claimed_job_does_not_apply_override_to_other_failure_code ... ok
+test worker::tests::completion_and_retry::process_claimed_job_does_not_apply_override_to_other_job_type ... ok
+test worker::tests::completion_and_retry::handler_continuation_reuses_the_job_with_a_fresh_attempt_budget ... ok
+test worker::tests::completion_and_retry::opted_in_workflow_managed_handler_continuation_runs_again_then_succeeds ... ok
+test worker::tests::completion_and_retry::process_claimed_job_handler_not_before_sets_effective_schedule_beyond_override ... ok
+test worker::tests::completion_and_retry::process_claimed_job_ignores_retry_delay_override_for_terminal_failure ... ok
+test worker::tests::completion_and_retry::process_claimed_job_handler_retry_after_cannot_shorten_registered_override ... ok
+test worker::tests::completion_and_retry::process_claimed_job_observer_reports_dead_letter_failure_from_completion_outcome ... ok
+test worker::tests::completion_and_retry::process_claimed_job_observer_reports_absolute_retry_time_after_commit ... ok
+test worker::tests::completion_and_retry::process_claimed_job_observer_reports_retryable_failure_after_commit ... ok
+test worker::tests::completion_and_retry::process_claimed_job_success_observer_reports_committed_coalesced_progress ... ok
+test worker::tests::completion_and_retry::process_claimed_job_observer_reports_success_after_commit ... ok
+test worker::tests::completion_and_retry::process_claimed_job_uses_registered_retry_delay_override ... ok
+test worker::tests::completion_and_retry::process_claimed_job_zero_handler_retry_bound_falls_back_to_override ... ok
+test worker::tests::observer_tasks::empty_lifecycle_observers_skip_running_and_terminal_tasks ... ok
+test worker::tests::observer_tasks::every_terminal_event_exposes_its_embedded_observed_job_identity ... ok
+test worker::tests::completion_and_retry::success_and_failure_lease_mismatches_report_lease_loss ... ok
+test worker::tests::observer_tasks::finished_running_observer_is_reaped_before_terminal_task_admission ... ok
+test worker::tests::observer_tasks::observer_task_owner_drains_completed_tasks_before_new_admission ... ok
+test scheduler::tests::run_scheduler_loop_shutdown_is_bounded_behind_schedule_guard_lock ... ok
+test worker::tests::observer_tasks::observer_task_owner_aborts_running_drain_overflow ... ok
+test worker::tests::observer_tasks::run_worker_loop_exits_when_shutdown_sender_is_dropped ... ok
+test worker::tests::observer_tasks::observer_task_owner_runs_terminal_when_running_drains_are_at_cap ... ok
+test worker::tests::observer_tasks::observer_task_owner_drops_newest_terminal_task_at_cap ... ok
+test worker::tests::observer_tasks::terminal_observer_rejection_does_not_abort_same_job_running_observer ... ok
+test worker::tests::lease_fencing::expired_lease_rejects_worker_lifecycle_updates ... ok
+test worker::tests::observer_tasks::terminal_observer_shutdown_waits_for_same_job_running_observer ... ok
+test worker::tests::lease_fencing::process_claimed_job_aborts_before_handler_when_lease_owner_changes_pre_run ... ok
+test worker::tests::observer_tasks::terminal_observer_waits_for_running_observer_for_same_job ... ok
+test worker::tests::observer_tasks::terminal_observer_shutdown_delivers_after_multiple_hanging_observer_callbacks ... ok
+test worker::tests::lease_fencing::process_claimed_job_terminally_fails_invalid_success_progress_without_replay ... ok
+test worker::tests::lease_fencing::process_claimed_job_terminally_fails_invalid_continuation_delay_without_replay ... ok
+test worker::tests::lease_fencing::stale_partial_continuation_progress_reports_the_continuation_path ... ok
+test worker::tests::lease_fencing::process_claimed_job_terminally_fails_stale_partial_success_progress_without_replay ... ok
+test worker::tests::completion_and_retry::process_claimed_job_observer_reports_timeout_failure_after_commit ... ok
+test worker::tests::lease_fencing::standalone_success_completion_allows_non_read_committed_session ... ok
+test worker::tests::lease_fencing::successful_completion_persists_completion_update ... ok
+test worker::tests::observer_tasks::run_worker_loop_shutdown_delivers_terminal_after_hanging_running_observer ... ok
+test worker::tests::observer_tasks::run_worker_loop_waits_for_terminal_observer_on_shutdown ... ok
+test worker::tests::prestart_recovery::claimed_job_without_lease_owner_waits_for_reaper_recovery ... ok
+test worker::tests::prestart_recovery::process_claimed_job_aborts_when_running_progress_cannot_be_persisted ... ok
+test worker::tests::prestart_recovery::reaper_requeues_unstarted_claim_when_running_progress_never_persisted ... ok
+test worker::tests::prestart_recovery::reaper_does_not_burn_retry_attempt_when_later_attempt_never_started ... ok
+test worker::tests::lease_fencing::heartbeat_rejects_lease_that_expires_while_waiting_for_job_lock ... ok
+test worker::tests::prestart_recovery::release_unstarted_claim_reports_not_applicable_after_running_persists ... ok
+test worker::tests::completion_and_retry::process_claimed_job_does_not_block_handler_or_heartbeats_on_slow_running_observers ... ok
+test worker::tests::prestart_recovery::strict_unstarted_claim_release_reports_identity_mismatch ... ok
+test worker::tests::prestart_recovery::strict_unstarted_claim_release_rejects_a_stale_attempt_identity ... ok
+test worker::tests::terminal_hooks::process_claimed_job_cancels_inflight_dead_letter_hook_when_parent_is_aborted ... ok
+test worker::tests::terminal_hooks::process_claimed_job_reports_attempt_exhaustion_to_dead_letter_hook ... ok
+test worker::tests::terminal_hooks::process_claimed_job_reports_non_retryable_failure_to_dead_letter_hook ... ok
+test worker::tests::terminal_hooks::process_claimed_job_catches_main_handler_panic ... ok
+test worker::tests::terminal_hooks::process_claimed_job_persists_handler_failure_with_reserved_lease_code ... ok
+test worker::tests::terminal_hooks::process_claimed_job_survives_terminal_failure_hook_panic ... ok
+test worker::tests::heartbeat_progress::heartbeat_budget_aborts_handler_before_short_lease_expires ... ok
+test worker::tests::terminal_hooks::worker_dead_letter_hook_receives_latest_committed_checkpoint ... ok
+test worker::tests::terminal_hooks::run_worker_loop_continues_processing_after_handler_panic ... ok
+test worker::tests::terminal_hooks::process_claimed_job_survives_terminal_failure_hook_timeout ... ok
+test worker::tests::heartbeat_progress::pending_heartbeat_keeps_polling_handler_that_owns_the_job_row_lock ... ok
+
+test result: ok. 190 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.34s
+
+     Running tests/catalog.rs (target/debug/deps/catalog-e55eba9e497c0649)
+
+running 63 tests
+test legacy_try_job_rejects_handler_job_type_mismatch_before_database ... ok
+test schedule_helper_rejects_unknown_job_type ... ok
+test enqueue_helper_rejects_unknown_job_type_before_enqueue_job ... ok
+test catalog_helpers_do_not_check_operator_disabled_database_rows ... ok
+test schedule_helper_forwards_all_input_fields ... ok
+test schedule_helper_rejects_disabled_catalog_job_type ... ok
+test enqueue_helper_forwards_all_input_fields ... ok
+test catalog_uses_the_identity_validated_at_handler_registration ... ok
+test sync_definitions_disables_existing_enabled_job_override_without_active_schedules ... ok
+test sync_definitions_creates_readable_job_definition_with_defaults ... ok
+test sync_definitions_exact_rejects_catalog_jobs_outside_scope ... ok
+test sync_definitions_exact_restores_operator_disabled_catalog_jobs ... ok
+test sync_definitions_exact_restores_enabled_job_override ... ok
+test sync_definitions_exact_can_disable_catalog_jobs_without_active_schedules ... ok
+test schedule_helper_builds_valid_upsert_for_enabled_catalog_job ... ok
+test sync_definitions_exact_rejects_active_schedules_for_absent_job_types ... ok
+test sync_definitions_exact_rejects_disabled_catalog_job_with_active_schedule ... ok
+test sync_definitions_exact_allows_active_schedules_for_already_disabled_absent_job_types ... ok
+test job_before_defaults_uses_later_defaults_on_sync ... ok
+test supervisor_with_catalog_processes_enqueued_job_after_sync ... ok
+test sync_definitions_exact_rejects_empty_catalog ... ok
+test sync_definitions_exact_reenables_reintroduced_catalog_jobs ... ok
+test sync_definitions_rejects_disabled_catalog_job_with_active_schedule ... ok
+test sync_definitions_handles_mixed_enabled_and_disabled_overrides ... ok
+test sync_definitions_preserves_operator_enabled_state_on_resync ... ok
+test sync_definitions_is_idempotent ... ok
+test sync_definitions_overwrites_owned_fields_but_preserves_operator_disabled_state ... ok
+test sync_definitions_exact_writes_disabled_job_override_without_active_schedules ... ok
+test sync_definitions_exact_disables_absent_job_definitions ... ok
+test sync_definitions_preserves_operator_disabled_state_for_enabled_job_override ... ok
+test sync_definitions_rejects_disabled_job_override_with_active_schedule ... ok
+test sync_definitions_rejects_invalid_defaults_before_database_write ... ok
+test sync_schedules_rejects_duplicate_names_on_catalog ... ok
+test sync_definitions_rejects_zero_max_attempts_before_database_write ... ok
+test sync_definitions_rejects_zero_version_before_database_write ... ok
+test sync_definitions_exact_waits_for_schedule_table_lock_before_disabling ... ok
+test sync_schedules_is_idempotent ... ok
+test sync_schedules_exact_rejects_specs_outside_scope ... ok
+test sync_definitions_writes_disabled_catalog_definition_without_active_schedules ... ok
+test try_handler_with_definition_overrides_rejects_invalid_max_attempts_override ... ok
+test try_handler_with_definition_overrides_rejects_invalid_timeout_override ... ok
+test try_handler_with_definition_overrides_rejects_invalid_version_override ... ok
+test workflow_dag_helper_propagates_build_errors ... ok
+test workflow_dag_helper_rejects_unknown_job_type ... ok
+test workflow_step_helper_forwards_job_step_fields ... ok
+test workflow_step_helper_rejects_blank_step_key ... ok
+test workflow_step_helper_rejects_disabled_job_type ... ok
+test workflow_step_helper_rejects_unknown_job_type ... ok
+test sync_definitions_writes_disabled_job_override_without_active_schedules ... ok
+test sync_schedules_exact_with_empty_specs_deactivates_scope ... ok
+test sync_schedules_exact_with_rejects_dynamic_specs_outside_derived_scope ... ok
+test sync_schedules_exact_deactivates_absent_scoped_schedules ... ok
+test sync_schedules_exact_waits_for_schedule_table_lock ... ok
+test sync_definitions_uses_job_specific_definition_overrides ... ok
+test sync_schedules_exact_uses_registered_specs_and_derived_scope ... ok
+test sync_schedules_preserves_next_fire_at_when_cron_is_unchanged ... ok
+test sync_schedules_rejects_duplicate_names_in_sync_batch ... ok
+test sync_schedules_uses_catalog_registered_specs ... ok
+test sync_schedules_with_rejects_unknown_job_type_before_database ... ok
+test sync_schedules_with_activates_schedule_after_definitions_sync ... ok
+test sync_schedules_with_rejects_disabled_job_type_before_database ... ok
+test sync_schedules_with_applies_is_active_false ... ok
+test sync_schedules_reports_failing_schedule_name ... ok
+
+test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.25s
+
+     Running tests/config_validation.rs (target/debug/deps/config_validation-d99cb8d2bb05dd2a)
+
+running 13 tests
+test scheduler_loop_rejects_zero_claim_batch_size ... ok
+test scheduler_loop_does_not_reject_worker_or_reaper_only_fields ... ok
+test reaper_loop_rejects_zero_retry_delay ... ok
+test worker_loop_rejects_zero_global_concurrency ... ok
+test worker_loop_does_not_reject_scheduler_or_reaper_only_fields ... ok
+test reaper_loop_does_not_reject_worker_or_scheduler_only_fields ... ok
+test independently_configured_intent_promoter_rejects_invalid_values ... ok
+test intent_promoter_does_not_reject_execution_or_other_loop_fields ... ok
+test intent_promoter_rejects_zero_poll_interval ... ok
+test supervisor_build_rejects_any_invalid_config_field ... ok
+test supervisor_rejects_invalid_independent_intent_promoter_config ... ok
+test runtime_loops_reject_oversized_claim_batch_size ... ok
+test worker_loop_rejects_nonpositive_lease_ttl ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/idempotency.rs (target/debug/deps/idempotency-ad3940bd44536ba4)
+
+running 32 tests
+test append_workflow_steps_idempotency_uses_jsonb_numeric_equality ... ok
+test job_enqueue_idempotency_returns_existing_job_for_identical_retry ... ok
+test job_enqueue_idempotency_rejects_conflicting_retry ... ok
+test job_enqueue_idempotency_survives_lifecycle_stage_mutation ... ok
+test append_workflow_steps_matches_legacy_persisted_request_shape ... ok
+test job_enqueue_idempotency_rejects_changed_request_fields ... ok
+test append_workflow_steps_identical_retry_after_closed_window_is_already_applied ... ok
+test append_workflow_steps_release_conflict_can_be_committed_without_partial_mutation ... ok
+test append_workflow_steps_tx_rejects_non_read_committed_transaction ... ok
+test job_enqueue_idempotency_keeps_global_and_org_scopes_separate ... ok
+test append_workflow_steps_rejects_conflicting_retry ... ok
+test idempotent_job_enqueue_tx_accepts_read_uncommitted_transaction ... ok
+test idempotent_job_enqueue_tx_rejects_non_read_committed_transaction ... ok
+test job_enqueue_idempotency_normalizes_next_run_at_to_postgres_precision ... ok
+test idempotent_workflow_enqueue_tx_rejects_non_read_committed_transaction ... ok
+test legacy_workflow_enqueue_idempotency_snapshot_missing_is_rejected ... ok
+test job_enqueue_idempotency_returns_one_job_for_concurrent_identical_retry ... ok
+test job_enqueue_idempotency_uses_jsonb_numeric_equality ... ok
+test job_enqueue_without_idempotency_always_inserts_new_job ... ok
+test legacy_job_enqueue_idempotency_snapshot_missing_is_rejected ... ok
+test org_scoped_job_enqueue_idempotency_returns_existing_job ... ok
+test org_scoped_workflow_enqueue_idempotency_returns_existing_run ... ok
+test workflow_enqueue_idempotency_rejects_conflicting_retry ... ok
+test workflow_enqueue_idempotency_matches_reordered_steps_and_dependencies ... ok
+test workflow_enqueue_idempotency_rejects_changed_result_step_key ... ok
+test workflow_enqueue_idempotency_returns_existing_run_for_identical_retry ... ok
+test workflow_enqueue_idempotency_survives_appended_steps ... ok
+test workflow_enqueue_idempotency_survives_pending_step_payload_mutation ... ok
+test workflow_enqueue_idempotency_treats_cleared_job_stage_as_queued ... ok
+test workflow_enqueue_idempotency_uses_jsonb_numeric_equality ... ok
+test workflow_enqueue_without_idempotency_always_inserts_new_run ... ok
+test workflow_idempotency_lookup_keeps_global_and_org_scopes_separate ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.33s
+
+     Running tests/prelude_smoke.rs (target/debug/deps/prelude_smoke-c44e7199758ab603)
+
+running 1 test
+test all_preludes_can_be_glob_imported_together ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/reaper_loop.rs (target/debug/deps/reaper_loop-158d0c87451a9f82)
+
+running 2 tests
+test run_reaper_loop_reaps_later_batches_while_reaped_observer_is_pending ... ok
+test run_reaper_loop_shutdown_waits_for_inflight_terminal_hook_delivery ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.97s
+
+     Running tests/supervisor_loop.rs (target/debug/deps/supervisor_loop-eb21866136e44096)
+
+running 1 test
+test supervisor_processes_job_and_shuts_down ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s
+
+     Running tests/support.rs (target/debug/deps/support-82d6febfc7f11ead)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/worker_loop.rs (target/debug/deps/worker_loop-f406230b5873e4ed)
+
+running 8 tests
+test shutdown_cancels_a_lock_blocked_intent_promotion_pass ... ok
+test worker_does_not_starve_other_jobs_when_running_progress_persist_keeps_failing ... ok
+test worker_promotes_registered_intents_and_leaves_unregistered_types_pending ... ok
+test full_intent_batches_drain_without_poll_interval_delay ... ok
+test worker_fills_but_does_not_exceed_exact_capacity_without_poll_delay ... ok
+test contended_intent_promotion_does_not_delay_existing_job_claims ... ok
+test intent_promoter_runs_while_worker_is_saturated_and_shutdown_interrupts_wait ... ok
+test worker_shutdown_delivers_terminal_success_when_running_observer_hangs ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.99s
+
+     Running tests/workflow_cancel_lock_order.rs (target/debug/deps/workflow_cancel_lock_order-13b471c176d937ec)
+
+running 17 tests
+test retryable_workflow_job_failure_returns_step_to_enqueued ... ok
+test external_workflow_completion_rejects_non_read_committed_transaction ... ok
+test cancel_workflow_run_rejects_non_read_committed_transaction ... ok
+test external_completion_waits_for_ordered_step_locks_before_locking_gate ... ok
+test job_completion_waits_for_release_lock_and_releases_after_rollback ... ok
+test external_completion_conflicts_when_cancel_waits_on_step_rows ... ok
+test external_completion_release_conflict_can_be_committed_without_partial_mutation ... ok
+test queue_success_waits_for_release_lock_and_releases_dependents ... ok
+test workflow_job_completion_rejects_non_read_committed_transaction ... ok
+test cancel_workflow_run_relocks_jobs_that_appear_while_waiting_for_release_lock ... ok
+test job_completion_after_cancel_commit_does_not_reenqueue_dependents ... ok
+test cancel_workflow_run_does_not_release_blocked_on_terminal_dependents ... ok
+test handler_continuation_wins_job_lock_before_workflow_cancellation ... ok
+test workflow_cancellation_wins_job_lock_before_handler_continuation ... ok
+test workflow_step_release_proceeds_while_another_release_holds_shared_lock ... ok
+test cancel_workflow_run_locks_job_rows_before_workflow_steps ... ok
+test job_completion_release_lock_timeout_returns_release_conflict ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.62s
+
+   Doc-tests runledger_postgres
+
+running 9 tests
+test runledger-postgres/src/lib.rs - (line 116) - compile ... ok
+test runledger-postgres/src/lib.rs - (line 185) - compile ... ok
+test runledger-postgres/src/lib.rs - (line 213) - compile ... ok
+test runledger-postgres/src/lib.rs - (line 240) - compile ... ok
+test runledger-postgres/src/lib.rs - (line 265) - compile ... ok
+test runledger-postgres/src/lib.rs - (line 305) - compile ... ok
+test runledger-postgres/src/lib.rs - (line 42) - compile ... ok
+test runledger-postgres/src/lib.rs - (line 85) - compile ... ok
+test runledger-postgres/src/lib.rs - (line 72) ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests runledger_runtime
+
+running 4 tests
+test runledger-runtime/src/lib.rs - (line 53) - compile ... ok
+test runledger-runtime/src/lib.rs - (line 43) ... ok
+test runledger-runtime/src/catalog/schedule_spec.rs - catalog::schedule_spec::CatalogJobScheduleSpec (line 17) ... ok
+test runledger-runtime/src/catalog/types.rs - catalog::types::JobCatalogScheduleSyncScope (line 252) ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[baseline] exit=0
