@@ -2,7 +2,7 @@ use std::any::Any;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use runledger_core::jobs::{JobCompletion, JobContext, JobFailure};
 use runledger_postgres::QueryErrorKind;
 use runledger_postgres::jobs::{self, JobLeaseIdentity, JobRunningUpdate};
@@ -303,6 +303,7 @@ impl ClaimedJobExecution {
         let mut ticker = tokio::time::interval(heartbeat_interval(self.lease_ttl_seconds));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ticker.tick().await;
+        let mut pending_heartbeats = FuturesUnordered::new();
 
         loop {
             tokio::select! {
@@ -320,14 +321,8 @@ impl ClaimedJobExecution {
                         "Job exceeded the configured timeout.",
                     )));
                 }
-                _ = ticker.tick() => {
-                    if let Err(error) = jobs::heartbeat_job_for_lease(
-                        &self.pool,
-                        self.lease_identity(),
-                        self.lease_ttl_seconds,
-                    )
-                    .await
-                    {
+                Some(result) = pending_heartbeats.next(), if !pending_heartbeats.is_empty() => {
+                    if let Err(error) = result {
                         let lease_owner_mismatch = is_lease_owner_mismatch_error(&error);
                         let error = WorkerError::Heartbeat {
                             job_id: self.job.id,
@@ -351,6 +346,17 @@ impl ClaimedJobExecution {
                             lease_maintenance_failure(),
                         ));
                     }
+                }
+                _ = ticker.tick(), if pending_heartbeats.is_empty() => {
+                    // Keep the heartbeat future in the select set instead of
+                    // awaiting it inside this branch. A handler can be waiting
+                    // to finish and commit a progress transaction that owns the
+                    // same job-row lock the heartbeat needs.
+                    pending_heartbeats.push(jobs::heartbeat_job_for_lease(
+                        &self.pool,
+                        self.lease_identity(),
+                        self.lease_ttl_seconds,
+                    ));
                 }
             }
         }

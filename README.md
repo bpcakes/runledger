@@ -1324,6 +1324,11 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   stable `job.lease_owner_mismatch` code, even when the lease was lost by time
   rather than to another worker. Once `lease_expires_at` passes there is no
   owner grace period for heartbeat/progress/success/failure/continuation writes.
+  The built-in runtime continues polling handlers while a heartbeat is waiting
+  on a concurrent progress write. Heartbeat and progress transactions also cap
+  job-row lock waits at five seconds and their total transaction lifetime at
+  thirty seconds; stricter `lock_timeout` and `transaction_timeout` settings
+  configured by the embedding service remain in force.
   Release 0.9.0 added `JobLeaseIdentity` for typed lifecycle lease fencing.
   In 0.11.0 and later, use `mark_job_running_for_lease` with
   `JobRunningUpdate` to commit `RUNNING` and its initial checkpoint/progress

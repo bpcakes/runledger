@@ -1,10 +1,26 @@
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use sqlx::types::Uuid;
 
 use crate::{DbTx, Error, Result};
 
 use super::super::super::errors::{lease_owner_mismatch_error, validate_completion_progress};
+use super::super::super::transaction_settings::{
+    PostgresTimeout, cap_local_lock_timeout_duration_tx, cap_local_transaction_timeout_duration_tx,
+};
 use super::super::super::types::JobLeaseIdentity;
+
+// Lifecycle mutations are expected to be short. The lock cap prevents one
+// worker connection from waiting indefinitely behind an abandoned job-row
+// transaction, while the transaction cap also covers a connection left idle
+// after acquiring that row lock. Stricter consumer settings remain in force.
+const JOB_LIFECYCLE_LOCK_TIMEOUT: PostgresTimeout = PostgresTimeout::new(Duration::from_secs(5));
+const JOB_LIFECYCLE_TRANSACTION_TIMEOUT: PostgresTimeout =
+    PostgresTimeout::new(Duration::from_secs(30));
+const _: () = assert!(
+    JOB_LIFECYCLE_TRANSACTION_TIMEOUT.milliseconds() > JOB_LIFECYCLE_LOCK_TIMEOUT.milliseconds()
+);
 
 pub(super) const HEARTBEAT_LEASE_MISMATCH_CONTEXT: &str =
     "heartbeat job transaction lease mismatch";
@@ -16,6 +32,23 @@ pub(super) const COMPLETE_CONTINUATION_LEASE_MISMATCH_CONTEXT: &str =
     "complete job continuation transaction lease mismatch";
 pub(super) const COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT: &str =
     "complete job failure transaction missing leased row";
+
+pub(super) async fn cap_owned_job_lifecycle_timeouts_tx(
+    tx: &mut DbTx<'_>,
+    transaction_context: &'static str,
+    lock_context: &'static str,
+) -> Result<()> {
+    // These are owned transactions, so both SET LOCAL values intentionally
+    // remain active until the operation commits or rolls back.
+    cap_local_transaction_timeout_duration_tx(
+        tx,
+        JOB_LIFECYCLE_TRANSACTION_TIMEOUT,
+        transaction_context,
+    )
+    .await?;
+    cap_local_lock_timeout_duration_tx(tx, JOB_LIFECYCLE_LOCK_TIMEOUT, lock_context).await?;
+    Ok(())
+}
 
 pub(super) struct CompletionLeaseRow {
     pub(super) job_type: String,
@@ -107,4 +140,59 @@ pub(super) async fn rollback_and_return_lease_mismatch<T>(
         );
     }
     Err(lease_owner_mismatch_error())
+}
+
+#[cfg(test)]
+mod tests {
+    use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn owned_lifecycle_transactions_cap_unlimited_database_timeouts() {
+        let (pool, database) = setup_ephemeral_pool("postgres_owned_lifecycle_timeouts", 1).await;
+        let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
+            .fetch_one(&pool)
+            .await
+            .expect("read PostgreSQL server_version");
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
+                .fetch_one(&pool)
+                .await
+                .expect("read PostgreSQL server_version_num");
+        eprintln!(
+            "owned lifecycle timeout regression PostgreSQL server_version={server_version}, \
+             server_version_num={server_version_num}"
+        );
+
+        let mut tx = pool.begin().await.expect("begin lifecycle timeout tx");
+        cap_owned_job_lifecycle_timeouts_tx(
+            &mut tx,
+            "cap lifecycle transaction timeout in regression test",
+            "cap lifecycle lock timeout in regression test",
+        )
+        .await
+        .expect("cap lifecycle transaction timeouts");
+
+        let (lock_timeout, transaction_timeout) = sqlx::query_as::<_, (String, String)>(
+            "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read capped lifecycle timeouts");
+        assert_eq!(lock_timeout, "5s");
+        assert_eq!(transaction_timeout, "30s");
+
+        tx.rollback().await.expect("roll back lifecycle timeout tx");
+        let (lock_timeout, transaction_timeout) = sqlx::query_as::<_, (String, String)>(
+            "SELECT current_setting('lock_timeout'), current_setting('transaction_timeout')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read restored session timeouts");
+        assert_eq!(lock_timeout, "0");
+        assert_eq!(transaction_timeout, "0");
+
+        teardown_ephemeral_pool(pool, database).await;
+    }
 }
