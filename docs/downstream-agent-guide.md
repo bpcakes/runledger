@@ -658,7 +658,7 @@ with application writes. That transaction must be `READ COMMITTED`, and the
 function neither commits nor rolls it back. An active-key recovery can remain
 blocked until the source claim is quiescent, or while another run owns the key.
 
-## Release Upgrade Map: 0.6 Through 0.11
+## Release Upgrade Map: 0.6 Through 0.12
 
 When an integration skips versions, preserve every intermediate runtime and
 schema boundary:
@@ -671,6 +671,7 @@ schema boundary:
 | 0.9.0 | No migration after 0.8.0. | Custom runtimes may adopt `JobLeaseIdentity` and the `_for_lease` lifecycle APIs without a coordinated schema or source migration; the positional functions remain available. |
 | 0.10.0 | `202608180001_job_enqueue_intents` before any process records or promotes enqueue intents. | Deploy exact-ID retention cleanup to every queue-retention caller before enabling intent writers. Keep promoter coverage for every intent type, and budget for independent polling by each enabled supervisor. |
 | 0.11.0 | `202608240001_expand_workflow_step_job_link` before deploying 0.11; `202608240002_contract_workflow_step_job_link` only after all 0.10 writers and leases drain. | Migrate every removed `requeue_job` call before compiling: exact-scope compare-and-requeue replaces canceled/dead-lettered recovery, while successful replay creates a fresh job for `SUCCEEDED`. Contracting the link is the 0.10 rollback boundary. |
+| 0.12.0 | No migration after 0.11.0. | Update exhaustive `QueryErrorKind` matches for `PostgresLockNotAvailable`. Runtime workers bound and retry contended heartbeats within a lease-aware maintenance budget; complete the 0.11 workflow-link rollout before deploying. |
 
 For 0.8 source compatibility, construct the now non-exhaustive
 `WorkflowDagStepValidationInput` through

@@ -57,7 +57,7 @@ handlers, process model, and admin surface.
   - [Active workflow keys](#active-workflow-keys)
   - [Durable execution resources](#durable-execution-resources)
   - [Workflow recovery](#workflow-recovery)
-  - [Upgrade map for releases 0.6 through 0.11](#upgrade-map-for-releases-06-through-011)
+  - [Upgrade map for releases 0.6 through 0.12](#upgrade-map-for-releases-06-through-012)
   - [0.7 to 0.8 activation and rollback](#07-to-08-activation-and-rollback)
   - [Schedules](#schedules)
   - [Job definition catalog](#job-definition-catalog)
@@ -771,9 +771,9 @@ the function neither commits nor rolls back it. A source must be terminal.
 Recovery of an active-key workflow can remain blocked until its old claim is
 quiescent, or while another run owns that key.
 
-### Upgrade map for releases 0.6 through 0.11
+### Upgrade map for releases 0.6 through 0.12
 
-The `0.11` release line includes the contracts introduced in the preceding
+The `0.12` release line includes the contracts introduced in the preceding
 releases. When skipping versions, preserve each release's schema and
 runtime fence:
 
@@ -785,6 +785,7 @@ runtime fence:
 | `0.9` | No migration after 0.8.0. | Custom runtimes may adopt `JobLeaseIdentity` and its `_for_lease` lifecycle APIs without a coordinated schema or source migration; the positional functions remain available. |
 | `0.10` | Apply `202608180001_job_enqueue_intents` before any process records or promotes enqueue intents. | Deploy exact-ID retention cleanup to every queue-retention caller before enabling intent writers. Keep at least one promoter for every intent type, and budget for each enabled supervisor's independent idle polling. |
 | `0.11` | Apply `202608240001_expand_workflow_step_job_link`, deploy 0.11, drain every 0.10 writer and lease, then apply `202608240002_contract_workflow_step_job_link`. | Migrate every removed `requeue_job` call before compiling 0.11: use exact-scope compare-and-requeue for canceled/dead-lettered jobs and fresh-job successful replay for `SUCCEEDED`. The contract migration is the 0.10 rollback boundary. |
+| `0.12` | No migration after 0.11.0. | Update exhaustive `QueryErrorKind` matches for `PostgresLockNotAvailable`. Runtime workers now bound and retry contended heartbeats within the lease-maintenance budget; complete the 0.11 workflow-link rollout before deployment. |
 
 For 0.8 source upgrades, construct `WorkflowDagStepValidationInput` with
 `WorkflowDagStepValidationInput::new(...)` and its option setters; it is now
@@ -1533,7 +1534,7 @@ crate from its packaged tarball. If the cache and schema drift apart,
 Prepare a release:
 
 ```bash
-./scripts/prepare-release.sh 0.11.0
+./scripts/prepare-release.sh 0.12.0
 ```
 
 The preparation script starts from a clean working tree or resumes an existing
@@ -1551,7 +1552,7 @@ or `runledger-runtime` and commit any resulting `.sqlx/` changes.
 After reviewing and committing the prepared diff:
 
 ```bash
-./scripts/publish-release.sh 0.11.0
+./scripts/publish-release.sh 0.12.0
 ```
 
 Before publishing any crate, the publish script confirms that the release tag
@@ -1560,22 +1561,20 @@ point at the exact local commit, and verifies that commit's completed GitHub
 Actions `CI` run and every job succeeded. It then dry-runs the branch and tag
 push, publishes crates in dependency order, and dry-runs each once its
 workspace dependencies are indexed. Finally, it atomically pushes `HEAD` as
-both the current branch and remote `v0.11.0` tag, then creates or reconciles the
+both the current branch and remote `v0.12.0` tag, then creates or reconciles the
 local lightweight tag. A local-only tag left by an older failed release does
 not block a retry. The publication preflight requires an authenticated GitHub
 CLI. Set `PUBLISH_REMOTE` to override the git remote for the final push.
 
 Observable contract changes to call out in release notes for this line:
 
-- The deprecated `requeue_job` symbol is removed. Migrate canceled and
-  dead-lettered recovery to the exact-scope compare-and-requeue APIs, and
-  migrate successful work to fresh-job replay before compiling 0.11.
-- The workflow-step/job link uses an expand/drain/contract migration. Apply
-  `202608240001` before deploying 0.11 and `202608240002` only after all 0.10
-  writers and leases have drained.
-- Typed running and ordinary-progress APIs replace ambiguous stage-bearing
-  progress writes; the older progress wrappers remain deprecated migration
-  paths for this release.
+- `QueryErrorKind` adds the `PostgresLockNotAvailable` variant. Update
+  exhaustive downstream matches before compiling 0.12.
+- Runtime heartbeats remain cancellation-safe while progress owns the same job
+  row, retry transient PostgreSQL lock contention within a fixed lease-aware
+  deadline, and stop handler polling before lease ownership expires.
+- No new database migration is required after 0.11. Complete the 0.11
+  workflow-step/job-link expand/drain/contract rollout before deploying 0.12.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

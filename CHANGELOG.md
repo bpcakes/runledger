@@ -4,6 +4,9 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-26
+[Compare changes](https://github.com/bpcakes/runledger/compare/v0.11.0...v0.12.0)
+
 ### Fixed
 
 - Keep polling a job handler and its timeout while a lease heartbeat waits on
@@ -18,6 +21,22 @@ All notable changes to this workspace are documented here.
   workflow propagation. A heartbeat that exhausts its lease-maintenance budget
   stops the handler and leaves its consumed attempt for ordinary reaper retry
   or dead-letter recovery on the PostgreSQL 18 baseline.
+
+### Changed
+
+- Breaking: add `PostgresLockNotAvailable` to the public, exhaustive
+  `QueryErrorKind` enum so runtimes can distinguish retryable PostgreSQL
+  `55P03` lock contention from unrelated persistence failures. Downstream
+  exhaustive matches must handle the new variant before compiling against
+  0.12.
+
+### Upgrade notes
+
+- No new database migration is required after 0.11.0. Complete the 0.11
+  workflow-step/job-link expand/drain/contract rollout before deploying 0.12.
+- Update exhaustive `QueryErrorKind` matches for `PostgresLockNotAvailable`.
+  Application-facing error handling should continue to prefer stable
+  `QueryError::code()` values.
 
 ## [0.11.0] - 2026-08-24
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.10.1...v0.11.0)

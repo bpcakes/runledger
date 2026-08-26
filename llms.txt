@@ -1,8 +1,8 @@
 # Runledger LLM Integration Summary
 
 Runledger is a Rust workspace for durable jobs, workflow orchestration, and
-worker runtime loops on PostgreSQL. This summary describes release 0.11.0,
-including the 0.6 through 0.11 continuation, recovery, replay, metrics, event,
+worker runtime loops on PostgreSQL. This summary describes release 0.12.0,
+including the 0.6 through 0.12 continuation, recovery, replay, metrics, event,
 coordination, lease-identity, and durable enqueue-intent contracts. The minimum
 supported versions are Rust 1.88 and PostgreSQL 18.
 
@@ -371,7 +371,9 @@ For public surfaces, return `QueryError::code()` and
 `QueryError::client_message()`. Use `QueryError::internal_message()` only for
 trusted diagnostics. `QueryError::kind()` is reserved for the small
 compile-checked cross-crate policy set; ordinary application handling should
-branch on stable codes.
+branch on stable codes. Release 0.12 adds the exhaustive
+`QueryErrorKind::PostgresLockNotAvailable` variant; downstream exhaustive
+matches must handle it when upgrading.
 
 ## More Complete Examples
 
