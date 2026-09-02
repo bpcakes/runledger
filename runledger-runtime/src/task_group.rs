@@ -541,30 +541,46 @@ fn log_abort_drain_timeout(timeout: Duration) {
 fn classify_task_result(task: &'static str, result: RuntimeTaskJoinResult) -> Option<RuntimeError> {
     match result {
         Ok(RuntimeTaskExit::Shutdown) => {
-            debug!(task, "supervised runtime task joined after shutdown");
+            log_supervised_task_shutdown(task);
             None
         }
         Ok(RuntimeTaskExit::Completed) => {
-            debug!(task, "supervised runtime task exited before shutdown");
+            log_supervised_task_completed_early(task);
             Some(RuntimeError::TaskExitedUnexpectedly { task })
         }
         Ok(RuntimeTaskExit::InvalidConfig(source)) => {
-            debug!(
-                task,
-                "supervised runtime task rejected invalid config after build validation"
-            );
+            log_supervised_task_invalid_config(task);
             Some(RuntimeError::InvalidJobsConfig { source })
         }
         Err(source) => {
-            debug!(
-                task,
-                is_cancelled = source.is_cancelled(),
-                is_panic = source.is_panic(),
-                "supervised runtime task join failed"
-            );
+            log_supervised_task_join_failed(task, &source);
             Some(RuntimeError::TaskJoin { task, source })
         }
     }
+}
+
+fn log_supervised_task_shutdown(task: &'static str) {
+    debug!(task, "supervised runtime task joined after shutdown");
+}
+
+fn log_supervised_task_completed_early(task: &'static str) {
+    debug!(task, "supervised runtime task exited before shutdown");
+}
+
+fn log_supervised_task_invalid_config(task: &'static str) {
+    debug!(
+        task,
+        "supervised runtime task rejected invalid config after build validation"
+    );
+}
+
+fn log_supervised_task_join_failed(task: &'static str, source: &tokio::task::JoinError) {
+    debug!(
+        task,
+        is_cancelled = source.is_cancelled(),
+        is_panic = source.is_panic(),
+        "supervised runtime task join failed"
+    );
 }
 
 #[cfg(test)]

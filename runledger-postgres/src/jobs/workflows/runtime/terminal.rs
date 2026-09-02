@@ -451,80 +451,148 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
     while let Some((prerequisite_step_id, prerequisite_terminal_status)) =
         terminal_queue.pop_front()
     {
-        let edges = sqlx::query!(
-            "SELECT workflow_run_id, dependent_step_id,
+        apply_terminal_prerequisite(
+            tx,
+            workflow_run_id,
+            prerequisite_step_id,
+            prerequisite_terminal_status,
+            &mut terminal_queue,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn apply_terminal_prerequisite(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    prerequisite_step_id: Uuid,
+    prerequisite_terminal_status: WorkflowStepStatus,
+    terminal_queue: &mut VecDeque<(Uuid, WorkflowStepStatus)>,
+) -> Result<()> {
+    let direct_dependent_updates = load_direct_dependent_updates(
+        tx,
+        workflow_run_id,
+        prerequisite_step_id,
+        prerequisite_terminal_status,
+    )
+    .await?;
+    if direct_dependent_updates.is_empty() {
+        return Ok(());
+    }
+
+    let rows = lock_and_update_direct_dependents(
+        tx,
+        workflow_run_id,
+        prerequisite_step_id,
+        &direct_dependent_updates,
+    )
+    .await?;
+
+    for row in rows {
+        enqueue_ready_or_canceled_dependent(tx, workflow_run_id, row, terminal_queue).await?;
+    }
+
+    Ok(())
+}
+
+struct DirectDependentUpdate {
+    step_id: Uuid,
+    dependency_unsatisfied: bool,
+}
+
+async fn load_direct_dependent_updates(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    prerequisite_step_id: Uuid,
+    prerequisite_terminal_status: WorkflowStepStatus,
+) -> Result<Vec<DirectDependentUpdate>> {
+    let edges = sqlx::query!(
+        "SELECT workflow_run_id, dependent_step_id,
                     release_mode::text AS \"release_mode!\"
              FROM workflow_step_dependencies
              WHERE prerequisite_step_id = $1
              ORDER BY dependent_step_id ASC",
-            prerequisite_step_id,
-        )
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|error| {
-            Error::from_query_sqlx_with_context("lookup workflow step dependency edges", error)
-        })?;
+        prerequisite_step_id,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("lookup workflow step dependency edges", error)
+    })?;
 
-        let mut dependent_step_ids = Vec::with_capacity(edges.len());
-        let mut dependency_unsatisfied = Vec::with_capacity(edges.len());
-        for edge in edges {
-            if edge.workflow_run_id != workflow_run_id {
-                return Err(workflow_internal_state_error(format!(
-                    "workflow dependency edge from prerequisite step {prerequisite_step_id} belongs to run {}, expected {workflow_run_id}",
-                    edge.workflow_run_id,
-                )));
-            }
-
-            let dependent_step_id: Uuid = edge.dependent_step_id;
-            let release_mode = parse_workflow_release_mode(edge.release_mode)?;
-            let is_unsatisfied = matches!(release_mode, WorkflowDependencyReleaseMode::OnSuccess)
-                && !matches!(prerequisite_terminal_status, WorkflowStepStatus::Succeeded);
-
-            dependent_step_ids.push(dependent_step_id);
-            dependency_unsatisfied.push(is_unsatisfied);
+    let mut updates = Vec::with_capacity(edges.len());
+    for edge in edges {
+        if edge.workflow_run_id != workflow_run_id {
+            return Err(workflow_internal_state_error(format!(
+                "workflow dependency edge from prerequisite step {prerequisite_step_id} belongs to run {}, expected {workflow_run_id}",
+                edge.workflow_run_id,
+            )));
         }
 
-        if dependent_step_ids.is_empty() {
-            continue;
-        }
+        let dependent_step_id: Uuid = edge.dependent_step_id;
+        let release_mode = parse_workflow_release_mode(edge.release_mode)?;
+        let is_unsatisfied = matches!(release_mode, WorkflowDependencyReleaseMode::OnSuccess)
+            && !matches!(prerequisite_terminal_status, WorkflowStepStatus::Succeeded);
 
-        // Intersecting fan-outs can update the same dependent from concurrent
-        // prerequisite completions. Lock the entire direct batch in stable UUID
-        // order before changing any counters so every completion acquires shared
-        // rows in the same order. The following UPDATE runs as a fresh READ
-        // COMMITTED statement and therefore observes counters committed while
-        // this lock acquisition waited.
-        let locked_dependent_step_ids = sqlx::query_scalar!(
-            "SELECT id
+        updates.push(DirectDependentUpdate {
+            step_id: dependent_step_id,
+            dependency_unsatisfied: is_unsatisfied,
+        });
+    }
+
+    Ok(updates)
+}
+
+async fn lock_and_update_direct_dependents(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    prerequisite_step_id: Uuid,
+    updates: &[DirectDependentUpdate],
+) -> Result<Vec<UpdatedDependent>> {
+    let (dependent_step_ids, dependency_unsatisfied): (Vec<_>, Vec<_>) = updates
+        .iter()
+        .map(|update| (update.step_id, update.dependency_unsatisfied))
+        .unzip();
+
+    // Intersecting fan-outs can update the same dependent from concurrent
+    // prerequisite completions. Lock the entire direct batch in stable UUID
+    // order before changing any counters so every completion acquires shared
+    // rows in the same order. The following UPDATE runs as a fresh READ
+    // COMMITTED statement and therefore observes counters committed while
+    // this lock acquisition waited.
+    let locked_dependent_step_ids = sqlx::query_scalar!(
+        "SELECT id
              FROM workflow_steps
              WHERE id = ANY($1::uuid[])
                AND workflow_run_id = $2
              ORDER BY id ASC
              FOR UPDATE",
-            &dependent_step_ids,
-            workflow_run_id,
+        &dependent_step_ids,
+        workflow_run_id,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context(
+            "lock direct workflow dependents for counter update",
+            error,
         )
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|error| {
-            Error::from_query_sqlx_with_context(
-                "lock direct workflow dependents for counter update",
-                error,
-            )
-        })?;
+    })?;
 
-        if let Some(dependent_step_id) = dependent_step_ids.iter().find(|dependent_step_id| {
-            locked_dependent_step_ids
-                .binary_search(dependent_step_id)
-                .is_err()
-        }) {
-            return Err(workflow_internal_state_error(format!(
-                "workflow dependency edge from prerequisite step {prerequisite_step_id} references dependent step {dependent_step_id} outside expected run {workflow_run_id}",
-            )));
-        }
+    if let Some(dependent_step_id) = dependent_step_ids.iter().find(|dependent_step_id| {
+        locked_dependent_step_ids
+            .binary_search(dependent_step_id)
+            .is_err()
+    }) {
+        return Err(workflow_internal_state_error(format!(
+            "workflow dependency edge from prerequisite step {prerequisite_step_id} references dependent step {dependent_step_id} outside expected run {workflow_run_id}",
+        )));
+    }
 
-        let mut rows = sqlx::query!(
-            "WITH dependency_updates AS (
+    let mut rows = sqlx::query!(
+        "WITH dependency_updates AS (
                 SELECT dependent_step_id, dependency_unsatisfied
                 FROM unnest($1::uuid[], $2::boolean[])
                     AS direct_dependents(dependent_step_id, dependency_unsatisfied)
@@ -552,32 +620,31 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                 ws.status::text AS \"status!\",
                 ws.dependency_count_pending,
                 ws.dependency_count_unsatisfied",
-            &dependent_step_ids,
-            &dependency_unsatisfied,
-            workflow_run_id,
-        )
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|error| {
-            Error::from_query_sqlx_with_context(
-                "batch update workflow step dependency counters",
-                error,
-            )
-        })?;
-        rows.sort_by_key(|row| row.id);
+        &dependent_step_ids,
+        &dependency_unsatisfied,
+        workflow_run_id,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("batch update workflow step dependency counters", error)
+    })?;
+    rows.sort_by_key(|row| row.id);
 
-        if rows
-            .iter()
-            .map(|row| row.id)
-            .ne(dependent_step_ids.iter().copied())
-        {
-            return Err(workflow_internal_state_error(format!(
-                "workflow dependency batch from prerequisite step {prerequisite_step_id} updated an unexpected dependent set in run {workflow_run_id}",
-            )));
-        }
+    if rows
+        .iter()
+        .map(|row| row.id)
+        .ne(dependent_step_ids.iter().copied())
+    {
+        return Err(workflow_internal_state_error(format!(
+            "workflow dependency batch from prerequisite step {prerequisite_step_id} updated an unexpected dependent set in run {workflow_run_id}",
+        )));
+    }
 
-        for row in rows {
-            let candidate = StepReleaseCandidate::from_decoded_fields(StepReleaseCandidateInit {
+    let mut decoded = Vec::with_capacity(rows.len());
+    for row in rows {
+        decoded.push(UpdatedDependent {
+            candidate: StepReleaseCandidate::from_decoded_fields(StepReleaseCandidateInit {
                 id: row.id,
                 workflow_run_id: row.workflow_run_id,
                 execution_kind: parse_workflow_step_execution_kind(row.execution_kind)?,
@@ -589,25 +656,39 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                 timeout_seconds: row.timeout_seconds,
                 stage: row.stage.map(parse_job_stage).transpose()?,
                 execution_resource_key: row.execution_resource_key,
-            });
-            let status = parse_workflow_step_status(row.status)?;
-            let dependency_count_pending: i32 = row.dependency_count_pending;
-            let dependency_count_unsatisfied: i32 = row.dependency_count_unsatisfied;
-            if dependency_count_pending != 0 {
-                continue;
-            }
+            }),
+            status: parse_workflow_step_status(row.status)?,
+            dependency_count_pending: row.dependency_count_pending,
+            dependency_count_unsatisfied: row.dependency_count_unsatisfied,
+        });
+    }
+    Ok(decoded)
+}
 
-            if status != WorkflowStepStatus::Blocked {
-                continue;
-            }
+struct UpdatedDependent {
+    candidate: StepReleaseCandidate,
+    status: WorkflowStepStatus,
+    dependency_count_pending: i32,
+    dependency_count_unsatisfied: i32,
+}
 
-            if dependency_count_unsatisfied == 0 {
-                release_candidate_step_tx(tx, &candidate).await?;
-                continue;
-            }
+async fn enqueue_ready_or_canceled_dependent(
+    tx: &mut DbTx<'_>,
+    workflow_run_id: Uuid,
+    row: UpdatedDependent,
+    terminal_queue: &mut VecDeque<(Uuid, WorkflowStepStatus)>,
+) -> Result<()> {
+    if row.dependency_count_pending != 0 || row.status != WorkflowStepStatus::Blocked {
+        return Ok(());
+    }
 
-            let canceled_row = sqlx::query_scalar!(
-                "UPDATE workflow_steps
+    if row.dependency_count_unsatisfied == 0 {
+        release_candidate_step_tx(tx, &row.candidate).await?;
+        return Ok(());
+    }
+
+    let canceled_row = sqlx::query_scalar!(
+        "UPDATE workflow_steps
                  SET status = 'CANCELED',
                      finished_at = COALESCE(finished_at, now()),
                      status_reason = 'workflow.dependency_unsatisfied',
@@ -619,21 +700,16 @@ pub(crate) async fn resolve_terminal_step_queue_tx(
                    AND workflow_run_id = $2
                    AND status = 'BLOCKED'
                  RETURNING id",
-                candidate.id(),
-                workflow_run_id,
-            )
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context("cancel blocked workflow step", error)
-            })?;
+        row.candidate.id(),
+        workflow_run_id,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("cancel blocked workflow step", error))?;
 
-            if canceled_row.is_some() {
-                terminal_queue.push_back((candidate.id(), WorkflowStepStatus::Canceled));
-            }
-        }
+    if canceled_row.is_some() {
+        terminal_queue.push_back((row.candidate.id(), WorkflowStepStatus::Canceled));
     }
-
     Ok(())
 }
 

@@ -370,13 +370,7 @@ async fn complete_job_continuation_after_handler(
     {
         Err(error) => {
             if let Some(failure) = invalid_continuation_failure_from_error(&error) {
-                warn!(
-                    job_id = %completion_context.job.id,
-                    attempt = completion_context.job.attempt,
-                    failure_code = failure.code,
-                    failure_message = %failure.message,
-                    "handler returned an invalid continuation; marking job terminal"
-                );
+                log_invalid_continuation(completion_context.job, &failure);
                 complete_job_failure_after_handler(completion_context, failure, observation).await;
                 return;
             }
@@ -386,41 +380,17 @@ async fn complete_job_continuation_after_handler(
                 JobCompletionPersistenceOperation::Continuation,
                 error,
                 |error, lease_owner_mismatch| {
-                    let error = WorkerError::CompleteContinuation {
-                        job_id: completion_context.job.id,
-                        attempt: completion_context.job.attempt,
-                        source: error,
-                    };
-                    if lease_owner_mismatch {
-                        warn!(
-                            %error,
-                            job_id = %completion_context.job.id,
-                            run_number = completion_context.job.run_number,
-                            attempt = completion_context.job.attempt,
-                            "successful handler continuation lost lease ownership before persistence"
-                        );
-                    } else {
-                        error!(
-                            %error,
-                            job_id = %completion_context.job.id,
-                            run_number = completion_context.job.run_number,
-                            attempt = completion_context.job.attempt,
-                            "failed to persist successful handler continuation; leaving job leased for recovery"
-                        );
-                    }
+                    log_continuation_persist_error(
+                        completion_context.job,
+                        error,
+                        lease_owner_mismatch,
+                    );
                 },
             )
             .await;
         }
         Ok(outcome) => {
-            info!(
-                job_id = %outcome.job_id,
-                completed_run_number = outcome.completed_run_number,
-                next_run_number = outcome.next_run_number,
-                attempt = outcome.attempt,
-                next_run_at = %outcome.next_run_at,
-                "handler continuation scheduled"
-            );
+            log_continuation_scheduled(&outcome);
             observation
                 .running_notification
                 .spawn_terminal_observer(
@@ -461,72 +431,30 @@ pub(super) async fn complete_job_failure_after_handler(
 
         match completion_result {
             Ok(outcome) => {
-                let effects = failure_completion_post_commit_effects(
-                    outcome,
-                    completion_context.context,
+                apply_failure_completion_outcome(
+                    completion_context,
                     &failure,
-                    observation.duration,
-                );
-                if effects.has_unknown_disposition {
-                    warn!(
-                        job_id = %completion_context.job.id,
-                        job_type = %completion_context.job.job_type,
-                        run_number = completion_context.job.run_number,
-                        attempt = completion_context.job.attempt,
-                        "postgres returned an unknown job failure completion disposition; reporting unknown observer disposition"
-                    );
-                }
-                let FailureCompletionPostCommitEffects {
-                    observer_event,
-                    dead_letter,
-                    checkpoint,
-                    has_unknown_disposition: _,
-                } = effects;
-                notify_failure_observer(observation, observer_event).await;
-
-                if let Some(dead_letter) = dead_letter {
-                    notify_dead_letter_after_handler_failure(
-                        completion_context,
-                        dead_letter,
-                        checkpoint,
-                    )
-                    .await;
-                }
+                    observation,
+                    outcome,
+                )
+                .await;
                 return;
             }
             Err(error) => {
                 if !invalid_retry_timing_rewritten
                     && let Some(invalid_failure) = invalid_retry_timing_failure_from_error(&error)
                 {
-                    warn!(
-                        job_id = %completion_context.job.id,
-                        attempt = completion_context.job.attempt,
-                        original_failure_code = failure.code,
-                        invalid_retry_timing = ?failure.retry_timing(),
-                        replacement_failure_code = invalid_failure.code,
-                        replacement_failure_message = %invalid_failure.message,
-                        "handler returned invalid retry timing; marking job terminal"
+                    log_invalid_retry_timing_rewrite(
+                        completion_context.job,
+                        &failure,
+                        &invalid_failure,
                     );
                     failure = invalid_failure;
                     invalid_retry_timing_rewritten = true;
                     continue;
                 }
 
-                let release_conflict = is_workflow_release_conflict_error(&error);
-                handle_completion_persist_failure(
-                    observation,
-                    JobCompletionPersistenceOperation::Failure,
-                    error,
-                    |error, lease_owner_mismatch| {
-                        log_completion_failure_persist_error(
-                            completion_context.job,
-                            error,
-                            release_conflict,
-                            lease_owner_mismatch,
-                        );
-                    },
-                )
-                .await;
+                persist_failure_completion_error(completion_context, observation, error).await;
                 return;
             }
         }
@@ -661,20 +589,32 @@ fn log_completion_success_persist_error(
         source: error,
     };
     if lease_owner_mismatch {
-        warn!(
-            %error,
-            job_id = %job.id,
-            "successful handler completion lost lease ownership before persistence"
-        );
+        log_success_persist_lease_lost(job, &error);
     } else if release_conflict {
-        warn!(
-            %error,
-            job_id = %job.id,
-            "job success completion conflicted with workflow cancellation; leaving lease for reaper recovery"
-        );
+        log_success_persist_release_conflict(job, &error);
     } else {
-        error!(%error, job_id = %job.id, "failed to mark job success");
+        log_success_persist_failure(job, &error);
     }
+}
+
+fn log_success_persist_lease_lost(job: &jobs::JobQueueRecord, error: &WorkerError) {
+    warn!(
+        %error,
+        job_id = %job.id,
+        "successful handler completion lost lease ownership before persistence"
+    );
+}
+
+fn log_success_persist_release_conflict(job: &jobs::JobQueueRecord, error: &WorkerError) {
+    warn!(
+        %error,
+        job_id = %job.id,
+        "job success completion conflicted with workflow cancellation; leaving lease for reaper recovery"
+    );
+}
+
+fn log_success_persist_failure(job: &jobs::JobQueueRecord, error: &WorkerError) {
+    error!(%error, job_id = %job.id, "failed to mark job success");
 }
 
 fn log_completion_failure_persist_error(
@@ -689,18 +629,164 @@ fn log_completion_failure_persist_error(
         source: error,
     };
     if lease_owner_mismatch {
-        warn!(
-            %error,
-            job_id = %job.id,
-            "handler failure completion lost lease ownership before persistence"
-        );
+        log_failure_persist_lease_lost(job, &error);
     } else if release_conflict {
-        warn!(
-            %error,
-            job_id = %job.id,
-            "job failure completion conflicted with workflow cancellation; leaving lease for reaper recovery"
-        );
+        log_failure_persist_release_conflict(job, &error);
     } else {
-        error!(%error, job_id = %job.id, "failed to mark job failure");
+        log_failure_persist_failure(job, &error);
     }
+}
+
+fn log_failure_persist_lease_lost(job: &jobs::JobQueueRecord, error: &WorkerError) {
+    warn!(
+        %error,
+        job_id = %job.id,
+        "handler failure completion lost lease ownership before persistence"
+    );
+}
+
+fn log_failure_persist_release_conflict(job: &jobs::JobQueueRecord, error: &WorkerError) {
+    warn!(
+        %error,
+        job_id = %job.id,
+        "job failure completion conflicted with workflow cancellation; leaving lease for reaper recovery"
+    );
+}
+
+fn log_failure_persist_failure(job: &jobs::JobQueueRecord, error: &WorkerError) {
+    error!(%error, job_id = %job.id, "failed to mark job failure");
+}
+
+fn log_invalid_continuation(job: &jobs::JobQueueRecord, failure: &JobFailure) {
+    warn!(
+        job_id = %job.id,
+        attempt = job.attempt,
+        failure_code = failure.code,
+        failure_message = %failure.message,
+        "handler returned an invalid continuation; marking job terminal"
+    );
+}
+
+fn log_continuation_persist_error(
+    job: &jobs::JobQueueRecord,
+    error: runledger_postgres::Error,
+    lease_owner_mismatch: bool,
+) {
+    let error = WorkerError::CompleteContinuation {
+        job_id: job.id,
+        attempt: job.attempt,
+        source: error,
+    };
+    if lease_owner_mismatch {
+        log_continuation_persist_lease_lost(job, &error);
+    } else {
+        log_continuation_persist_failure(job, &error);
+    }
+}
+
+fn log_continuation_persist_lease_lost(job: &jobs::JobQueueRecord, error: &WorkerError) {
+    warn!(
+        %error,
+        job_id = %job.id,
+        run_number = job.run_number,
+        attempt = job.attempt,
+        "successful handler continuation lost lease ownership before persistence"
+    );
+}
+
+fn log_continuation_persist_failure(job: &jobs::JobQueueRecord, error: &WorkerError) {
+    error!(
+        %error,
+        job_id = %job.id,
+        run_number = job.run_number,
+        attempt = job.attempt,
+        "failed to persist successful handler continuation; leaving job leased for recovery"
+    );
+}
+
+fn log_continuation_scheduled(outcome: &jobs::JobContinuationOutcome) {
+    info!(
+        job_id = %outcome.job_id,
+        completed_run_number = outcome.completed_run_number,
+        next_run_number = outcome.next_run_number,
+        attempt = outcome.attempt,
+        next_run_at = %outcome.next_run_at,
+        "handler continuation scheduled"
+    );
+}
+
+fn log_invalid_retry_timing_rewrite(
+    job: &jobs::JobQueueRecord,
+    failure: &JobFailure,
+    invalid_failure: &JobFailure,
+) {
+    warn!(
+        job_id = %job.id,
+        attempt = job.attempt,
+        original_failure_code = failure.code,
+        invalid_retry_timing = ?failure.retry_timing(),
+        replacement_failure_code = invalid_failure.code,
+        replacement_failure_message = %invalid_failure.message,
+        "handler returned invalid retry timing; marking job terminal"
+    );
+}
+
+fn log_unknown_failure_disposition(job: &jobs::JobQueueRecord) {
+    warn!(
+        job_id = %job.id,
+        job_type = %job.job_type,
+        run_number = job.run_number,
+        attempt = job.attempt,
+        "postgres returned an unknown job failure completion disposition; reporting unknown observer disposition"
+    );
+}
+
+async fn apply_failure_completion_outcome(
+    completion_context: CompletionContext<'_, '_>,
+    failure: &JobFailure,
+    observation: CompletionObservation<'_>,
+    outcome: jobs::JobFailureCompletionOutcome,
+) {
+    let effects = failure_completion_post_commit_effects(
+        outcome,
+        completion_context.context,
+        failure,
+        observation.duration,
+    );
+    if effects.has_unknown_disposition {
+        log_unknown_failure_disposition(completion_context.job);
+    }
+    let FailureCompletionPostCommitEffects {
+        observer_event,
+        dead_letter,
+        checkpoint,
+        has_unknown_disposition: _,
+    } = effects;
+    notify_failure_observer(observation, observer_event).await;
+
+    if let Some(dead_letter) = dead_letter {
+        notify_dead_letter_after_handler_failure(completion_context, dead_letter, checkpoint).await;
+    }
+}
+
+async fn persist_failure_completion_error(
+    completion_context: CompletionContext<'_, '_>,
+    observation: CompletionObservation<'_>,
+    error: runledger_postgres::Error,
+) {
+    let release_conflict = is_workflow_release_conflict_error(&error);
+    handle_completion_persist_failure(
+        observation,
+        JobCompletionPersistenceOperation::Failure,
+        error,
+        |error, lease_owner_mismatch| {
+            log_completion_failure_persist_error(
+                completion_context.job,
+                error,
+                release_conflict,
+                lease_owner_mismatch,
+            );
+        },
+    )
+    .await;
 }

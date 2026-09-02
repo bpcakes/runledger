@@ -281,10 +281,46 @@ async fn record_job_enqueue_intent_read_committed_tx(
         .idempotency_key
         .ok_or_else(intent_idempotency_key_error)?;
     for resolution_attempt in 0..2 {
-        let row = if let Some(organization_id) = enqueue.organization_id {
-            sqlx::query_as!(
-                JobEnqueueIntentOutcomeRow,
-                "INSERT INTO job_enqueue_intents (
+        if let Some(row) = insert_intent_if_absent(tx, prepared, idempotency_key).await? {
+            return intent_outcome(&row, JobEnqueueIntentDisposition::Inserted);
+        }
+
+        match load_conflicting_intent_outcome(tx, prepared, resolution_attempt).await? {
+            Some(outcome) => return Ok(outcome),
+            None => continue,
+        }
+    }
+
+    // The two bounded attempts above either return an outcome or a classified
+    // error. Keep this defensive fallback in case that control flow changes.
+    Err(intent_conflict_missing_existing_error(
+        enqueue.job_type.as_str(),
+    ))
+}
+
+async fn insert_intent_if_absent(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    prepared: &PreparedIntent<'_>,
+    idempotency_key: &str,
+) -> Result<Option<JobEnqueueIntentOutcomeRow>> {
+    let enqueue = &prepared.enqueue;
+    if let Some(organization_id) = enqueue.organization_id {
+        insert_org_scoped_intent(tx, prepared, organization_id, idempotency_key).await
+    } else {
+        insert_unscoped_intent(tx, prepared, idempotency_key).await
+    }
+}
+
+async fn insert_org_scoped_intent(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    prepared: &PreparedIntent<'_>,
+    organization_id: Uuid,
+    idempotency_key: &str,
+) -> Result<Option<JobEnqueueIntentOutcomeRow>> {
+    let enqueue = &prepared.enqueue;
+    sqlx::query_as!(
+        JobEnqueueIntentOutcomeRow,
+        "INSERT INTO job_enqueue_intents (
                 job_type,
                 organization_id,
                 payload,
@@ -307,25 +343,33 @@ async fn record_job_enqueue_intent_read_committed_tx(
                 status,
                 promoted_job_id,
                 TRUE AS \"enqueue_request_matches!\"",
-                enqueue.job_type as _,
-                organization_id,
-                enqueue.payload,
-                enqueue.priority,
-                enqueue.max_attempts,
-                enqueue.timeout_seconds,
-                enqueue.next_run_at,
-                idempotency_key,
-                prepared.stage,
-                JOB_ENQUEUE_REQUEST_VERSION,
-                &prepared.enqueue_request,
-                prepared.execution_resource_key,
-            )
-            .fetch_optional(&mut **tx.as_tx())
-            .await
-        } else {
-            sqlx::query_as!(
-                JobEnqueueIntentOutcomeRow,
-                "INSERT INTO job_enqueue_intents (
+        enqueue.job_type as _,
+        organization_id,
+        enqueue.payload,
+        enqueue.priority,
+        enqueue.max_attempts,
+        enqueue.timeout_seconds,
+        enqueue.next_run_at,
+        idempotency_key,
+        prepared.stage,
+        JOB_ENQUEUE_REQUEST_VERSION,
+        &prepared.enqueue_request,
+        prepared.execution_resource_key,
+    )
+    .fetch_optional(&mut **tx.as_tx())
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context(RECORD_OPERATION, error))
+}
+
+async fn insert_unscoped_intent(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    prepared: &PreparedIntent<'_>,
+    idempotency_key: &str,
+) -> Result<Option<JobEnqueueIntentOutcomeRow>> {
+    let enqueue = &prepared.enqueue;
+    sqlx::query_as!(
+        JobEnqueueIntentOutcomeRow,
+        "INSERT INTO job_enqueue_intents (
                 job_type,
                 organization_id,
                 payload,
@@ -348,49 +392,44 @@ async fn record_job_enqueue_intent_read_committed_tx(
                 status,
                 promoted_job_id,
                 TRUE AS \"enqueue_request_matches!\"",
-                enqueue.job_type as _,
-                enqueue.payload,
-                enqueue.priority,
-                enqueue.max_attempts,
-                enqueue.timeout_seconds,
-                enqueue.next_run_at,
-                idempotency_key,
-                prepared.stage,
-                JOB_ENQUEUE_REQUEST_VERSION,
-                &prepared.enqueue_request,
-                prepared.execution_resource_key,
-            )
-            .fetch_optional(&mut **tx.as_tx())
-            .await
+        enqueue.job_type as _,
+        enqueue.payload,
+        enqueue.priority,
+        enqueue.max_attempts,
+        enqueue.timeout_seconds,
+        enqueue.next_run_at,
+        idempotency_key,
+        prepared.stage,
+        JOB_ENQUEUE_REQUEST_VERSION,
+        &prepared.enqueue_request,
+        prepared.execution_resource_key,
+    )
+    .fetch_optional(&mut **tx.as_tx())
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context(RECORD_OPERATION, error))
+}
+
+async fn load_conflicting_intent_outcome(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    prepared: &PreparedIntent<'_>,
+    resolution_attempt: i32,
+) -> Result<Option<JobEnqueueIntentOutcome>> {
+    let enqueue = &prepared.enqueue;
+    let existing = load_existing_intent_with_key_share(tx, prepared).await?;
+    let Some(existing) = existing else {
+        if resolution_attempt == 0 {
+            return Ok(None);
         }
-        .map_err(|error| Error::from_query_sqlx_with_context(RECORD_OPERATION, error))?;
+        return Err(intent_conflict_missing_existing_error(
+            enqueue.job_type.as_str(),
+        ));
+    };
 
-        if let Some(row) = row {
-            return intent_outcome(&row, JobEnqueueIntentDisposition::Inserted);
-        }
-
-        let existing = load_existing_intent_with_key_share(tx, prepared).await?;
-        let Some(existing) = existing else {
-            if resolution_attempt == 0 {
-                continue;
-            }
-            return Err(intent_conflict_missing_existing_error(
-                enqueue.job_type.as_str(),
-            ));
-        };
-
-        if !existing.enqueue_request_matches {
-            return Err(intent_idempotency_conflict_error(enqueue.job_type.as_str()));
-        }
-
-        return intent_outcome(&existing, JobEnqueueIntentDisposition::Existing);
+    if !existing.enqueue_request_matches {
+        return Err(intent_idempotency_conflict_error(enqueue.job_type.as_str()));
     }
 
-    // The two bounded attempts above either return an outcome or a classified
-    // error. Keep this defensive fallback in case that control flow changes.
-    Err(intent_conflict_missing_existing_error(
-        enqueue.job_type.as_str(),
-    ))
+    intent_outcome(&existing, JobEnqueueIntentDisposition::Existing).map(Some)
 }
 
 async fn load_existing_intent_with_key_share(
@@ -747,6 +786,23 @@ async fn promote_job_enqueue_intents_read_committed_tx(
 ) -> Result<JobEnqueueIntentPromotionReport> {
     prepare_job_enqueue_intent_promotion_critical_section_tx(tx).await?;
 
+    let candidates =
+        claim_pending_intent_promotion_candidates(tx, allowed_job_types, limit).await?;
+    let mut report = JobEnqueueIntentPromotionReport::default();
+    report.mark_batch_size(candidates.len(), limit);
+    for candidate in candidates {
+        report.record(promote_intent_with_savepoint(tx, candidate).await?);
+    }
+    log_intent_promotion_report(&report);
+
+    Ok(report)
+}
+
+async fn claim_pending_intent_promotion_candidates(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    allowed_job_types: &[String],
+    limit: i64,
+) -> Result<Vec<IntentPromotionCandidate>> {
     let rows = sqlx::query_as!(
         SupportedJobEnqueueIntentPromotionRow,
         "SELECT
@@ -780,62 +836,70 @@ async fn promote_job_enqueue_intents_read_committed_tx(
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("claim job enqueue intents", error))?;
 
-    let candidates = rows
+    Ok(rows
         .into_iter()
         .map(IntentPromotionCandidate::from_row)
-        .collect::<Vec<_>>();
+        .collect())
+}
 
-    let mut report = JobEnqueueIntentPromotionReport::default();
-    report.mark_batch_size(candidates.len(), limit);
-    for candidate in candidates {
-        let intent_id = candidate.id();
-        // Keep these control statements dynamic: compiling three fixed
-        // SAVEPOINT statements would create SQLx cache entries without adding
-        // result-shape safety.
-        sqlx::query("SAVEPOINT promote_intent_row")
-            .execute(&mut **tx.as_tx())
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context("create intent promotion savepoint", error)
-            })?;
+async fn promote_intent_with_savepoint(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    candidate: IntentPromotionCandidate,
+) -> Result<IntentPromotionDisposition> {
+    let intent_id = candidate.id();
+    // Keep these control statements dynamic: compiling three fixed
+    // SAVEPOINT statements would create SQLx cache entries without adding
+    // result-shape safety.
+    sqlx::query("SAVEPOINT promote_intent_row")
+        .execute(&mut **tx.as_tx())
+        .await
+        .map_err(|error| {
+            Error::from_query_sqlx_with_context("create intent promotion savepoint", error)
+        })?;
 
-        let promotion_result = promote_intent_candidate_tx(tx, candidate).await;
+    let promotion_result = promote_intent_candidate_tx(tx, candidate).await;
+    let disposition = match promotion_result {
+        Ok(disposition) => disposition,
+        Err(error) => classified_intent_promotion_failure(tx, intent_id, error).await?,
+    };
 
-        let disposition = match promotion_result {
-            Ok(disposition) => disposition,
-            Err(error) => {
-                rollback_intent_promotion_savepoint(tx).await?;
-                match classify_intent_promotion_failure(&error) {
-                    IntentPromotionFailureAction::Conflict {
-                        code,
-                        client_message,
-                    } => {
-                        mark_intent_conflicted_tx(tx, intent_id, code, client_message).await?;
-                        log_query_intent_promotion_failure(intent_id, &error, "conflicted");
-                        IntentPromotionDisposition::Conflicted
-                    }
-                    IntentPromotionFailureAction::RetryDeferred {
-                        code,
-                        client_message,
-                    } => {
-                        mark_intent_retry_deferred_tx(tx, intent_id, code, client_message).await?;
-                        log_query_intent_promotion_failure(intent_id, &error, "retry_deferred");
-                        IntentPromotionDisposition::RetryDeferred
-                    }
-                    IntentPromotionFailureAction::Propagate => return Err(error),
-                }
-            }
-        };
+    sqlx::query("RELEASE SAVEPOINT promote_intent_row")
+        .execute(&mut **tx.as_tx())
+        .await
+        .map_err(|error| {
+            Error::from_query_sqlx_with_context("release intent promotion savepoint", error)
+        })?;
+    Ok(disposition)
+}
 
-        sqlx::query("RELEASE SAVEPOINT promote_intent_row")
-            .execute(&mut **tx.as_tx())
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context("release intent promotion savepoint", error)
-            })?;
-        report.record(disposition);
+async fn classified_intent_promotion_failure(
+    tx: &mut ReadCommittedTx<'_, '_>,
+    intent_id: Uuid,
+    error: Error,
+) -> Result<IntentPromotionDisposition> {
+    rollback_intent_promotion_savepoint(tx).await?;
+    match classify_intent_promotion_failure(&error) {
+        IntentPromotionFailureAction::Conflict {
+            code,
+            client_message,
+        } => {
+            mark_intent_conflicted_tx(tx, intent_id, code, client_message).await?;
+            log_query_intent_promotion_failure(intent_id, &error, "conflicted");
+            Ok(IntentPromotionDisposition::Conflicted)
+        }
+        IntentPromotionFailureAction::RetryDeferred {
+            code,
+            client_message,
+        } => {
+            mark_intent_retry_deferred_tx(tx, intent_id, code, client_message).await?;
+            log_query_intent_promotion_failure(intent_id, &error, "retry_deferred");
+            Ok(IntentPromotionDisposition::RetryDeferred)
+        }
+        IntentPromotionFailureAction::Propagate => Err(error),
     }
+}
 
+fn log_intent_promotion_report(report: &JobEnqueueIntentPromotionReport) {
     if report.total_promoted > 0
         || report.conflicted > 0
         || report.definition_became_unavailable > 0
@@ -850,8 +914,6 @@ async fn promote_job_enqueue_intents_read_committed_tx(
             "processed durable job enqueue intents"
         );
     }
-
-    Ok(report)
 }
 
 async fn promote_intent_candidate_tx(

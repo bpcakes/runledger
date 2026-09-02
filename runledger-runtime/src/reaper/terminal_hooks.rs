@@ -311,43 +311,31 @@ impl TerminalHookFanout {
             return;
         }
 
-        info!(
-            in_flight_terminal_hooks = self.in_flight.len(),
-            timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
-            "shutdown requested; draining in-flight reaper terminal hooks"
-        );
+        log_terminal_hook_shutdown_drain_start(self.in_flight.len());
 
-        match timeout(
+        if timeout(
             TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT,
             self.drain_hook_results_to_completion(),
         )
         .await
+        .is_err()
         {
-            Ok(()) => {}
-            Err(_) => {
-                warn!(
-                    remaining_terminal_hooks = self.in_flight.len(),
-                    timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
-                    "reaper terminal hooks did not finish before shutdown drain deadline; aborting"
-                );
-                self.in_flight.abort_all();
+            self.abort_remaining_hooks_after_drain_timeout().await;
+        }
+    }
 
-                match timeout(
-                    TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT,
-                    self.drain_hook_results_to_completion(),
-                )
-                .await
-                {
-                    Ok(()) => {}
-                    Err(_) => {
-                        warn!(
-                            remaining_terminal_hooks = self.in_flight.len(),
-                            timeout_ms = TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT.as_millis(),
-                            "reaper terminal hook abort drain timed out during shutdown; dropping unresolved tasks"
-                        );
-                    }
-                }
-            }
+    async fn abort_remaining_hooks_after_drain_timeout(&mut self) {
+        log_terminal_hook_shutdown_drain_timeout(self.in_flight.len());
+        self.in_flight.abort_all();
+
+        if timeout(
+            TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT,
+            self.drain_hook_results_to_completion(),
+        )
+        .await
+        .is_err()
+        {
+            log_terminal_hook_abort_drain_timeout(self.in_flight.len());
         }
     }
 
@@ -372,94 +360,176 @@ impl TerminalHookFanout {
     fn handle_next_hook_result(&mut self, result: HookJoinResult) {
         match result {
             Ok((id, DeadLetterHookOutcome::Completed)) => {
-                if self.metadata.remove(&id).is_none() {
-                    warn!("terminal failure hook completed; metadata missing in reaper loop");
-                }
+                log_completed_hook(self.metadata.remove(&id).is_none());
             }
             Ok((id, DeadLetterHookOutcome::TimedOut)) => {
-                if let Some(meta) = self.metadata.remove(&id) {
-                    warn!(
-                        job_id = meta.job_id,
-                        job_type = meta.job_type,
-                        run_number = meta.run_number,
-                        attempt = meta.attempt,
-                        timeout_ms = DEAD_LETTER_HOOK_TIMEOUT.as_millis(),
-                        "terminal failure hook timed out; continuing reaper loop"
-                    );
-                } else {
-                    warn!(
-                        timeout_ms = DEAD_LETTER_HOOK_TIMEOUT.as_millis(),
-                        "terminal failure hook timed out; metadata missing in reaper loop"
-                    );
-                }
+                log_timed_out_hook(self.metadata.remove(&id));
             }
             Ok((id, DeadLetterHookOutcome::Panicked(panic_message))) => {
-                if let Some(meta) = self.metadata.remove(&id) {
-                    warn!(
-                        job_id = meta.job_id,
-                        job_type = meta.job_type,
-                        run_number = meta.run_number,
-                        attempt = meta.attempt,
-                        panic = %panic_message,
-                        "terminal failure hook panicked; continuing reaper loop"
-                    );
-                } else {
-                    warn!(
-                        panic = %panic_message,
-                        "terminal failure hook panicked; metadata missing in reaper loop"
-                    );
-                }
+                log_panicked_hook(self.metadata.remove(&id), &panic_message);
             }
             Err(error) => {
-                let id = error.id();
-                if let Some(meta) = self.metadata.remove(&id) {
-                    if error.is_panic() {
-                        warn!(
-                            job_id = meta.job_id,
-                            job_type = meta.job_type,
-                            run_number = meta.run_number,
-                            attempt = meta.attempt,
-                            error = %error,
-                            "terminal failure hook panicked; continuing reaper loop"
-                        );
-                    } else if error.is_cancelled() {
-                        warn!(
-                            job_id = meta.job_id,
-                            job_type = meta.job_type,
-                            run_number = meta.run_number,
-                            attempt = meta.attempt,
-                            error = %error,
-                            "terminal failure hook was cancelled; continuing reaper loop"
-                        );
-                    } else {
-                        warn!(
-                            job_id = meta.job_id,
-                            job_type = meta.job_type,
-                            run_number = meta.run_number,
-                            attempt = meta.attempt,
-                            error = %error,
-                            "terminal failure hook join failed; continuing reaper loop"
-                        );
-                    }
-                } else if error.is_panic() {
-                    warn!(
-                        error = %error,
-                        "terminal failure hook panicked; metadata missing in reaper loop"
-                    );
-                } else if error.is_cancelled() {
-                    warn!(
-                        error = %error,
-                        "terminal failure hook was cancelled; metadata missing in reaper loop"
-                    );
-                } else {
-                    warn!(
-                        error = %error,
-                        "terminal failure hook join failed; metadata missing in reaper loop"
-                    );
-                }
+                log_join_failed_hook(self.metadata.remove(&error.id()), &error);
             }
         }
     }
+}
+
+fn log_terminal_hook_shutdown_drain_start(in_flight_terminal_hooks: usize) {
+    info!(
+        in_flight_terminal_hooks,
+        timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
+        "shutdown requested; draining in-flight reaper terminal hooks"
+    );
+}
+
+fn log_terminal_hook_shutdown_drain_timeout(remaining_terminal_hooks: usize) {
+    warn!(
+        remaining_terminal_hooks,
+        timeout_ms = TERMINAL_HOOK_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
+        "reaper terminal hooks did not finish before shutdown drain deadline; aborting"
+    );
+}
+
+fn log_terminal_hook_abort_drain_timeout(remaining_terminal_hooks: usize) {
+    warn!(
+        remaining_terminal_hooks,
+        timeout_ms = TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT.as_millis(),
+        "reaper terminal hook abort drain timed out during shutdown; dropping unresolved tasks"
+    );
+}
+
+fn log_completed_hook(metadata_missing: bool) {
+    if metadata_missing {
+        warn!("terminal failure hook completed; metadata missing in reaper loop");
+    }
+}
+
+fn log_timed_out_hook(meta: Option<HookMetadata>) {
+    match meta {
+        Some(meta) => meta.warn_timed_out(),
+        None => warn_timed_out_hook_missing_metadata(),
+    }
+}
+
+fn log_panicked_hook(meta: Option<HookMetadata>, panic_message: &str) {
+    match meta {
+        Some(meta) => meta.warn_panicked(panic_message),
+        None => warn_panicked_hook_missing_metadata(panic_message),
+    }
+}
+
+fn log_join_failed_hook(meta: Option<HookMetadata>, error: &tokio::task::JoinError) {
+    match (meta, join_error_kind(error)) {
+        (Some(meta), JoinErrorKind::Panic) => meta.warn_join_panic(error),
+        (Some(meta), JoinErrorKind::Cancelled) => meta.warn_join_cancelled(error),
+        (Some(meta), JoinErrorKind::Other) => meta.warn_join_failed(error),
+        (None, JoinErrorKind::Panic) => warn_join_panic_missing_metadata(error),
+        (None, JoinErrorKind::Cancelled) => warn_join_cancelled_missing_metadata(error),
+        (None, JoinErrorKind::Other) => warn_join_failed_missing_metadata(error),
+    }
+}
+
+fn join_error_kind(error: &tokio::task::JoinError) -> JoinErrorKind {
+    if error.is_panic() {
+        JoinErrorKind::Panic
+    } else if error.is_cancelled() {
+        JoinErrorKind::Cancelled
+    } else {
+        JoinErrorKind::Other
+    }
+}
+
+impl HookMetadata {
+    fn warn_timed_out(&self) {
+        warn!(
+            job_id = self.job_id,
+            job_type = self.job_type,
+            run_number = self.run_number,
+            attempt = self.attempt,
+            timeout_ms = DEAD_LETTER_HOOK_TIMEOUT.as_millis(),
+            "terminal failure hook timed out; continuing reaper loop"
+        );
+    }
+
+    fn warn_panicked(&self, panic_message: &str) {
+        warn!(
+            job_id = self.job_id,
+            job_type = self.job_type,
+            run_number = self.run_number,
+            attempt = self.attempt,
+            panic = %panic_message,
+            "terminal failure hook panicked; continuing reaper loop"
+        );
+    }
+
+    fn warn_join_panic(&self, error: &tokio::task::JoinError) {
+        warn!(
+            job_id = self.job_id,
+            job_type = self.job_type,
+            run_number = self.run_number,
+            attempt = self.attempt,
+            error = %error,
+            "terminal failure hook panicked; continuing reaper loop"
+        );
+    }
+
+    fn warn_join_cancelled(&self, error: &tokio::task::JoinError) {
+        warn!(
+            job_id = self.job_id,
+            job_type = self.job_type,
+            run_number = self.run_number,
+            attempt = self.attempt,
+            error = %error,
+            "terminal failure hook was cancelled; continuing reaper loop"
+        );
+    }
+
+    fn warn_join_failed(&self, error: &tokio::task::JoinError) {
+        warn!(
+            job_id = self.job_id,
+            job_type = self.job_type,
+            run_number = self.run_number,
+            attempt = self.attempt,
+            error = %error,
+            "terminal failure hook join failed; continuing reaper loop"
+        );
+    }
+}
+
+fn warn_timed_out_hook_missing_metadata() {
+    warn!(
+        timeout_ms = DEAD_LETTER_HOOK_TIMEOUT.as_millis(),
+        "terminal failure hook timed out; metadata missing in reaper loop"
+    );
+}
+
+fn warn_panicked_hook_missing_metadata(panic_message: &str) {
+    warn!(
+        panic = %panic_message,
+        "terminal failure hook panicked; metadata missing in reaper loop"
+    );
+}
+
+fn warn_join_panic_missing_metadata(error: &tokio::task::JoinError) {
+    warn!(
+        error = %error,
+        "terminal failure hook panicked; metadata missing in reaper loop"
+    );
+}
+
+fn warn_join_cancelled_missing_metadata(error: &tokio::task::JoinError) {
+    warn!(
+        error = %error,
+        "terminal failure hook was cancelled; metadata missing in reaper loop"
+    );
+}
+
+fn warn_join_failed_missing_metadata(error: &tokio::task::JoinError) {
+    warn!(
+        error = %error,
+        "terminal failure hook join failed; metadata missing in reaper loop"
+    );
 }
 
 type HookJoinResult = std::result::Result<(Id, DeadLetterHookOutcome), tokio::task::JoinError>;
@@ -468,4 +538,11 @@ type HookJoinResult = std::result::Result<(Id, DeadLetterHookOutcome), tokio::ta
 enum HookWaitOutcome {
     HookCompleted,
     ShutdownRequested,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinErrorKind {
+    Panic,
+    Cancelled,
+    Other,
 }

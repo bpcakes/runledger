@@ -28,6 +28,7 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+cognitive_complexity = "warn"
 allow_attributes_without_reason = "deny"
 dbg_macro = "deny"
 todo = "deny"

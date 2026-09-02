@@ -248,11 +248,19 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
 
     // Preserve the release protocol's error precedence: malformed persisted
     // job shapes are reported only after the advisory-lock and run-state gates.
-    let execution = candidate.releasable_execution()?;
-    match execution {
-        ReleasableStepExecution::Job(job) => {
-            let row = sqlx::query!(
-                "INSERT INTO job_queue (
+    match candidate.releasable_execution()? {
+        ReleasableStepExecution::Job(job) => release_job_step_tx(tx, candidate, &job).await,
+        ReleasableStepExecution::External => release_external_step_tx(tx, candidate).await,
+    }
+}
+
+async fn release_job_step_tx(
+    tx: &mut DbTx<'_>,
+    candidate: &StepReleaseCandidate,
+    job: &JobReleaseSpec<'_>,
+) -> Result<()> {
+    let row = sqlx::query!(
+        "INSERT INTO job_queue (
                     job_type,
                     organization_id,
                     payload,
@@ -265,26 +273,35 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                  )
                  VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8)
                  RETURNING id, run_number",
-                job.job_type.as_str(),
-                candidate.organization_id,
-                &candidate.payload,
-                job.priority,
-                job.max_attempts,
-                job.timeout_seconds,
-                job.stage.as_db_value(),
-                job.execution_resource_key,
-            )
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context("enqueue released workflow step job", error)
-            })?;
+        job.job_type.as_str(),
+        candidate.organization_id,
+        &candidate.payload,
+        job.priority,
+        job.max_attempts,
+        job.timeout_seconds,
+        job.stage.as_db_value(),
+        job.execution_resource_key,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("enqueue released workflow step job", error)
+    })?;
 
-            let job_id: Uuid = row.id;
-            let run_number: i32 = row.run_number;
+    let job_id: Uuid = row.id;
+    let run_number: i32 = row.run_number;
 
-            let updated = sqlx::query!(
-                "UPDATE workflow_steps
+    mark_released_job_step_enqueued(tx, candidate.id, job_id).await?;
+    insert_released_job_enqueue_event(tx, job, job_id, run_number).await
+}
+
+async fn mark_released_job_step_enqueued(
+    tx: &mut DbTx<'_>,
+    step_id: Uuid,
+    job_id: Uuid,
+) -> Result<()> {
+    let updated = sqlx::query!(
+        "UPDATE workflow_steps
                  SET status = 'ENQUEUED',
                      job_id = $2,
                      released_at = COALESCE(released_at, now()),
@@ -297,26 +314,31 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                    AND job_id IS NULL
                    AND dependency_count_pending = 0
                    AND dependency_count_unsatisfied = 0",
-                candidate.id,
-                job_id,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context(
-                    "mark released workflow step as enqueued",
-                    error,
-                )
-            })?
-            .rows_affected();
-            if updated != 1 {
-                return Err(workflow_internal_state_error(
-                    "workflow step release preconditions were not met",
-                ));
-            }
+        step_id,
+        job_id,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("mark released workflow step as enqueued", error)
+    })?
+    .rows_affected();
+    if updated != 1 {
+        return Err(workflow_internal_state_error(
+            "workflow step release preconditions were not met",
+        ));
+    }
+    Ok(())
+}
 
-            sqlx::query!(
-                "INSERT INTO job_events (
+async fn insert_released_job_enqueue_event(
+    tx: &mut DbTx<'_>,
+    job: &JobReleaseSpec<'_>,
+    job_id: Uuid,
+    run_number: i32,
+) -> Result<()> {
+    sqlx::query!(
+        "INSERT INTO job_events (
                     job_id,
                     run_number,
                     event_type,
@@ -324,25 +346,25 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                     payload
                  )
                  VALUES ($1, $2, 'ENQUEUED', $3, jsonb_build_object('job_type', $4::text))",
-                job_id,
-                run_number,
-                job.stage.as_db_value(),
-                job.job_type.as_str(),
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context(
-                    "insert released workflow step enqueue event",
-                    error,
-                )
-            })?;
+        job_id,
+        run_number,
+        job.stage.as_db_value(),
+        job.job_type.as_str(),
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("insert released workflow step enqueue event", error)
+    })?;
+    Ok(())
+}
 
-            Ok(())
-        }
-        ReleasableStepExecution::External => {
-            let updated = sqlx::query!(
-                "UPDATE workflow_steps
+async fn release_external_step_tx(
+    tx: &mut DbTx<'_>,
+    candidate: &StepReleaseCandidate,
+) -> Result<()> {
+    let updated = sqlx::query!(
+        "UPDATE workflow_steps
                  SET status = 'WAITING_FOR_EXTERNAL',
                      job_id = NULL,
                      released_at = COALESCE(released_at, now()),
@@ -357,26 +379,24 @@ pub(in crate::jobs::workflows) async fn release_candidate_step_tx(
                    AND job_id IS NULL
                    AND dependency_count_pending = 0
                    AND dependency_count_unsatisfied = 0",
-                candidate.id,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context(
-                    "mark released workflow step as waiting for external completion",
-                    error,
-                )
-            })?
-            .rows_affected();
-            if updated != 1 {
-                return Err(workflow_internal_state_error(
-                    "workflow step release preconditions were not met",
-                ));
-            }
-
-            Ok(())
-        }
+        candidate.id,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context(
+            "mark released workflow step as waiting for external completion",
+            error,
+        )
+    })?
+    .rows_affected();
+    if updated != 1 {
+        return Err(workflow_internal_state_error(
+            "workflow step release preconditions were not met",
+        ));
     }
+
+    Ok(())
 }
 
 async fn workflow_run_allows_step_release_tx(

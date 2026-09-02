@@ -68,8 +68,12 @@ fn step_by_key<'a>(steps: &'a [WorkflowStepDbRecord], step_key: &str) -> &'a Wor
 
 fn assert_resolved_job_defaults_overrides_and_external_nullability(steps: &[WorkflowStepDbRecord]) {
     assert_eq!(steps.len(), 3);
+    assert_omitted_defaults_step(step_by_key(steps, "omitted-defaults"));
+    assert_explicit_overrides_step(step_by_key(steps, "explicit-overrides"));
+    assert_external_step_nullability(step_by_key(steps, "external"));
+}
 
-    let omitted = step_by_key(steps, "omitted-defaults");
+fn assert_omitted_defaults_step(omitted: &WorkflowStepDbRecord) {
     assert_eq!(omitted.execution_kind, WorkflowStepExecutionKind::Job);
     assert_eq!(
         omitted.job_type.as_ref().map(|job_type| job_type.as_str()),
@@ -79,8 +83,9 @@ fn assert_resolved_job_defaults_overrides_and_external_nullability(steps: &[Work
     assert_eq!(omitted.max_attempts, Some(DEFAULT_MAX_ATTEMPTS));
     assert_eq!(omitted.timeout_seconds, Some(DEFAULT_TIMEOUT_SECONDS));
     assert_eq!(omitted.stage, Some(JobStage::Queued));
+}
 
-    let override_step = step_by_key(steps, "explicit-overrides");
+fn assert_explicit_overrides_step(override_step: &WorkflowStepDbRecord) {
     assert_eq!(override_step.execution_kind, WorkflowStepExecutionKind::Job);
     assert_eq!(
         override_step
@@ -96,8 +101,9 @@ fn assert_resolved_job_defaults_overrides_and_external_nullability(steps: &[Work
         Some(OVERRIDE_TIMEOUT_SECONDS)
     );
     assert_eq!(override_step.stage, Some(JobStage::Queued));
+}
 
-    let external = step_by_key(steps, "external");
+fn assert_external_step_nullability(external: &WorkflowStepDbRecord) {
     assert_eq!(external.execution_kind, WorkflowStepExecutionKind::External);
     assert!(external.job_type.is_none());
     assert!(external.priority.is_none());

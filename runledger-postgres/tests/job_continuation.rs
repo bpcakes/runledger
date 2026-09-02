@@ -925,10 +925,35 @@ async fn assert_continuing_prerequisite_releases_dependent_once(
     release_on_success: bool,
 ) {
     let (pool, database) = setup_ephemeral_pool(database_name, 4).await;
+    let run = enqueue_continuation_dependency_workflow(&pool, release_on_success).await;
+    let (prerequisite_step_id, prerequisite_job_id) =
+        assert_initial_continuation_dependency(&pool, run.id).await;
+
+    for completed_run_number in 1..=3 {
+        continue_prerequisite_and_assert_dependent_blocked(
+            &pool,
+            run.id,
+            prerequisite_step_id,
+            prerequisite_job_id,
+            completed_run_number,
+        )
+        .await;
+    }
+
+    complete_prerequisite_and_assert_dependent_released_once(&pool, run.id, prerequisite_job_id)
+        .await;
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+async fn enqueue_continuation_dependency_workflow(
+    pool: &runledger_postgres::DbPool,
+    release_on_success: bool,
+) -> runledger_postgres::jobs::WorkflowRunDbRecord {
     let prerequisite_job_type = "jobs.test.workflow_continuation.prerequisite";
     let dependent_job_type = "jobs.test.workflow_continuation.dependent";
-    register_test_job_definition(&pool, prerequisite_job_type).await;
-    register_test_job_definition(&pool, dependent_job_type).await;
+    register_test_job_definition(pool, prerequisite_job_type).await;
+    register_test_job_definition(pool, dependent_job_type).await;
     let prerequisite_payload = json!({"step": "a"});
     let dependent_payload = json!({"step": "b"});
     let metadata = json!({
@@ -962,17 +987,22 @@ async fn assert_continuing_prerequisite_releases_dependent_once(
     .step(dependent)
     .try_build()
     .expect("build dependency workflow");
-    let run = enqueue_workflow_run(&pool, &workflow)
+    enqueue_workflow_run(pool, &workflow)
         .await
-        .expect("enqueue dependency workflow");
-    let initial_steps = list_workflow_steps(&pool, None, run.id)
+        .expect("enqueue dependency workflow")
+}
+
+async fn assert_initial_continuation_dependency(
+    pool: &runledger_postgres::DbPool,
+    workflow_run_id: Uuid,
+) -> (Uuid, Uuid) {
+    let initial_steps = list_workflow_steps(pool, None, workflow_run_id)
         .await
         .expect("list initial steps");
     let prerequisite_step = initial_steps
         .iter()
         .find(|step| step.step_key.as_str() == "a")
         .expect("prerequisite step exists");
-    let prerequisite_step_id = prerequisite_step.id;
     let prerequisite_job_id = prerequisite_step
         .job_id
         .expect("prerequisite job should be released");
@@ -983,64 +1013,73 @@ async fn assert_continuing_prerequisite_releases_dependent_once(
     assert_eq!(dependent_step.status, WorkflowStepStatus::Blocked);
     assert_eq!(dependent_step.job_id, None);
     assert_eq!(dependent_step.dependency_count_pending, 1);
+    (prerequisite_step.id, prerequisite_job_id)
+}
 
-    for completed_run_number in 1..=3 {
-        let claim = claim_one_job(
-            &pool,
-            &format!("worker-prerequisite-{completed_run_number}"),
-        )
-        .await;
-        assert_eq!(claim.id, prerequisite_job_id);
-        assert_eq!(claim.run_number, completed_run_number);
-        let checkpoint = json!({"slice": completed_run_number});
-        complete_job_continuation_with_outcome(
-            &pool,
-            claim.id,
-            claim.run_number,
-            claim.attempt,
-            claim.worker_id.as_deref().expect("prerequisite worker id"),
-            &JobContinuationUpdate {
-                delay: Duration::ZERO,
-                progress_done: Some(i64::from(completed_run_number)),
-                progress_total: Some(4),
-                checkpoint: Some(&checkpoint),
-            },
-        )
+async fn continue_prerequisite_and_assert_dependent_blocked(
+    pool: &runledger_postgres::DbPool,
+    workflow_run_id: Uuid,
+    prerequisite_step_id: Uuid,
+    prerequisite_job_id: Uuid,
+    completed_run_number: i32,
+) {
+    let claim = claim_one_job(pool, &format!("worker-prerequisite-{completed_run_number}")).await;
+    assert_eq!(claim.id, prerequisite_job_id);
+    assert_eq!(claim.run_number, completed_run_number);
+    let checkpoint = json!({"slice": completed_run_number});
+    complete_job_continuation_with_outcome(
+        pool,
+        claim.id,
+        claim.run_number,
+        claim.attempt,
+        claim.worker_id.as_deref().expect("prerequisite worker id"),
+        &JobContinuationUpdate {
+            delay: Duration::ZERO,
+            progress_done: Some(i64::from(completed_run_number)),
+            progress_total: Some(4),
+            checkpoint: Some(&checkpoint),
+        },
+    )
+    .await
+    .expect("continue prerequisite");
+
+    let steps = list_workflow_steps(pool, None, workflow_run_id)
         .await
-        .expect("continue prerequisite");
-
-        let steps = list_workflow_steps(&pool, None, run.id)
+        .expect("list steps after continuation");
+    let continued_prerequisite = steps
+        .iter()
+        .find(|step| step.step_key.as_str() == "a")
+        .expect("continued prerequisite exists");
+    let blocked_dependent = steps
+        .iter()
+        .find(|step| step.step_key.as_str() == "b")
+        .expect("blocked dependent exists");
+    assert_eq!(continued_prerequisite.id, prerequisite_step_id);
+    assert_eq!(continued_prerequisite.status, WorkflowStepStatus::Enqueued);
+    assert_eq!(continued_prerequisite.job_id, Some(prerequisite_job_id));
+    assert_eq!(blocked_dependent.status, WorkflowStepStatus::Blocked);
+    assert_eq!(blocked_dependent.job_id, None);
+    assert_eq!(blocked_dependent.dependency_count_pending, 1);
+    assert_eq!(
+        get_workflow_run_by_id(pool, None, workflow_run_id)
             .await
-            .expect("list steps after continuation");
-        let continued_prerequisite = steps
-            .iter()
-            .find(|step| step.step_key.as_str() == "a")
-            .expect("continued prerequisite exists");
-        let blocked_dependent = steps
-            .iter()
-            .find(|step| step.step_key.as_str() == "b")
-            .expect("blocked dependent exists");
-        assert_eq!(continued_prerequisite.id, prerequisite_step_id);
-        assert_eq!(continued_prerequisite.status, WorkflowStepStatus::Enqueued);
-        assert_eq!(continued_prerequisite.job_id, Some(prerequisite_job_id));
-        assert_eq!(blocked_dependent.status, WorkflowStepStatus::Blocked);
-        assert_eq!(blocked_dependent.job_id, None);
-        assert_eq!(blocked_dependent.dependency_count_pending, 1);
-        assert_eq!(
-            get_workflow_run_by_id(&pool, None, run.id)
-                .await
-                .expect("load active workflow")
-                .expect("workflow exists")
-                .status,
-            runledger_core::jobs::WorkflowRunStatus::Running
-        );
-    }
+            .expect("load active workflow")
+            .expect("workflow exists")
+            .status,
+        runledger_core::jobs::WorkflowRunStatus::Running
+    );
+}
 
-    let final_claim = claim_one_job(&pool, "worker-prerequisite-final").await;
+async fn complete_prerequisite_and_assert_dependent_released_once(
+    pool: &runledger_postgres::DbPool,
+    workflow_run_id: Uuid,
+    prerequisite_job_id: Uuid,
+) {
+    let final_claim = claim_one_job(pool, "worker-prerequisite-final").await;
     assert_eq!(final_claim.id, prerequisite_job_id);
     assert_eq!(final_claim.run_number, 4);
     complete_job_success(
-        &pool,
+        pool,
         final_claim.id,
         final_claim.run_number,
         final_claim.attempt,
@@ -1053,7 +1092,7 @@ async fn assert_continuing_prerequisite_releases_dependent_once(
     .await
     .expect("complete prerequisite");
 
-    let released_steps = list_workflow_steps(&pool, None, run.id)
+    let released_steps = list_workflow_steps(pool, None, workflow_run_id)
         .await
         .expect("list released steps");
     let released_dependent = released_steps
@@ -1066,7 +1105,7 @@ async fn assert_continuing_prerequisite_releases_dependent_once(
         .job_id
         .expect("dependent job should be released exactly once");
     assert_eq!(
-        list_job_events(&pool, None, dependent_job_id, 20, None)
+        list_job_events(pool, None, dependent_job_id, 20, None)
             .await
             .expect("list dependent events")
             .iter()
@@ -1075,10 +1114,10 @@ async fn assert_continuing_prerequisite_releases_dependent_once(
         1
     );
 
-    let dependent_claim = claim_one_job(&pool, "worker-dependent").await;
+    let dependent_claim = claim_one_job(pool, "worker-dependent").await;
     assert_eq!(dependent_claim.id, dependent_job_id);
     complete_job_success(
-        &pool,
+        pool,
         dependent_claim.id,
         dependent_claim.run_number,
         dependent_claim.attempt,
@@ -1091,15 +1130,13 @@ async fn assert_continuing_prerequisite_releases_dependent_once(
     .await
     .expect("complete dependent");
     assert_eq!(
-        get_workflow_run_by_id(&pool, None, run.id)
+        get_workflow_run_by_id(pool, None, workflow_run_id)
             .await
             .expect("load terminal workflow")
             .expect("workflow exists")
             .status,
         runledger_core::jobs::WorkflowRunStatus::Succeeded
     );
-
-    teardown_ephemeral_pool(pool, database).await;
 }
 
 #[tokio::test]

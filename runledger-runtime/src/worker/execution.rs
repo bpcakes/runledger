@@ -239,15 +239,15 @@ impl ClaimedJobExecution {
         };
 
         if lease_owner_mismatch {
-            warn!(
-                %error,
-                job_id = %self.job.id,
-                attempt = self.job.attempt,
-                "aborting job before execution because lease ownership was already lost"
-            );
+            log_running_progress_lease_lost(&error, &self.job);
             return;
         }
 
+        self.release_unstarted_claim_after_running_progress_failure(&error)
+            .await;
+    }
+
+    async fn release_unstarted_claim_after_running_progress_failure(&self, error: &WorkerError) {
         match jobs::release_unstarted_job_claim(
             &self.pool,
             self.lease_identity(),
@@ -256,42 +256,28 @@ impl ClaimedJobExecution {
         )
         .await
         {
-            Ok(()) => {
-                warn!(
-                    %error,
-                    job_id = %self.job.id,
-                    attempt = self.job.attempt,
-                    "running progress could not be persisted; released unstarted claim back to pending"
-                );
-            }
-            Err(release_error) => {
-                let no_longer_releasable =
-                    is_unstarted_claim_release_not_applicable_error(&release_error);
-                let release_error = WorkerError::ReleaseUnstartedClaim {
-                    job_id: self.job.id,
-                    attempt: self.job.attempt,
-                    source: release_error,
-                };
-                if no_longer_releasable {
-                    warn!(
-                        %error,
-                        %release_error,
-                        job_id = %self.job.id,
-                        attempt = self.job.attempt,
-                        "running progress could not be persisted; unstarted release no longer applies and the job will continue under the current lease owner"
-                    );
-                    return;
-                }
-
-                warn!(
-                    %error,
-                    %release_error,
-                    job_id = %self.job.id,
-                    attempt = self.job.attempt,
-                    "running progress could not be persisted; leaving claim for reaper recovery"
-                );
-            }
+            Ok(()) => log_unstarted_claim_released(error, &self.job),
+            Err(release_error) => self.log_unstarted_claim_release_failure(error, release_error),
         }
+    }
+
+    fn log_unstarted_claim_release_failure(
+        &self,
+        error: &WorkerError,
+        release_error: runledger_postgres::Error,
+    ) {
+        let no_longer_releasable = is_unstarted_claim_release_not_applicable_error(&release_error);
+        let release_error = WorkerError::ReleaseUnstartedClaim {
+            job_id: self.job.id,
+            attempt: self.job.attempt,
+            source: release_error,
+        };
+        if no_longer_releasable {
+            log_unstarted_claim_release_not_applicable(error, &release_error, &self.job);
+            return;
+        }
+
+        log_unstarted_claim_left_for_reaper(error, &release_error, &self.job);
     }
 
     async fn execute_job_handler_with_heartbeats(
@@ -315,12 +301,7 @@ impl ClaimedJobExecution {
         loop {
             tokio::select! {
                 result = &mut execution => {
-                    return match result {
-                        Ok(result) => result.map_err(JobExecutionFailure::Handler),
-                        Err(panic_payload) => {
-                            Err(JobExecutionFailure::Handler(handler_panic_failure(panic_payload)))
-                        }
-                    };
+                    return map_handler_join(result);
                 }
                 _ = &mut timeout => {
                     return Err(JobExecutionFailure::Handler(JobFailure::timeout(
@@ -329,43 +310,7 @@ impl ClaimedJobExecution {
                     )));
                 }
                 Some(result) = pending_heartbeats.next(), if !pending_heartbeats.is_empty() => {
-                    let error = match result {
-                        Ok(()) => continue,
-                        Err(HeartbeatMaintenanceError::DeadlineElapsed) => {
-                            warn!(
-                                job_id = %self.job.id,
-                                attempt = self.job.attempt,
-                                heartbeat_budget_ms = heartbeat_budget.as_millis(),
-                                "aborting job because lease heartbeat exceeded its maintenance budget"
-                            );
-                            return Err(JobExecutionFailure::LeaseMaintenance(
-                                lease_maintenance_failure(),
-                            ));
-                        }
-                        Err(HeartbeatMaintenanceError::Persistence(error)) => error,
-                    };
-                    let lease_owner_mismatch = is_lease_owner_mismatch_error(&error);
-                    let error = WorkerError::Heartbeat {
-                        job_id: self.job.id,
-                        attempt: self.job.attempt,
-                        source: error,
-                    };
-
-                    if lease_owner_mismatch {
-                        warn!(%error, job_id = %self.job.id, "job heartbeat lost lease ownership");
-                        return Err(JobExecutionFailure::LeaseMaintenance(
-                            lease_owner_mismatch_failure(),
-                        ));
-                    }
-
-                    warn!(
-                        %error,
-                        job_id = %self.job.id,
-                        "aborting job because lease heartbeat could not be persisted"
-                    );
-                    return Err(JobExecutionFailure::LeaseMaintenance(
-                        lease_maintenance_failure(),
-                    ));
+                    self.heartbeat_join_to_failure(result, heartbeat_budget)?;
                 }
                 _ = ticker.tick(), if pending_heartbeats.is_empty() => {
                     // Keep the heartbeat future in the select set instead of
@@ -386,6 +331,127 @@ impl ClaimedJobExecution {
             }
         }
     }
+
+    fn heartbeat_join_to_failure(
+        &self,
+        result: Result<(), HeartbeatMaintenanceError>,
+        heartbeat_budget: Duration,
+    ) -> Result<(), JobExecutionFailure> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(HeartbeatMaintenanceError::DeadlineElapsed) => {
+                log_heartbeat_budget_exceeded(&self.job, heartbeat_budget);
+                Err(JobExecutionFailure::LeaseMaintenance(
+                    lease_maintenance_failure(),
+                ))
+            }
+            Err(HeartbeatMaintenanceError::Persistence(error)) => {
+                self.heartbeat_persist_failure(error)
+            }
+        }
+    }
+
+    fn heartbeat_persist_failure(
+        &self,
+        error: runledger_postgres::Error,
+    ) -> Result<(), JobExecutionFailure> {
+        let lease_owner_mismatch = is_lease_owner_mismatch_error(&error);
+        let error = WorkerError::Heartbeat {
+            job_id: self.job.id,
+            attempt: self.job.attempt,
+            source: error,
+        };
+
+        if lease_owner_mismatch {
+            log_heartbeat_lost_lease(&error, &self.job);
+            return Err(JobExecutionFailure::LeaseMaintenance(
+                lease_owner_mismatch_failure(),
+            ));
+        }
+
+        log_heartbeat_persist_abort(&error, &self.job);
+        Err(JobExecutionFailure::LeaseMaintenance(
+            lease_maintenance_failure(),
+        ))
+    }
+}
+
+fn map_handler_join(
+    result: Result<Result<JobCompletion, JobFailure>, Box<dyn Any + Send>>,
+) -> Result<JobCompletion, JobExecutionFailure> {
+    match result {
+        Ok(result) => result.map_err(JobExecutionFailure::Handler),
+        Err(panic_payload) => Err(JobExecutionFailure::Handler(handler_panic_failure(
+            panic_payload,
+        ))),
+    }
+}
+
+fn log_running_progress_lease_lost(error: &WorkerError, job: &jobs::JobQueueRecord) {
+    warn!(
+        %error,
+        job_id = %job.id,
+        attempt = job.attempt,
+        "aborting job before execution because lease ownership was already lost"
+    );
+}
+
+fn log_unstarted_claim_released(error: &WorkerError, job: &jobs::JobQueueRecord) {
+    warn!(
+        %error,
+        job_id = %job.id,
+        attempt = job.attempt,
+        "running progress could not be persisted; released unstarted claim back to pending"
+    );
+}
+
+fn log_unstarted_claim_release_not_applicable(
+    error: &WorkerError,
+    release_error: &WorkerError,
+    job: &jobs::JobQueueRecord,
+) {
+    warn!(
+        %error,
+        %release_error,
+        job_id = %job.id,
+        attempt = job.attempt,
+        "running progress could not be persisted; unstarted release no longer applies and the job will continue under the current lease owner"
+    );
+}
+
+fn log_unstarted_claim_left_for_reaper(
+    error: &WorkerError,
+    release_error: &WorkerError,
+    job: &jobs::JobQueueRecord,
+) {
+    warn!(
+        %error,
+        %release_error,
+        job_id = %job.id,
+        attempt = job.attempt,
+        "running progress could not be persisted; leaving claim for reaper recovery"
+    );
+}
+
+fn log_heartbeat_budget_exceeded(job: &jobs::JobQueueRecord, heartbeat_budget: Duration) {
+    warn!(
+        job_id = %job.id,
+        attempt = job.attempt,
+        heartbeat_budget_ms = heartbeat_budget.as_millis(),
+        "aborting job because lease heartbeat exceeded its maintenance budget"
+    );
+}
+
+fn log_heartbeat_lost_lease(error: &WorkerError, job: &jobs::JobQueueRecord) {
+    warn!(%error, job_id = %job.id, "job heartbeat lost lease ownership");
+}
+
+fn log_heartbeat_persist_abort(error: &WorkerError, job: &jobs::JobQueueRecord) {
+    warn!(
+        %error,
+        job_id = %job.id,
+        "aborting job because lease heartbeat could not be persisted"
+    );
 }
 
 async fn heartbeat_within_maintenance_budget(

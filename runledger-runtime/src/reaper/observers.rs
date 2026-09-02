@@ -171,36 +171,53 @@ async fn abort_reaped_observer_fanout(in_flight: &mut JoinSet<ReapedObserverTask
         return;
     }
 
+    log_reaped_observer_abort_start(in_flight.len());
+    in_flight.abort_all();
+    log_reaped_observer_abort_drain(
+        timeout(
+            REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT,
+            drain_aborted_reaped_observer_notifications(in_flight),
+        )
+        .await,
+        in_flight.len(),
+    );
+}
+
+fn log_reaped_observer_abort_start(in_flight_reaped_observer_callbacks: usize) {
     warn!(
-        in_flight_reaped_observer_callbacks = in_flight.len(),
+        in_flight_reaped_observer_callbacks,
         drain_timeout_ms = REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT.as_millis(),
         "shutdown requested while reaped lease observers are running; aborting in-flight callbacks"
     );
+}
 
-    in_flight.abort_all();
-    let drain_result = timeout(
-        REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT,
-        drain_aborted_reaped_observer_notifications(in_flight),
-    )
-    .await;
-
+fn log_reaped_observer_abort_drain(
+    drain_result: Result<usize, tokio::time::error::Elapsed>,
+    remaining_in_flight_observers: usize,
+) {
     match drain_result {
         Ok(cancelled_observer_count) => {
-            if cancelled_observer_count > 0 {
-                info!(
-                    cancelled_observer_count,
-                    "reaped lease observer callbacks cancelled due to shutdown request"
-                );
-            }
+            log_reaped_observer_cancelled(cancelled_observer_count);
         }
-        Err(_) => {
-            warn!(
-                remaining_in_flight_observers = in_flight.len(),
-                drain_timeout_ms = REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT.as_millis(),
-                "reaped lease observer abort drain timed out during shutdown; dropping unresolved observer tasks"
-            );
-        }
+        Err(_) => log_reaped_observer_abort_timeout(remaining_in_flight_observers),
     }
+}
+
+fn log_reaped_observer_cancelled(cancelled_observer_count: usize) {
+    if cancelled_observer_count > 0 {
+        info!(
+            cancelled_observer_count,
+            "reaped lease observer callbacks cancelled due to shutdown request"
+        );
+    }
+}
+
+fn log_reaped_observer_abort_timeout(remaining_in_flight_observers: usize) {
+    warn!(
+        remaining_in_flight_observers,
+        drain_timeout_ms = REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT.as_millis(),
+        "reaped lease observer abort drain timed out during shutdown; dropping unresolved observer tasks"
+    );
 }
 
 async fn drain_aborted_reaped_observer_notifications(
@@ -229,29 +246,35 @@ fn handle_reaped_observer_join_result(result: ReapedObserverJoinResult) {
         Ok(ReapedObserverTaskResult {
             metadata,
             outcome: ReapedObserverTaskOutcome::Panicked(panic_message),
-        }) => {
-            warn!(
-                job_id = metadata.job_id,
-                job_type = metadata.job_type,
-                organization_id = ?metadata.organization_id,
-                run_number = metadata.run_number,
-                attempt = metadata.attempt,
-                max_attempts = metadata.max_attempts,
-                worker_id = metadata.worker_id,
-                panic = %panic_message,
-                "reaped lease observer task panicked after observer-level panic handling"
-            );
-        }
-        Err(error) if error.is_cancelled() => {
-            warn!(
-                error = %error,
-                "reaped lease observer task was cancelled outside shutdown abort handling"
-            );
-        }
-        Err(error) => {
-            warn!(error = %error, "reaped lease observer task join failed");
-        }
+        }) => log_reaped_observer_panic(&metadata, &panic_message),
+        Err(error) if error.is_cancelled() => log_reaped_observer_cancelled_join(&error),
+        Err(error) => log_reaped_observer_join_failure(&error),
     }
+}
+
+fn log_reaped_observer_panic(metadata: &ReapedObserverMetadata, panic_message: &str) {
+    warn!(
+        job_id = metadata.job_id,
+        job_type = metadata.job_type,
+        organization_id = ?metadata.organization_id,
+        run_number = metadata.run_number,
+        attempt = metadata.attempt,
+        max_attempts = metadata.max_attempts,
+        worker_id = metadata.worker_id,
+        panic = %panic_message,
+        "reaped lease observer task panicked after observer-level panic handling"
+    );
+}
+
+fn log_reaped_observer_cancelled_join(error: &tokio::task::JoinError) {
+    warn!(
+        error = %error,
+        "reaped lease observer task was cancelled outside shutdown abort handling"
+    );
+}
+
+fn log_reaped_observer_join_failure(error: &tokio::task::JoinError) {
+    warn!(error = %error, "reaped lease observer task join failed");
 }
 
 async fn run_reaped_observer_task<F>(

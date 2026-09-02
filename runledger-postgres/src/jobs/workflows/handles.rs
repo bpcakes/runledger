@@ -222,50 +222,57 @@ impl<'pool> WorkflowResultWaiter<'pool> {
     }
 
     async fn establish_listener(&mut self) -> std::result::Result<(), WorkflowRunHandleError> {
-        let mut listener = match await_before_deadline(
-            self.deadline,
-            PgListener::connect_with(self.pool),
-        )
-        .await?
-        {
-            Ok(listener) => listener,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "workflow result listener connect failed; using polling"
-                );
-                return Ok(());
-            }
+        let Some(mut listener) = self.connect_workflow_result_listener().await? else {
+            return Ok(());
         };
-
-        if !pool_can_spare_query_connection(self.pool) {
-            let pool_size = self.pool.size();
-            let pool_idle = self.pool.num_idle();
-            let max_connections = self.pool.options().get_max_connections();
-            tracing::debug!(
-                pool_size,
-                pool_idle,
-                max_connections,
-                "workflow result listener skipped; pool has no spare connection for race-closing reads"
-            );
+        if !self.can_keep_listener_connection() {
+            return Ok(());
+        }
+        if !self
+            .subscribe_workflow_result_listener(&mut listener)
+            .await?
+        {
             return Ok(());
         }
 
+        self.listener = Some(listener);
+        Ok(())
+    }
+
+    async fn connect_workflow_result_listener(
+        &self,
+    ) -> std::result::Result<Option<PgListener>, WorkflowRunHandleError> {
+        match await_before_deadline(self.deadline, PgListener::connect_with(self.pool)).await? {
+            Ok(listener) => Ok(Some(listener)),
+            Err(error) => {
+                log_workflow_result_listener_connect_failure(&error);
+                Ok(None)
+            }
+        }
+    }
+
+    fn can_keep_listener_connection(&self) -> bool {
+        if pool_can_spare_query_connection(self.pool) {
+            return true;
+        }
+        log_workflow_result_listener_skipped(self.pool);
+        false
+    }
+
+    async fn subscribe_workflow_result_listener(
+        &self,
+        listener: &mut PgListener,
+    ) -> std::result::Result<bool, WorkflowRunHandleError> {
         if let Err(error) = await_before_deadline(
             self.deadline,
             listener.listen(WORKFLOW_RUN_TERMINAL_CHANNEL),
         )
         .await?
         {
-            tracing::warn!(
-                error = %error,
-                "workflow result listener subscribe failed; using polling"
-            );
-            return Ok(());
+            log_workflow_result_listener_subscribe_failure(&error);
+            return Ok(false);
         }
-
-        self.listener = Some(listener);
-        Ok(())
+        Ok(true)
     }
 
     async fn wait_for_wakes(
@@ -465,6 +472,32 @@ pub async fn enqueue_workflow_run_handle(
 }
 
 const DEADLINE_RESULT_LOOKUP_TIMEOUT: Duration = Duration::from_millis(250);
+
+fn log_workflow_result_listener_connect_failure(error: &sqlx::Error) {
+    tracing::warn!(
+        error = %error,
+        "workflow result listener connect failed; using polling"
+    );
+}
+
+fn log_workflow_result_listener_skipped(pool: &DbPool) {
+    let pool_size = pool.size();
+    let pool_idle = pool.num_idle();
+    let max_connections = pool.options().get_max_connections();
+    tracing::debug!(
+        pool_size,
+        pool_idle,
+        max_connections,
+        "workflow result listener skipped; pool has no spare connection for race-closing reads"
+    );
+}
+
+fn log_workflow_result_listener_subscribe_failure(error: &sqlx::Error) {
+    tracing::warn!(
+        error = %error,
+        "workflow result listener subscribe failed; using polling"
+    );
+}
 
 fn pool_can_spare_query_connection(pool: &DbPool) -> bool {
     pool.num_idle() > 0 || pool.size() < pool.options().get_max_connections()

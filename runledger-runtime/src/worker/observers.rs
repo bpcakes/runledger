@@ -265,51 +265,73 @@ async fn drain_terminal_observers_for_shutdown(tasks: &mut JoinSet<()>) {
         return;
     }
 
-    info!(
-        terminal_observer_tasks = tasks.len(),
-        timeout_ms = TERMINAL_OBSERVER_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
-        "worker shutdown requested; draining terminal observer tasks"
-    );
+    log_terminal_observer_shutdown_drain_start(tasks.len());
 
-    match timeout(
+    if timeout(
         TERMINAL_OBSERVER_SHUTDOWN_DRAIN_TIMEOUT,
         drain_terminal_observer_tasks(tasks),
     )
     .await
+    .is_err()
     {
-        Ok(()) => {}
-        Err(_) => {
-            warn!(
-                remaining_terminal_observer_tasks = tasks.len(),
-                timeout_ms = TERMINAL_OBSERVER_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
-                "terminal observer tasks did not finish before worker shutdown deadline; aborting"
-            );
-            tasks.abort_all();
-
-            match timeout(
-                TERMINAL_OBSERVER_ABORT_DRAIN_TIMEOUT,
-                drain_aborted_terminal_observer_tasks(tasks),
-            )
-            .await
-            {
-                Ok(cancelled_count) => {
-                    if cancelled_count > 0 {
-                        info!(
-                            cancelled_terminal_observer_tasks = cancelled_count,
-                            "terminal observer tasks cancelled during worker shutdown"
-                        );
-                    }
-                }
-                Err(_) => {
-                    warn!(
-                        remaining_terminal_observer_tasks = tasks.len(),
-                        timeout_ms = TERMINAL_OBSERVER_ABORT_DRAIN_TIMEOUT.as_millis(),
-                        "terminal observer abort drain timed out during worker shutdown; dropping unresolved tasks"
-                    );
-                }
-            }
-        }
+        abort_remaining_terminal_observers_after_drain_timeout(tasks).await;
     }
+}
+
+async fn abort_remaining_terminal_observers_after_drain_timeout(tasks: &mut JoinSet<()>) {
+    log_terminal_observer_shutdown_drain_timeout(tasks.len());
+    tasks.abort_all();
+    log_terminal_observer_abort_drain(
+        timeout(
+            TERMINAL_OBSERVER_ABORT_DRAIN_TIMEOUT,
+            drain_aborted_terminal_observer_tasks(tasks),
+        )
+        .await,
+        tasks.len(),
+    );
+}
+
+fn log_terminal_observer_shutdown_drain_start(terminal_observer_tasks: usize) {
+    info!(
+        terminal_observer_tasks,
+        timeout_ms = TERMINAL_OBSERVER_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
+        "worker shutdown requested; draining terminal observer tasks"
+    );
+}
+
+fn log_terminal_observer_shutdown_drain_timeout(remaining_terminal_observer_tasks: usize) {
+    warn!(
+        remaining_terminal_observer_tasks,
+        timeout_ms = TERMINAL_OBSERVER_SHUTDOWN_DRAIN_TIMEOUT.as_millis(),
+        "terminal observer tasks did not finish before worker shutdown deadline; aborting"
+    );
+}
+
+fn log_terminal_observer_abort_drain(
+    drain_result: Result<usize, tokio::time::error::Elapsed>,
+    remaining_terminal_observer_tasks: usize,
+) {
+    match drain_result {
+        Ok(cancelled_count) => log_terminal_observer_cancelled(cancelled_count),
+        Err(_) => log_terminal_observer_abort_timeout(remaining_terminal_observer_tasks),
+    }
+}
+
+fn log_terminal_observer_cancelled(cancelled_terminal_observer_tasks: usize) {
+    if cancelled_terminal_observer_tasks > 0 {
+        info!(
+            cancelled_terminal_observer_tasks,
+            "terminal observer tasks cancelled during worker shutdown"
+        );
+    }
+}
+
+fn log_terminal_observer_abort_timeout(remaining_terminal_observer_tasks: usize) {
+    warn!(
+        remaining_terminal_observer_tasks,
+        timeout_ms = TERMINAL_OBSERVER_ABORT_DRAIN_TIMEOUT.as_millis(),
+        "terminal observer abort drain timed out during worker shutdown; dropping unresolved tasks"
+    );
 }
 
 async fn drain_terminal_observer_tasks(tasks: &mut JoinSet<()>) {
@@ -341,35 +363,51 @@ async fn abort_running_observers_for_shutdown(tasks: &mut JoinSet<()>) {
         return;
     }
 
+    log_running_observer_abort_start(tasks.len());
+    tasks.abort_all();
+    log_running_observer_abort_drain(
+        timeout(
+            TERMINAL_OBSERVER_ABORT_DRAIN_TIMEOUT,
+            drain_aborted_running_observer_tasks(tasks),
+        )
+        .await,
+        tasks.len(),
+    );
+}
+
+fn log_running_observer_abort_start(running_observer_tasks: usize) {
     info!(
-        running_observer_tasks = tasks.len(),
+        running_observer_tasks,
         timeout_ms = TERMINAL_OBSERVER_ABORT_DRAIN_TIMEOUT.as_millis(),
         "worker shutdown requested; aborting running observer tasks"
     );
-    tasks.abort_all();
+}
 
-    match timeout(
-        TERMINAL_OBSERVER_ABORT_DRAIN_TIMEOUT,
-        drain_aborted_running_observer_tasks(tasks),
-    )
-    .await
-    {
-        Ok(cancelled_count) => {
-            if cancelled_count > 0 {
-                info!(
-                    cancelled_running_observer_tasks = cancelled_count,
-                    "running observer tasks cancelled during worker shutdown"
-                );
-            }
-        }
-        Err(_) => {
-            warn!(
-                remaining_running_observer_tasks = tasks.len(),
-                timeout_ms = TERMINAL_OBSERVER_ABORT_DRAIN_TIMEOUT.as_millis(),
-                "running observer abort drain timed out during worker shutdown; dropping unresolved tasks"
-            );
-        }
+fn log_running_observer_abort_drain(
+    drain_result: Result<usize, tokio::time::error::Elapsed>,
+    remaining_running_observer_tasks: usize,
+) {
+    match drain_result {
+        Ok(cancelled_count) => log_running_observer_cancelled(cancelled_count),
+        Err(_) => log_running_observer_abort_timeout(remaining_running_observer_tasks),
     }
+}
+
+fn log_running_observer_cancelled(cancelled_running_observer_tasks: usize) {
+    if cancelled_running_observer_tasks > 0 {
+        info!(
+            cancelled_running_observer_tasks,
+            "running observer tasks cancelled during worker shutdown"
+        );
+    }
+}
+
+fn log_running_observer_abort_timeout(remaining_running_observer_tasks: usize) {
+    warn!(
+        remaining_running_observer_tasks,
+        timeout_ms = TERMINAL_OBSERVER_ABORT_DRAIN_TIMEOUT.as_millis(),
+        "running observer abort drain timed out during worker shutdown; dropping unresolved tasks"
+    );
 }
 
 async fn drain_aborted_running_observer_tasks(tasks: &mut JoinSet<()>) -> usize {
@@ -584,31 +622,46 @@ impl Drop for RunningObserverJoinGuard {
 
 fn log_running_notification_join_error(job: &JobObserverLogContext, error: tokio::task::JoinError) {
     if error.is_panic() {
-        warn!(
-            job_id = %job.job_id,
-            job_type = %job.job_type,
-            run_number = job.run_number,
-            attempt = job.attempt,
-            error = %error,
-            "job running observer task panicked; continuing worker job task"
-        );
+        log_running_notification_panic(job, &error);
     } else if error.is_cancelled() {
-        warn!(
-            job_id = %job.job_id,
-            job_type = %job.job_type,
-            run_number = job.run_number,
-            attempt = job.attempt,
-            error = %error,
-            "job running observer task was cancelled; continuing worker job task"
-        );
+        log_running_notification_cancelled(job, &error);
     } else {
-        warn!(
-            job_id = %job.job_id,
-            job_type = %job.job_type,
-            run_number = job.run_number,
-            attempt = job.attempt,
-            error = %error,
-            "job running observer task join failed; continuing worker job task"
-        );
+        log_running_notification_join_failure(job, &error);
     }
+}
+
+fn log_running_notification_panic(job: &JobObserverLogContext, error: &tokio::task::JoinError) {
+    warn!(
+        job_id = %job.job_id,
+        job_type = %job.job_type,
+        run_number = job.run_number,
+        attempt = job.attempt,
+        error = %error,
+        "job running observer task panicked; continuing worker job task"
+    );
+}
+
+fn log_running_notification_cancelled(job: &JobObserverLogContext, error: &tokio::task::JoinError) {
+    warn!(
+        job_id = %job.job_id,
+        job_type = %job.job_type,
+        run_number = job.run_number,
+        attempt = job.attempt,
+        error = %error,
+        "job running observer task was cancelled; continuing worker job task"
+    );
+}
+
+fn log_running_notification_join_failure(
+    job: &JobObserverLogContext,
+    error: &tokio::task::JoinError,
+) {
+    warn!(
+        job_id = %job.job_id,
+        job_type = %job.job_type,
+        run_number = job.run_number,
+        attempt = job.attempt,
+        error = %error,
+        "job running observer task join failed; continuing worker job task"
+    );
 }

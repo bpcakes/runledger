@@ -61,44 +61,72 @@ pub async fn run_reaper_loop_with_observer(
         .await
         {
             Ok(result) => {
-                if result.summary.processed > 0 {
-                    info!(
-                        reaped = result.summary.processed,
-                        "reaper reclaimed expired leases"
-                    );
-                }
-                log_deferred_row_errors(&result);
-                log_claim_cleanup(&result, config.claim_batch_size);
-
-                let fanout_result = notify_reaped_lease_side_effects(
+                if handle_successful_reap_iteration(
                     registry.as_ref(),
                     &observers,
                     &mut reaped_observer_tasks,
-                    &result.reaped_leases,
+                    &result,
+                    config.claim_batch_size,
                     &mut shutdown,
                 )
-                .await;
-                if matches!(
-                    fanout_result,
-                    ReaperNotificationFanoutResult::InterruptedByShutdown
-                ) {
+                .await
+                    == ReaperNotificationFanoutResult::InterruptedByShutdown
+                {
                     return reaper_shutdown_complete(&mut reaped_observer_tasks).await;
                 }
             }
-            Err(error) => {
-                let error = ReaperError::ReapExpiredLeases {
-                    batch_size: config.claim_batch_size,
-                    retry_delay_ms: config.reaper_retry_delay_ms,
-                    source: error,
-                };
-                warn!(%error, "reaper iteration failed");
-            }
+            Err(error) => log_reap_iteration_failure(
+                config.claim_batch_size,
+                config.reaper_retry_delay_ms,
+                error,
+            ),
         }
 
         if shutdown::wait_for_request_or_timeout(&mut shutdown, config.reaper_interval).await {
             return reaper_shutdown_complete(&mut reaped_observer_tasks).await;
         }
     }
+}
+
+async fn handle_successful_reap_iteration(
+    registry: &JobRegistry,
+    observers: &JobLifecycleObservers,
+    reaped_observer_tasks: &mut ReapedObserverTasks,
+    result: &runledger_postgres::jobs::ReapExpiredLeasesDetailedResult,
+    claim_batch_size: i64,
+    shutdown: &mut watch::Receiver<bool>,
+) -> ReaperNotificationFanoutResult {
+    log_reaped_leases(result.summary.processed);
+    log_deferred_row_errors(result);
+    log_claim_cleanup(result, claim_batch_size);
+
+    notify_reaped_lease_side_effects(
+        registry,
+        observers,
+        reaped_observer_tasks,
+        &result.reaped_leases,
+        shutdown,
+    )
+    .await
+}
+
+fn log_reaped_leases(reaped: i64) {
+    if reaped > 0 {
+        info!(reaped, "reaper reclaimed expired leases");
+    }
+}
+
+fn log_reap_iteration_failure(
+    batch_size: i64,
+    retry_delay_ms: i32,
+    source: runledger_postgres::Error,
+) {
+    let error = ReaperError::ReapExpiredLeases {
+        batch_size,
+        retry_delay_ms,
+        source,
+    };
+    warn!(%error, "reaper iteration failed");
 }
 
 async fn notify_reaped_lease_side_effects(
@@ -148,6 +176,14 @@ fn log_claim_cleanup(
     result: &runledger_postgres::jobs::ReapExpiredLeasesDetailedResult,
     batch_size: i64,
 ) {
+    log_released_coordination_claims(result);
+    log_coordination_claim_cleanup_errors(result);
+    log_coordination_claim_cleanup_saturation(result, batch_size);
+}
+
+fn log_released_coordination_claims(
+    result: &runledger_postgres::jobs::ReapExpiredLeasesDetailedResult,
+) {
     if result.workflow_active_claims_released > 0 || result.execution_resource_claims_released > 0 {
         info!(
             workflow_active_claims_released = result.workflow_active_claims_released,
@@ -155,7 +191,11 @@ fn log_claim_cleanup(
             "reaper released quiesced coordination claims"
         );
     }
+}
 
+fn log_coordination_claim_cleanup_errors(
+    result: &runledger_postgres::jobs::ReapExpiredLeasesDetailedResult,
+) {
     for error in &result.cleanup_errors {
         warn!(
             operation = error.operation.as_str(),
@@ -163,7 +203,12 @@ fn log_claim_cleanup(
             "reaper coordination-claim cleanup failed after the lease batch committed"
         );
     }
+}
 
+fn log_coordination_claim_cleanup_saturation(
+    result: &runledger_postgres::jobs::ReapExpiredLeasesDetailedResult,
+    batch_size: i64,
+) {
     let Ok(batch_size) = u64::try_from(batch_size) else {
         return;
     };

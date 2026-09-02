@@ -205,34 +205,53 @@ impl WorkerLoop {
     }
 
     async fn drain(mut self, exit: RuntimeLoopExit) -> RuntimeLoopExit {
-        if !self.join_set.is_empty() {
-            match exit {
-                RuntimeLoopExit::Shutdown => {
-                    info!("worker shutdown requested; draining in-flight jobs")
-                }
-                RuntimeLoopExit::InvalidConfig(_) => {
-                    warn!("worker loop rejected invalid config; draining in-flight jobs");
-                }
-                RuntimeLoopExit::Completed => {
-                    warn!("worker loop completed before shutdown; draining in-flight jobs");
-                }
-            }
-        }
+        self.log_drain_start(&exit);
         while let Some(result) = self.join_set.join_next().await {
-            if let Err(error) = result {
-                error!(%error, "job task crashed while draining in-flight jobs");
-            }
+            log_drained_job_task_result(result);
         }
         self.terminal_observer_tasks.drain_for_shutdown().await;
         exit
     }
 
+    fn log_drain_start(&self, exit: &RuntimeLoopExit) {
+        if self.join_set.is_empty() {
+            return;
+        }
+        match exit {
+            RuntimeLoopExit::Shutdown => log_worker_shutdown_drain(),
+            RuntimeLoopExit::InvalidConfig(_) => log_worker_invalid_config_drain(),
+            RuntimeLoopExit::Completed => log_worker_completed_drain(),
+        }
+    }
+
     async fn drain_finished_tasks(&mut self) {
         while let Some(result) = self.join_set.try_join_next() {
-            if let Err(error) = result {
-                error!(%error, "job task crashed");
-            }
+            log_finished_job_task_result(result);
         }
+    }
+}
+
+fn log_worker_shutdown_drain() {
+    info!("worker shutdown requested; draining in-flight jobs");
+}
+
+fn log_worker_invalid_config_drain() {
+    warn!("worker loop rejected invalid config; draining in-flight jobs");
+}
+
+fn log_worker_completed_drain() {
+    warn!("worker loop completed before shutdown; draining in-flight jobs");
+}
+
+fn log_drained_job_task_result(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result {
+        error!(%error, "job task crashed while draining in-flight jobs");
+    }
+}
+
+fn log_finished_job_task_result(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result {
+        error!(%error, "job task crashed");
     }
 }
 
