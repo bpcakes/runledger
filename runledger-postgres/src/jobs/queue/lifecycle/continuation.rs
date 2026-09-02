@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use runledger_core::jobs::JobStage;
 use sqlx::types::Uuid;
 
-use crate::{DbPool, Error, Result};
+use crate::{DbPool, DbTx, Error, Result};
 
 use super::super::super::errors::{
     ensure_rejection_rollback_succeeded, invalid_continuation_delay_error,
@@ -173,23 +173,13 @@ pub async fn complete_job_continuation_with_outcome_for_lease(
         .await;
     };
 
-    finish_successful_attempt_tx(&mut tx, identity, "close continued job attempt").await?;
-    insert_requeued_event_tx(
+    record_handler_continuation_tx(
         &mut tx,
-        RequeuedJobEvent {
-            job_id: identity.job_id,
-            completed_run_number: identity.run_number,
-            attempt: Some(identity.attempt),
-            stage: Some(JobStage::Queued.as_db_value()),
-            progress_done: progress.progress_done,
-            progress_total: progress.progress_total,
-            payload: RequeuedEventPayload::HandlerContinuation {
-                next_run_number: next_run.run_number,
-                next_run_at: next_run.next_run_at,
-                delay_microseconds: delay_us,
-            },
-        },
-        "insert handler continuation event",
+        identity,
+        &progress,
+        next_run.run_number,
+        next_run.next_run_at,
+        delay_us,
     )
     .await?;
     let job_type = parse_job_type_name(lookup.job_type)?;
@@ -210,6 +200,36 @@ pub async fn complete_job_continuation_with_outcome_for_lease(
         progress_done: progress.progress_done,
         progress_total: progress.progress_total,
     })
+}
+
+async fn record_handler_continuation_tx(
+    tx: &mut DbTx<'_>,
+    identity: JobLeaseIdentity<'_>,
+    progress: &ContinuationProgressUpdate<'_>,
+    next_run_number: i32,
+    next_run_at: DateTime<Utc>,
+    delay_us: i64,
+) -> Result<()> {
+    finish_successful_attempt_tx(tx, identity, "close continued job attempt").await?;
+    insert_requeued_event_tx(
+        tx,
+        RequeuedJobEvent {
+            job_id: identity.job_id,
+            completed_run_number: identity.run_number,
+            attempt: Some(identity.attempt),
+            stage: Some(JobStage::Queued.as_db_value()),
+            progress_done: progress.progress_done,
+            progress_total: progress.progress_total,
+            payload: RequeuedEventPayload::HandlerContinuation {
+                next_run_number,
+                next_run_at,
+                delay_microseconds: delay_us,
+            },
+        },
+        "insert handler continuation event",
+    )
+    .await
+    .map(|_| ())
 }
 
 #[cfg(test)]

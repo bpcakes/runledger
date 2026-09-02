@@ -662,6 +662,68 @@ mod tests {
         node_types
     }
 
+    async fn assert_ready_candidate_query_plan(
+        tx: &mut DbTx<'_>,
+        workflow_run_id: Uuid,
+        appended_step_ids: &[Uuid],
+    ) {
+        let plan = sqlx::query_scalar::<_, JsonValue>(
+            "EXPLAIN (ANALYZE, FORMAT JSON)
+             SELECT
+                id,
+                workflow_run_id,
+                execution_kind::text,
+                job_type,
+                organization_id,
+                payload,
+                priority,
+                max_attempts,
+                timeout_seconds,
+                stage,
+                execution_resource_key,
+                dependency_count_unsatisfied
+             FROM workflow_steps
+             WHERE workflow_run_id = $1
+               AND id = ANY($2::uuid[])
+               AND dependency_count_pending = 0
+             ORDER BY array_position($2::uuid[], id)
+             FOR UPDATE",
+        )
+        .bind(workflow_run_id)
+        .bind(appended_step_ids)
+        .fetch_one(&mut **tx)
+        .await
+        .expect("explain ready appended-candidate query");
+        let node_types = plan_node_types(&plan);
+        eprintln!(
+            "append ready-candidate EXPLAIN ANALYZE node_types={node_types:?}, planning_time_ms={}, execution_time_ms={}",
+            plan[0]["Planning Time"], plan[0]["Execution Time"]
+        );
+        assert_eq!(
+            plan[0]["Plan"]["Actual Rows"].as_f64(),
+            Some(3.0),
+            "only immediately ready existing rows should reach the candidate plan"
+        );
+        assert!(
+            node_types.iter().any(|node_type| node_type == "LockRows"),
+            "ready candidates remain locked before release: {plan}"
+        );
+        assert!(
+            node_types.iter().any(|node_type| node_type == "Sort"),
+            "ready candidates must sort by append-input order: {plan}"
+        );
+        assert!(
+            node_types
+                .iter()
+                .any(|node_type| matches!(node_type.as_str(), "Index Scan" | "Bitmap Heap Scan")),
+            "the ready-candidate lookup should remain ID-index driven: {plan}"
+        );
+        assert!(
+            !node_types.iter().any(|node_type| node_type == "Seq Scan"),
+            "the ready-candidate lookup must not scan unrelated workflow steps: {plan}"
+        );
+    }
+
     #[tokio::test]
     async fn ready_appended_candidates_filter_pending_preserve_input_order_and_skip_missing_rows() {
         let (pool, database) = setup_ephemeral_pool("workflow_append_ready_candidates", 4).await;
@@ -705,61 +767,7 @@ mod tests {
             "the ready-only query must retain the append-input order while omitting pending and absent rows"
         );
 
-        let plan = sqlx::query_scalar::<_, JsonValue>(
-            "EXPLAIN (ANALYZE, FORMAT JSON)
-             SELECT
-                id,
-                workflow_run_id,
-                execution_kind::text,
-                job_type,
-                organization_id,
-                payload,
-                priority,
-                max_attempts,
-                timeout_seconds,
-                stage,
-                execution_resource_key,
-                dependency_count_unsatisfied
-             FROM workflow_steps
-             WHERE workflow_run_id = $1
-               AND id = ANY($2::uuid[])
-               AND dependency_count_pending = 0
-             ORDER BY array_position($2::uuid[], id)
-             FOR UPDATE",
-        )
-        .bind(workflow_run_id)
-        .bind(&appended_step_ids)
-        .fetch_one(&mut *tx)
-        .await
-        .expect("explain ready appended-candidate query");
-        let node_types = plan_node_types(&plan);
-        eprintln!(
-            "append ready-candidate EXPLAIN ANALYZE node_types={node_types:?}, planning_time_ms={}, execution_time_ms={}",
-            plan[0]["Planning Time"], plan[0]["Execution Time"]
-        );
-        assert_eq!(
-            plan[0]["Plan"]["Actual Rows"].as_f64(),
-            Some(3.0),
-            "only immediately ready existing rows should reach the candidate plan"
-        );
-        assert!(
-            node_types.iter().any(|node_type| node_type == "LockRows"),
-            "ready candidates remain locked before release: {plan}"
-        );
-        assert!(
-            node_types.iter().any(|node_type| node_type == "Sort"),
-            "ready candidates must sort by append-input order: {plan}"
-        );
-        assert!(
-            node_types
-                .iter()
-                .any(|node_type| matches!(node_type.as_str(), "Index Scan" | "Bitmap Heap Scan")),
-            "the ready-candidate lookup should remain ID-index driven: {plan}"
-        );
-        assert!(
-            !node_types.iter().any(|node_type| node_type == "Seq Scan"),
-            "the ready-candidate lookup must not scan unrelated workflow steps: {plan}"
-        );
+        assert_ready_candidate_query_plan(&mut tx, workflow_run_id, &appended_step_ids).await;
 
         // The normal append path obtains these IDs from successful inserts, so
         // it cannot include `missing`. Passing it here proves the deliberate

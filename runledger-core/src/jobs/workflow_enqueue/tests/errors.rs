@@ -1,8 +1,8 @@
 use super::super::{WorkflowBuildError, WorkflowDagValidationError};
 
 #[test]
-fn workflow_build_error_maps_all_dag_validation_variants() {
-    let mapping_cases = vec![
+fn workflow_build_error_maps_workflow_and_step_validation_variants() {
+    assert_dag_validation_mappings([
         (
             WorkflowDagValidationError::EmptySteps,
             WorkflowBuildError::EmptySteps,
@@ -65,6 +65,12 @@ fn workflow_build_error_maps_all_dag_validation_variants() {
                 step_key: "step.a".to_owned(),
             },
         ),
+    ]);
+}
+
+#[test]
+fn workflow_build_error_maps_dependency_validation_variants() {
+    assert_dag_validation_mappings([
         (
             WorkflowDagValidationError::BlankDependencyStepKey {
                 step_key: "step.a".to_owned(),
@@ -113,8 +119,12 @@ fn workflow_build_error_maps_all_dag_validation_variants() {
             WorkflowDagValidationError::CycleDetected,
             WorkflowBuildError::CycleDetected,
         ),
-    ];
+    ]);
+}
 
+fn assert_dag_validation_mappings(
+    mapping_cases: impl IntoIterator<Item = (WorkflowDagValidationError, WorkflowBuildError)>,
+) {
     for (validation_error, expected_build_error) in mapping_cases {
         assert_eq!(
             WorkflowBuildError::from(validation_error),

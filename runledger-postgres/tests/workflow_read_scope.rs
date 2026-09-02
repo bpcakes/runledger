@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use runledger_core::jobs::{
     StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowType,
 };
@@ -16,6 +14,7 @@ use runledger_postgres::jobs::{
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::json;
 use sqlx::types::Uuid;
+use std::collections::BTreeSet;
 
 const WORKFLOW_TYPE: &str = "workflow.test.read_scope";
 
@@ -104,27 +103,52 @@ fn count_filter(scope: WorkflowRunReadScope) -> WorkflowRunReadCountFilter<'stat
     }
 }
 
-#[tokio::test]
-async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
-    let (pool, database) = setup_ephemeral_pool("postgres_workflow_read_scope", 4).await;
-    record_postgres_server_version(&pool).await;
+struct WorkflowReadScopeFixture {
+    global_run: WorkflowRunDbRecord,
+    organization_run: WorkflowRunDbRecord,
+    other_organization_run: WorkflowRunDbRecord,
+    global: WorkflowRunReadScope,
+    organization: WorkflowRunReadScope,
+    wrong_organization: WorkflowRunReadScope,
+    admin: WorkflowRunReadScope,
+}
 
+async fn setup_workflow_read_scope_fixture(pool: &DbPool) -> WorkflowReadScopeFixture {
     let organization_id = Uuid::from_u128(22_001);
     let other_organization_id = Uuid::from_u128(22_002);
     let wrong_organization_id = Uuid::from_u128(22_003);
-    let global_run = enqueue_scoped_workflow(&pool, None, "global").await;
-    let organization_run =
-        enqueue_scoped_workflow(&pool, Some(organization_id), "organization").await;
-    let other_organization_run =
-        enqueue_scoped_workflow(&pool, Some(other_organization_id), "other-organization").await;
+    WorkflowReadScopeFixture {
+        global_run: enqueue_scoped_workflow(pool, None, "global").await,
+        organization_run: enqueue_scoped_workflow(pool, Some(organization_id), "organization")
+            .await,
+        other_organization_run: enqueue_scoped_workflow(
+            pool,
+            Some(other_organization_id),
+            "other-organization",
+        )
+        .await,
+        global: WorkflowRunReadScope::Global,
+        organization: WorkflowRunReadScope::Organization(organization_id),
+        wrong_organization: WorkflowRunReadScope::Organization(wrong_organization_id),
+        admin: WorkflowRunReadScope::Admin,
+    }
+}
 
-    let global = WorkflowRunReadScope::Global;
-    let organization = WorkflowRunReadScope::Organization(organization_id);
-    let wrong_organization = WorkflowRunReadScope::Organization(wrong_organization_id);
-    let admin = WorkflowRunReadScope::Admin;
+async fn assert_scoped_workflow_gets(pool: &DbPool, fixture: &WorkflowReadScopeFixture) {
+    let WorkflowReadScopeFixture {
+        global_run,
+        organization_run,
+        other_organization_run: _,
+        global,
+        organization,
+        wrong_organization,
+        admin,
+    } = fixture;
+    let (global, organization, wrong_organization, admin) =
+        (*global, *organization, *wrong_organization, *admin);
 
     assert_eq!(
-        get_workflow_run_by_id_with_scope(&pool, global, global_run.id)
+        get_workflow_run_by_id_with_scope(pool, global, global_run.id)
             .await
             .expect("load global run")
             .map(|run| run.id),
@@ -132,14 +156,14 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
         "global scope reads only the exact global run"
     );
     assert!(
-        get_workflow_run_by_id_with_scope(&pool, global, organization_run.id)
+        get_workflow_run_by_id_with_scope(pool, global, organization_run.id)
             .await
             .expect("reject organization run from global scope")
             .is_none(),
         "global scope must not read an organization run"
     );
     assert_eq!(
-        get_workflow_run_by_id_with_scope(&pool, organization, organization_run.id)
+        get_workflow_run_by_id_with_scope(pool, organization, organization_run.id)
             .await
             .expect("load organization run")
             .map(|run| run.id),
@@ -147,14 +171,14 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
         "organization scope reads its exact organization run"
     );
     assert!(
-        get_workflow_run_by_id_with_scope(&pool, wrong_organization, organization_run.id)
+        get_workflow_run_by_id_with_scope(pool, wrong_organization, organization_run.id)
             .await
             .expect("reject wrong organization")
             .is_none(),
         "wrong organization scope must not read another organization run"
     );
     assert_eq!(
-        get_workflow_run_by_id_with_scope(&pool, admin, organization_run.id)
+        get_workflow_run_by_id_with_scope(pool, admin, organization_run.id)
             .await
             .expect("admin loads organization run")
             .map(|run| run.id),
@@ -163,7 +187,7 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
     );
 
     assert_eq!(
-        get_latest_workflow_run_by_type_with_scope(&pool, global, WorkflowType::new(WORKFLOW_TYPE))
+        get_latest_workflow_run_by_type_with_scope(pool, global, WorkflowType::new(WORKFLOW_TYPE))
             .await
             .expect("load latest global run")
             .map(|run| run.id),
@@ -172,7 +196,7 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
     );
     assert_eq!(
         get_latest_workflow_run_by_type_with_scope(
-            &pool,
+            pool,
             organization,
             WorkflowType::new(WORKFLOW_TYPE),
         )
@@ -184,7 +208,7 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
     );
     assert!(
         get_latest_workflow_run_by_type_with_scope(
-            &pool,
+            pool,
             wrong_organization,
             WorkflowType::new(WORKFLOW_TYPE),
         )
@@ -194,16 +218,33 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
         "wrong organization has no latest run"
     );
     assert!(
-        get_latest_workflow_run_by_type_with_scope(&pool, admin, WorkflowType::new(WORKFLOW_TYPE))
+        get_latest_workflow_run_by_type_with_scope(pool, admin, WorkflowType::new(WORKFLOW_TYPE))
             .await
             .expect("admin loads a latest run")
             .is_some(),
         "admin can read across organizations"
     );
+}
+
+async fn assert_scoped_workflow_lists_and_counts(
+    pool: &DbPool,
+    fixture: &WorkflowReadScopeFixture,
+) {
+    let WorkflowReadScopeFixture {
+        global_run,
+        organization_run,
+        other_organization_run,
+        global,
+        organization,
+        wrong_organization,
+        admin,
+    } = fixture;
+    let (global, organization, wrong_organization, admin) =
+        (*global, *organization, *wrong_organization, *admin);
 
     assert_eq!(
         run_ids(
-            list_workflow_runs_with_scope(&pool, &list_filter(global))
+            list_workflow_runs_with_scope(pool, &list_filter(global))
                 .await
                 .expect("list global workflow runs"),
         ),
@@ -212,7 +253,7 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
     );
     assert_eq!(
         run_ids(
-            list_workflow_runs_with_scope(&pool, &list_filter(organization))
+            list_workflow_runs_with_scope(pool, &list_filter(organization))
                 .await
                 .expect("list organization workflow runs"),
         ),
@@ -221,7 +262,7 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
     );
     assert_eq!(
         run_ids(
-            list_workflow_runs_with_scope(&pool, &list_filter(admin))
+            list_workflow_runs_with_scope(pool, &list_filter(admin))
                 .await
                 .expect("list workflow runs as admin"),
         ),
@@ -233,7 +274,7 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
         "admin list spans global and organization runs"
     );
     assert!(
-        list_workflow_runs_with_scope(&pool, &list_filter(wrong_organization))
+        list_workflow_runs_with_scope(pool, &list_filter(wrong_organization))
             .await
             .expect("list workflow runs for wrong organization")
             .is_empty(),
@@ -241,140 +282,229 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
     );
 
     assert_read_count!(
-        count_workflow_runs_with_scope(&pool, &count_filter(global)),
+        count_workflow_runs_with_scope(pool, &count_filter(global)),
         1,
         "global count is exact"
     );
     assert_read_count!(
-        count_workflow_runs_with_scope(&pool, &count_filter(organization)),
+        count_workflow_runs_with_scope(pool, &count_filter(organization)),
         1,
         "organization count is exact"
     );
     assert_read_count!(
-        count_workflow_runs_with_scope(&pool, &count_filter(admin)),
+        count_workflow_runs_with_scope(pool, &count_filter(admin)),
         3,
         "admin count spans global and organization runs"
     );
     assert_read_count!(
-        count_workflow_runs_with_scope(&pool, &count_filter(wrong_organization)),
+        count_workflow_runs_with_scope(pool, &count_filter(wrong_organization)),
         0,
         "wrong organization count is empty"
     );
+}
+
+async fn assert_scoped_workflow_step_full_lists(pool: &DbPool, fixture: &WorkflowReadScopeFixture) {
+    let WorkflowReadScopeFixture {
+        global_run,
+        organization_run,
+        other_organization_run: _,
+        global,
+        organization,
+        wrong_organization,
+        admin,
+    } = fixture;
+    let (global, organization, wrong_organization, admin) =
+        (*global, *organization, *wrong_organization, *admin);
 
     assert_read_len!(
-        list_workflow_steps_with_scope(&pool, global, global_run.id),
+        list_workflow_steps_with_scope(pool, global, global_run.id),
         2,
         "global scope lists global steps"
     );
     assert_read_len!(
-        list_workflow_steps_with_scope(&pool, global, organization_run.id),
+        list_workflow_steps_with_scope(pool, global, organization_run.id),
         0,
         "global scope rejects organization steps"
     );
     assert_read_len!(
-        list_workflow_steps_with_scope(&pool, organization, organization_run.id),
+        list_workflow_steps_with_scope(pool, organization, organization_run.id),
         2,
         "organization scope lists its steps"
     );
     assert_read_len!(
-        list_workflow_steps_with_scope(&pool, admin, organization_run.id),
+        list_workflow_steps_with_scope(pool, admin, organization_run.id),
         2,
         "admin scope lists organization steps"
     );
     assert_read_len!(
-        list_workflow_steps_with_scope(&pool, wrong_organization, organization_run.id),
+        list_workflow_steps_with_scope(pool, wrong_organization, organization_run.id),
         0,
         "wrong organization cannot list steps"
     );
+}
+
+async fn assert_scoped_workflow_step_pages(pool: &DbPool, fixture: &WorkflowReadScopeFixture) {
+    let WorkflowReadScopeFixture {
+        global_run,
+        organization_run,
+        other_organization_run: _,
+        global,
+        organization,
+        wrong_organization,
+        admin,
+    } = fixture;
+    let (global, organization, wrong_organization, admin) =
+        (*global, *organization, *wrong_organization, *admin);
+
     assert_read_len!(
-        list_workflow_steps_page_with_scope(&pool, global, global_run.id, 10, 0),
+        list_workflow_steps_page_with_scope(pool, global, global_run.id, 10, 0),
         2,
         "global scope lists a global step page"
     );
     assert_read_len!(
-        list_workflow_steps_page_with_scope(&pool, global, organization_run.id, 10, 0),
+        list_workflow_steps_page_with_scope(pool, global, organization_run.id, 10, 0),
         0,
         "global scope rejects an organization step page"
     );
     assert_read_len!(
-        list_workflow_steps_page_with_scope(&pool, organization, organization_run.id, 10, 0),
+        list_workflow_steps_page_with_scope(pool, organization, organization_run.id, 10, 0),
         2,
         "organization scope lists its step page"
     );
     assert_read_len!(
-        list_workflow_steps_page_with_scope(&pool, admin, organization_run.id, 10, 0),
+        list_workflow_steps_page_with_scope(pool, admin, organization_run.id, 10, 0),
         2,
         "admin scope lists an organization step page"
     );
     assert_read_len!(
-        list_workflow_steps_page_with_scope(&pool, wrong_organization, organization_run.id, 10, 0,),
+        list_workflow_steps_page_with_scope(pool, wrong_organization, organization_run.id, 10, 0,),
         0,
         "wrong organization cannot list a step page"
     );
+}
+
+async fn assert_scoped_workflow_step_lists(pool: &DbPool, fixture: &WorkflowReadScopeFixture) {
+    assert_scoped_workflow_step_full_lists(pool, fixture).await;
+    assert_scoped_workflow_step_pages(pool, fixture).await;
+}
+
+async fn assert_scoped_workflow_step_counts(pool: &DbPool, fixture: &WorkflowReadScopeFixture) {
+    let WorkflowReadScopeFixture {
+        global_run,
+        organization_run,
+        other_organization_run: _,
+        global,
+        organization,
+        wrong_organization,
+        admin,
+    } = fixture;
+    let (global, organization, wrong_organization, admin) =
+        (*global, *organization, *wrong_organization, *admin);
+
     assert_read_count!(
-        count_workflow_steps_with_scope(&pool, global, global_run.id),
+        count_workflow_steps_with_scope(pool, global, global_run.id),
         2,
         "global scope counts global steps"
     );
     assert_read_count!(
-        count_workflow_steps_with_scope(&pool, global, organization_run.id),
+        count_workflow_steps_with_scope(pool, global, organization_run.id),
         0,
         "global scope rejects organization step count"
     );
     assert_read_count!(
-        count_workflow_steps_with_scope(&pool, organization, organization_run.id),
+        count_workflow_steps_with_scope(pool, organization, organization_run.id),
         2,
         "organization scope counts its steps"
     );
     assert_read_count!(
-        count_workflow_steps_with_scope(&pool, admin, organization_run.id),
+        count_workflow_steps_with_scope(pool, admin, organization_run.id),
         2,
         "admin scope counts organization steps"
     );
     assert_read_count!(
-        count_workflow_steps_with_scope(&pool, wrong_organization, organization_run.id),
+        count_workflow_steps_with_scope(pool, wrong_organization, organization_run.id),
         0,
         "wrong organization cannot count steps"
     );
+}
+
+async fn assert_scoped_workflow_steps(pool: &DbPool, fixture: &WorkflowReadScopeFixture) {
+    assert_scoped_workflow_step_lists(pool, fixture).await;
+    assert_scoped_workflow_step_counts(pool, fixture).await;
+}
+
+async fn assert_scoped_workflow_dependency_full_lists(
+    pool: &DbPool,
+    fixture: &WorkflowReadScopeFixture,
+) {
+    let WorkflowReadScopeFixture {
+        global_run,
+        organization_run,
+        other_organization_run: _,
+        global,
+        organization,
+        wrong_organization,
+        admin,
+    } = fixture;
+    let (global, organization, wrong_organization, admin) =
+        (*global, *organization, *wrong_organization, *admin);
 
     assert_read_len!(
-        list_workflow_step_dependencies_with_scope(&pool, global, global_run.id),
+        list_workflow_step_dependencies_with_scope(pool, global, global_run.id),
         1,
         "global scope lists global dependencies"
     );
     assert_read_len!(
-        list_workflow_step_dependencies_with_scope(&pool, global, organization_run.id),
+        list_workflow_step_dependencies_with_scope(pool, global, organization_run.id),
         0,
         "global scope rejects organization dependencies"
     );
     assert_read_len!(
-        list_workflow_step_dependencies_with_scope(&pool, organization, organization_run.id),
+        list_workflow_step_dependencies_with_scope(pool, organization, organization_run.id),
         1,
         "organization scope lists its dependencies"
     );
     assert_read_len!(
-        list_workflow_step_dependencies_with_scope(&pool, admin, organization_run.id),
+        list_workflow_step_dependencies_with_scope(pool, admin, organization_run.id),
         1,
         "admin scope lists organization dependencies"
     );
     assert_read_len!(
-        list_workflow_step_dependencies_with_scope(&pool, wrong_organization, organization_run.id),
+        list_workflow_step_dependencies_with_scope(pool, wrong_organization, organization_run.id),
         0,
         "wrong organization cannot list dependencies"
     );
+}
+
+async fn assert_scoped_workflow_dependency_pages(
+    pool: &DbPool,
+    fixture: &WorkflowReadScopeFixture,
+) {
+    let WorkflowReadScopeFixture {
+        global_run,
+        organization_run,
+        other_organization_run: _,
+        global,
+        organization,
+        wrong_organization,
+        admin,
+    } = fixture;
+    let (global, organization, wrong_organization, admin) =
+        (*global, *organization, *wrong_organization, *admin);
+
     assert_read_len!(
-        list_workflow_step_dependencies_page_with_scope(&pool, global, global_run.id, 10, 0),
+        list_workflow_step_dependencies_page_with_scope(pool, global, global_run.id, 10, 0),
         1,
         "global scope lists a global dependency page"
     );
     assert_read_len!(
-        list_workflow_step_dependencies_page_with_scope(&pool, global, organization_run.id, 10, 0),
+        list_workflow_step_dependencies_page_with_scope(pool, global, organization_run.id, 10, 0),
         0,
         "global scope rejects an organization dependency page"
     );
     assert_read_len!(
         list_workflow_step_dependencies_page_with_scope(
-            &pool,
+            pool,
             organization,
             organization_run.id,
             10,
@@ -384,13 +514,13 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
         "organization scope lists its dependency page"
     );
     assert_read_len!(
-        list_workflow_step_dependencies_page_with_scope(&pool, admin, organization_run.id, 10, 0),
+        list_workflow_step_dependencies_page_with_scope(pool, admin, organization_run.id, 10, 0),
         1,
         "admin scope lists an organization dependency page"
     );
     assert_read_len!(
         list_workflow_step_dependencies_page_with_scope(
-            &pool,
+            pool,
             wrong_organization,
             organization_run.id,
             10,
@@ -399,34 +529,77 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
         0,
         "wrong organization cannot list a dependency page"
     );
+}
+
+async fn assert_scoped_workflow_dependency_lists(
+    pool: &DbPool,
+    fixture: &WorkflowReadScopeFixture,
+) {
+    assert_scoped_workflow_dependency_full_lists(pool, fixture).await;
+    assert_scoped_workflow_dependency_pages(pool, fixture).await;
+}
+
+async fn assert_scoped_workflow_dependency_counts(
+    pool: &DbPool,
+    fixture: &WorkflowReadScopeFixture,
+) {
+    let WorkflowReadScopeFixture {
+        global_run,
+        organization_run,
+        other_organization_run: _,
+        global,
+        organization,
+        wrong_organization,
+        admin,
+    } = fixture;
+    let (global, organization, wrong_organization, admin) =
+        (*global, *organization, *wrong_organization, *admin);
+
     assert_read_count!(
-        count_workflow_step_dependencies_with_scope(&pool, global, global_run.id),
+        count_workflow_step_dependencies_with_scope(pool, global, global_run.id),
         1,
         "global scope counts global dependencies"
     );
     assert_read_count!(
-        count_workflow_step_dependencies_with_scope(&pool, global, organization_run.id),
+        count_workflow_step_dependencies_with_scope(pool, global, organization_run.id),
         0,
         "global scope rejects organization dependency count"
     );
     assert_read_count!(
-        count_workflow_step_dependencies_with_scope(&pool, organization, organization_run.id),
+        count_workflow_step_dependencies_with_scope(pool, organization, organization_run.id),
         1,
         "organization scope counts its dependencies"
     );
     assert_read_count!(
-        count_workflow_step_dependencies_with_scope(&pool, admin, organization_run.id),
+        count_workflow_step_dependencies_with_scope(pool, admin, organization_run.id),
         1,
         "admin scope counts organization dependencies"
     );
     assert_read_count!(
-        count_workflow_step_dependencies_with_scope(&pool, wrong_organization, organization_run.id),
+        count_workflow_step_dependencies_with_scope(pool, wrong_organization, organization_run.id),
         0,
         "wrong organization cannot count dependencies"
     );
+}
+
+async fn assert_scoped_workflow_dependencies(pool: &DbPool, fixture: &WorkflowReadScopeFixture) {
+    assert_scoped_workflow_dependency_lists(pool, fixture).await;
+    assert_scoped_workflow_dependency_counts(pool, fixture).await;
+}
+
+async fn assert_legacy_workflow_scope_wildcards(pool: &DbPool, fixture: &WorkflowReadScopeFixture) {
+    let WorkflowReadScopeFixture {
+        global_run,
+        organization_run,
+        other_organization_run,
+        global: _,
+        organization: _,
+        wrong_organization: _,
+        admin: _,
+    } = fixture;
 
     assert!(
-        get_workflow_run_by_id(&pool, None, organization_run.id)
+        get_workflow_run_by_id(pool, None, organization_run.id)
             .await
             .expect("legacy get workflow run")
             .is_some(),
@@ -435,7 +608,7 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
     assert_eq!(
         run_ids(
             list_workflow_runs(
-                &pool,
+                pool,
                 &runledger_postgres::jobs::WorkflowRunListFilter {
                     organization_id: None,
                     status: None,
@@ -456,7 +629,7 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
     );
     assert_read_count!(
         count_workflow_runs(
-            &pool,
+            pool,
             &runledger_postgres::jobs::WorkflowRunCountFilter {
                 organization_id: None,
                 status: None,
@@ -466,6 +639,19 @@ async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
         3,
         "legacy None count remains an admin wildcard"
     );
+}
+
+#[tokio::test]
+async fn workflow_read_scope_is_exact_for_get_list_and_count_apis() {
+    let (pool, database) = setup_ephemeral_pool("postgres_workflow_read_scope", 4).await;
+    record_postgres_server_version(&pool).await;
+    let fixture = setup_workflow_read_scope_fixture(&pool).await;
+
+    assert_scoped_workflow_gets(&pool, &fixture).await;
+    assert_scoped_workflow_lists_and_counts(&pool, &fixture).await;
+    assert_scoped_workflow_steps(&pool, &fixture).await;
+    assert_scoped_workflow_dependencies(&pool, &fixture).await;
+    assert_legacy_workflow_scope_wildcards(&pool, &fixture).await;
 
     teardown_ephemeral_pool(pool, database).await;
 }

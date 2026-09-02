@@ -86,6 +86,156 @@ fn replay_request<'a>(
     }
 }
 
+async fn assert_source_preserved(
+    pool: &DbPool,
+    organization_id: Uuid,
+    source_job_id: Uuid,
+    checkpoint: &Value,
+    output: &Value,
+) {
+    let source = get_job_by_id(pool, Some(organization_id), source_job_id)
+        .await
+        .expect("load successful source")
+        .expect("source exists");
+    assert_eq!(source.status, JobStatus::Succeeded);
+    assert_eq!(source.run_number, 1);
+    assert_eq!(source.progress_done, Some(8));
+    assert_eq!(source.progress_total, Some(8));
+    assert_eq!(source.checkpoint.as_ref(), Some(checkpoint));
+    assert_eq!(source.output.as_ref(), Some(output));
+    assert_eq!(
+        source.idempotency_key.as_deref(),
+        Some("original-operation-501")
+    );
+}
+
+async fn assert_replay_payload_remains_mutable(
+    pool: &DbPool,
+    organization_id: Uuid,
+    replay_job_id: Uuid,
+) {
+    let related_id = Uuid::from_u128(50_100);
+    let payload_update = update_job_payload_uuid_array_field(
+        pool,
+        organization_id,
+        replay_job_id,
+        JobType::new(JOB_TYPE),
+        "related_ids",
+        &[related_id],
+    )
+    .await
+    .expect("update fresh replay payload");
+    assert_eq!(payload_update, JobPayloadUuidArrayFieldUpdate::Updated);
+    let updated_replay = get_job_by_id(pool, Some(organization_id), replay_job_id)
+        .await
+        .expect("reload replay after payload update")
+        .expect("replay exists after payload update");
+    assert_eq!(
+        updated_replay.payload.get("related_ids"),
+        Some(&json!([related_id]))
+    );
+}
+
+async fn assert_replay_is_fresh(
+    pool: &DbPool,
+    organization_id: Uuid,
+    replay_job_id: Uuid,
+    payload: &Value,
+) {
+    let replay = get_job_by_id(pool, Some(organization_id), replay_job_id)
+        .await
+        .expect("load replay job")
+        .expect("replay exists");
+    assert_eq!(replay.status, JobStatus::Pending);
+    assert_eq!(replay.run_number, 1);
+    assert_eq!(replay.attempt, 0);
+    assert_eq!(replay.stage, JobStage::Queued);
+    assert_eq!(&replay.payload, payload);
+    assert_eq!(replay.priority, 77);
+    assert_eq!(replay.max_attempts, 5);
+    assert_eq!(replay.timeout_seconds, 123);
+    assert!(replay.progress_done.is_none());
+    assert!(replay.progress_total.is_none());
+    assert!(replay.checkpoint.is_none());
+    assert!(replay.output.is_none());
+    assert!(replay.idempotency_key.is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Value>>(
+            "SELECT enqueue_request FROM job_queue WHERE id = $1",
+        )
+        .bind(replay.id)
+        .fetch_one(pool)
+        .await
+        .expect("load replay enqueue snapshot"),
+        None,
+        "fresh unkeyed replay must keep ordinary unkeyed snapshot semantics"
+    );
+
+    assert_replay_payload_remains_mutable(pool, organization_id, replay_job_id).await;
+}
+
+async fn assert_replay_event_and_lineage(
+    pool: &DbPool,
+    organization_id: Uuid,
+    source_job_id: Uuid,
+    replay_job_id: Uuid,
+) {
+    let events = list_job_events(pool, Some(organization_id), replay_job_id, 10, None)
+        .await
+        .expect("list replay events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, JobEventType::Enqueued);
+    assert_eq!(
+        events[0].payload,
+        json!({
+            "job_type": JOB_TYPE,
+            "replayed_from_job_id": source_job_id,
+            "replayed_from_run_number": 1,
+            "replay_request_key": "operator-action-501",
+            "reason": "operator requested a fresh execution"
+        })
+    );
+    match events[0].decoded_payload() {
+        DecodedJobEventPayload::SuccessfulReplayEnqueued(payload) => {
+            assert_eq!(payload.replayed_from_job_id, source_job_id);
+            assert_eq!(payload.replayed_from_run_number, 1);
+            assert_eq!(payload.replay_request_key, "operator-action-501");
+            assert_eq!(payload.reason, "operator requested a fresh execution");
+        }
+        payload => panic!("expected decoded successful-replay payload, got {payload:?}"),
+    }
+
+    let lineage = sqlx::query(
+        "SELECT source_job_id, source_run_number, replay_request_key, reason
+         FROM job_replays
+         WHERE replay_job_id = $1",
+    )
+    .bind(replay_job_id)
+    .fetch_one(pool)
+    .await
+    .expect("load replay lineage");
+    assert_eq!(lineage.get::<Uuid, _>("source_job_id"), source_job_id);
+    assert_eq!(lineage.get::<i32, _>("source_run_number"), 1);
+    assert_eq!(
+        lineage.get::<String, _>("replay_request_key"),
+        "operator-action-501"
+    );
+}
+
+async fn assert_fresh_replay_persistence(
+    pool: &DbPool,
+    organization_id: Uuid,
+    source_job_id: Uuid,
+    replay_job_id: Uuid,
+    payload: &Value,
+    checkpoint: &Value,
+    output: &Value,
+) {
+    assert_source_preserved(pool, organization_id, source_job_id, checkpoint, output).await;
+    assert_replay_is_fresh(pool, organization_id, replay_job_id, payload).await;
+    assert_replay_event_and_lineage(pool, organization_id, source_job_id, replay_job_id).await;
+}
+
 #[tokio::test]
 async fn successful_replay_preserves_source_and_idempotently_creates_fresh_job() {
     let (pool, database) = setup_ephemeral_pool("postgres_successful_job_replay", 4).await;
@@ -124,111 +274,16 @@ async fn successful_replay_preserves_source_and_idempotently_creates_fresh_job()
     assert_eq!(first_replay.status, JobStatus::Pending);
     assert_eq!(first_replay.run_number, 1);
 
-    let source = get_job_by_id(&pool, Some(organization_id), source_job_id)
-        .await
-        .expect("load successful source")
-        .expect("source exists");
-    assert_eq!(source.status, JobStatus::Succeeded);
-    assert_eq!(source.run_number, 1);
-    assert_eq!(source.progress_done, Some(8));
-    assert_eq!(source.progress_total, Some(8));
-    assert_eq!(source.checkpoint, Some(checkpoint.clone()));
-    assert_eq!(source.output, Some(output.clone()));
-    assert_eq!(
-        source.idempotency_key.as_deref(),
-        Some("original-operation-501")
-    );
-
-    let replay = get_job_by_id(&pool, Some(organization_id), first_replay.job_id)
-        .await
-        .expect("load replay job")
-        .expect("replay exists");
-    assert_eq!(replay.status, JobStatus::Pending);
-    assert_eq!(replay.run_number, 1);
-    assert_eq!(replay.attempt, 0);
-    assert_eq!(replay.stage, JobStage::Queued);
-    assert_eq!(replay.payload, payload);
-    assert_eq!(replay.priority, 77);
-    assert_eq!(replay.max_attempts, 5);
-    assert_eq!(replay.timeout_seconds, 123);
-    assert!(replay.progress_done.is_none());
-    assert!(replay.progress_total.is_none());
-    assert!(replay.checkpoint.is_none());
-    assert!(replay.output.is_none());
-    assert!(replay.idempotency_key.is_none());
-    assert_eq!(
-        sqlx::query_scalar::<_, Option<Value>>(
-            "SELECT enqueue_request FROM job_queue WHERE id = $1",
-        )
-        .bind(replay.id)
-        .fetch_one(&pool)
-        .await
-        .expect("load replay enqueue snapshot"),
-        None,
-        "fresh unkeyed replay must keep ordinary unkeyed snapshot semantics"
-    );
-
-    let related_id = Uuid::from_u128(50_100);
-    let payload_update = update_job_payload_uuid_array_field(
+    assert_fresh_replay_persistence(
         &pool,
         organization_id,
-        replay.id,
-        JobType::new(JOB_TYPE),
-        "related_ids",
-        &[related_id],
+        source_job_id,
+        first_replay.job_id,
+        &payload,
+        &checkpoint,
+        &output,
     )
-    .await
-    .expect("update fresh replay payload");
-    assert_eq!(payload_update, JobPayloadUuidArrayFieldUpdate::Updated);
-    let replay_after_payload_update = get_job_by_id(&pool, Some(organization_id), replay.id)
-        .await
-        .expect("reload replay after payload update")
-        .expect("replay exists after payload update");
-    assert_eq!(
-        replay_after_payload_update.payload.get("related_ids"),
-        Some(&json!([related_id]))
-    );
-
-    let replay_events = list_job_events(&pool, Some(organization_id), replay.id, 10, None)
-        .await
-        .expect("list replay events");
-    assert_eq!(replay_events.len(), 1);
-    assert_eq!(replay_events[0].event_type, JobEventType::Enqueued);
-    assert_eq!(
-        replay_events[0].payload,
-        json!({
-            "job_type": JOB_TYPE,
-            "replayed_from_job_id": source_job_id,
-            "replayed_from_run_number": 1,
-            "replay_request_key": "operator-action-501",
-            "reason": "operator requested a fresh execution"
-        })
-    );
-    match replay_events[0].decoded_payload() {
-        DecodedJobEventPayload::SuccessfulReplayEnqueued(payload) => {
-            assert_eq!(payload.replayed_from_job_id, source_job_id);
-            assert_eq!(payload.replayed_from_run_number, 1);
-            assert_eq!(payload.replay_request_key, "operator-action-501");
-            assert_eq!(payload.reason, "operator requested a fresh execution");
-        }
-        payload => panic!("expected decoded successful-replay payload, got {payload:?}"),
-    }
-
-    let stored = sqlx::query(
-        "SELECT source_job_id, source_run_number, replay_request_key, reason
-         FROM job_replays
-         WHERE replay_job_id = $1",
-    )
-    .bind(replay.id)
-    .fetch_one(&pool)
-    .await
-    .expect("load replay lineage");
-    assert_eq!(stored.get::<Uuid, _>("source_job_id"), source_job_id);
-    assert_eq!(stored.get::<i32, _>("source_run_number"), 1);
-    assert_eq!(
-        stored.get::<String, _>("replay_request_key"),
-        "operator-action-501"
-    );
+    .await;
 
     let repeated = compare_and_replay_succeeded_job(
         &pool,

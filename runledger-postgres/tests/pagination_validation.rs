@@ -70,71 +70,42 @@ async fn invalid_pagination_rejects_before_database_access() {
     let pool = disconnected_pool();
     let job_id = Uuid::nil();
 
-    assert_invalid_pagination(
-        list_jobs(
-            &pool,
-            &JobListFilter {
-                organization_id: None,
-                status: None,
-                job_type: None,
-                limit: 0,
-                offset: 0,
-            },
-        )
-        .await,
-    );
-    assert_invalid_pagination(
-        list_jobs(
-            &pool,
-            &JobListFilter {
-                organization_id: None,
-                status: None,
-                job_type: None,
-                limit: -1,
-                offset: 0,
-            },
-        )
-        .await,
-    );
-    assert_invalid_pagination(
-        list_jobs(
-            &pool,
-            &JobListFilter {
-                organization_id: None,
-                status: None,
-                job_type: None,
-                limit: JOB_LIST_PAGE_LIMIT_MAX + 1,
-                offset: 0,
-            },
-        )
-        .await,
-    );
-    assert_invalid_pagination(
-        list_jobs(
-            &pool,
-            &JobListFilter {
-                organization_id: None,
-                status: None,
-                job_type: None,
-                limit: 1,
-                offset: -1,
-            },
-        )
-        .await,
-    );
+    assert_invalid_job_pagination(&pool, job_id).await;
+    assert_invalid_workflow_and_definition_pagination(&pool).await;
+    assert_invalid_intent_and_runtime_config_pagination(&pool).await;
+    assert_invalid_workflow_step_pagination(&pool, job_id).await;
+}
 
-    assert_invalid_pagination(list_job_events(&pool, None, job_id, 0, None).await);
+async fn assert_invalid_job_pagination(pool: &DbPool, job_id: Uuid) {
+    for (limit, offset) in [(0, 0), (-1, 0), (JOB_LIST_PAGE_LIMIT_MAX + 1, 0), (1, -1)] {
+        assert_invalid_pagination(
+            list_jobs(
+                pool,
+                &JobListFilter {
+                    organization_id: None,
+                    status: None,
+                    job_type: None,
+                    limit,
+                    offset,
+                },
+            )
+            .await,
+        );
+    }
+    assert_invalid_pagination(list_job_events(pool, None, job_id, 0, None).await);
     assert_invalid_pagination(
-        list_job_events(&pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, None).await,
+        list_job_events(pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, None).await,
     );
-    assert_invalid_pagination(list_job_logs(&pool, None, job_id, 0, None).await);
+    assert_invalid_pagination(list_job_logs(pool, None, job_id, 0, None).await);
     assert_invalid_pagination(
-        list_job_logs(&pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, None).await,
+        list_job_logs(pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, None).await,
     );
+}
 
+async fn assert_invalid_workflow_and_definition_pagination(pool: &DbPool) {
     assert_invalid_pagination(
         list_workflow_runs(
-            &pool,
+            pool,
             &WorkflowRunListFilter {
                 organization_id: None,
                 status: None,
@@ -147,7 +118,7 @@ async fn invalid_pagination_rejects_before_database_access() {
     );
     assert_invalid_pagination(
         list_workflow_runs_with_scope(
-            &pool,
+            pool,
             &WorkflowRunReadListFilter {
                 scope: WorkflowRunReadScope::Admin,
                 status: None,
@@ -160,7 +131,7 @@ async fn invalid_pagination_rejects_before_database_access() {
     );
     assert_invalid_pagination(
         list_workflow_runs(
-            &pool,
+            pool,
             &WorkflowRunListFilter {
                 organization_id: None,
                 status: None,
@@ -173,7 +144,7 @@ async fn invalid_pagination_rejects_before_database_access() {
     );
     assert_invalid_pagination(
         list_workflow_runs(
-            &pool,
+            pool,
             &WorkflowRunListFilter {
                 organization_id: None,
                 status: None,
@@ -187,7 +158,7 @@ async fn invalid_pagination_rejects_before_database_access() {
 
     assert_invalid_pagination(
         list_job_definitions(
-            &pool,
+            pool,
             &JobDefinitionListFilter {
                 job_type: None,
                 limit: 0,
@@ -198,7 +169,7 @@ async fn invalid_pagination_rejects_before_database_access() {
     );
     assert_invalid_pagination(
         list_job_definitions(
-            &pool,
+            pool,
             &JobDefinitionListFilter {
                 job_type: None,
                 limit: JOB_LIST_PAGE_LIMIT_MAX + 1,
@@ -209,7 +180,7 @@ async fn invalid_pagination_rejects_before_database_access() {
     );
     assert_invalid_pagination(
         list_job_definitions(
-            &pool,
+            pool,
             &JobDefinitionListFilter {
                 job_type: None,
                 limit: 1,
@@ -218,10 +189,12 @@ async fn invalid_pagination_rejects_before_database_access() {
         )
         .await,
     );
+}
 
+async fn assert_invalid_intent_and_runtime_config_pagination(pool: &DbPool) {
     assert_invalid_pagination(
         list_job_runtime_configs(
-            &pool,
+            pool,
             &JobRuntimeConfigListFilter {
                 job_type: None,
                 limit: 0,
@@ -232,34 +205,34 @@ async fn invalid_pagination_rejects_before_database_access() {
     );
 
     assert_invalid_pagination(
-        get_job_enqueue_intent_metrics(&pool, &JobEnqueueIntentMetricsFilter::new(0, 0)).await,
+        get_job_enqueue_intent_metrics(pool, &JobEnqueueIntentMetricsFilter::new(0, 0)).await,
     );
     assert_invalid_pagination(
         get_job_enqueue_intent_metrics(
-            &pool,
+            pool,
             &JobEnqueueIntentMetricsFilter::new(JOB_LIST_PAGE_LIMIT_MAX + 1, 0),
         )
         .await,
     );
     assert_invalid_pagination(
-        get_job_enqueue_intent_metrics(&pool, &JobEnqueueIntentMetricsFilter::new(1, -1)).await,
+        get_job_enqueue_intent_metrics(pool, &JobEnqueueIntentMetricsFilter::new(1, -1)).await,
     );
     assert_invalid_pagination(
-        list_job_enqueue_intents(&pool, &JobEnqueueIntentListFilter::new(0, 0)).await,
+        list_job_enqueue_intents(pool, &JobEnqueueIntentListFilter::new(0, 0)).await,
     );
     assert_invalid_pagination(
         list_job_enqueue_intents(
-            &pool,
+            pool,
             &JobEnqueueIntentListFilter::new(JOB_LIST_PAGE_LIMIT_MAX + 1, 0),
         )
         .await,
     );
     assert_invalid_pagination(
-        list_job_enqueue_intents(&pool, &JobEnqueueIntentListFilter::new(1, -1)).await,
+        list_job_enqueue_intents(pool, &JobEnqueueIntentListFilter::new(1, -1)).await,
     );
     assert_invalid_pagination(
         list_job_runtime_configs(
-            &pool,
+            pool,
             &JobRuntimeConfigListFilter {
                 job_type: None,
                 limit: JOB_LIST_PAGE_LIMIT_MAX + 1,
@@ -270,7 +243,7 @@ async fn invalid_pagination_rejects_before_database_access() {
     );
     assert_invalid_pagination(
         list_job_runtime_configs(
-            &pool,
+            pool,
             &JobRuntimeConfigListFilter {
                 job_type: None,
                 limit: 1,
@@ -279,22 +252,22 @@ async fn invalid_pagination_rejects_before_database_access() {
         )
         .await,
     );
+}
 
-    assert_invalid_pagination(list_workflow_steps_page(&pool, None, job_id, 0, 0).await);
+async fn assert_invalid_workflow_step_pagination(pool: &DbPool, job_id: Uuid) {
+    assert_invalid_pagination(list_workflow_steps_page(pool, None, job_id, 0, 0).await);
     assert_invalid_pagination(
-        list_workflow_steps_page_with_scope(&pool, WorkflowRunReadScope::Admin, job_id, 0, 0).await,
+        list_workflow_steps_page_with_scope(pool, WorkflowRunReadScope::Admin, job_id, 0, 0).await,
     );
     assert_invalid_pagination(
-        list_workflow_steps_page(&pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, 0).await,
+        list_workflow_steps_page(pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, 0).await,
     );
-    assert_invalid_pagination(list_workflow_steps_page(&pool, None, job_id, 1, -1).await);
+    assert_invalid_pagination(list_workflow_steps_page(pool, None, job_id, 1, -1).await);
 
-    assert_invalid_pagination(
-        list_workflow_step_dependencies_page(&pool, None, job_id, 0, 0).await,
-    );
+    assert_invalid_pagination(list_workflow_step_dependencies_page(pool, None, job_id, 0, 0).await);
     assert_invalid_pagination(
         list_workflow_step_dependencies_page_with_scope(
-            &pool,
+            pool,
             WorkflowRunReadScope::Admin,
             job_id,
             0,
@@ -303,11 +276,11 @@ async fn invalid_pagination_rejects_before_database_access() {
         .await,
     );
     assert_invalid_pagination(
-        list_workflow_step_dependencies_page(&pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, 0)
+        list_workflow_step_dependencies_page(pool, None, job_id, JOB_LIST_PAGE_LIMIT_MAX + 1, 0)
             .await,
     );
     assert_invalid_pagination(
-        list_workflow_step_dependencies_page(&pool, None, job_id, 1, -1).await,
+        list_workflow_step_dependencies_page(pool, None, job_id, 1, -1).await,
     );
 }
 

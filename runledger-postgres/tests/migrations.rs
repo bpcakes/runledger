@@ -80,32 +80,30 @@ impl TestHarness {
     }
 }
 
-#[tokio::test]
-async fn migrate_applies_bundled_schema_to_fresh_database() {
-    let harness = TestHarness::fresh("runledger_pg_migrate").await;
+async fn assert_bundled_migration_history(pool: &PgPool) {
     let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read exact PostgreSQL version for bundled schema regression");
     eprintln!("bundled schema regression PostgreSQL server_version={server_version}");
 
-    migrate_after_idempotency_cutover(&harness.pool)
+    migrate_after_idempotency_cutover(pool)
         .await
         .expect("apply migrations");
-    migrate_after_idempotency_cutover(&harness.pool)
+    migrate_after_idempotency_cutover(pool)
         .await
         .expect("repeat migrate after constraints are validated");
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect("schema should validate after migrate");
     assert!(
-        idempotency_cutover_constraints_valid(&harness.pool).await,
+        idempotency_cutover_constraints_valid(pool).await,
         "migrate should validate idempotency cutover constraints after legacy check passes"
     );
 
     let migrations_row_count =
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations")
-            .fetch_one(&harness.pool)
+            .fetch_one(pool)
             .await
             .expect("count applied migrations");
     assert_eq!(
@@ -116,14 +114,16 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let recorded_runledger_versions = sqlx::query_scalar::<_, i64>(
         "SELECT version FROM runledger_migration_history ORDER BY version",
     )
-    .fetch_all(&harness.pool)
+    .fetch_all(pool)
     .await
     .expect("list recorded runledger migrations");
     assert_eq!(
         recorded_runledger_versions,
         expected_compatibility_fence_versions()
     );
+}
 
+async fn assert_bundled_runtime_schema(pool: &PgPool) {
     let metrics_view_exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
              SELECT 1
@@ -132,7 +132,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
                AND table_name = 'job_metrics_rollup'
          )",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("query metrics view");
     assert!(metrics_view_exists);
@@ -145,13 +145,13 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
                AND table_name = 'job_continuation_metrics_rollup'
          )",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("query continuation metrics view");
     assert!(continuation_metrics_view_exists);
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('job_replays')::text")
-            .fetch_one(&harness.pool)
+            .fetch_one(pool)
             .await
             .expect("query job replay table"),
         Some("job_replays".to_owned())
@@ -160,7 +160,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let resource_claim_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_queue_execution_resource_claim_order'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read execution-resource claim-order index");
     assert!(
@@ -174,7 +174,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let active_cleanup_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_workflow_active_claims_release_pending'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read active-claim cleanup index");
     assert!(active_cleanup_index.contains("WHERE release_pending"));
@@ -187,7 +187,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
                   AND NOT tgisinternal
              )",
         )
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read terminal active-claim trigger")
     );
@@ -200,14 +200,16 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
                   AND NOT tgisinternal
              )",
         )
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read execution-resource lease enforcement trigger")
     );
+}
 
+async fn assert_enqueue_intent_queue_indexes(pool: &PgPool) {
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('job_enqueue_intents')::text")
-            .fetch_one(&harness.pool)
+            .fetch_one(pool)
             .await
             .expect("query job enqueue intents table"),
         Some("job_enqueue_intents".to_owned())
@@ -215,7 +217,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let pending_intent_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_pending'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read pending intent index");
     assert!(pending_intent_index.contains("(next_promotion_at, created_at, id)"));
@@ -224,7 +226,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let pending_intent_type_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_pending_type'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read pending intent type index");
     assert!(pending_intent_type_index.contains("(job_type, next_promotion_at, created_at, id)"));
@@ -233,15 +235,18 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let promoted_job_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_promoted_job'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read promoted intent job index");
     assert!(promoted_job_index.contains("(promoted_job_id)"));
     assert!(promoted_job_index.contains("WHERE (promoted_job_id IS NOT NULL)"));
+}
+
+async fn assert_enqueue_intent_metrics_indexes(pool: &PgPool) {
     let pending_metrics_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_pending_metrics'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read pending intent metrics index");
     assert!(pending_metrics_index.contains("(job_type, created_at)"));
@@ -250,7 +255,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let conflicted_metrics_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_conflicted_metrics'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read conflicted intent metrics index");
     assert!(conflicted_metrics_index.contains("(conflicted_at, job_type)"));
@@ -258,7 +263,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let org_conflicted_metrics_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_org_conflicted_metrics'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read organization conflicted intent metrics index");
     assert!(org_conflicted_metrics_index.contains("(organization_id, conflicted_at, job_type)"));
@@ -266,7 +271,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let org_promoted_metrics_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_org_promoted_metrics'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read organization promoted intent metrics index");
     assert!(org_promoted_metrics_index.contains("(organization_id, promoted_at, job_type)"));
@@ -274,16 +279,19 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let promoted_cleanup_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_promoted_cleanup'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read promoted intent cleanup index");
     assert!(promoted_cleanup_index.contains("(promoted_at, id)"));
     assert!(promoted_cleanup_index.contains("INCLUDE (job_type, organization_id)"));
     assert!(promoted_cleanup_index.contains("WHERE (status = 'PROMOTED'::text)"));
+}
+
+async fn assert_enqueue_intent_listing_and_unique_indexes(pool: &PgPool) {
     let global_created_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_created'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read global intent listing index");
     assert!(global_created_index.contains("(created_at DESC, id DESC)"));
@@ -291,7 +299,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
     let organization_created_index = sqlx::query_scalar::<_, String>(
         "SELECT pg_get_indexdef('idx_job_enqueue_intents_org_created'::regclass)",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read organization intent listing index");
     assert!(organization_created_index.contains("(organization_id, created_at DESC, id DESC)"));
@@ -304,12 +312,21 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
         assert_eq!(
             sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
                 .bind(index_name)
-                .fetch_one(&harness.pool)
+                .fetch_one(pool)
                 .await
                 .expect("query enqueue intent index"),
             Some(index_name.to_owned())
         );
     }
+}
+
+async fn assert_enqueue_intent_indexes(pool: &PgPool) {
+    assert_enqueue_intent_queue_indexes(pool).await;
+    assert_enqueue_intent_metrics_indexes(pool).await;
+    assert_enqueue_intent_listing_and_unique_indexes(pool).await;
+}
+
+async fn assert_enqueue_intent_columns_and_constraints(pool: &PgPool) {
     assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT data_type
@@ -318,7 +335,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
                AND table_name = 'job_enqueue_intents'
                AND column_name = 'enqueue_request_version'",
         )
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read enqueue request version type"),
         "smallint"
@@ -335,7 +352,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
                  OR (column_name = 'last_attempted_at' AND data_type = 'timestamp with time zone')
                )",
         )
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read enqueue intent retry metadata columns"),
         3
@@ -349,7 +366,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
                   AND conrelid = 'job_enqueue_intents'::regclass
              )",
         )
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read enqueue intent promotion-attempt constraint")
     );
@@ -360,7 +377,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
              WHERE conname = 'fk_job_enqueue_intents_promoted_job'
                AND conrelid = 'job_enqueue_intents'::regclass",
         )
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read promoted-job foreign-key delete action"),
         "r"
@@ -371,7 +388,7 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
          WHERE conname = 'chk_job_enqueue_intents_execution_resource_key'
            AND conrelid = 'job_enqueue_intents'::regclass",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("read enqueue intent execution-resource constraint");
     assert!(resource_constraint.contains("octet_length(execution_resource_key) <= 512"));
@@ -385,21 +402,23 @@ async fn migrate_applies_bundled_schema_to_fresh_database() {
                   AND conrelid = 'job_enqueue_intents'::regclass
              )",
         )
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read enqueue intent state constraint")
     );
-
-    harness.teardown().await;
 }
 
 #[tokio::test]
-async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
-    let harness = TestHarness::fresh("runledger_pg_workflow_job_link_rollout").await;
-    record_postgres_18_server_version(&harness.pool, "workflow job-link rollout").await;
-    apply_runledger_migrations_through(&harness.pool, CONTINUATION_METRICS_CTE_MIGRATION_VERSION)
-        .await;
+async fn migrate_applies_bundled_schema_to_fresh_database() {
+    let harness = TestHarness::fresh("runledger_pg_migrate").await;
+    assert_bundled_migration_history(&harness.pool).await;
+    assert_bundled_runtime_schema(&harness.pool).await;
+    assert_enqueue_intent_indexes(&harness.pool).await;
+    assert_enqueue_intent_columns_and_constraints(&harness.pool).await;
+    harness.teardown().await;
+}
 
+async fn seed_and_expand_workflow_job_links(pool: &PgPool) -> Uuid {
     sqlx::query(
         "INSERT INTO job_definitions (
             job_type,
@@ -411,7 +430,7 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          )
          VALUES ('jobs.test.workflow_job_link', 1, 3, 30, 100, true)",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("insert workflow job-link definition");
     let workflow_run_id = sqlx::query_scalar::<_, Uuid>(
@@ -419,15 +438,15 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          VALUES ('workflow.test.job_link_rollout')
          RETURNING id",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("insert workflow job-link run");
-    let legacy_step_id = insert_job_workflow_step(&harness.pool, workflow_run_id, "legacy").await;
+    let legacy_step_id = insert_job_workflow_step(pool, workflow_run_id, "legacy").await;
 
     // The released writer populated both columns in one transaction because
     // the baseline's deferred symmetry triggers rejected either one-sided
     // shape at commit.
-    let mut legacy_tx = harness.pool.begin().await.expect("begin legacy writer tx");
+    let mut legacy_tx = pool.begin().await.expect("begin legacy writer tx");
     let legacy_job_id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO job_queue (
             job_type,
@@ -469,44 +488,43 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
         "ALTER TABLE workflow_steps
          DISABLE TRIGGER trg_workflow_steps_job_linkage_symmetry",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("disable baseline symmetry trigger for backfill fixture");
     sqlx::query("UPDATE workflow_steps SET job_id = NULL WHERE id = $1")
         .bind(legacy_step_id)
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("create one-sided legacy linkage");
     sqlx::query(
         "ALTER TABLE workflow_steps
          ENABLE TRIGGER trg_workflow_steps_job_linkage_symmetry",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("restore baseline symmetry trigger");
 
-    apply_runledger_migration(
-        &harness.pool,
-        WORKFLOW_STEP_JOB_LINK_EXPAND_MIGRATION_VERSION,
-    )
-    .await;
+    apply_runledger_migration(pool, WORKFLOW_STEP_JOB_LINK_EXPAND_MIGRATION_VERSION).await;
     assert_eq!(
         sqlx::query_scalar::<_, Option<Uuid>>("SELECT job_id FROM workflow_steps WHERE id = $1",)
             .bind(legacy_step_id)
-            .fetch_one(&harness.pool)
+            .fetch_one(pool)
             .await
             .expect("read expand-backfilled step relationship"),
         Some(legacy_job_id)
     );
+    workflow_run_id
+}
 
+async fn assert_expand_mixed_writers(pool: &PgPool, workflow_run_id: Uuid) -> Uuid {
     // The new writer stores only workflow_steps.job_id. The expand trigger
     // projects it into the deprecated column for an old binary's readers.
-    let new_step_id = insert_job_workflow_step(&harness.pool, workflow_run_id, "new-writer").await;
-    let new_job_id = insert_direct_job(&harness.pool).await;
+    let new_step_id = insert_job_workflow_step(pool, workflow_run_id, "new-writer").await;
+    let new_job_id = insert_direct_job(pool).await;
     sqlx::query("UPDATE workflow_steps SET job_id = $2 WHERE id = $1")
         .bind(new_step_id)
         .bind(new_job_id)
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("new writer stores only workflow_steps.job_id");
     assert_eq!(
@@ -514,7 +532,7 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
             "SELECT workflow_step_id FROM job_queue WHERE id = $1",
         )
         .bind(new_job_id)
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("old reader sees expand compatibility projection"),
         Some(new_step_id)
@@ -522,8 +540,8 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
 
     // An old writer remains valid during the same expand window by completing
     // its established queue-insert/step-update dual-write transaction.
-    let old_step_id = insert_job_workflow_step(&harness.pool, workflow_run_id, "old-writer").await;
-    let mut old_tx = harness.pool.begin().await.expect("begin old writer tx");
+    let old_step_id = insert_job_workflow_step(pool, workflow_run_id, "old-writer").await;
+    let mut old_tx = pool.begin().await.expect("begin old writer tx");
     let old_job_id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO job_queue (
             job_type,
@@ -564,13 +582,13 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
     assert_eq!(
         sqlx::query_scalar::<_, Option<Uuid>>("SELECT job_id FROM workflow_steps WHERE id = $1",)
             .bind(old_step_id)
-            .fetch_one(&harness.pool)
+            .fetch_one(pool)
             .await
             .expect("new reader sees old writer through authoritative relationship"),
         Some(old_job_id)
     );
-    assert_eq!(workflow_job_link_anti_join_count(&harness.pool).await, 0);
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    assert_eq!(workflow_job_link_anti_join_count(pool).await, 0);
+    ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect("current guard accepts the validated expand-only rollout schema");
 
@@ -590,10 +608,10 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
     .step(current_step)
     .try_build()
     .expect("build current-binary expand workflow");
-    let current_run = enqueue_workflow_run(&harness.pool, &current_workflow)
+    let current_run = enqueue_workflow_run(pool, &current_workflow)
         .await
         .expect("current binary enqueues against expand-only schema");
-    let current_steps = list_workflow_steps(&harness.pool, None, current_run.id)
+    let current_steps = list_workflow_steps(pool, None, current_run.id)
         .await
         .expect("current binary reads steps from expand-only schema");
     let current_job_id = current_steps[0]
@@ -604,18 +622,21 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
             "SELECT workflow_step_id FROM job_queue WHERE id = $1",
         )
         .bind(current_job_id)
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("old reader sees current binary's projected relationship"),
         Some(current_steps[0].id)
     );
+    new_job_id
+}
 
+async fn assert_expand_trigger_guard_rejections(pool: &PgPool) {
     sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("remove one expand compatibility trigger for guard regression");
     assert_workflow_job_link_expand_schema_rejected(
-        &harness.pool,
+        pool,
         "an incomplete expand projection",
         "trg_workflow_steps_job_linkage_compatibility",
         WorkflowJobLinkTriggerProblem::Missing,
@@ -634,18 +655,18 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          FOR EACH ROW
          EXECUTE FUNCTION public.project_workflow_step_job_linkage_compatibility();",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("create wrong-schema trigger lookalike");
     assert_workflow_job_link_expand_schema_rejected(
-        &harness.pool,
+        pool,
         "a wrong-schema trigger lookalike",
         "trg_workflow_steps_job_linkage_compatibility",
         WorkflowJobLinkTriggerProblem::Missing,
     )
     .await;
     sqlx::query("DROP SCHEMA workflow_job_link_shadow CASCADE")
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("remove wrong-schema trigger lookalike");
 
@@ -655,18 +676,18 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          FOR EACH ROW
          EXECUTE FUNCTION enforce_workflow_job_linkage_symmetry()",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("create wrong-function trigger lookalike");
     assert_workflow_job_link_expand_schema_rejected(
-        &harness.pool,
+        pool,
         "a trigger invoking the wrong function",
         "trg_workflow_steps_job_linkage_compatibility",
         WorkflowJobLinkTriggerProblem::WrongFunction,
     )
     .await;
     sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("remove wrong-function trigger lookalike");
 
@@ -676,18 +697,18 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          FOR EACH ROW
          EXECUTE FUNCTION project_workflow_step_job_linkage_compatibility()",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("restore expand compatibility trigger after guard regression");
     sqlx::query(
         "ALTER TABLE workflow_steps
          DISABLE TRIGGER trg_workflow_steps_job_linkage_compatibility",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("disable expand compatibility trigger");
     assert_workflow_job_link_expand_schema_rejected(
-        &harness.pool,
+        pool,
         "a disabled trigger",
         "trg_workflow_steps_job_linkage_compatibility",
         WorkflowJobLinkTriggerProblem::NotEnabledForOriginWrites,
@@ -697,11 +718,11 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
         "ALTER TABLE workflow_steps
          ENABLE REPLICA TRIGGER trg_workflow_steps_job_linkage_compatibility",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("make expand compatibility trigger replica-only");
     assert_workflow_job_link_expand_schema_rejected(
-        &harness.pool,
+        pool,
         "a replica-only trigger",
         "trg_workflow_steps_job_linkage_compatibility",
         WorkflowJobLinkTriggerProblem::NotEnabledForOriginWrites,
@@ -711,17 +732,19 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
         "ALTER TABLE workflow_steps
          ENABLE TRIGGER trg_workflow_steps_job_linkage_compatibility",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("restore expand compatibility trigger to origin mode");
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect("current guard accepts all correctly defined and enabled expand triggers");
+}
 
+async fn assert_expand_trigger_modes(pool: &PgPool) {
     // Firing on a safe superset of UPDATE statements still protects every
     // relationship-column mutation and should not be rejected as schema drift.
     sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("remove column-specific compatibility trigger");
     sqlx::query(
@@ -730,14 +753,14 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          FOR EACH ROW
          EXECUTE FUNCTION project_workflow_step_job_linkage_compatibility()",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("create safe all-updates compatibility trigger");
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect("current guard accepts a trigger firing on a safe update superset");
     sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_compatibility ON workflow_steps")
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("remove safe all-updates compatibility trigger");
     sqlx::query(
@@ -746,12 +769,12 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          FOR EACH ROW
          EXECUTE FUNCTION project_workflow_step_job_linkage_compatibility()",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("restore column-specific compatibility trigger");
 
     sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_symmetry ON workflow_steps")
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("remove deferred workflow-step symmetry trigger");
     sqlx::query(
@@ -761,18 +784,18 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          FOR EACH ROW
          EXECUTE FUNCTION enforce_workflow_job_linkage_symmetry()",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("create non-deferrable workflow-step symmetry trigger");
     assert_workflow_job_link_expand_schema_rejected(
-        &harness.pool,
+        pool,
         "a non-deferrable symmetry trigger",
         "trg_workflow_steps_job_linkage_symmetry",
         WorkflowJobLinkTriggerProblem::WrongConstraintMode,
     )
     .await;
     sqlx::query("DROP TRIGGER trg_workflow_steps_job_linkage_symmetry ON workflow_steps")
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("remove non-deferrable workflow-step symmetry trigger");
     sqlx::query(
@@ -782,13 +805,19 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          FOR EACH ROW
          EXECUTE FUNCTION enforce_workflow_job_linkage_symmetry()",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("restore deferred workflow-step symmetry trigger");
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect("current guard accepts restored deferred symmetry semantics");
+}
 
+async fn assert_workflow_job_link_plans_and_contract(
+    pool: &PgPool,
+    workflow_run_id: Uuid,
+    new_job_id: Uuid,
+) {
     // Give PostgreSQL enough cardinality to compare actual indexed point plans
     // instead of choosing tiny-table sequential scans.
     sqlx::query(
@@ -814,7 +843,7 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          FROM generate_series(1, 2000) AS ordinal",
     )
     .bind(workflow_run_id)
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("seed reverse-lookup plan cardinality");
     sqlx::query(
@@ -837,11 +866,11 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
             'queued'
          FROM generate_series(1, 2000)",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("seed legacy-lookup plan cardinality");
     sqlx::raw_sql("ANALYZE job_queue; ANALYZE workflow_steps;")
-        .execute(&harness.pool)
+        .execute(pool)
         .await
         .expect("analyze workflow job-link plan fixtures");
 
@@ -850,7 +879,7 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          SELECT id FROM workflow_steps WHERE job_id = $1",
     )
     .bind(new_job_id)
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("explain authoritative reverse lookup");
     let legacy_plan = sqlx::query_scalar::<_, Value>(
@@ -858,7 +887,7 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
          SELECT workflow_step_id FROM job_queue WHERE id = $1",
     )
     .bind(new_job_id)
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("explain deprecated reciprocal lookup");
     eprintln!(
@@ -875,15 +904,11 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
         "legacy lookup comparison must use the queue primary key: {legacy_plan}"
     );
 
-    apply_runledger_migration(
-        &harness.pool,
-        WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION,
-    )
-    .await;
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    apply_runledger_migration(pool, WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION).await;
+    ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect("current guard accepts contracted workflow job-link schema");
-    assert!(!job_queue_workflow_step_id_exists(&harness.pool).await);
+    assert!(!job_queue_workflow_step_id_exists(pool).await);
     assert!(
         sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
@@ -893,11 +918,25 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
              )",
         )
         .bind(WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION)
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read workflow job-link contract compatibility fence"),
         "contract migration must fence older binaries"
     );
+}
+
+#[tokio::test]
+async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
+    let harness = TestHarness::fresh("runledger_pg_workflow_job_link_rollout").await;
+    record_postgres_18_server_version(&harness.pool, "workflow job-link rollout").await;
+    apply_runledger_migrations_through(&harness.pool, CONTINUATION_METRICS_CTE_MIGRATION_VERSION)
+        .await;
+
+    let workflow_run_id = seed_and_expand_workflow_job_links(&harness.pool).await;
+    let new_job_id = assert_expand_mixed_writers(&harness.pool, workflow_run_id).await;
+    assert_expand_trigger_guard_rejections(&harness.pool).await;
+    assert_expand_trigger_modes(&harness.pool).await;
+    assert_workflow_job_link_plans_and_contract(&harness.pool, workflow_run_id, new_job_id).await;
 
     harness.teardown().await;
 }
@@ -987,15 +1026,13 @@ async fn contracted_workflow_step_job_link_is_one_to_one_and_delete_safe() {
     harness.teardown().await;
 }
 
-#[tokio::test]
-async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_boundary() {
-    let harness = TestHarness::fresh("runledger_pg_replay_metrics_upgrade").await;
+async fn seed_preexisting_continuation_before_replay_metrics(pool: &PgPool) -> Uuid {
     let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read exact PostgreSQL version for migration compatibility regression");
     eprintln!("migration compatibility regression PostgreSQL server_version={server_version}");
-    apply_runledger_migrations_through(&harness.pool, V0_6_LATEST_MIGRATION_VERSION).await;
+    apply_runledger_migrations_through(pool, V0_6_LATEST_MIGRATION_VERSION).await;
 
     sqlx::query(
         "INSERT INTO job_definitions (
@@ -1008,7 +1045,7 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
          )
          VALUES ('jobs.test.preexisting_continuation', 1, 3, 30, 100, true)",
     )
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("insert preexisting continuation definition");
     let job_id = sqlx::query_scalar::<_, sqlx::types::Uuid>(
@@ -1032,7 +1069,7 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
          )
          RETURNING id",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("insert preexisting continued job");
     sqlx::query(
@@ -1055,14 +1092,17 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
          )",
     )
     .bind(job_id)
-    .execute(&harness.pool)
+    .execute(pool)
     .await
     .expect("insert preexisting continuation event");
+    job_id
+}
 
-    migrate_after_idempotency_cutover(&harness.pool)
+async fn assert_replay_metrics_upgrade(pool: &PgPool, job_id: Uuid) {
+    migrate_after_idempotency_cutover(pool)
         .await
         .expect("upgrade v0.6 schema to replay and metrics migration");
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect("latest schema guard accepts upgraded database");
 
@@ -1072,14 +1112,14 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
          WHERE organization_id IS NULL
            AND job_type = 'jobs.test.preexisting_continuation'",
     )
-    .fetch_one(&harness.pool)
+    .fetch_one(pool)
     .await
     .expect("load upgraded continuation metrics");
     assert_eq!(metrics, (1, 1, 2));
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_queue WHERE id = $1")
             .bind(job_id)
-            .fetch_one(&harness.pool)
+            .fetch_one(pool)
             .await
             .expect("count preserved preexisting job"),
         1
@@ -1088,7 +1128,7 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
     let recorded_runledger_versions = sqlx::query_scalar::<_, i64>(
         "SELECT version FROM runledger_migration_history ORDER BY version",
     )
-    .fetch_all(&harness.pool)
+    .fetch_all(pool)
     .await
     .expect("list compatibility-fence migration history");
     assert_eq!(
@@ -1102,7 +1142,7 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
          FROM _sqlx_migrations
          ORDER BY version",
     )
-    .fetch_all(&harness.pool)
+    .fetch_all(pool)
     .await
     .expect("load SQLx history after additive upgrade");
     assert!(
@@ -1127,10 +1167,11 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
             migration.version
         );
     }
+}
 
+async fn assert_raw_v0_6_upgrade_boundary(pool: &PgPool) {
     let v0_6_migrator = raw_v0_6_migrator();
-    let mut raw_connection = harness
-        .pool
+    let mut raw_connection = pool
         .acquire()
         .await
         .expect("acquire connection for raw v0.6 migrator");
@@ -1153,19 +1194,22 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
         .await
         .expect("close raw v0.6 migration connection after VersionMissing");
 
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect("Runledger's filtered startup guard accepts the additive migration");
+}
 
+async fn assert_replay_metrics_rollback_and_reapply(pool: &PgPool) {
+    let v0_6_migrator = raw_v0_6_migrator();
     MIGRATOR
-        .undo(&harness.pool, V0_6_LATEST_MIGRATION_VERSION)
+        .undo(pool, V0_6_LATEST_MIGRATION_VERSION)
         .await
         .expect("current migrator can revert the post-v0.6 additive migration");
     for object in ["job_replays", "job_continuation_metrics_rollup"] {
         assert_eq!(
             sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
                 .bind(object)
-                .fetch_one(&harness.pool)
+                .fetch_one(pool)
                 .await
                 .unwrap_or_else(|error| panic!("query reverted object {object}: {error}")),
             None,
@@ -1174,7 +1218,7 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
     }
 
     v0_6_migrator
-        .run(&harness.pool)
+        .run(pool)
         .await
         .expect("raw v0.6 migrator runs after newer history is reverted");
     let v0_6_versions = v0_6_migrator
@@ -1184,23 +1228,23 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
         .collect::<Vec<_>>();
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(&harness.pool)
+            .fetch_all(pool)
             .await
             .expect("list raw v0.6 SQLx history"),
         v0_6_versions
     );
 
-    migrate_after_idempotency_cutover(&harness.pool)
+    migrate_after_idempotency_cutover(pool)
         .await
         .expect("current migrator reapplies the additive migration after rollback");
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+    ensure_schema_compatible_after_idempotency_cutover(pool)
         .await
         .expect("current guard accepts the reapplied schema");
     for object in ["job_replays", "job_continuation_metrics_rollup"] {
         assert_eq!(
             sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
                 .bind(object)
-                .fetch_one(&harness.pool)
+                .fetch_one(pool)
                 .await
                 .unwrap_or_else(|error| panic!("query reapplied object {object}: {error}")),
             Some(object.to_owned()),
@@ -1214,12 +1258,20 @@ async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_bou
              WHERE organization_id IS NULL
                AND job_type = 'jobs.test.preexisting_continuation'",
         )
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("load continuation metrics after down/up cycle"),
         (1, 1, 2)
     );
+}
 
+#[tokio::test]
+async fn replay_metrics_upgrade_preserves_data_and_exposes_raw_v0_6_rollback_boundary() {
+    let harness = TestHarness::fresh("runledger_pg_replay_metrics_upgrade").await;
+    let job_id = seed_preexisting_continuation_before_replay_metrics(&harness.pool).await;
+    assert_replay_metrics_upgrade(&harness.pool, job_id).await;
+    assert_raw_v0_6_upgrade_boundary(&harness.pool).await;
+    assert_replay_metrics_rollback_and_reapply(&harness.pool).await;
     harness.teardown().await;
 }
 
@@ -1331,25 +1383,23 @@ async fn raw_version_missing_strands_session_lock_until_pool_close_but_safe_path
     harness.teardown().await;
 }
 
-#[tokio::test]
-async fn continuation_metrics_require_well_typed_v0_6_or_v0_7_payloads() {
-    const JOB_TYPE: &str = "jobs.test.continuation_payload_validation";
+const CONTINUATION_PAYLOAD_JOB_TYPE: &str = "jobs.test.continuation_payload_validation";
 
-    let harness = TestHarness::fresh("runledger_pg_continuation_payloads").await;
+async fn setup_continuation_payload_schema(pool: &PgPool) {
     let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
-        .fetch_one(&harness.pool)
+        .fetch_one(pool)
         .await
         .expect("read exact PostgreSQL version for continuation metrics regression");
     let server_version_num =
         sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
-            .fetch_one(&harness.pool)
+            .fetch_one(pool)
             .await
             .expect("read PostgreSQL numeric version for continuation metrics regression");
     eprintln!(
         "continuation metrics regression PostgreSQL server_version={server_version}, server_version_num={server_version_num}"
     );
 
-    migrate_after_idempotency_cutover(&harness.pool)
+    migrate_after_idempotency_cutover(pool)
         .await
         .expect("apply continuation metrics validation migration");
     sqlx::query(
@@ -1363,11 +1413,13 @@ async fn continuation_metrics_require_well_typed_v0_6_or_v0_7_payloads() {
          )
          VALUES ($1, 1, 3, 30, 100, true)",
     )
-    .bind(JOB_TYPE)
-    .execute(&harness.pool)
+    .bind(CONTINUATION_PAYLOAD_JOB_TYPE)
+    .execute(pool)
     .await
     .expect("insert continuation payload validation job definition");
+}
 
+async fn seed_continuation_payload_cases(pool: &PgPool) {
     sqlx::query(
         r#"
 WITH canonical(event_payload) AS (
@@ -1508,26 +1560,27 @@ FROM inserted_jobs
 JOIN payload_cases USING (case_name)
         "#,
     )
-    .bind(JOB_TYPE)
-    .execute(&harness.pool)
+    .bind(CONTINUATION_PAYLOAD_JOB_TYPE)
+    .execute(pool)
     .await
     .expect("seed valid and malformed continuation event payloads");
+}
 
+async fn assert_continuation_payload_plans(pool: &PgPool) {
     assert_eq!(
-        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        load_continuation_metrics(pool, CONTINUATION_PAYLOAD_JOB_TYPE).await,
         (2, 2, 2),
         "only genuine kindless v0.6 and discriminated v0.7 continuation events count"
     );
 
-    let factored_view_definition = continuation_metrics_view_definition(&harness.pool).await;
+    let factored_view_definition = continuation_metrics_view_definition(pool).await;
     assert!(
         factored_view_definition.contains("valid_continuation_events AS NOT MATERIALIZED"),
         "forward migration must keep the shared validity predicate in a local NOT MATERIALIZED CTE: {factored_view_definition}"
     );
 
-    let custom_plan = explain_continuation_metrics_plan(&harness.pool, PlanCacheMode::Custom).await;
-    let generic_plan =
-        explain_continuation_metrics_plan(&harness.pool, PlanCacheMode::Generic).await;
+    let custom_plan = explain_continuation_metrics_plan(pool, PlanCacheMode::Custom).await;
+    let generic_plan = explain_continuation_metrics_plan(pool, PlanCacheMode::Generic).await;
     assert_eq!(
         continuation_plan_node_types(&custom_plan),
         continuation_plan_node_types(&generic_plan),
@@ -1550,7 +1603,9 @@ JOIN payload_cases USING (case_name)
             "{mode} plan must inline the NOT MATERIALIZED CTE: {plan}"
         );
     }
+}
 
+async fn assert_continuation_cte_down_and_up(pool: &PgPool) {
     let cte_down_migration = MIGRATOR
         .iter()
         .find(|migration| {
@@ -1558,8 +1613,7 @@ JOIN payload_cases USING (case_name)
                 && migration.version == CONTINUATION_METRICS_CTE_MIGRATION_VERSION
         })
         .expect("continuation metrics CTE down migration exists");
-    let mut conn = harness
-        .pool
+    let mut conn = pool
         .acquire()
         .await
         .expect("acquire continuation metrics CTE revert connection");
@@ -1570,32 +1624,34 @@ JOIN payload_cases USING (case_name)
     drop(conn);
 
     assert_eq!(
-        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        load_continuation_metrics(pool, CONTINUATION_PAYLOAD_JOB_TYPE).await,
         (2, 2, 2),
         "CTE down migration must preserve strict continuation metric results"
     );
     assert!(
-        !continuation_metrics_view_definition(&harness.pool)
+        !continuation_metrics_view_definition(pool)
             .await
             .contains("valid_continuation_events"),
         "CTE down migration must restore the prior duplicated view definition"
     );
 
-    migrate_after_idempotency_cutover(&harness.pool)
+    migrate_after_idempotency_cutover(pool)
         .await
         .expect("reapply continuation metrics CTE migration");
     assert_eq!(
-        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        load_continuation_metrics(pool, CONTINUATION_PAYLOAD_JOB_TYPE).await,
         (2, 2, 2),
         "reapplying the CTE migration must preserve strict continuation metric results"
     );
     assert!(
-        continuation_metrics_view_definition(&harness.pool)
+        continuation_metrics_view_definition(pool)
             .await
             .contains("valid_continuation_events AS NOT MATERIALIZED"),
         "reapplying the CTE migration must restore the local NOT MATERIALIZED CTE"
     );
+}
 
+async fn assert_continuation_validation_down_and_up(pool: &PgPool) {
     let down_migration = MIGRATOR
         .iter()
         .find(|migration| {
@@ -1603,8 +1659,7 @@ JOIN payload_cases USING (case_name)
                 && migration.version == CONTINUATION_METRICS_VALIDATION_MIGRATION_VERSION
         })
         .expect("continuation metrics validation down migration exists");
-    let mut conn = harness
-        .pool
+    let mut conn = pool
         .acquire()
         .await
         .expect("acquire continuation metrics revert connection");
@@ -1615,20 +1670,29 @@ JOIN payload_cases USING (case_name)
     drop(conn);
 
     assert_eq!(
-        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        load_continuation_metrics(pool, CONTINUATION_PAYLOAD_JOB_TYPE).await,
         (16, 14, 3),
         "down migration must restore the published v0.7 payload-presence semantics"
     );
 
-    migrate_after_idempotency_cutover(&harness.pool)
+    migrate_after_idempotency_cutover(pool)
         .await
         .expect("reapply continuation metrics validation migration");
     assert_eq!(
-        load_continuation_metrics(&harness.pool, JOB_TYPE).await,
+        load_continuation_metrics(pool, CONTINUATION_PAYLOAD_JOB_TYPE).await,
         (2, 2, 2),
         "reapplying the forward migration restores strict payload validation"
     );
+}
 
+#[tokio::test]
+async fn continuation_metrics_require_well_typed_v0_6_or_v0_7_payloads() {
+    let harness = TestHarness::fresh("runledger_pg_continuation_payloads").await;
+    setup_continuation_payload_schema(&harness.pool).await;
+    seed_continuation_payload_cases(&harness.pool).await;
+    assert_continuation_payload_plans(&harness.pool).await;
+    assert_continuation_cte_down_and_up(&harness.pool).await;
+    assert_continuation_validation_down_and_up(&harness.pool).await;
     harness.teardown().await;
 }
 

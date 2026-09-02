@@ -126,69 +126,13 @@ async fn reap_expired_lease_batch(
             execution_started_persisted_at: db_row.execution_started_persisted_at,
             legacy_execution_started_persisted_at: db_row.legacy_execution_started_persisted_at,
         };
-        let job_id = row.job_id;
-        let run_number = row.run_number;
-
-        sqlx::query!("SAVEPOINT reaper_row")
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context("reap create row savepoint", error)
-            })?;
-
-        let disposition = match reap_expired_lease_row_tx(&mut tx, &row, default_retry_delay_ms)
-            .await
-        {
-            Ok(disposition) => disposition,
-            Err(error) => {
-                log_sanitized_deferred_row_error(&row, &error);
-
-                sqlx::query!("ROLLBACK TO SAVEPOINT reaper_row")
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|error| {
-                        Error::from_query_sqlx_with_context("reap rollback row savepoint", error)
-                    })?;
-                sqlx::query!("RELEASE SAVEPOINT reaper_row")
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|error| {
-                        Error::from_query_sqlx_with_context("reap release row savepoint", error)
-                    })?;
-
-                // Push failed rows out of the immediate expired-lease window so one
-                // poison row does not starve otherwise healthy work in subsequent batches.
-                sqlx::query!(
-                    "UPDATE job_queue
-                     SET lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
-                         updated_at = now()
-                     WHERE id = $1
-                       AND run_number = $2
-                       AND status = 'LEASED'",
-                    job_id,
-                    run_number,
-                    i64::from(default_retry_delay_ms),
-                )
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| {
-                    Error::from_query_sqlx_with_context("reap defer failed row", error)
-                })?;
-
-                outcome.record_deferred_row_error(&row, &error);
-
-                continue;
-            }
-        };
-
-        sqlx::query!("RELEASE SAVEPOINT reaper_row")
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                Error::from_query_sqlx_with_context("reap release row savepoint", error)
-            })?;
-
-        outcome.record_reaped_lease(&row, &disposition);
+        reap_expired_lease_row_with_savepoint_tx(
+            &mut tx,
+            &row,
+            default_retry_delay_ms,
+            &mut outcome,
+        )
+        .await?;
     }
 
     tx.commit()
@@ -196,6 +140,68 @@ async fn reap_expired_lease_batch(
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
 
     Ok(outcome)
+}
+
+async fn reap_expired_lease_row_with_savepoint_tx(
+    tx: &mut DbTx<'_>,
+    row: &ReapExpiredLeaseRow,
+    default_retry_delay_ms: i32,
+    outcome: &mut ReapExpiredLeaseBatchOutcome,
+) -> Result<()> {
+    sqlx::query!("SAVEPOINT reaper_row")
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| Error::from_query_sqlx_with_context("reap create row savepoint", error))?;
+
+    let disposition = match reap_expired_lease_row_tx(tx, row, default_retry_delay_ms).await {
+        Ok(disposition) => disposition,
+        Err(error) => {
+            log_sanitized_deferred_row_error(row, &error);
+
+            sqlx::query!("ROLLBACK TO SAVEPOINT reaper_row")
+                .execute(&mut **tx)
+                .await
+                .map_err(|error| {
+                    Error::from_query_sqlx_with_context("reap rollback row savepoint", error)
+                })?;
+            sqlx::query!("RELEASE SAVEPOINT reaper_row")
+                .execute(&mut **tx)
+                .await
+                .map_err(|error| {
+                    Error::from_query_sqlx_with_context("reap release row savepoint", error)
+                })?;
+
+            // Push failed rows out of the immediate expired-lease window so one
+            // poison row does not starve otherwise healthy work in subsequent batches.
+            sqlx::query!(
+                "UPDATE job_queue
+                     SET lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
+                         updated_at = now()
+                     WHERE id = $1
+                       AND run_number = $2
+                       AND status = 'LEASED'",
+                row.job_id,
+                row.run_number,
+                i64::from(default_retry_delay_ms),
+            )
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| Error::from_query_sqlx_with_context("reap defer failed row", error))?;
+
+            outcome.record_deferred_row_error(row, &error);
+            return Ok(());
+        }
+    };
+
+    sqlx::query!("RELEASE SAVEPOINT reaper_row")
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            Error::from_query_sqlx_with_context("reap release row savepoint", error)
+        })?;
+
+    outcome.record_reaped_lease(row, &disposition);
+    Ok(())
 }
 
 async fn cleanup_reaped_lease_coordination(

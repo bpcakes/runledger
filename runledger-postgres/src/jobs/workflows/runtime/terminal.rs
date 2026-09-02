@@ -278,57 +278,7 @@ async fn complete_external_workflow_step_read_committed_tx(
     let terminal_status = input.outcome.status();
     let output = input.outcome.output();
 
-    lock_workflow_step_rows_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;
-
-    let row = sqlx::query_as!(
-        WorkflowStepRow,
-        "SELECT
-            ws.id,
-            ws.workflow_run_id,
-            ws.step_key,
-            ws.execution_kind::text AS \"execution_kind!\",
-            ws.job_type,
-            ws.organization_id,
-            ws.payload,
-            ws.priority,
-            ws.max_attempts,
-            ws.timeout_seconds,
-            ws.stage,
-            ws.allow_handler_continuation,
-            ws.execution_resource_key,
-            ws.status::text AS \"status!\",
-            ws.job_id,
-            ws.released_at,
-            ws.started_at,
-            ws.finished_at,
-            ws.dependency_count_total,
-            ws.dependency_count_pending,
-            ws.dependency_count_unsatisfied,
-            ws.status_reason,
-            ws.last_error_code,
-            ws.last_error_message,
-            ws.output,
-            ws.created_at,
-            ws.updated_at
-         FROM workflow_steps ws
-         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
-         WHERE ws.workflow_run_id = $1
-           AND ws.step_key = $2
-           AND ($3::uuid IS NULL OR wr.organization_id = $3)
-         FOR UPDATE",
-        input.workflow_run_id,
-        input.step_key.as_str(),
-        input.organization_id,
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("lock external workflow step for completion", error)
-    })?
-    .ok_or_else(workflow_external_step_not_found_error)?;
-
-    let stored_output = row.output.clone();
-    let step = row.into_record()?;
+    let (step, stored_output) = lock_external_workflow_step_for_completion_tx(tx, input).await?;
     if step.execution_kind != WorkflowStepExecutionKind::External {
         return Err(workflow_external_step_not_external_error(
             step.step_key.as_str(),
@@ -438,6 +388,63 @@ async fn complete_external_workflow_step_read_committed_tx(
     recompute_workflow_run_status_tx(tx, updated.workflow_run_id).await?;
 
     Ok(updated)
+}
+
+async fn lock_external_workflow_step_for_completion_tx(
+    tx: &mut DbTx<'_>,
+    input: &CompleteExternalWorkflowStepInput<'_>,
+) -> Result<(WorkflowStepDbRecord, Option<Value>)> {
+    lock_workflow_step_rows_for_update_tx(tx, input.workflow_run_id, input.organization_id).await?;
+    let row = sqlx::query_as!(
+        WorkflowStepRow,
+        "SELECT
+            ws.id,
+            ws.workflow_run_id,
+            ws.step_key,
+            ws.execution_kind::text AS \"execution_kind!\",
+            ws.job_type,
+            ws.organization_id,
+            ws.payload,
+            ws.priority,
+            ws.max_attempts,
+            ws.timeout_seconds,
+            ws.stage,
+            ws.allow_handler_continuation,
+            ws.execution_resource_key,
+            ws.status::text AS \"status!\",
+            ws.job_id,
+            ws.released_at,
+            ws.started_at,
+            ws.finished_at,
+            ws.dependency_count_total,
+            ws.dependency_count_pending,
+            ws.dependency_count_unsatisfied,
+            ws.status_reason,
+            ws.last_error_code,
+            ws.last_error_message,
+            ws.output,
+            ws.created_at,
+            ws.updated_at
+         FROM workflow_steps ws
+         JOIN workflow_runs wr ON wr.id = ws.workflow_run_id
+         WHERE ws.workflow_run_id = $1
+           AND ws.step_key = $2
+           AND ($3::uuid IS NULL OR wr.organization_id = $3)
+         FOR UPDATE",
+        input.workflow_run_id,
+        input.step_key.as_str(),
+        input.organization_id,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        Error::from_query_sqlx_with_context("lock external workflow step for completion", error)
+    })?
+    .ok_or_else(workflow_external_step_not_found_error)?;
+
+    let stored_output = row.output.clone();
+    let step = row.into_record()?;
+    Ok((step, stored_output))
 }
 
 pub(crate) async fn resolve_terminal_step_queue_tx(
@@ -551,10 +558,7 @@ async fn lock_and_update_direct_dependents(
     prerequisite_step_id: Uuid,
     updates: &[DirectDependentUpdate],
 ) -> Result<Vec<UpdatedDependent>> {
-    let (dependent_step_ids, dependency_unsatisfied): (Vec<_>, Vec<_>) = updates
-        .iter()
-        .map(|update| (update.step_id, update.dependency_unsatisfied))
-        .unzip();
+    let (dependent_step_ids, dependency_unsatisfied) = direct_dependent_update_arrays(updates);
 
     // Intersecting fan-outs can update the same dependent from concurrent
     // prerequisite completions. Lock the entire direct batch in stable UUID
@@ -663,6 +667,13 @@ async fn lock_and_update_direct_dependents(
         });
     }
     Ok(decoded)
+}
+
+fn direct_dependent_update_arrays(updates: &[DirectDependentUpdate]) -> (Vec<Uuid>, Vec<bool>) {
+    updates
+        .iter()
+        .map(|update| (update.step_id, update.dependency_unsatisfied))
+        .unzip()
 }
 
 struct UpdatedDependent {

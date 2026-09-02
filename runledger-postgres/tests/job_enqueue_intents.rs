@@ -12,7 +12,7 @@ use runledger_postgres::jobs::{
     record_job_enqueue_intent_tx, update_job_definition,
 };
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::types::Uuid;
 use tokio::time::{sleep, timeout};
 
@@ -42,6 +42,21 @@ async fn record_postgres_server_version(pool: &sqlx::PgPool, diagnostic: &str) {
     eprintln!(
         "{diagnostic} PostgreSQL server_version={server_version}, server_version_num={server_version_num}"
     );
+}
+
+async fn assert_pending_intent_metrics(pool: &sqlx::PgPool, organization_id: Uuid) {
+    let metrics = get_job_enqueue_intent_metrics(
+        pool,
+        &JobEnqueueIntentMetricsFilter::new(10, 0).with_organization_id(organization_id),
+    )
+    .await
+    .expect("read pending metrics");
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].pending_count, 1);
+    assert_eq!(metrics[0].retrying_count, 0);
+    assert_eq!(metrics[0].max_promotion_attempts, 0);
+    assert_eq!(metrics[0].conflicted_24h, 0);
+    assert!(metrics[0].oldest_pending_at.is_some());
 }
 
 #[tokio::test]
@@ -514,18 +529,7 @@ async fn promotion_creates_ordinary_job_event_metrics_and_cleanup_state() {
         Some(persisted_next_run_at)
     );
 
-    let metrics = get_job_enqueue_intent_metrics(
-        &pool,
-        &JobEnqueueIntentMetricsFilter::new(10, 0).with_organization_id(organization_id),
-    )
-    .await
-    .expect("read pending metrics");
-    assert_eq!(metrics.len(), 1);
-    assert_eq!(metrics[0].pending_count, 1);
-    assert_eq!(metrics[0].retrying_count, 0);
-    assert_eq!(metrics[0].max_promotion_attempts, 0);
-    assert_eq!(metrics[0].conflicted_24h, 0);
-    assert!(metrics[0].oldest_pending_at.is_some());
+    assert_pending_intent_metrics(&pool, organization_id).await;
 
     register_test_job_definition(&pool, JOB_TYPE).await;
     let report = promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 10)
@@ -918,12 +922,9 @@ async fn recording_retries_when_a_conflicting_intent_disappears_before_lookup() 
     teardown_ephemeral_pool(pool, database).await;
 }
 
-#[tokio::test]
-async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_conflict() {
-    let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_conflicts", 4).await;
-    register_test_job_definition(&pool, JOB_TYPE).await;
+async fn assert_disabled_definition_keeps_intent_pending(pool: &sqlx::PgPool) {
     update_job_definition(
-        &pool,
+        pool,
         JobType::new(JOB_TYPE),
         &JobDefinitionUpdate {
             max_attempts: None,
@@ -938,17 +939,17 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
     let pending_payload = json!({"event": "pending"});
     let pending_intent =
         JobEnqueueIntent::new(JobType::new(JOB_TYPE), &pending_payload, "pending-key");
-    let pending = record_job_enqueue_intent(&pool, &pending_intent)
+    let pending = record_job_enqueue_intent(pool, &pending_intent)
         .await
         .expect("record pending intent");
     assert_eq!(
-        promote_job_enqueue_intents_for_types(&pool, &[JobType::new(JOB_TYPE)], 10)
+        promote_job_enqueue_intents_for_types(pool, &[JobType::new(JOB_TYPE)], 10)
             .await
             .expect("skip disabled definition"),
         Default::default()
     );
     assert_eq!(
-        get_job_enqueue_intent_by_id(&pool, None, pending.intent_id)
+        get_job_enqueue_intent_by_id(pool, None, pending.intent_id)
             .await
             .expect("load pending intent")
             .expect("pending intent exists")
@@ -957,7 +958,7 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
     );
 
     update_job_definition(
-        &pool,
+        pool,
         JobType::new(JOB_TYPE),
         &JobDefinitionUpdate {
             max_attempts: None,
@@ -968,6 +969,105 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
     )
     .await
     .expect("enable definition");
+}
+
+async fn assert_exact_retention_cleanup(pool: &sqlx::PgPool, intent_id: Uuid, job_id: Uuid) {
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin exact retention transaction");
+    assert_eq!(
+        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut tx, &[])
+            .await
+            .expect("empty exact retention cleanup"),
+        0
+    );
+    sqlx::query("SET LOCAL lock_timeout = '11s'")
+        .execute(&mut *tx)
+        .await
+        .expect("set caller retention lock timeout");
+    sqlx::query("SET LOCAL statement_timeout = '41s'")
+        .execute(&mut *tx)
+        .await
+        .expect("set caller retention statement timeout");
+    let timeouts_before = sqlx::query_as::<_, (String, String)>(
+        "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read caller retention timeouts");
+    assert_eq!(
+        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut tx, &[job_id])
+            .await
+            .expect("delete intent linked to existing job"),
+        1
+    );
+    let timeouts_after = sqlx::query_as::<_, (String, String)>(
+        "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read restored retention timeouts");
+    assert_eq!(timeouts_after, timeouts_before);
+    assert_eq!(
+        sqlx::query("DELETE FROM job_queue WHERE id = $1")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await
+            .expect("delete linked job after exact intent cleanup")
+            .rows_affected(),
+        1
+    );
+    tx.commit()
+        .await
+        .expect("commit exact retention transaction");
+    assert!(
+        get_job_enqueue_intent_by_id(pool, None, intent_id)
+            .await
+            .expect("check exact retention cleanup")
+            .is_none()
+    );
+}
+
+async fn assert_promoted_intent_retention_fence(
+    pool: &sqlx::PgPool,
+    intent_id: Uuid,
+    job_id: Uuid,
+) {
+    let equivalent = get_job_enqueue_intent_by_id(pool, None, intent_id)
+        .await
+        .expect("load equivalent intent")
+        .expect("equivalent intent exists");
+    assert_eq!(equivalent.status(), JobEnqueueIntentStatus::Promoted);
+    assert_eq!(equivalent.promoted_job_id(), Some(job_id));
+    let delete_error = sqlx::query("DELETE FROM job_queue WHERE id = $1")
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .expect_err("promoted intent must retain its linked job");
+    let database_error = delete_error
+        .as_database_error()
+        .expect("retention fence must be a database error");
+    assert_eq!(database_error.code().as_deref(), Some("23001"));
+    assert_eq!(
+        database_error.constraint(),
+        Some("fk_job_enqueue_intents_promoted_job")
+    );
+    assert_eq!(
+        delete_promoted_job_enqueue_intents_before(pool, Utc::now() - ChronoDuration::days(1), 10,)
+            .await
+            .expect("time-based cleanup must retain the new intent"),
+        0
+    );
+
+    assert_exact_retention_cleanup(pool, intent_id, job_id).await;
+}
+
+#[tokio::test]
+async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_conflict() {
+    let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_conflicts", 4).await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    assert_disabled_definition_keeps_intent_pending(&pool).await;
 
     let equivalent_payload = json!({"event": "equivalent"});
     let equivalent_intent = JobEnqueueIntent::new(
@@ -1035,93 +1135,7 @@ async fn unavailable_definitions_stay_pending_and_direct_enqueues_converge_or_co
     assert_eq!(report.conflicted, 1);
     assert_eq!(report.total_promoted, 2);
 
-    let equivalent = get_job_enqueue_intent_by_id(&pool, None, equivalent.intent_id)
-        .await
-        .expect("load equivalent intent")
-        .expect("equivalent intent exists");
-    assert_eq!(equivalent.status(), JobEnqueueIntentStatus::Promoted);
-    assert_eq!(equivalent.promoted_job_id(), Some(existing_job_id));
-    let delete_error = sqlx::query("DELETE FROM job_queue WHERE id = $1")
-        .bind(existing_job_id)
-        .execute(&pool)
-        .await
-        .expect_err("promoted intent must retain its linked job");
-    let database_error = delete_error
-        .as_database_error()
-        .expect("retention fence must be a database error");
-    assert_eq!(database_error.code().as_deref(), Some("23001"));
-    assert_eq!(
-        database_error.constraint(),
-        Some("fk_job_enqueue_intents_promoted_job")
-    );
-    assert_eq!(
-        delete_promoted_job_enqueue_intents_before(
-            &pool,
-            Utc::now() - ChronoDuration::days(1),
-            10,
-        )
-        .await
-        .expect("time-based cleanup must retain the new intent"),
-        0
-    );
-
-    let mut retention_tx = pool
-        .begin()
-        .await
-        .expect("begin exact retention transaction");
-    assert_eq!(
-        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[])
-            .await
-            .expect("empty exact retention cleanup"),
-        0
-    );
-    sqlx::query("SET LOCAL lock_timeout = '11s'")
-        .execute(&mut *retention_tx)
-        .await
-        .expect("set caller retention lock timeout");
-    sqlx::query("SET LOCAL statement_timeout = '41s'")
-        .execute(&mut *retention_tx)
-        .await
-        .expect("set caller retention statement timeout");
-    let timeouts_before = sqlx::query_as::<_, (String, String)>(
-        "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
-    )
-    .fetch_one(&mut *retention_tx)
-    .await
-    .expect("read caller retention timeouts");
-    assert_eq!(
-        delete_promoted_job_enqueue_intents_for_jobs_tx(&mut retention_tx, &[existing_job_id],)
-            .await
-            .expect("delete intent linked to existing job"),
-        1
-    );
-    let timeouts_after = sqlx::query_as::<_, (String, String)>(
-        "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
-    )
-    .fetch_one(&mut *retention_tx)
-    .await
-    .expect("read restored retention timeouts");
-    assert_eq!(timeouts_after, timeouts_before);
-    assert_eq!(
-        sqlx::query("DELETE FROM job_queue WHERE id = $1")
-            .bind(existing_job_id)
-            .execute(&mut *retention_tx)
-            .await
-            .expect("delete linked job after exact intent cleanup")
-            .rows_affected(),
-        1
-    );
-    retention_tx
-        .commit()
-        .await
-        .expect("commit exact retention transaction");
-    assert!(
-        get_job_enqueue_intent_by_id(&pool, None, equivalent.id)
-            .await
-            .expect("check exact retention cleanup")
-            .is_none()
-    );
-
+    assert_promoted_intent_retention_fence(&pool, equivalent.intent_id, existing_job_id).await;
     let conflicted = get_job_enqueue_intent_by_id(&pool, None, conflicting.intent_id)
         .await
         .expect("load conflicted intent")
@@ -1979,22 +1993,13 @@ async fn promotion_row_lock_wait_is_bounded_while_holding_retention_fence() {
     teardown_ephemeral_pool(pool, database).await;
 }
 
-#[tokio::test]
-async fn inverse_existing_job_order_is_serialized_with_retention() {
-    const PROMOTION_BLOCKER_LOCK: i64 = 0x7275_6e6c_7465_7374;
-
-    let (pool, database) =
-        setup_ephemeral_pool("postgres_enqueue_intent_inverse_retention_order", 8).await;
-    record_postgres_server_version(&pool, "inverse intent retention lock characterization").await;
-    register_test_job_definition(&pool, JOB_TYPE).await;
-    let payload = json!({"event": "inverse-retention-order"});
-
+async fn prepare_inverse_retention_order(pool: &sqlx::PgPool, payload: &Value) -> (Uuid, Uuid) {
     let job_a = enqueue_job(
-        &pool,
+        pool,
         &JobEnqueue {
             job_type: JobType::new(JOB_TYPE),
             organization_id: None,
-            payload: &payload,
+            payload,
             priority: None,
             max_attempts: None,
             timeout_seconds: None,
@@ -2006,11 +2011,11 @@ async fn inverse_existing_job_order_is_serialized_with_retention() {
     .await
     .expect("enqueue first inverse-order job");
     let job_b = enqueue_job(
-        &pool,
+        pool,
         &JobEnqueue {
             job_type: JobType::new(JOB_TYPE),
             organization_id: None,
-            payload: &payload,
+            payload,
             priority: None,
             max_attempts: None,
             timeout_seconds: None,
@@ -2028,14 +2033,14 @@ async fn inverse_existing_job_order_is_serialized_with_retention() {
     };
 
     let high_intent = record_job_enqueue_intent(
-        &pool,
-        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, high_key),
+        pool,
+        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), payload, high_key),
     )
     .await
     .expect("record high-job intent first");
     let low_intent = record_job_enqueue_intent(
-        &pool,
-        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, low_key),
+        pool,
+        &JobEnqueueIntent::new(JobType::new(JOB_TYPE), payload, low_key),
     )
     .await
     .expect("record low-job intent second");
@@ -2049,7 +2054,7 @@ async fn inverse_existing_job_order_is_serialized_with_retention() {
     )
     .bind(high_intent.intent_id)
     .bind([high_intent.intent_id, low_intent.intent_id])
-    .execute(&pool)
+    .execute(pool)
     .await
     .expect("force inverse intent promotion order");
 
@@ -2064,7 +2069,7 @@ async fn inverse_existing_job_order_is_serialized_with_retention() {
          END
          $function$",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .expect("create inverse-order promotion blocker function");
     sqlx::query(
@@ -2073,9 +2078,23 @@ async fn inverse_existing_job_order_is_serialized_with_retention() {
          FOR EACH ROW
          EXECUTE FUNCTION block_inverse_intent_promotion()",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .expect("create inverse-order promotion blocker trigger");
+
+    (low_job_id, high_job_id)
+}
+
+#[tokio::test]
+async fn inverse_existing_job_order_is_serialized_with_retention() {
+    const PROMOTION_BLOCKER_LOCK: i64 = 0x7275_6e6c_7465_7374;
+
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_inverse_retention_order", 8).await;
+    record_postgres_server_version(&pool, "inverse intent retention lock characterization").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let payload = json!({"event": "inverse-retention-order"});
+    let (low_job_id, high_job_id) = prepare_inverse_retention_order(&pool, &payload).await;
 
     let mut blocker_tx = pool.begin().await.expect("begin promotion blocker");
     let blocker_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")

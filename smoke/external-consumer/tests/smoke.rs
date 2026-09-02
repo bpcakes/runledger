@@ -27,6 +27,7 @@ use runledger_runtime::config::JobsConfig;
 use runledger_runtime::registry::JobHandler;
 use runledger_test_support::{setup_unmigrated_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::{Value, json};
+use sqlx::types::Uuid;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{Instant, sleep, timeout};
 
@@ -43,28 +44,46 @@ const RETRY_AT_FAILURE_CODE: &str = "smoke.provider_rate_limited";
 const REPLAY_REQUEST_KEY: &str = "external-smoke-success-replay";
 const REPLAY_REASON: &str = "prove fresh successful replay from a packaged consumer";
 
-#[tokio::test]
-async fn packaged_crates_support_external_consumer_embedding() {
-    let (pool, database) =
-        setup_unmigrated_ephemeral_pool("external_consumer_smoke", SMOKE_POOL_MAX_CONNECTIONS)
-            .await;
+struct SmokeRuntime {
+    hang_release: Arc<Notify>,
+    dead_letters: Arc<Mutex<Vec<String>>>,
+    execution_count: Arc<AtomicUsize>,
+    completed_continuation_slices: Arc<Mutex<HashSet<(Uuid, i64)>>>,
+    stop_supervisor_tx: tokio::sync::oneshot::Sender<()>,
+    supervisor_task: tokio::task::JoinHandle<runledger_runtime::Result<()>>,
+}
+
+struct RecoveryJobs {
+    keyed: Uuid,
+    transactional: Uuid,
+}
+
+struct SmokeJobs {
+    success: Uuid,
+    continuation: Uuid,
+    terminal: Uuid,
+    retry_after: Uuid,
+    retry_at: Uuid,
+}
+
+async fn setup_consumer_schema_and_intent(pool: &DbPool) -> (Uuid, Value) {
     let server_version = sqlx::query_scalar::<_, String>("SHOW server_version")
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await
         .expect("read smoke PostgreSQL server_version");
     let server_version_num =
         sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::int")
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
             .expect("read smoke PostgreSQL server_version_num");
     eprintln!(
         "external consumer smoke PostgreSQL server_version={server_version} server_version_num={server_version_num}"
     );
 
-    runledger_postgres::migrate_after_idempotency_cutover(&pool)
+    runledger_postgres::migrate_after_idempotency_cutover(pool)
         .await
         .expect("apply packaged migrations");
-    create_consumer_audit_table(&pool)
+    create_consumer_audit_table(pool)
         .await
         .expect("create consumer-owned audit table");
 
@@ -94,13 +113,34 @@ async fn packaged_crates_support_external_consumer_embedding() {
         .await
         .expect("commit consumer audit and enqueue intent atomically");
     assert_consumer_audit(
-        &pool,
+        pool,
         "transactional-enqueue-intent",
         recorded_intent.intent_id,
         recorded_intent.intent_id,
     )
     .await;
+    (recorded_intent.intent_id, intent_payload)
+}
 
+async fn register_smoke_job_definition(pool: &DbPool) {
+    let mut tx = pool.begin().await.expect("begin job definition tx");
+    upsert_job_definition_tx(
+        &mut tx,
+        &JobDefinitionUpsert {
+            job_type: JobType::new(SMOKE_JOB_TYPE),
+            version: 1,
+            max_attempts: 1,
+            default_timeout_seconds: 30,
+            default_priority: 100,
+            is_enabled: true,
+        },
+    )
+    .await
+    .expect("upsert smoke job definition");
+    tx.commit().await.expect("commit job definition tx");
+}
+
+async fn start_smoke_runtime(pool: &DbPool) -> SmokeRuntime {
     let hang_release = Arc::new(Notify::new());
     let dead_letters = Arc::new(Mutex::new(Vec::new()));
     let execution_count = Arc::new(AtomicUsize::new(0));
@@ -121,28 +161,46 @@ async fn packaged_crates_support_external_consumer_embedding() {
     }
     let registry = catalog.to_registry();
 
-    let mut tx = pool.begin().await.expect("begin job definition tx");
-    upsert_job_definition_tx(
-        &mut tx,
-        &JobDefinitionUpsert {
-            job_type: JobType::new(SMOKE_JOB_TYPE),
-            version: 1,
-            max_attempts: 1,
-            default_timeout_seconds: 30,
-            default_priority: 100,
-            is_enabled: true,
-        },
-    )
-    .await
-    .expect("upsert smoke job definition");
-    tx.commit().await.expect("commit job definition tx");
+    let config = JobsConfig {
+        worker_id: "external-consumer-smoke-worker".to_string(),
+        poll_interval: Duration::from_millis(25),
+        claim_batch_size: 8,
+        lease_ttl_seconds: 10,
+        max_global_concurrency: 8,
+        reaper_interval: Duration::from_millis(100),
+        schedule_poll_interval: Duration::from_millis(100),
+        reaper_retry_delay_ms: 1_000,
+    };
 
-    let recovery_payload = json!({"kind": "success"});
+    let supervisor = Supervisor::builder(pool, config)
+        .expect("supervisor builder should find active Tokio runtime")
+        .with_registry(registry)
+        .build()
+        .expect("supervisor should build");
+    let (stop_supervisor_tx, stop_supervisor_rx) = tokio::sync::oneshot::channel();
+    let supervisor_task = tokio::spawn(supervisor.run_until_shutdown(
+        async move {
+            let _ = stop_supervisor_rx.await;
+        },
+        Duration::from_secs(10),
+    ));
+
+    SmokeRuntime {
+        hang_release,
+        dead_letters,
+        execution_count,
+        completed_continuation_slices,
+        stop_supervisor_tx,
+        supervisor_task,
+    }
+}
+
+async fn assert_keyed_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid {
     let recovery_next_run_at = Utc::now() + ChronoDuration::hours(1);
     let recovery_request = JobEnqueue {
         job_type: JobType::new(SMOKE_JOB_TYPE),
         organization_id: None,
-        payload: &recovery_payload,
+        payload: recovery_payload,
         priority: None,
         max_attempts: None,
         timeout_seconds: None,
@@ -164,7 +222,7 @@ async fn packaged_crates_support_external_consumer_embedding() {
         .await
         .expect("commit recovery enqueue");
     cancel_job_with_scope(
-        &pool,
+        pool,
         JobCancellationScope::Global,
         inserted_recovery.job_id,
         Some("external smoke recovery"),
@@ -188,7 +246,7 @@ async fn packaged_crates_support_external_consumer_embedding() {
         .await
         .expect("commit existing enqueue");
 
-    let observed_recovery = get_job_by_id(&pool, None, inserted_recovery.job_id)
+    let observed_recovery = get_job_by_id(pool, None, inserted_recovery.job_id)
         .await
         .expect("load canceled recovery job")
         .expect("canceled recovery job exists");
@@ -198,24 +256,27 @@ async fn packaged_crates_support_external_consumer_embedding() {
         "external smoke compare-and-requeue",
     )
     .expect("canceled observation is recoverable");
-    let recovery_outcome = compare_and_requeue_job(&pool, recovery_request)
+    let recovery_outcome = compare_and_requeue_job(pool, recovery_request)
         .await
         .expect("compare and requeue recovery job");
     assert!(matches!(
         recovery_outcome,
         CompareAndRequeueJobOutcome::Requeued { .. }
     ));
+    inserted_recovery.job_id
+}
 
-    let transactional_recovery_job_id = enqueue_payload(&pool, &recovery_payload).await;
+async fn assert_transactional_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid {
+    let transactional_recovery_job_id = enqueue_payload(pool, recovery_payload).await;
     cancel_job_with_scope(
-        &pool,
+        pool,
         JobCancellationScope::Global,
         transactional_recovery_job_id,
         Some("external smoke transactional recovery"),
     )
     .await
     .expect("cancel transactional recovery job");
-    let observed_transactional_recovery = get_job_by_id(&pool, None, transactional_recovery_job_id)
+    let observed_transactional_recovery = get_job_by_id(pool, None, transactional_recovery_job_id)
         .await
         .expect("load transactional recovery job")
         .expect("transactional recovery job exists");
@@ -255,50 +316,36 @@ async fn packaged_crates_support_external_consumer_embedding() {
         .await
         .expect("commit recovery and consumer audit atomically");
     assert_consumer_audit(
-        &pool,
+        pool,
         "transactional-recovery",
         transactional_recovery_job_id,
         transactional_recovery_job_id,
     )
     .await;
-    let committed_transactional_recovery =
-        get_job_by_id(&pool, None, transactional_recovery_job_id)
-            .await
-            .expect("reload committed transactional recovery")
-            .expect("committed transactional recovery exists");
+    let committed_transactional_recovery = get_job_by_id(pool, None, transactional_recovery_job_id)
+        .await
+        .expect("reload committed transactional recovery")
+        .expect("committed transactional recovery exists");
     assert_eq!(committed_transactional_recovery.status, JobStatus::Pending);
     assert_eq!(committed_transactional_recovery.run_number, 2);
+    transactional_recovery_job_id
+}
 
-    let config = JobsConfig {
-        worker_id: "external-consumer-smoke-worker".to_string(),
-        poll_interval: Duration::from_millis(25),
-        claim_batch_size: 8,
-        lease_ttl_seconds: 10,
-        max_global_concurrency: 8,
-        reaper_interval: Duration::from_millis(100),
-        schedule_poll_interval: Duration::from_millis(100),
-        reaper_retry_delay_ms: 1_000,
-    };
+async fn assert_recovery_apis(pool: &DbPool) -> RecoveryJobs {
+    let recovery_payload = json!({"kind": "success"});
+    RecoveryJobs {
+        keyed: assert_keyed_recovery(pool, &recovery_payload).await,
+        transactional: assert_transactional_recovery(pool, &recovery_payload).await,
+    }
+}
 
-    let supervisor = Supervisor::builder(&pool, config)
-        .expect("supervisor builder should find active Tokio runtime")
-        .with_registry(registry)
-        .build()
-        .expect("supervisor should build");
-    let (stop_supervisor_tx, stop_supervisor_rx) = tokio::sync::oneshot::channel();
-    let supervisor_task = tokio::spawn(supervisor.run_until_shutdown(
-        async move {
-            let _ = stop_supervisor_rx.await;
-        },
-        Duration::from_secs(10),
-    ));
-
-    let success_job_id = enqueue_kind(&pool, "success").await;
-    let intent_job_id = wait_for_promoted_intent(&pool, recorded_intent.intent_id).await;
-    let intent_job = wait_for_status(&pool, intent_job_id, JobStatus::Succeeded).await;
-    assert_eq!(intent_job.payload, intent_payload);
+async fn enqueue_smoke_jobs(pool: &DbPool, intent_id: Uuid, intent_payload: &Value) -> SmokeJobs {
+    let success_job_id = enqueue_kind(pool, "success").await;
+    let intent_job_id = wait_for_promoted_intent(pool, intent_id).await;
+    let intent_job = wait_for_status(pool, intent_job_id, JobStatus::Succeeded).await;
+    assert_eq!(&intent_job.payload, intent_payload);
     let continuation_job_id = enqueue_payload(
-        &pool,
+        pool,
         &json!({
             "kind": "continuation",
             "canary": true,
@@ -306,16 +353,25 @@ async fn packaged_crates_support_external_consumer_embedding() {
         }),
     )
     .await;
-    let terminal_job_id = enqueue_kind(&pool, "terminal").await;
+    let terminal_job_id = enqueue_kind(pool, "terminal").await;
     let retry_after_job_id =
-        enqueue_payload_with_max_attempts(&pool, &json!({"kind": "retry-after"}), Some(2)).await;
+        enqueue_payload_with_max_attempts(pool, &json!({"kind": "retry-after"}), Some(2)).await;
     let retry_at_job_id =
-        enqueue_payload_with_max_attempts(&pool, &json!({"kind": "retry-at"}), Some(2)).await;
-    insert_due_schedule(&pool, "scheduled-success")
+        enqueue_payload_with_max_attempts(pool, &json!({"kind": "retry-at"}), Some(2)).await;
+    insert_due_schedule(pool, "scheduled-success")
         .await
         .expect("insert due schedule");
+    SmokeJobs {
+        success: success_job_id,
+        continuation: continuation_job_id,
+        terminal: terminal_job_id,
+        retry_after: retry_after_job_id,
+        retry_at: retry_at_job_id,
+    }
+}
 
-    let success_job = wait_for_status(&pool, success_job_id, JobStatus::Succeeded).await;
+async fn assert_successful_replay(pool: &DbPool, success_job_id: Uuid) {
+    let success_job = wait_for_status(pool, success_job_id, JobStatus::Succeeded).await;
     assert_eq!(success_job.status, JobStatus::Succeeded);
 
     let replay_request = CompareAndReplaySucceededJob {
@@ -351,14 +407,14 @@ async fn packaged_crates_support_external_consumer_embedding() {
         .await
         .expect("commit replay and consumer audit atomically");
     assert_consumer_audit(
-        &pool,
+        pool,
         "transactional-successful-replay",
         success_job.id,
         replay.job_id,
     )
     .await;
 
-    let existing_replay = compare_and_replay_succeeded_job(&pool, replay_request)
+    let existing_replay = compare_and_replay_succeeded_job(pool, replay_request)
         .await
         .expect("resolve replay idempotently through pool wrapper");
     let CompareAndReplaySucceededJobOutcome::Replayed {
@@ -371,9 +427,9 @@ async fn packaged_crates_support_external_consumer_embedding() {
     assert_eq!(existing_replay.job_id, replay.job_id);
     assert_eq!(existing_replay.disposition, JobEnqueueDisposition::Existing);
 
-    let replayed_job = wait_for_status(&pool, replay.job_id, JobStatus::Succeeded).await;
+    let replayed_job = wait_for_status(pool, replay.job_id, JobStatus::Succeeded).await;
     assert_eq!(replayed_job.run_number, 1);
-    let replay_events = list_job_events(&pool, None, replay.job_id, 100, None)
+    let replay_events = list_job_events(pool, None, replay.job_id, 100, None)
         .await
         .expect("list successful replay events through the public prelude");
     assert_successful_replay_event(
@@ -383,21 +439,23 @@ async fn packaged_crates_support_external_consumer_embedding() {
         success_job.run_number,
     );
     assert_eq!(
-        get_job_by_id(&pool, None, success_job.id)
+        get_job_by_id(pool, None, success_job.id)
             .await
             .expect("reload successful replay source")
             .expect("successful replay source still exists")
             .status,
         JobStatus::Succeeded
     );
+}
 
-    let continuation_job = wait_for_status(&pool, continuation_job_id, JobStatus::Succeeded).await;
+async fn assert_continuation_smoke_job(pool: &DbPool, jobs: &SmokeJobs, runtime: &SmokeRuntime) {
+    let continuation_job = wait_for_status(pool, jobs.continuation, JobStatus::Succeeded).await;
     assert_eq!(continuation_job.run_number, 2);
     assert_eq!(continuation_job.attempt, 1);
-    let continuation_events = list_job_events(&pool, None, continuation_job_id, 100, None)
+    let continuation_events = list_job_events(pool, None, jobs.continuation, 100, None)
         .await
         .expect("list continuation events through the public prelude");
-    assert_handler_continuation_event(&continuation_events, continuation_job_id);
+    assert_handler_continuation_event(&continuation_events, jobs.continuation);
     assert_eq!(
         continuation_job.checkpoint,
         Some(json!({
@@ -405,7 +463,7 @@ async fn packaged_crates_support_external_consumer_embedding() {
             "cursor": CONTINUATION_MAX_RUNS - 1,
         }))
     );
-    let continuation_metrics = get_job_continuation_metrics(&pool, None, Some(SMOKE_JOB_TYPE))
+    let continuation_metrics = get_job_continuation_metrics(pool, None, Some(SMOKE_JOB_TYPE))
         .await
         .expect("load smoke continuation metrics")
         .pop()
@@ -413,40 +471,59 @@ async fn packaged_crates_support_external_consumer_embedding() {
     assert_eq!(continuation_metrics.continued_24h, 1);
     assert_eq!(continuation_metrics.active_continued_count, 0);
     assert_eq!(continuation_metrics.max_active_run_number, 0);
-    assert_eq!(completed_continuation_slices.lock().await.len(), 2);
+    assert_eq!(runtime.completed_continuation_slices.lock().await.len(), 2);
+}
 
-    let retry_after_job = wait_for_status(&pool, retry_after_job_id, JobStatus::Succeeded).await;
+async fn assert_retry_smoke_jobs(pool: &DbPool, jobs: &SmokeJobs) {
+    let retry_after_job = wait_for_status(pool, jobs.retry_after, JobStatus::Succeeded).await;
     assert_eq!(retry_after_job.run_number, 1);
     assert_eq!(retry_after_job.attempt, 2);
-    let retry_after_events = list_job_events(&pool, None, retry_after_job_id, 100, None)
+    let retry_after_events = list_job_events(pool, None, jobs.retry_after, 100, None)
         .await
         .expect("list handler-selected relative retry events");
-    assert_relative_retry_event(&retry_after_events, retry_after_job_id);
+    assert_relative_retry_event(&retry_after_events, jobs.retry_after);
 
-    let retry_at_job = wait_for_status(&pool, retry_at_job_id, JobStatus::Succeeded).await;
+    let retry_at_job = wait_for_status(pool, jobs.retry_at, JobStatus::Succeeded).await;
     assert_eq!(retry_at_job.run_number, 1);
     assert_eq!(retry_at_job.attempt, 2);
-    let retry_at_events = list_job_events(&pool, None, retry_at_job_id, 100, None)
+    let retry_at_events = list_job_events(pool, None, jobs.retry_at, 100, None)
         .await
         .expect("list handler-selected absolute retry events");
-    assert_absolute_retry_event(&retry_at_events, retry_at_job_id);
+    assert_absolute_retry_event(&retry_at_events, jobs.retry_at);
+}
 
-    let recovered_job =
-        wait_for_status(&pool, inserted_recovery.job_id, JobStatus::Succeeded).await;
+async fn assert_recovery_terminal_and_schedule_jobs(
+    pool: &DbPool,
+    jobs: &SmokeJobs,
+    recovery_jobs: &RecoveryJobs,
+) {
+    let recovered_job = wait_for_status(pool, recovery_jobs.keyed, JobStatus::Succeeded).await;
     assert_eq!(recovered_job.run_number, 2);
     let transactionally_recovered_job =
-        wait_for_status(&pool, transactional_recovery_job_id, JobStatus::Succeeded).await;
+        wait_for_status(pool, recovery_jobs.transactional, JobStatus::Succeeded).await;
     assert_eq!(transactionally_recovered_job.run_number, 2);
 
-    let terminal_job = wait_for_status(&pool, terminal_job_id, JobStatus::DeadLettered).await;
+    let terminal_job = wait_for_status(pool, jobs.terminal, JobStatus::DeadLettered).await;
     assert_eq!(terminal_job.status, JobStatus::DeadLettered);
 
-    let scheduled_job =
-        wait_for_kind_status(&pool, "scheduled-success", JobStatus::Succeeded).await;
+    let scheduled_job = wait_for_kind_status(pool, "scheduled-success", JobStatus::Succeeded).await;
     assert_eq!(scheduled_job.status, JobStatus::Succeeded);
+}
 
-    let hanging_job_id = enqueue_kind(&pool, "hang").await;
-    let hanging_job = wait_for_running(&pool, hanging_job_id).await;
+async fn assert_completed_smoke_jobs(
+    pool: &DbPool,
+    jobs: &SmokeJobs,
+    recovery_jobs: &RecoveryJobs,
+    runtime: &SmokeRuntime,
+) {
+    assert_continuation_smoke_job(pool, jobs, runtime).await;
+    assert_retry_smoke_jobs(pool, jobs).await;
+    assert_recovery_terminal_and_schedule_jobs(pool, jobs, recovery_jobs).await;
+}
+
+async fn assert_reaping_and_shutdown(pool: &DbPool, runtime: SmokeRuntime) {
+    let hanging_job_id = enqueue_kind(pool, "hang").await;
+    let hanging_job = wait_for_running(pool, hanging_job_id).await;
     assert_eq!(hanging_job.status, JobStatus::Leased);
     assert_eq!(hanging_job.stage, JobStage::Running);
     assert!(
@@ -454,29 +531,43 @@ async fn packaged_crates_support_external_consumer_embedding() {
         "hanging job should be claimed by the worker"
     );
 
-    expire_job_lease(&pool, hanging_job_id)
+    expire_job_lease(pool, hanging_job_id)
         .await
         .expect("force job lease expiration");
 
-    let reaped_job = wait_for_status(&pool, hanging_job_id, JobStatus::DeadLettered).await;
+    let reaped_job = wait_for_status(pool, hanging_job_id, JobStatus::DeadLettered).await;
     assert_eq!(reaped_job.status, JobStatus::DeadLettered);
 
-    wait_for_dead_letter(&dead_letters, "terminal").await;
-    wait_for_dead_letter(&dead_letters, "hang").await;
+    wait_for_dead_letter(&runtime.dead_letters, "terminal").await;
+    wait_for_dead_letter(&runtime.dead_letters, "hang").await;
 
     assert!(
-        execution_count.load(Ordering::SeqCst) >= 13,
+        runtime.execution_count.load(Ordering::SeqCst) >= 13,
         "worker should execute direct, retried, continued, recovered, replayed, scheduled, and hanging jobs"
     );
 
-    hang_release.notify_waiters();
-    let _ = stop_supervisor_tx.send(());
-    let shutdown_result = timeout(Duration::from_secs(12), supervisor_task)
+    runtime.hang_release.notify_waiters();
+    let _ = runtime.stop_supervisor_tx.send(());
+    let shutdown_result = timeout(Duration::from_secs(12), runtime.supervisor_task)
         .await
         .expect("supervisor monitor task should stop before outer timeout")
         .expect("supervisor monitor task should join");
     shutdown_result.expect("supervisor tasks should stop and join cleanly");
+}
 
+#[tokio::test]
+async fn packaged_crates_support_external_consumer_embedding() {
+    let (pool, database) =
+        setup_unmigrated_ephemeral_pool("external_consumer_smoke", SMOKE_POOL_MAX_CONNECTIONS)
+            .await;
+    let (intent_id, intent_payload) = setup_consumer_schema_and_intent(&pool).await;
+    register_smoke_job_definition(&pool).await;
+    let recovery_jobs = assert_recovery_apis(&pool).await;
+    let runtime = start_smoke_runtime(&pool).await;
+    let jobs = enqueue_smoke_jobs(&pool, intent_id, &intent_payload).await;
+    assert_successful_replay(&pool, jobs.success).await;
+    assert_completed_smoke_jobs(&pool, &jobs, &recovery_jobs, &runtime).await;
+    assert_reaping_and_shutdown(&pool, runtime).await;
     teardown_ephemeral_pool(pool, database).await;
 }
 

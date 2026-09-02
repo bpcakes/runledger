@@ -84,23 +84,7 @@ pub fn draw_detail(
 
     f.render_widget(Paragraph::new(scope_banner(app.scope)), chunks[0]);
 
-    let run = &data.run;
-    let mut header = format!(
-        "Run {} | {} | {}",
-        short_uuid(run.id),
-        run.workflow_type.as_str(),
-        workflow_run_status_label(run.status),
-    );
-    if data.steps_truncated() || data.dependencies_truncated() {
-        header.push_str(&format!(
-            "\nShowing {} of {} steps and {} of {} dependencies.",
-            data.steps.len(),
-            data.steps_total,
-            data.dependencies.len(),
-            data.dependencies_total
-        ));
-    }
-    f.render_widget(Paragraph::new(header), chunks[1]);
+    f.render_widget(Paragraph::new(workflow_detail_header(data)), chunks[1]);
 
     let step_columns = [
         TableColumn::left("Step", Constraint::Min(18)),
@@ -229,4 +213,24 @@ pub fn draw_detail(
         dep_rows,
         dependency_empty,
     );
+}
+
+fn workflow_detail_header(data: &WorkflowDetailData) -> String {
+    let run = &data.run;
+    let mut header = format!(
+        "Run {} | {} | {}",
+        short_uuid(run.id),
+        run.workflow_type.as_str(),
+        workflow_run_status_label(run.status),
+    );
+    if data.steps_truncated() || data.dependencies_truncated() {
+        header.push_str(&format!(
+            "\nShowing {} of {} steps and {} of {} dependencies.",
+            data.steps.len(),
+            data.steps_total,
+            data.dependencies.len(),
+            data.dependencies_total
+        ));
+    }
+    header
 }

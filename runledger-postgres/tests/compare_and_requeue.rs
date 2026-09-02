@@ -21,6 +21,8 @@ mod support;
 use support::{claim_one_job, enqueue_test_job, register_test_job_definition};
 
 const JOB_TYPE: &str = "jobs.test.compare_and_requeue";
+const KEYED_RECOVERY_IDEMPOTENCY_KEY: &str = "keyed-enqueue-recovery";
+const KEYED_RECOVERY_REASON: &str = "second transaction recovery";
 
 async fn enqueue_scoped_job(pool: &DbPool, organization_id: Option<Uuid>, key: &str) -> Uuid {
     let payload = json!({"key": key});
@@ -73,6 +75,85 @@ async fn assert_job_row_is_not_locked(pool: &DbPool, job_id: Uuid, context: &str
     .unwrap_or_else(|_| panic!("{context}: row-lock probe timed out"))
     .unwrap_or_else(|error| panic!("{context}: row remained locked: {error}"));
     probe_tx.rollback().await.expect("rollback row-lock probe");
+}
+
+fn spawn_keyed_recovery_transaction(
+    pool: DbPool,
+    payload: Value,
+    job_id: Uuid,
+    pid_sender: tokio::sync::oneshot::Sender<i32>,
+) -> tokio::task::JoinHandle<Result<(), String>> {
+    tokio::spawn(async move {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin transaction B: {error}"))?;
+        let pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("load transaction B backend pid: {error}"))?;
+        pid_sender
+            .send(pid)
+            .map_err(|_| String::from("publish transaction B backend pid"))?;
+
+        let existing = enqueue_job_with_outcome_tx(
+            &mut tx,
+            &JobEnqueue {
+                job_type: JobType::new(JOB_TYPE),
+                organization_id: None,
+                payload: &payload,
+                priority: None,
+                max_attempts: None,
+                timeout_seconds: None,
+                next_run_at: None,
+                idempotency_key: Some(KEYED_RECOVERY_IDEMPOTENCY_KEY),
+                stage: None,
+            },
+        )
+        .await
+        .map_err(|error| format!("transaction B keyed enqueue: {error}"))?;
+        if existing.disposition != JobEnqueueDisposition::Existing
+            || existing.status != JobStatus::Canceled
+            || existing.run_number != 1
+        {
+            return Err(format!(
+                "transaction B saw unexpected keyed enqueue outcome: {existing:?}"
+            ));
+        }
+
+        let outcome = compare_and_requeue_job_tx(
+            &mut tx,
+            CompareAndRequeueJob {
+                scope: JobScope::Global,
+                job_id,
+                expected_status: RequeueableJobStatus::Canceled,
+                expected_run_number: 1,
+                state_policy: JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
+                reason: KEYED_RECOVERY_REASON,
+            },
+        )
+        .await
+        .map_err(|error| format!("transaction B compare-and-requeue: {error}"))?;
+        let CompareAndRequeueJobOutcome::Requeued { before, after, .. } = outcome else {
+            return Err(format!(
+                "transaction B expected Requeued outcome, got {outcome:?}"
+            ));
+        };
+        if before.organization_id.is_some()
+            || before.status != JobStatus::Canceled
+            || before.run_number != 1
+            || after.status != JobStatus::Pending
+            || after.run_number != 2
+        {
+            return Err(format!(
+                "transaction B saw unexpected recovery transition: before={before:?}, after={after:?}"
+            ));
+        }
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit transaction B: {error}"))?;
+        Ok(())
+    })
 }
 
 #[tokio::test]
@@ -436,9 +517,6 @@ async fn global_scope_matches_only_global_jobs() {
 
 #[tokio::test]
 async fn keyed_enqueue_composes_with_compare_and_requeue_without_lock_upgrade_deadlock() {
-    const IDEMPOTENCY_KEY: &str = "keyed-enqueue-recovery";
-    const RECOVERY_REASON: &str = "second transaction recovery";
-
     let (pool, database) = setup_ephemeral_pool("postgres_keyed_enqueue_recovery_lock", 6).await;
     register_test_job_definition(&pool, JOB_TYPE).await;
     let payload = json!({"key": "keyed-enqueue-recovery"});
@@ -454,7 +532,7 @@ async fn keyed_enqueue_composes_with_compare_and_requeue_without_lock_upgrade_de
             max_attempts: None,
             timeout_seconds: None,
             next_run_at: None,
-            idempotency_key: Some(IDEMPOTENCY_KEY),
+            idempotency_key: Some(KEYED_RECOVERY_IDEMPOTENCY_KEY),
             stage: None,
         },
     )
@@ -498,7 +576,7 @@ async fn keyed_enqueue_composes_with_compare_and_requeue_without_lock_upgrade_de
             max_attempts: None,
             timeout_seconds: None,
             next_run_at: None,
-            idempotency_key: Some(IDEMPOTENCY_KEY),
+            idempotency_key: Some(KEYED_RECOVERY_IDEMPOTENCY_KEY),
             stage: None,
         },
     )
@@ -509,80 +587,12 @@ async fn keyed_enqueue_composes_with_compare_and_requeue_without_lock_upgrade_de
     assert_eq!(existing_a.run_number, 1);
 
     let (pid_b_sender, pid_b_receiver) = tokio::sync::oneshot::channel();
-    let pool_b = pool.clone();
-    let payload_b = payload.clone();
-    let job_id = seeded.job_id;
-    let task_b = tokio::spawn(async move {
-        let mut tx_b = pool_b
-            .begin()
-            .await
-            .map_err(|error| format!("begin transaction B: {error}"))?;
-        let pid_b = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-            .fetch_one(&mut *tx_b)
-            .await
-            .map_err(|error| format!("load transaction B backend pid: {error}"))?;
-        pid_b_sender
-            .send(pid_b)
-            .map_err(|_| String::from("publish transaction B backend pid"))?;
-
-        let existing_b = enqueue_job_with_outcome_tx(
-            &mut tx_b,
-            &JobEnqueue {
-                job_type: JobType::new(JOB_TYPE),
-                organization_id: None,
-                payload: &payload_b,
-                priority: None,
-                max_attempts: None,
-                timeout_seconds: None,
-                next_run_at: None,
-                idempotency_key: Some(IDEMPOTENCY_KEY),
-                stage: None,
-            },
-        )
-        .await
-        .map_err(|error| format!("transaction B keyed enqueue: {error}"))?;
-        if existing_b.disposition != JobEnqueueDisposition::Existing
-            || existing_b.status != JobStatus::Canceled
-            || existing_b.run_number != 1
-        {
-            return Err(format!(
-                "transaction B saw unexpected keyed enqueue outcome: {existing_b:?}"
-            ));
-        }
-
-        let outcome = compare_and_requeue_job_tx(
-            &mut tx_b,
-            CompareAndRequeueJob {
-                scope: JobScope::Global,
-                job_id,
-                expected_status: RequeueableJobStatus::Canceled,
-                expected_run_number: 1,
-                state_policy: JobRequeueStatePolicy::PreserveProgressAndCheckpoint,
-                reason: RECOVERY_REASON,
-            },
-        )
-        .await
-        .map_err(|error| format!("transaction B compare-and-requeue: {error}"))?;
-        let CompareAndRequeueJobOutcome::Requeued { before, after, .. } = outcome else {
-            return Err(format!(
-                "transaction B expected Requeued outcome, got {outcome:?}"
-            ));
-        };
-        if before.organization_id.is_some()
-            || before.status != JobStatus::Canceled
-            || before.run_number != 1
-            || after.status != JobStatus::Pending
-            || after.run_number != 2
-        {
-            return Err(format!(
-                "transaction B saw unexpected recovery transition: before={before:?}, after={after:?}"
-            ));
-        }
-        tx_b.commit()
-            .await
-            .map_err(|error| format!("commit transaction B: {error}"))?;
-        Ok::<(), String>(())
-    });
+    let task_b = spawn_keyed_recovery_transaction(
+        pool.clone(),
+        payload.clone(),
+        seeded.job_id,
+        pid_b_sender,
+    );
 
     let pid_b = timeout(Duration::from_secs(2), pid_b_receiver)
         .await
@@ -652,7 +662,7 @@ async fn keyed_enqueue_composes_with_compare_and_requeue_without_lock_upgrade_de
             .payload
             .get("reason")
             .and_then(|value| value.as_str()),
-        Some(RECOVERY_REASON)
+        Some(KEYED_RECOVERY_REASON)
     );
     assert_eq!(
         requeued_events[0]

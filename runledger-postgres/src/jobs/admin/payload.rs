@@ -58,50 +58,13 @@ pub async fn update_job_payload_uuid_array_field(
         )
     })?;
 
-    let previous_lock_timeout =
-        cap_job_payload_uuid_array_field_update_lock_timeout_tx(&mut tx).await?;
-
-    let row_result = sqlx::query_as::<_, JobPayloadUuidArrayFieldUpdateCandidate>(
-        "SELECT
-             status::text AS status,
-             worker_id,
-             lease_expires_at,
-             EXISTS (
-                 SELECT 1
-                 FROM workflow_steps ws
-                 WHERE ws.job_id = job_queue.id
-             ) AS workflow_managed,
-             idempotency_key,
-             enqueue_request
-           FROM job_queue
-           WHERE id = $1
-             AND organization_id = $2
-             AND job_type = $3
-           FOR UPDATE",
+    let row = lock_job_payload_uuid_array_field_update_candidate_tx(
+        &mut tx,
+        organization_id,
+        job_id,
+        job_type,
     )
-    .bind(job_id)
-    .bind(organization_id)
-    .bind(job_type)
-    .fetch_optional(&mut *tx)
-    .await;
-
-    let row = match row_result {
-        Ok(row) => {
-            set_local_lock_timeout_tx(
-                &mut tx,
-                &previous_lock_timeout,
-                "restore job payload uuid array update lock timeout",
-            )
-            .await?;
-            row
-        }
-        Err(error) => {
-            return Err(Error::from_query_sqlx_with_context(
-                "classify job payload uuid array update",
-                error,
-            ));
-        }
-    };
+    .await?;
 
     let Some(row) = row else {
         tx.commit().await.map_err(|error| {
@@ -113,22 +76,7 @@ pub async fn update_job_payload_uuid_array_field(
         return Ok(JobPayloadUuidArrayFieldUpdate::NotFound);
     };
 
-    // Order matters: workflow-managed jobs can also carry request snapshots, so
-    // return the ownership rejection before the snapshot-consistency rejection.
-    let rejection = if row.workflow_managed {
-        Some(JobPayloadUuidArrayFieldUpdateRejection::WorkflowManaged)
-    } else if row.idempotency_key.is_some() || row.enqueue_request.is_some() {
-        Some(JobPayloadUuidArrayFieldUpdateRejection::IdempotentRequestSnapshot)
-    } else if row.status != JobStatus::Pending.as_db_value()
-        || row.worker_id.is_some()
-        || row.lease_expires_at.is_some()
-    {
-        Some(JobPayloadUuidArrayFieldUpdateRejection::NotPendingOrClaimed)
-    } else {
-        None
-    };
-
-    if let Some(reason) = rejection {
+    if let Some(reason) = job_payload_uuid_array_field_update_rejection(&row) {
         tx.commit().await.map_err(|error| {
             Error::from_query_sqlx_with_context(
                 "commit job payload uuid array update transaction",
@@ -170,6 +118,73 @@ pub async fn update_job_payload_uuid_array_field(
         )
     })?;
     Ok(JobPayloadUuidArrayFieldUpdate::Updated)
+}
+
+async fn lock_job_payload_uuid_array_field_update_candidate_tx(
+    tx: &mut DbTx<'_>,
+    organization_id: Uuid,
+    job_id: Uuid,
+    job_type: JobType<'_>,
+) -> Result<Option<JobPayloadUuidArrayFieldUpdateCandidate>> {
+    let previous_lock_timeout = cap_job_payload_uuid_array_field_update_lock_timeout_tx(tx).await?;
+    let row = sqlx::query_as::<_, JobPayloadUuidArrayFieldUpdateCandidate>(
+        "SELECT
+             status::text AS status,
+             worker_id,
+             lease_expires_at,
+             EXISTS (
+                 SELECT 1
+                 FROM workflow_steps ws
+                 WHERE ws.job_id = job_queue.id
+             ) AS workflow_managed,
+             idempotency_key,
+             enqueue_request
+           FROM job_queue
+           WHERE id = $1
+             AND organization_id = $2
+             AND job_type = $3
+           FOR UPDATE",
+    )
+    .bind(job_id)
+    .bind(organization_id)
+    .bind(job_type)
+    .fetch_optional(&mut **tx)
+    .await;
+
+    match row {
+        Ok(row) => {
+            set_local_lock_timeout_tx(
+                tx,
+                &previous_lock_timeout,
+                "restore job payload uuid array update lock timeout",
+            )
+            .await?;
+            Ok(row)
+        }
+        Err(error) => Err(Error::from_query_sqlx_with_context(
+            "classify job payload uuid array update",
+            error,
+        )),
+    }
+}
+
+fn job_payload_uuid_array_field_update_rejection(
+    row: &JobPayloadUuidArrayFieldUpdateCandidate,
+) -> Option<JobPayloadUuidArrayFieldUpdateRejection> {
+    // Order matters: workflow-managed jobs can also carry request snapshots, so
+    // return the ownership rejection before the snapshot-consistency rejection.
+    if row.workflow_managed {
+        Some(JobPayloadUuidArrayFieldUpdateRejection::WorkflowManaged)
+    } else if row.idempotency_key.is_some() || row.enqueue_request.is_some() {
+        Some(JobPayloadUuidArrayFieldUpdateRejection::IdempotentRequestSnapshot)
+    } else if row.status != JobStatus::Pending.as_db_value()
+        || row.worker_id.is_some()
+        || row.lease_expires_at.is_some()
+    {
+        Some(JobPayloadUuidArrayFieldUpdateRejection::NotPendingOrClaimed)
+    } else {
+        None
+    }
 }
 
 async fn cap_job_payload_uuid_array_field_update_lock_timeout_tx(

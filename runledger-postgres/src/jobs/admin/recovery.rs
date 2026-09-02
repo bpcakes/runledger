@@ -114,67 +114,9 @@ pub(crate) async fn cancel_job_with_scope_tx(
     job_id: Uuid,
     reason: Option<&str>,
 ) -> Result<Option<JobQueueRecord>> {
-    let (is_admin, organization_id) = cancellation_scope_predicate(scope);
-    // Preserve a live lease's original expiry as a cancellation-quiescence
-    // marker. Status fencing rejects every subsequent worker write immediately,
-    // while compare-and-requeue waits until this marker has passed before it
-    // can start a new run. Pending jobs already have a NULL marker.
-    let row = sqlx::query_as!(
-        JobQueueRow,
-        "UPDATE job_queue
-         SET status = 'CANCELED',
-             last_heartbeat_at = NULL,
-             worker_id = NULL,
-             finished_at = now(),
-             output = NULL,
-             status_reason = COALESCE($4, 'CANCELED'),
-             updated_at = now()
-         WHERE id = $1
-           AND ($2 OR organization_id IS NOT DISTINCT FROM $3)
-           AND status IN ('PENDING', 'LEASED')
-         RETURNING
-            id,
-            job_type,
-            organization_id,
-            payload,
-            status::text AS \"status!\",
-            priority,
-            run_number,
-            attempt,
-            max_attempts,
-            timeout_seconds,
-            next_run_at,
-            lease_expires_at,
-            last_heartbeat_at,
-            worker_id,
-            started_at,
-            finished_at,
-            stage,
-            progress_done,
-            progress_total,
-            progress_pct::float8 AS progress_pct,
-            checkpoint,
-            output,
-            idempotency_key,
-            status_reason,
-            last_error_code,
-            last_error_message,
-            created_at,
-            updated_at",
-        job_id,
-        is_admin,
-        organization_id,
-        reason,
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("cancel job", error))?;
-
-    let Some(row) = row else {
+    let Some(record) = update_canceled_job_tx(tx, scope, job_id, reason).await? else {
         return Ok(None);
     };
-
-    let record = row.into_record()?;
 
     sqlx::query!(
         "UPDATE job_attempts
@@ -232,6 +174,71 @@ pub(crate) async fn cancel_job_with_scope_tx(
     .await?;
 
     Ok(Some(record))
+}
+
+async fn update_canceled_job_tx(
+    tx: &mut DbTx<'_>,
+    scope: JobCancellationScope,
+    job_id: Uuid,
+    reason: Option<&str>,
+) -> Result<Option<JobQueueRecord>> {
+    let (is_admin, organization_id) = cancellation_scope_predicate(scope);
+    // Preserve a live lease's original expiry as a cancellation-quiescence
+    // marker. Status fencing rejects every subsequent worker write immediately,
+    // while compare-and-requeue waits until this marker has passed before it
+    // can start a new run. Pending jobs already have a NULL marker.
+    let row = sqlx::query_as!(
+        JobQueueRow,
+        "UPDATE job_queue
+         SET status = 'CANCELED',
+             last_heartbeat_at = NULL,
+             worker_id = NULL,
+             finished_at = now(),
+             output = NULL,
+             status_reason = COALESCE($4, 'CANCELED'),
+             updated_at = now()
+         WHERE id = $1
+           AND ($2 OR organization_id IS NOT DISTINCT FROM $3)
+           AND status IN ('PENDING', 'LEASED')
+         RETURNING
+            id,
+            job_type,
+            organization_id,
+            payload,
+            status::text AS \"status!\",
+            priority,
+            run_number,
+            attempt,
+            max_attempts,
+            timeout_seconds,
+            next_run_at,
+            lease_expires_at,
+            last_heartbeat_at,
+            worker_id,
+            started_at,
+            finished_at,
+            stage,
+            progress_done,
+            progress_total,
+            progress_pct::float8 AS progress_pct,
+            checkpoint,
+            output,
+            idempotency_key,
+            status_reason,
+            last_error_code,
+            last_error_message,
+            created_at,
+            updated_at",
+        job_id,
+        is_admin,
+        organization_id,
+        reason,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| Error::from_query_sqlx_with_context("cancel job", error))?;
+
+    row.map(JobQueueRow::into_record).transpose()
 }
 
 #[derive(sqlx::FromRow)]
@@ -526,17 +533,12 @@ mod tests {
         complete_job_failure, enqueue_job, upsert_job_definition_tx,
     };
 
-    #[tokio::test]
-    async fn compare_and_requeue_retries_lock_when_later_snapshot_matches_expectation() {
-        const JOB_TYPE: &str = "jobs.test.compare_requeue_snapshot_race";
-
-        let (pool, database) =
-            setup_ephemeral_pool("postgres_compare_requeue_snapshot_race", 4).await;
+    async fn upsert_snapshot_race_job_definition(pool: &crate::DbPool, job_type: &str) {
         let mut definition_tx = pool.begin().await.expect("begin definition transaction");
         upsert_job_definition_tx(
             &mut definition_tx,
             &JobDefinitionUpsert {
-                job_type: JobType::new(JOB_TYPE),
+                job_type: JobType::new(job_type),
                 version: 1,
                 max_attempts: 3,
                 default_timeout_seconds: 60,
@@ -547,6 +549,15 @@ mod tests {
         .await
         .expect("upsert job definition");
         definition_tx.commit().await.expect("commit job definition");
+    }
+
+    #[tokio::test]
+    async fn compare_and_requeue_retries_lock_when_later_snapshot_matches_expectation() {
+        const JOB_TYPE: &str = "jobs.test.compare_requeue_snapshot_race";
+
+        let (pool, database) =
+            setup_ephemeral_pool("postgres_compare_requeue_snapshot_race", 4).await;
+        upsert_snapshot_race_job_definition(&pool, JOB_TYPE).await;
 
         let payload = json!({ "case": "snapshot-race" });
         let job_id = enqueue_job(

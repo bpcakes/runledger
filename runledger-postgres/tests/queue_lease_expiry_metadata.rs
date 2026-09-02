@@ -189,6 +189,112 @@ fn assert_failure_metadata_parity(
     assert_eq!(attempt.2.as_deref(), Some(LEASE_EXPIRY_MESSAGE));
 }
 
+async fn assert_terminal_lease_expiry(pool: &DbPool, job_id: Uuid, claim: &JobQueueRecord) {
+    let queue = load_job(pool, job_id).await;
+    assert_eq!(queue.status, JobStatus::DeadLettered);
+    let attempt =
+        load_attempt_failure_metadata(pool, job_id, claim.run_number, claim.attempt).await;
+    assert_eq!(attempt.3, None);
+    let failed_event = event_payload(pool, job_id, JobEventType::Failed).await;
+    assert_failure_metadata_parity(&queue, &attempt, &failed_event);
+    assert_eq!(
+        event_payload(pool, job_id, JobEventType::DeadLettered).await,
+        json!({
+            "kind": LEASE_EXPIRY_KIND,
+            "error_code": LEASE_EXPIRY_CODE,
+            "started_without_renewal_heartbeat": false,
+        })
+    );
+    let dead_letter = sqlx::query_as::<_, (String, String)>(
+        "SELECT error_code, error_message
+         FROM job_dead_letters
+         WHERE job_id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await
+    .expect("load terminal dead letter metadata");
+    assert_eq!(
+        dead_letter,
+        (
+            LEASE_EXPIRY_CODE.to_owned(),
+            LEASE_EXPIRY_MESSAGE.to_owned()
+        )
+    );
+}
+
+async fn assert_retryable_lease_expiry(
+    pool: &DbPool,
+    job_id: Uuid,
+    claim: &JobQueueRecord,
+    next_run_at: DateTime<Utc>,
+) {
+    let queue = load_job(pool, job_id).await;
+    assert_eq!(queue.status, JobStatus::Pending);
+    assert_eq!(next_run_at, queue.next_run_at);
+    let attempt =
+        load_attempt_failure_metadata(pool, job_id, claim.run_number, claim.attempt).await;
+    assert_eq!(attempt.3, Some(RETRY_DELAY_MS));
+    let failed_event = event_payload(pool, job_id, JobEventType::Failed).await;
+    assert_failure_metadata_parity(&queue, &attempt, &failed_event);
+    let scheduled_event = event_payload(pool, job_id, JobEventType::RetryScheduled).await;
+    assert_eq!(
+        scheduled_event.get("kind").and_then(Value::as_str),
+        Some(LEASE_EXPIRY_KIND)
+    );
+    assert_eq!(
+        scheduled_event
+            .get("retry_delay_ms")
+            .and_then(Value::as_i64),
+        Some(i64::from(RETRY_DELAY_MS))
+    );
+    assert_eq!(
+        scheduled_event.get("started_without_renewal_heartbeat"),
+        Some(&json!(false))
+    );
+    assert!(
+        scheduled_event.get("error_code").is_none()
+            && scheduled_event.get("error_message").is_none(),
+        "retry-scheduled payload deliberately retains its historical kind-only failure metadata"
+    );
+    let event_next_run_at = scheduled_event
+        .get("next_run_at")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+        .expect("retry-scheduled event should include a PostgreSQL timestamp");
+    assert_eq!(event_next_run_at, queue.next_run_at);
+}
+
+async fn assert_prestart_lease_expiry(pool: &DbPool, job_id: Uuid, claim: &JobQueueRecord) {
+    let queue = load_job(pool, job_id).await;
+    assert_eq!(queue.status, JobStatus::Pending);
+    assert_eq!(queue.attempt, 0);
+    assert!(queue.status_reason.is_none());
+    assert!(queue.last_error_code.is_none());
+    assert!(queue.last_error_message.is_none());
+    let attempt_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM job_attempts
+         WHERE job_id = $1
+           AND run_number = $2
+           AND attempt = $3",
+    )
+    .bind(job_id)
+    .bind(claim.run_number)
+    .bind(claim.attempt)
+    .fetch_one(pool)
+    .await
+    .expect("count released prestart attempts");
+    assert_eq!(attempt_count, 0);
+    assert_eq!(
+        event_payload(pool, job_id, JobEventType::Requeued).await,
+        json!({
+            "reason": PRESTART_RELEASE_REASON,
+            "requeue_kind": "BASIC",
+        })
+    );
+}
+
 #[tokio::test]
 async fn lease_expiry_metadata_stays_in_parity_across_queue_attempt_and_audit_rows() {
     let (pool, database) = setup_ephemeral_pool("postgres_lease_expiry_metadata", 6).await;
@@ -266,111 +372,9 @@ async fn lease_expiry_metadata_stays_in_parity_across_queue_attempt_and_audit_ro
         ReapedLeaseDisposition::ReleasedToPending
     ));
 
-    let terminal_queue = load_job(&pool, terminal_job_id).await;
-    assert_eq!(terminal_queue.status, JobStatus::DeadLettered);
-    let terminal_attempt = load_attempt_failure_metadata(
-        &pool,
-        terminal_job_id,
-        terminal_claim.run_number,
-        terminal_claim.attempt,
-    )
-    .await;
-    assert_eq!(terminal_attempt.3, None);
-    let terminal_failed_event = event_payload(&pool, terminal_job_id, JobEventType::Failed).await;
-    assert_failure_metadata_parity(&terminal_queue, &terminal_attempt, &terminal_failed_event);
-    assert_eq!(
-        event_payload(&pool, terminal_job_id, JobEventType::DeadLettered).await,
-        json!({
-            "kind": LEASE_EXPIRY_KIND,
-            "error_code": LEASE_EXPIRY_CODE,
-            "started_without_renewal_heartbeat": false,
-        })
-    );
-    let terminal_dead_letter = sqlx::query_as::<_, (String, String)>(
-        "SELECT error_code, error_message
-         FROM job_dead_letters
-         WHERE job_id = $1",
-    )
-    .bind(terminal_job_id)
-    .fetch_one(&pool)
-    .await
-    .expect("load terminal dead letter metadata");
-    assert_eq!(
-        terminal_dead_letter,
-        (
-            LEASE_EXPIRY_CODE.to_owned(),
-            LEASE_EXPIRY_MESSAGE.to_owned()
-        )
-    );
-
-    let retry_queue = load_job(&pool, retry_job_id).await;
-    assert_eq!(retry_queue.status, JobStatus::Pending);
-    assert_eq!(*next_run_at, retry_queue.next_run_at);
-    let retry_attempt = load_attempt_failure_metadata(
-        &pool,
-        retry_job_id,
-        retry_claim.run_number,
-        retry_claim.attempt,
-    )
-    .await;
-    assert_eq!(retry_attempt.3, Some(RETRY_DELAY_MS));
-    let retry_failed_event = event_payload(&pool, retry_job_id, JobEventType::Failed).await;
-    assert_failure_metadata_parity(&retry_queue, &retry_attempt, &retry_failed_event);
-    let retry_scheduled_event =
-        event_payload(&pool, retry_job_id, JobEventType::RetryScheduled).await;
-    assert_eq!(
-        retry_scheduled_event.get("kind").and_then(Value::as_str),
-        Some(LEASE_EXPIRY_KIND)
-    );
-    assert_eq!(
-        retry_scheduled_event
-            .get("retry_delay_ms")
-            .and_then(Value::as_i64),
-        Some(i64::from(RETRY_DELAY_MS))
-    );
-    assert_eq!(
-        retry_scheduled_event.get("started_without_renewal_heartbeat"),
-        Some(&json!(false))
-    );
-    assert!(
-        retry_scheduled_event.get("error_code").is_none()
-            && retry_scheduled_event.get("error_message").is_none(),
-        "retry-scheduled payload deliberately retains its historical kind-only failure metadata"
-    );
-    let retry_event_next_run_at = retry_scheduled_event
-        .get("next_run_at")
-        .and_then(Value::as_str)
-        .and_then(|value| value.parse::<DateTime<Utc>>().ok())
-        .expect("retry-scheduled event should include a PostgreSQL timestamp");
-    assert_eq!(retry_event_next_run_at, retry_queue.next_run_at);
-
-    let prestart_queue = load_job(&pool, prestart_job_id).await;
-    assert_eq!(prestart_queue.status, JobStatus::Pending);
-    assert_eq!(prestart_queue.attempt, 0);
-    assert!(prestart_queue.status_reason.is_none());
-    assert!(prestart_queue.last_error_code.is_none());
-    assert!(prestart_queue.last_error_message.is_none());
-    let prestart_attempt_count = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*)
-         FROM job_attempts
-         WHERE job_id = $1
-           AND run_number = $2
-           AND attempt = $3",
-    )
-    .bind(prestart_job_id)
-    .bind(prestart_claim.run_number)
-    .bind(prestart_claim.attempt)
-    .fetch_one(&pool)
-    .await
-    .expect("count released prestart attempts");
-    assert_eq!(prestart_attempt_count, 0);
-    assert_eq!(
-        event_payload(&pool, prestart_job_id, JobEventType::Requeued).await,
-        json!({
-            "reason": PRESTART_RELEASE_REASON,
-            "requeue_kind": "BASIC",
-        })
-    );
+    assert_terminal_lease_expiry(&pool, terminal_job_id, &terminal_claim).await;
+    assert_retryable_lease_expiry(&pool, retry_job_id, &retry_claim, *next_run_at).await;
+    assert_prestart_lease_expiry(&pool, prestart_job_id, &prestart_claim).await;
 
     teardown_ephemeral_pool(pool, database).await;
 }

@@ -11,7 +11,7 @@ use runledger_postgres::jobs::{
     complete_job_success, enqueue_workflow_run, get_job_by_id, get_job_continuation_metrics,
     get_workflow_run_by_id, list_job_events, list_workflow_steps,
 };
-use runledger_postgres::{Error, QueryErrorKind};
+use runledger_postgres::{DbPool, Error, QueryErrorKind};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::{Value, json};
 use sqlx::{Row, types::Uuid};
@@ -45,6 +45,249 @@ fn plan_contains_node_type(value: &Value, expected_node_type: &str) -> bool {
         }
         _ => false,
     }
+}
+
+async fn assert_continued_job_pending(pool: &DbPool, job_id: Uuid, checkpoint: Value) {
+    let pending = get_job_by_id(pool, None, job_id)
+        .await
+        .expect("load continued job")
+        .expect("continued job exists");
+    assert_eq!(pending.status, JobStatus::Pending);
+    assert_eq!(pending.stage, JobStage::Queued);
+    assert_eq!(pending.run_number, 2);
+    assert_eq!(pending.attempt, 0);
+    assert_eq!(pending.progress_done, Some(25));
+    assert_eq!(pending.progress_total, Some(100));
+    assert_eq!(pending.checkpoint, Some(checkpoint));
+    assert_eq!(
+        pending.status_reason.as_deref(),
+        Some("HANDLER_CONTINUATION")
+    );
+    assert!(pending.worker_id.is_none());
+    assert!(pending.lease_expires_at.is_none());
+    assert!(pending.last_heartbeat_at.is_none());
+    assert!(pending.started_at.is_none());
+    assert!(pending.finished_at.is_none());
+    assert!(pending.output.is_none());
+}
+
+async fn assert_continuation_attempt_closed(pool: &DbPool, job_id: Uuid) {
+    let attempt = sqlx::query(
+        "SELECT finished_at, outcome::text AS outcome, error_code, retry_delay_ms
+         FROM job_attempts
+         WHERE job_id = $1 AND run_number = 1 AND attempt = 1",
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await
+    .expect("load completed continuation attempt");
+    assert!(
+        attempt
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
+            .expect("finished_at column")
+            .is_some()
+    );
+    for column in ["outcome", "error_code"] {
+        assert_eq!(
+            attempt
+                .try_get::<Option<String>, _>(column)
+                .unwrap_or_else(|_| panic!("{column} column")),
+            None
+        );
+    }
+    assert_eq!(
+        attempt
+            .try_get::<Option<i32>, _>("retry_delay_ms")
+            .expect("retry_delay_ms column"),
+        None
+    );
+}
+
+async fn assert_continuation_event(
+    pool: &DbPool,
+    job_id: Uuid,
+    next_run_at: chrono::DateTime<chrono::Utc>,
+) {
+    let events = list_job_events(pool, None, job_id, 10, None)
+        .await
+        .expect("list continuation events");
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_type)
+            .collect::<Vec<_>>(),
+        vec![
+            JobEventType::Enqueued,
+            JobEventType::Leased,
+            JobEventType::Requeued
+        ]
+    );
+    let event = events.last().expect("continuation event");
+    assert_eq!(event.run_number, 1);
+    assert_eq!(event.attempt, Some(1));
+    assert_eq!(event.stage, Some(JobStage::Queued));
+    assert_eq!(event.progress_done, Some(25));
+    assert_eq!(event.progress_total, Some(100));
+    match event.decoded_payload() {
+        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::HandlerContinuation {
+            reason,
+            next_run_number,
+            next_run_at: event_next_run_at,
+            delay_microseconds,
+            ..
+        }) => {
+            assert_eq!(reason, "HANDLER_CONTINUATION");
+            assert_eq!(next_run_number, 2);
+            assert_eq!(event_next_run_at, next_run_at);
+            assert_eq!(delay_microseconds, 100_000);
+        }
+        payload => panic!("expected decoded handler-continuation payload, got {payload:?}"),
+    }
+    assert_eq!(
+        event.payload.get("reason").and_then(Value::as_str),
+        Some("HANDLER_CONTINUATION")
+    );
+    assert_eq!(
+        event.payload.get("requeue_kind").and_then(Value::as_str),
+        Some("HANDLER_CONTINUATION")
+    );
+    assert_eq!(
+        event.payload.get("next_run_number").and_then(Value::as_i64),
+        Some(2)
+    );
+    assert_eq!(
+        event
+            .payload
+            .get("delay_microseconds")
+            .and_then(Value::as_i64),
+        Some(100_000)
+    );
+}
+
+async fn assert_continuation_persistence(
+    pool: &DbPool,
+    job_id: Uuid,
+    checkpoint: Value,
+    next_run_at: chrono::DateTime<chrono::Utc>,
+) {
+    assert_continued_job_pending(pool, job_id, checkpoint).await;
+    assert_continuation_attempt_closed(pool, job_id).await;
+    assert_continuation_event(pool, job_id, next_run_at).await;
+}
+
+async fn complete_continued_run_and_assert_metrics(pool: &DbPool, job_id: Uuid) {
+    tokio::time::sleep(Duration::from_millis(125)).await;
+    let next_claim = claim_one_job(pool, "worker-continuation-next").await;
+    assert_eq!(next_claim.id, job_id);
+    assert_eq!(next_claim.run_number, 2);
+    assert_eq!(next_claim.attempt, 1);
+
+    let active = get_job_continuation_metrics(pool, None, Some(JOB_TYPE))
+        .await
+        .expect("load active continuation metrics")
+        .pop()
+        .expect("registered job type has continuation metrics");
+    assert_eq!(active.continued_24h, 1);
+    assert_eq!(active.active_continued_count, 1);
+    assert_eq!(active.max_active_run_number, 2);
+
+    complete_job_success(
+        pool,
+        next_claim.id,
+        next_claim.run_number,
+        next_claim.attempt,
+        next_claim
+            .worker_id
+            .as_deref()
+            .expect("next claim has worker id"),
+        None,
+    )
+    .await
+    .expect("complete continued job");
+    let terminal = get_job_continuation_metrics(pool, None, Some(JOB_TYPE))
+        .await
+        .expect("load terminal continuation metrics")
+        .pop()
+        .expect("registered job type has continuation metrics");
+    assert_eq!(terminal.continued_24h, 1);
+    assert_eq!(terminal.active_continued_count, 0);
+    assert_eq!(terminal.max_active_run_number, 0);
+}
+
+async fn assert_reason_collision_excluded_from_continuation_metrics(pool: &DbPool) {
+    let job_id = enqueue_test_job(
+        pool,
+        JOB_TYPE,
+        None,
+        &json!({"target": "ordinary-requeue-reason-collision"}),
+    )
+    .await;
+    cancel_job(pool, None, job_id, Some("prepare ordinary requeue"))
+        .await
+        .expect("cancel reason-collision job");
+    let canceled = get_job_by_id(pool, None, job_id)
+        .await
+        .expect("load reason-collision job")
+        .expect("reason-collision job exists");
+    let request = CompareAndRequeueJob::from_observed_job(
+        &canceled,
+        JobRequeueStatePolicy::ResetProgressAndCheckpoint,
+        "HANDLER_CONTINUATION",
+    )
+    .expect("canceled reason-collision job is recoverable");
+    let outcome = compare_and_requeue_job(pool, request)
+        .await
+        .expect("ordinary requeue may use the same free-form reason");
+    let CompareAndRequeueJobOutcome::Requeued { after, .. } = outcome else {
+        panic!("expected reason-collision job to be requeued");
+    };
+    let event = list_job_events(pool, None, job_id, 10, None)
+        .await
+        .expect("list reason-collision events")
+        .pop()
+        .expect("reason-collision requeue event exists");
+    match event.decoded_payload() {
+        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::CompareAndRequeue {
+            reason,
+            state_policy,
+            ..
+        }) => {
+            assert_eq!(reason, "HANDLER_CONTINUATION");
+            assert_eq!(
+                state_policy,
+                JobRequeueStatePolicy::ResetProgressAndCheckpoint
+            );
+        }
+        payload => panic!("expected decoded compare-and-requeue payload, got {payload:?}"),
+    }
+    assert_eq!(
+        event.payload.get("requeue_kind").and_then(Value::as_str),
+        Some("COMPARE_AND_REQUEUE")
+    );
+
+    sqlx::query(
+        "UPDATE job_events
+         SET payload = payload || jsonb_build_object(
+             'next_run_number', $2::int4,
+             'next_run_at', clock_timestamp() + interval '1 hour',
+             'delay_microseconds', 3600000000::bigint
+         )
+         WHERE id = $1",
+    )
+    .bind(event.id)
+    .bind(after.run_number)
+    .execute(pool)
+    .await
+    .expect("shape future non-continuation requeue event");
+
+    let metrics = get_job_continuation_metrics(pool, None, Some(JOB_TYPE))
+        .await
+        .expect("load collision-safe continuation metrics")
+        .pop()
+        .expect("registered job type has continuation metrics");
+    assert_eq!(metrics.continued_24h, 1);
+    assert_eq!(metrics.active_continued_count, 0);
+    assert_eq!(metrics.max_active_run_number, 0);
 }
 
 #[tokio::test]
@@ -87,243 +330,9 @@ async fn handler_continuation_closes_attempt_and_starts_a_fresh_run() {
     assert_eq!(outcome.progress_total, Some(100));
     assert!(outcome.next_run_at >= database_time_before + chrono::Duration::milliseconds(100));
 
-    let pending = get_job_by_id(&pool, None, job_id)
-        .await
-        .expect("load continued job")
-        .expect("continued job exists");
-    assert_eq!(pending.status, JobStatus::Pending);
-    assert_eq!(pending.stage, JobStage::Queued);
-    assert_eq!(pending.run_number, 2);
-    assert_eq!(pending.attempt, 0);
-    assert_eq!(pending.progress_done, Some(25));
-    assert_eq!(pending.progress_total, Some(100));
-    assert_eq!(pending.checkpoint, Some(checkpoint));
-    assert_eq!(
-        pending.status_reason.as_deref(),
-        Some("HANDLER_CONTINUATION")
-    );
-    assert!(pending.worker_id.is_none());
-    assert!(pending.lease_expires_at.is_none());
-    assert!(pending.last_heartbeat_at.is_none());
-    assert!(pending.started_at.is_none());
-    assert!(pending.finished_at.is_none());
-    assert!(pending.output.is_none());
-
-    let attempt = sqlx::query(
-        "SELECT finished_at, outcome::text AS outcome, error_code, retry_delay_ms
-         FROM job_attempts
-         WHERE job_id = $1 AND run_number = 1 AND attempt = 1",
-    )
-    .bind(job_id)
-    .fetch_one(&pool)
-    .await
-    .expect("load completed continuation attempt");
-    assert!(
-        attempt
-            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
-            .expect("finished_at column")
-            .is_some()
-    );
-    assert_eq!(
-        attempt
-            .try_get::<Option<String>, _>("outcome")
-            .expect("outcome column"),
-        None
-    );
-    assert_eq!(
-        attempt
-            .try_get::<Option<String>, _>("error_code")
-            .expect("error_code column"),
-        None
-    );
-    assert_eq!(
-        attempt
-            .try_get::<Option<i32>, _>("retry_delay_ms")
-            .expect("retry_delay_ms column"),
-        None
-    );
-
-    let events = list_job_events(&pool, None, job_id, 10, None)
-        .await
-        .expect("list continuation events");
-    assert_eq!(
-        events
-            .iter()
-            .map(|event| event.event_type)
-            .collect::<Vec<_>>(),
-        vec![
-            JobEventType::Enqueued,
-            JobEventType::Leased,
-            JobEventType::Requeued
-        ]
-    );
-    let event = events.last().expect("continuation event");
-    assert_eq!(event.run_number, 1);
-    assert_eq!(event.attempt, Some(1));
-    assert_eq!(event.stage, Some(JobStage::Queued));
-    assert_eq!(event.progress_done, Some(25));
-    assert_eq!(event.progress_total, Some(100));
-    match event.decoded_payload() {
-        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::HandlerContinuation {
-            reason,
-            next_run_number,
-            next_run_at,
-            delay_microseconds,
-            ..
-        }) => {
-            assert_eq!(reason, "HANDLER_CONTINUATION");
-            assert_eq!(next_run_number, 2);
-            assert_eq!(next_run_at, outcome.next_run_at);
-            assert_eq!(delay_microseconds, 100_000);
-        }
-        payload => panic!("expected decoded handler-continuation payload, got {payload:?}"),
-    }
-    assert_eq!(
-        event.payload.get("reason").and_then(Value::as_str),
-        Some("HANDLER_CONTINUATION")
-    );
-    assert_eq!(
-        event.payload.get("requeue_kind").and_then(Value::as_str),
-        Some("HANDLER_CONTINUATION")
-    );
-    assert_eq!(
-        event.payload.get("next_run_number").and_then(Value::as_i64),
-        Some(2)
-    );
-    assert_eq!(
-        event
-            .payload
-            .get("delay_microseconds")
-            .and_then(Value::as_i64),
-        Some(100_000)
-    );
-
-    tokio::time::sleep(Duration::from_millis(125)).await;
-    let next_claim = claim_one_job(&pool, "worker-continuation-next").await;
-    assert_eq!(next_claim.id, job_id);
-    assert_eq!(next_claim.run_number, 2);
-    assert_eq!(next_claim.attempt, 1);
-
-    let active_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
-        .await
-        .expect("load active continuation metrics")
-        .pop()
-        .expect("registered job type has continuation metrics");
-    assert_eq!(active_metrics.continued_24h, 1);
-    assert_eq!(active_metrics.active_continued_count, 1);
-    assert_eq!(active_metrics.max_active_run_number, 2);
-
-    complete_job_success(
-        &pool,
-        next_claim.id,
-        next_claim.run_number,
-        next_claim.attempt,
-        next_claim
-            .worker_id
-            .as_deref()
-            .expect("next claim has worker id"),
-        None,
-    )
-    .await
-    .expect("complete continued job");
-    let terminal_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
-        .await
-        .expect("load terminal continuation metrics")
-        .pop()
-        .expect("registered job type has continuation metrics");
-    assert_eq!(terminal_metrics.continued_24h, 1);
-    assert_eq!(terminal_metrics.active_continued_count, 0);
-    assert_eq!(terminal_metrics.max_active_run_number, 0);
-
-    let collision_job_id = enqueue_test_job(
-        &pool,
-        JOB_TYPE,
-        None,
-        &json!({"target": "ordinary-requeue-reason-collision"}),
-    )
-    .await;
-    cancel_job(
-        &pool,
-        None,
-        collision_job_id,
-        Some("prepare ordinary requeue"),
-    )
-    .await
-    .expect("cancel reason-collision job");
-    let canceled = get_job_by_id(&pool, None, collision_job_id)
-        .await
-        .expect("load reason-collision job")
-        .expect("reason-collision job exists");
-    let request = CompareAndRequeueJob::from_observed_job(
-        &canceled,
-        JobRequeueStatePolicy::ResetProgressAndCheckpoint,
-        "HANDLER_CONTINUATION",
-    )
-    .expect("canceled reason-collision job is recoverable");
-    let collision_requeue = compare_and_requeue_job(&pool, request)
-        .await
-        .expect("ordinary requeue may use the same free-form reason");
-    let CompareAndRequeueJobOutcome::Requeued {
-        after: collision_after,
-        ..
-    } = collision_requeue
-    else {
-        panic!("expected reason-collision job to be requeued");
-    };
-    let collision_event = list_job_events(&pool, None, collision_job_id, 10, None)
-        .await
-        .expect("list reason-collision events")
-        .pop()
-        .expect("reason-collision requeue event exists");
-    match collision_event.decoded_payload() {
-        DecodedJobEventPayload::Requeued(DecodedRequeuedEventPayload::CompareAndRequeue {
-            reason,
-            state_policy,
-            ..
-        }) => {
-            assert_eq!(reason, "HANDLER_CONTINUATION");
-            assert_eq!(
-                state_policy,
-                JobRequeueStatePolicy::ResetProgressAndCheckpoint
-            );
-        }
-        payload => panic!("expected decoded compare-and-requeue payload, got {payload:?}"),
-    }
-    assert_eq!(
-        collision_event
-            .payload
-            .get("requeue_kind")
-            .and_then(Value::as_str),
-        Some("COMPARE_AND_REQUEUE")
-    );
-
-    // A future delayed administrative requeue may carry the same schedule
-    // shape. Its stable discriminator must keep it out of continuation metrics
-    // even if an operator also chose the legacy continuation reason string.
-    sqlx::query(
-        "UPDATE job_events
-         SET payload = payload || jsonb_build_object(
-             'next_run_number', $2::int4,
-             'next_run_at', clock_timestamp() + interval '1 hour',
-             'delay_microseconds', 3600000000::bigint
-         )
-         WHERE id = $1",
-    )
-    .bind(collision_event.id)
-    .bind(collision_after.run_number)
-    .execute(&pool)
-    .await
-    .expect("shape future non-continuation requeue event");
-
-    let collision_safe_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
-        .await
-        .expect("load collision-safe continuation metrics")
-        .pop()
-        .expect("registered job type has continuation metrics");
-    assert_eq!(collision_safe_metrics.continued_24h, 1);
-    assert_eq!(collision_safe_metrics.active_continued_count, 0);
-    assert_eq!(collision_safe_metrics.max_active_run_number, 0);
-
+    assert_continuation_persistence(&pool, job_id, checkpoint, outcome.next_run_at).await;
+    complete_continued_run_and_assert_metrics(&pool, job_id).await;
+    assert_reason_collision_excluded_from_continuation_metrics(&pool).await;
     teardown_ephemeral_pool(pool, database).await;
 }
 
