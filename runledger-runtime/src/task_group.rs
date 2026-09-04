@@ -9,9 +9,11 @@ use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio::time::Instant;
 use tracing::{Instrument, debug, error, info_span, warn};
 
-use crate::config::JobsConfigValidationError;
 use crate::shutdown::ShutdownSignal;
 use crate::{Error, Result, RuntimeError, RuntimeLoopExit};
+
+#[cfg(test)]
+use crate::config::JobsConfigValidationError;
 
 const MAX_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -22,14 +24,7 @@ pub(crate) struct TaskGroup {
 
 struct RuntimeTask {
     name: &'static str,
-    handle: JoinHandle<RuntimeTaskExit>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RuntimeTaskExit {
-    Completed,
-    InvalidConfig(JobsConfigValidationError),
-    Shutdown,
+    handle: JoinHandle<RuntimeLoopExit>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,11 +35,11 @@ enum DrainResult {
 
 struct RuntimeTaskFuture {
     name: &'static str,
-    future: Pin<Box<dyn Future<Output = RuntimeTaskExit> + Send>>,
+    future: Pin<Box<dyn Future<Output = RuntimeLoopExit> + Send>>,
     started: bool,
 }
 
-type RuntimeTaskJoinResult = std::result::Result<RuntimeTaskExit, JoinError>;
+type RuntimeTaskJoinResult = std::result::Result<RuntimeLoopExit, JoinError>;
 type JoinedRuntimeTask = (&'static str, RuntimeTaskJoinResult);
 
 impl TaskGroup {
@@ -232,16 +227,14 @@ impl RuntimeTask {
         let span = info_span!("runledger_runtime_supervisor_task", task = name);
         Self {
             name,
-            handle: runtime.spawn(
-                RuntimeTaskFuture::new(name, async move { future.await.into() }).instrument(span),
-            ),
+            handle: runtime.spawn(RuntimeTaskFuture::new(name, future).instrument(span)),
         }
     }
 
     #[cfg(test)]
     fn spawn<F>(name: &'static str, future: F) -> Self
     where
-        F: Future<Output = RuntimeTaskExit> + Send + 'static,
+        F: Future<Output = RuntimeLoopExit> + Send + 'static,
     {
         Self {
             name,
@@ -257,7 +250,7 @@ impl RuntimeTask {
 impl RuntimeTaskFuture {
     fn new<F>(name: &'static str, future: F) -> Self
     where
-        F: Future<Output = RuntimeTaskExit> + Send + 'static,
+        F: Future<Output = RuntimeLoopExit> + Send + 'static,
     {
         Self {
             name,
@@ -268,7 +261,7 @@ impl RuntimeTaskFuture {
 }
 
 impl Future for RuntimeTaskFuture {
-    type Output = RuntimeTaskExit;
+    type Output = RuntimeLoopExit;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let task = self.as_mut().get_mut();
@@ -283,16 +276,6 @@ impl Future for RuntimeTaskFuture {
                 debug!(task = task.name, ?exit, "supervised runtime task completed");
                 Poll::Ready(exit)
             }
-        }
-    }
-}
-
-impl From<RuntimeLoopExit> for RuntimeTaskExit {
-    fn from(exit: RuntimeLoopExit) -> Self {
-        match exit {
-            RuntimeLoopExit::Shutdown => Self::Shutdown,
-            RuntimeLoopExit::InvalidConfig(source) => Self::InvalidConfig(source),
-            RuntimeLoopExit::Completed => Self::Completed,
         }
     }
 }
@@ -540,15 +523,15 @@ fn log_abort_drain_timeout(timeout: Duration) {
 
 fn classify_task_result(task: &'static str, result: RuntimeTaskJoinResult) -> Option<RuntimeError> {
     match result {
-        Ok(RuntimeTaskExit::Shutdown) => {
+        Ok(RuntimeLoopExit::Shutdown) => {
             log_supervised_task_shutdown(task);
             None
         }
-        Ok(RuntimeTaskExit::Completed) => {
+        Ok(RuntimeLoopExit::Completed) => {
             log_supervised_task_completed_early(task);
             Some(RuntimeError::TaskExitedUnexpectedly { task })
         }
-        Ok(RuntimeTaskExit::InvalidConfig(source)) => {
+        Ok(RuntimeLoopExit::InvalidConfig(source)) => {
             log_supervised_task_invalid_config(task);
             Some(RuntimeError::InvalidJobsConfig { source })
         }
@@ -605,11 +588,11 @@ mod tests {
     struct CompleteAfterPollSignal {
         entered_tx: Option<std::sync::mpsc::Sender<()>>,
         release_rx: std::sync::mpsc::Receiver<()>,
-        exit: RuntimeTaskExit,
+        exit: RuntimeLoopExit,
     }
 
     impl Future for CompleteAfterPollSignal {
-        type Output = RuntimeTaskExit;
+        type Output = RuntimeLoopExit;
 
         fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
             let task = self.as_mut().get_mut();
@@ -629,17 +612,17 @@ mod tests {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        test_task_with_exit(name, RuntimeTaskExit::Completed, future)
+        test_task_with_exit(name, RuntimeLoopExit::Completed, future)
     }
 
     fn test_shutdown_task<F>(name: &'static str, future: F) -> RuntimeTask
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        test_task_with_exit(name, RuntimeTaskExit::Shutdown, future)
+        test_task_with_exit(name, RuntimeLoopExit::Shutdown, future)
     }
 
-    fn test_task_with_exit<F>(name: &'static str, exit: RuntimeTaskExit, future: F) -> RuntimeTask
+    fn test_task_with_exit<F>(name: &'static str, exit: RuntimeLoopExit, future: F) -> RuntimeTask
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -840,7 +823,7 @@ mod tests {
             CompleteAfterPollSignal {
                 entered_tx: Some(entered_tx),
                 release_rx,
-                exit: RuntimeTaskExit::Completed,
+                exit: RuntimeLoopExit::Completed,
             },
         )]);
         entered_rx
@@ -876,7 +859,7 @@ mod tests {
             CompleteAfterPollSignal {
                 entered_tx: Some(entered_tx),
                 release_rx,
-                exit: RuntimeTaskExit::Shutdown,
+                exit: RuntimeLoopExit::Shutdown,
             },
         )]);
         entered_rx
@@ -951,7 +934,7 @@ mod tests {
         let expected = JobsConfigValidationError::InvalidClaimBatchSize { actual: 0 };
         let mut group = test_group(vec![test_task_with_exit(
             "invalid-config-loop",
-            RuntimeTaskExit::InvalidConfig(expected),
+            RuntimeLoopExit::InvalidConfig(expected),
             async {},
         )]);
 

@@ -58,3 +58,27 @@ impl Drop for ScopedEnv {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ScopedEnv;
+
+    #[test]
+    fn applies_and_restores_environment_overrides() {
+        const SET_KEY: &str = "RUNLEDGER_SCOPED_ENV_SET_TEST";
+        const REMOVE_KEY: &str = "RUNLEDGER_SCOPED_ENV_REMOVE_TEST";
+
+        let prior_set_value = std::env::var_os(SET_KEY);
+        let prior_remove_value = std::env::var_os(REMOVE_KEY);
+
+        {
+            let _env = ScopedEnv::set(&[(SET_KEY, Some("temporary")), (REMOVE_KEY, None)]);
+
+            assert_eq!(std::env::var(SET_KEY).as_deref(), Ok("temporary"));
+            assert_eq!(std::env::var_os(REMOVE_KEY), None);
+        }
+
+        assert_eq!(std::env::var_os(SET_KEY), prior_set_value);
+        assert_eq!(std::env::var_os(REMOVE_KEY), prior_remove_value);
+    }
+}

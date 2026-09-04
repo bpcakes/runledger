@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -10,6 +9,8 @@ use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use runledger_core::jobs::{JobDeadLetterReason, JobFailure, JobTypeName};
 use tracing::warn;
 use uuid::Uuid;
+
+use crate::panic_payload::panic_payload_message;
 
 #[cfg(test)]
 const OBSERVER_TIMEOUT: Duration = Duration::from_millis(100);
@@ -496,16 +497,4 @@ where
             );
         }
     }
-}
-
-fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
-    if let Some(message) = panic_payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-
-    if let Some(message) = panic_payload.downcast_ref::<&'static str>() {
-        return (*message).to_string();
-    }
-
-    "non-string panic payload".to_string()
 }

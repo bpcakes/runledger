@@ -94,6 +94,7 @@ mod dead_letter_hook;
 pub mod error;
 pub mod intent_promoter;
 pub mod observer;
+mod panic_payload;
 pub mod reaper;
 pub mod registry;
 pub mod scheduler;

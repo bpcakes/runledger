@@ -4,6 +4,8 @@ use std::panic::AssertUnwindSafe;
 use futures_util::FutureExt;
 use tokio::time::Duration;
 
+use crate::panic_payload::panic_payload_message;
+
 #[cfg(test)]
 pub(crate) const DEAD_LETTER_HOOK_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(not(test))]
@@ -32,18 +34,6 @@ where
         }
         Err(_) => DeadLetterHookOutcome::TimedOut,
     }
-}
-
-fn panic_payload_message(panic_payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = panic_payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-
-    if let Some(message) = panic_payload.downcast_ref::<&'static str>() {
-        return (*message).to_string();
-    }
-
-    "non-string panic payload".to_string()
 }
 
 #[cfg(test)]

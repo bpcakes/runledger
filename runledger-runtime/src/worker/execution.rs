@@ -16,6 +16,7 @@ use super::completion::{
 use super::observers::{JobRunningNotification, TerminalJobObserverEvent, TerminalObserverTasks};
 use crate::WorkerError;
 use crate::observer::{JobLeaseLostEvent, JobLifecycleObservers, ObservedJob};
+use crate::panic_payload::panic_payload_message;
 use crate::registry::JobRegistry;
 
 // Kept stable for clients that already match this code; it also covers leases
@@ -523,18 +524,6 @@ fn handler_panic_failure(panic_payload: Box<dyn Any + Send>) -> JobFailure {
             panic_payload_message(&*panic_payload)
         ),
     )
-}
-
-fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
-    if let Some(message) = panic_payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-
-    if let Some(message) = panic_payload.downcast_ref::<&'static str>() {
-        return (*message).to_string();
-    }
-
-    "non-string panic payload".to_string()
 }
 
 fn has_query_error_kind(error: &runledger_postgres::Error, expected_kind: QueryErrorKind) -> bool {
