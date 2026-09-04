@@ -130,7 +130,7 @@ pub enum CatalogError {
     },
     /// Committing a catalog sync transaction failed.
     #[error("failed to commit job definition sync transaction: {0}")]
-    CommitFailure(#[source] sqlx::Error),
+    CommitFailure(#[source] Box<runledger_postgres::Error>),
     /// Applying the transaction-local bounds for definition-disabling sync failed.
     #[error("failed to bound job definition sync critical section: {0}")]
     CriticalSectionTimeoutFailure(#[source] Box<runledger_postgres::Error>),

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 
 use super::JobFailureKind;
@@ -25,6 +25,72 @@ impl Default for JobCompletionDisposition {
     }
 }
 
+/// Invalid progress supplied by a job handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum JobProgressValidationError {
+    /// Completed work cannot be negative.
+    NegativeDone { actual: i64 },
+    /// Total work cannot be negative.
+    NegativeTotal { actual: i64 },
+    /// Completed work cannot exceed total work.
+    DoneExceedsTotal { done: i64, total: i64 },
+}
+
+impl std::fmt::Display for JobProgressValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NegativeDone { actual } => {
+                write!(f, "progress_done must be non-negative, got {actual}")
+            }
+            Self::NegativeTotal { actual } => {
+                write!(f, "progress_total must be non-negative, got {actual}")
+            }
+            Self::DoneExceedsTotal { done, total } => write!(
+                f,
+                "progress_done must not exceed progress_total, got progress_done={done}, progress_total={total}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for JobProgressValidationError {}
+
+/// Validated progress reported by a job handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JobProgress {
+    done: i64,
+    total: i64,
+}
+
+impl JobProgress {
+    /// Creates progress after validating its durable invariants.
+    const fn new(done: i64, total: i64) -> Result<Self, JobProgressValidationError> {
+        if done < 0 {
+            return Err(JobProgressValidationError::NegativeDone { actual: done });
+        }
+        if total < 0 {
+            return Err(JobProgressValidationError::NegativeTotal { actual: total });
+        }
+        if done > total {
+            return Err(JobProgressValidationError::DoneExceedsTotal { done, total });
+        }
+        Ok(Self { done, total })
+    }
+
+    /// Returns the completed work count.
+    #[must_use]
+    const fn done(self) -> i64 {
+        self.done
+    }
+
+    /// Returns the total work count.
+    #[must_use]
+    const fn total(self) -> i64 {
+        self.total
+    }
+}
+
 /// A handler's in-process completion result.
 ///
 /// Direct jobs may return a continuation disposition without enqueue-time
@@ -38,14 +104,21 @@ impl Default for JobCompletionDisposition {
 /// values with newer Runledger versions. It is not a rolling-upgrade wire
 /// protocol: an older consumer cannot safely interpret dispositions introduced
 /// by a newer Runledger version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobCompletion {
-    #[serde(default)]
     disposition: JobCompletionDisposition,
-    pub progress_done: Option<i64>,
-    pub progress_total: Option<i64>,
-    pub checkpoint: Option<serde_json::Value>,
+    progress: Option<JobProgress>,
+    checkpoint: Option<serde_json::Value>,
     output: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct SerializableJobCompletion<'a> {
+    disposition: JobCompletionDisposition,
+    progress_done: Option<i64>,
+    progress_total: Option<i64>,
+    checkpoint: Option<&'a serde_json::Value>,
+    output: Option<&'a serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -74,13 +147,40 @@ impl<'de> Deserialize<'de> for JobCompletion {
             ));
         }
 
+        let progress = match (serialized.progress_done, serialized.progress_total) {
+            (None, None) => None,
+            (Some(done), Some(total)) => {
+                Some(JobProgress::new(done, total).map_err(serde::de::Error::custom)?)
+            }
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "completion progress must provide both progress_done and progress_total",
+                ));
+            }
+        };
+
         Ok(Self {
             disposition: serialized.disposition,
-            progress_done: serialized.progress_done,
-            progress_total: serialized.progress_total,
+            progress,
             checkpoint: serialized.checkpoint,
             output: serialized.output,
         })
+    }
+}
+
+impl Serialize for JobCompletion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SerializableJobCompletion {
+            disposition: self.disposition,
+            progress_done: self.progress_done(),
+            progress_total: self.progress_total(),
+            checkpoint: self.checkpoint.as_ref(),
+            output: self.output.as_ref(),
+        }
+        .serialize(serializer)
     }
 }
 
@@ -89,8 +189,7 @@ impl JobCompletion {
     pub fn success() -> Self {
         Self {
             disposition: JobCompletionDisposition::Succeed,
-            progress_done: None,
-            progress_total: None,
+            progress: None,
             checkpoint: None,
             output: None,
         }
@@ -108,6 +207,12 @@ impl JobCompletion {
     /// Successfully finishes this bounded slice and schedules the same logical
     /// job for another run after `delay`.
     ///
+    /// The persistence boundary stores delays as signed 64-bit microseconds,
+    /// rounding positive sub-microsecond values up to one microsecond. The
+    /// delay and resulting PostgreSQL timestamp must both be representable;
+    /// otherwise the runtime dead-letters the completion with
+    /// `job.invalid_continuation_delay` instead of replaying the handler.
+    ///
     /// Continuations cannot carry final output; that state is not constructible
     /// through this API and is rejected during deserialization. Workflow job
     /// steps require a persisted handler-continuation opt-in.
@@ -115,8 +220,7 @@ impl JobCompletion {
     pub fn continue_after(delay: Duration) -> Self {
         Self {
             disposition: JobCompletionDisposition::ContinueAfter(delay),
-            progress_done: None,
-            progress_total: None,
+            progress: None,
             checkpoint: None,
             output: None,
         }
@@ -147,11 +251,42 @@ impl JobCompletion {
         self.output.as_ref()
     }
 
+    /// Sets validated progress for this completion.
+    ///
+    /// # Errors
+    /// Returns [`JobProgressValidationError`] when either value is negative or
+    /// `progress_done` exceeds `progress_total`.
+    pub fn progress(
+        mut self,
+        progress_done: i64,
+        progress_total: i64,
+    ) -> Result<Self, JobProgressValidationError> {
+        self.progress = Some(JobProgress::new(progress_done, progress_total)?);
+        Ok(self)
+    }
+
+    /// Returns the completion's validated completed work count, if present.
     #[must_use]
-    pub fn progress(mut self, progress_done: i64, progress_total: i64) -> Self {
-        self.progress_done = Some(progress_done);
-        self.progress_total = Some(progress_total);
-        self
+    pub const fn progress_done(&self) -> Option<i64> {
+        match self.progress {
+            Some(progress) => Some(progress.done()),
+            None => None,
+        }
+    }
+
+    /// Returns the completion's validated total work count, if present.
+    #[must_use]
+    pub const fn progress_total(&self) -> Option<i64> {
+        match self.progress {
+            Some(progress) => Some(progress.total()),
+            None => None,
+        }
+    }
+
+    /// Returns the checkpoint to persist, if present.
+    #[must_use]
+    pub const fn checkpoint_value(&self) -> Option<&serde_json::Value> {
+        self.checkpoint.as_ref()
     }
 
     #[must_use]
@@ -174,14 +309,15 @@ mod tests {
     fn continuation_constructors_preserve_progress_and_checkpoint_builders() {
         let immediate = JobCompletion::continue_now()
             .progress(4, 10)
+            .expect("valid progress")
             .checkpoint(json!({"cursor": 4}));
         assert_eq!(
             immediate.disposition(),
             JobCompletionDisposition::ContinueAfter(Duration::ZERO)
         );
-        assert_eq!(immediate.progress_done, Some(4));
-        assert_eq!(immediate.progress_total, Some(10));
-        assert_eq!(immediate.checkpoint, Some(json!({"cursor": 4})));
+        assert_eq!(immediate.progress_done(), Some(4));
+        assert_eq!(immediate.progress_total(), Some(10));
+        assert_eq!(immediate.checkpoint_value(), Some(&json!({"cursor": 4})));
         assert_eq!(immediate.output(), None);
 
         let delayed = JobCompletion::continue_after(Duration::from_secs(30));
@@ -214,10 +350,74 @@ mod tests {
         .expect("pre-0.6 completion should remain deserializable");
 
         assert_eq!(completion.disposition(), JobCompletionDisposition::Succeed);
-        assert_eq!(completion.progress_done, Some(4));
-        assert_eq!(completion.progress_total, Some(10));
-        assert_eq!(completion.checkpoint, Some(json!({"cursor": 4})));
+        assert_eq!(completion.progress_done(), Some(4));
+        assert_eq!(completion.progress_total(), Some(10));
+        assert_eq!(completion.checkpoint_value(), Some(&json!({"cursor": 4})));
         assert_eq!(completion.output(), None);
+    }
+
+    #[test]
+    fn completion_serialization_preserves_the_public_field_shape() {
+        let completion = JobCompletion::continue_now()
+            .progress(4, 10)
+            .expect("valid progress")
+            .checkpoint(json!({"cursor": 4}));
+
+        assert_eq!(
+            serde_json::to_value(completion).expect("serialize completion"),
+            json!({
+                "disposition": {"continue_after": {"secs": 0, "nanos": 0}},
+                "progress_done": 4,
+                "progress_total": 10,
+                "checkpoint": {"cursor": 4},
+                "output": null
+            })
+        );
+    }
+
+    #[test]
+    fn completion_progress_rejects_invalid_values_at_construction() {
+        assert_eq!(
+            JobCompletion::success().progress(-1, 10),
+            Err(super::JobProgressValidationError::NegativeDone { actual: -1 })
+        );
+        assert_eq!(
+            JobCompletion::success().progress(0, -1),
+            Err(super::JobProgressValidationError::NegativeTotal { actual: -1 })
+        );
+        assert_eq!(
+            JobCompletion::success().progress(11, 10),
+            Err(super::JobProgressValidationError::DoneExceedsTotal {
+                done: 11,
+                total: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn serialized_invalid_completion_progress_is_rejected() {
+        let error = serde_json::from_value::<JobCompletion>(json!({
+            "progress_done": 2,
+            "progress_total": 1,
+            "checkpoint": null,
+            "output": null
+        }))
+        .expect_err("invalid serialized progress must be rejected at the type boundary");
+
+        assert!(error.to_string().contains("progress_done must not exceed"));
+    }
+
+    #[test]
+    fn serialized_partial_completion_progress_is_rejected() {
+        let error = serde_json::from_value::<JobCompletion>(json!({
+            "progress_done": 2,
+            "progress_total": null,
+            "checkpoint": null,
+            "output": null
+        }))
+        .expect_err("partial serialized progress must be rejected at the type boundary");
+
+        assert!(error.to_string().contains("must provide both"));
     }
 
     #[test]

@@ -281,9 +281,9 @@ async fn complete_job_success_after_handler(
     observation: CompletionObservation<'_>,
 ) {
     let completion_update = JobCompletionUpdate {
-        progress_done: completion.progress_done,
-        progress_total: completion.progress_total,
-        checkpoint: completion.checkpoint.as_ref(),
+        progress_done: completion.progress_done(),
+        progress_total: completion.progress_total(),
+        checkpoint: completion.checkpoint_value(),
         output: completion.output(),
     };
     match jobs::complete_job_success_with_outcome_for_lease(
@@ -357,9 +357,9 @@ async fn complete_job_continuation_after_handler(
 ) {
     let continuation = JobContinuationUpdate {
         delay,
-        progress_done: completion.progress_done,
-        progress_total: completion.progress_total,
-        checkpoint: completion.checkpoint.as_ref(),
+        progress_done: completion.progress_done(),
+        progress_total: completion.progress_total(),
+        checkpoint: completion.checkpoint_value(),
     };
     match jobs::complete_job_continuation_with_outcome_for_lease(
         completion_context.pool,

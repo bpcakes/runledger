@@ -47,11 +47,21 @@ async fn initialize_shared_postgres() -> SharedPostgres {
 }
 
 fn configured_postgres_source() -> PostgresSource {
-    match std::env::var(TEST_ADMIN_DATABASE_URL_ENV) {
-        Ok(admin_url) => PostgresSource::ExternalAdmin(admin_url),
-        Err(_) => PostgresSource::Image(
-            std::env::var(TEST_PG_IMAGE_ENV).unwrap_or_else(|_| DEFAULT_POSTGRES_IMAGE.to_owned()),
-        ),
+    configured_postgres_source_from(
+        std::env::var(TEST_ADMIN_DATABASE_URL_ENV).ok(),
+        std::env::var(TEST_PG_IMAGE_ENV).ok(),
+    )
+}
+
+fn configured_postgres_source_from(
+    admin_url: Option<String>,
+    image_ref: Option<String>,
+) -> PostgresSource {
+    match admin_url {
+        Some(admin_url) => PostgresSource::ExternalAdmin(admin_url),
+        None => {
+            PostgresSource::Image(image_ref.unwrap_or_else(|| DEFAULT_POSTGRES_IMAGE.to_owned()))
+        }
     }
 }
 
@@ -194,8 +204,6 @@ mod tests {
     use tokio::sync::{Barrier, OnceCell, oneshot};
 
     use super::*;
-    use crate::ScopedEnv;
-
     const CONCURRENT_CALLERS: usize = 8;
 
     async fn postgres_18_admin_url(test_name: &str) -> String {
@@ -323,13 +331,10 @@ mod tests {
     #[tokio::test]
     async fn external_admin_url_mode_uses_postgres_18_without_owning_a_container() {
         let admin_url = postgres_18_admin_url("external admin URL mode").await;
-        let source = {
-            let _env = ScopedEnv::set(&[
-                (TEST_ADMIN_DATABASE_URL_ENV, Some(admin_url.as_str())),
-                (TEST_PG_IMAGE_ENV, Some("unused.invalid/postgres:0")),
-            ]);
-            configured_postgres_source()
-        };
+        let source = configured_postgres_source_from(
+            Some(admin_url.clone()),
+            Some("unused.invalid/postgres:0".to_owned()),
+        );
         assert_eq!(source, PostgresSource::ExternalAdmin(admin_url.clone()));
 
         let cell = OnceCell::<SharedPostgres>::new();

@@ -4,6 +4,28 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking: `JobCompletion` now keeps progress and checkpoint state private.
+  `.progress(done, total)` validates non-negative values and `done <= total`,
+  returning `Result`; use the new accessors when inspecting a completion.
+- Breaking: `runledger_test_support::ScopedEnv::set` is now `unsafe` because a
+  crate-local mutex cannot guarantee exclusive access to the process-wide
+  environment. Prefer injected configuration or child-process environments.
+- Keep `CatalogError::CommitFailure` behind the `runledger-postgres` error
+  boundary instead of exposing `sqlx::Error` directly.
+- Document the signed 64-bit microsecond and timestamp representability limits
+  for handler continuation delays.
+
+### Upgrade notes
+
+- Update completion builders to handle the `Result` returned by `.progress`
+  and replace direct `progress_done`, `progress_total`, or `checkpoint` field
+  access with `progress_done()`, `progress_total()`, and `checkpoint_value()`.
+- Serialized `JobCompletion` values with partial or invalid progress are now
+  rejected during deserialization; valid existing representations are
+  unchanged.
+
 ## [0.12.0] - 2026-08-26
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.11.0...v0.12.0)
 

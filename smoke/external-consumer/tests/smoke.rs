@@ -653,12 +653,19 @@ impl SmokeHandler {
         if slice < max_runs {
             Ok(JobCompletion::continue_after(Duration::from_millis(25))
                 .progress(slice, max_runs)
+                .map_err(|error| {
+                    JobFailure::terminal("smoke.invalid_progress", error.to_string())
+                })?
                 .checkpoint(json!({
                     "version": CONTINUATION_CHECKPOINT_VERSION,
                     "cursor": slice,
                 })))
         } else {
-            Ok(JobCompletion::success().progress(slice, max_runs))
+            JobCompletion::success()
+                .progress(slice, max_runs)
+                .map_err(|error| {
+                    JobFailure::terminal("smoke.invalid_progress", error.to_string())
+                })
         }
     }
 }

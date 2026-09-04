@@ -148,12 +148,12 @@ struct InvalidCompletionProgressHandler {
     dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
 }
 
-struct PartialInvalidCompletionProgressHandler {
+struct InvalidStoredTotalProgressHandler {
     runs: Arc<AtomicUsize>,
     dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
 }
 
-struct PartialInvalidContinuationProgressHandler {
+struct InvalidContinuationProgressHandler {
     runs: Arc<AtomicUsize>,
     dead_letters: Arc<Mutex<Vec<JobDeadLetterInfo>>>,
 }
@@ -366,10 +366,13 @@ impl JobHandler for ContinueThenSuccessHandler {
         if context.run_number == 1 {
             return Ok(JobCompletion::continue_now()
                 .progress(1, 2)
+                .expect("continuation progress is valid")
                 .checkpoint(json!({"cursor": 1})));
         }
 
-        Ok(JobCompletion::success().progress(2, 2))
+        Ok(JobCompletion::success()
+            .progress(2, 2)
+            .expect("terminal progress is valid"))
     }
 }
 
@@ -466,7 +469,12 @@ impl JobHandler for InvalidCompletionProgressHandler {
         _payload: Value,
     ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
-        Ok(JobCompletion::success().progress(2, 1))
+        JobCompletion::success().progress(2, 1).map_err(|error| {
+            JobFailure::terminal(
+                "job.invalid_completion_progress",
+                format!("Handler returned invalid success progress: {error}"),
+            )
+        })
     }
 
     async fn on_dead_letter(
@@ -483,7 +491,7 @@ impl JobHandler for InvalidCompletionProgressHandler {
 }
 
 #[async_trait::async_trait]
-impl JobHandler for PartialInvalidCompletionProgressHandler {
+impl JobHandler for InvalidStoredTotalProgressHandler {
     fn job_type(&self) -> JobType<'static> {
         JobType::new("jobs.test.partial_invalid_completion_progress")
     }
@@ -494,9 +502,12 @@ impl JobHandler for PartialInvalidCompletionProgressHandler {
         _payload: Value,
     ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
-        let mut completion = JobCompletion::success();
-        completion.progress_done = Some(20);
-        Ok(completion)
+        JobCompletion::success().progress(20, 10).map_err(|error| {
+            JobFailure::terminal(
+                "job.invalid_completion_progress",
+                format!("Handler returned invalid success progress: {error}"),
+            )
+        })
     }
 
     async fn on_dead_letter(
@@ -513,7 +524,7 @@ impl JobHandler for PartialInvalidCompletionProgressHandler {
 }
 
 #[async_trait::async_trait]
-impl JobHandler for PartialInvalidContinuationProgressHandler {
+impl JobHandler for InvalidContinuationProgressHandler {
     fn job_type(&self) -> JobType<'static> {
         JobType::new("jobs.test.partial_invalid_continuation_progress")
     }
@@ -524,9 +535,14 @@ impl JobHandler for PartialInvalidContinuationProgressHandler {
         _payload: Value,
     ) -> Result<JobCompletion, JobFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
-        let mut completion = JobCompletion::continue_now();
-        completion.progress_done = Some(20);
-        Ok(completion)
+        JobCompletion::continue_now()
+            .progress(20, 10)
+            .map_err(|error| {
+                JobFailure::terminal(
+                    "job.invalid_completion_progress",
+                    format!("Handler returned invalid continuation progress: {error}"),
+                )
+            })
     }
 
     async fn on_dead_letter(

@@ -329,7 +329,7 @@ clarified field names.
 
 When one logical job must process bounded slices, return
 `JobCompletion::continue_now()` or `JobCompletion::continue_after(delay)` from
-the handler instead of enqueueing ordinal successor jobs. Add `.progress(...)`
+the handler instead of enqueueing ordinal successor jobs. Add `.progress(...)?`
 and `.checkpoint(...)` when the next run needs durable position metadata.
 The next handler invocation receives that committed value as
 `JobContext::checkpoint`; its original payload is unchanged.

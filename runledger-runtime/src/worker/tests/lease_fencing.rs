@@ -373,7 +373,7 @@ async fn process_claimed_job_terminally_fails_invalid_continuation_delay_without
 }
 
 #[tokio::test]
-async fn process_claimed_job_terminally_fails_invalid_success_progress_without_replay() {
+async fn handler_validation_terminally_fails_invalid_success_progress_without_replay() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_invalid_success_progress", 8).await;
 
     let (job_id, claimed_job) = enqueue_and_claim_job(
@@ -465,7 +465,7 @@ async fn process_claimed_job_terminally_fails_invalid_success_progress_without_r
 }
 
 #[tokio::test]
-async fn process_claimed_job_terminally_fails_stale_partial_success_progress_without_replay() {
+async fn handler_validation_terminally_fails_progress_exceeding_stored_total_without_replay() {
     let (pool, database) =
         setup_ephemeral_pool("jobs_worker_stale_partial_success_progress", 8).await;
 
@@ -500,7 +500,7 @@ async fn process_claimed_job_terminally_fails_stale_partial_success_progress_wit
     let runs = Arc::new(AtomicUsize::new(0));
     let dead_letters = Arc::new(Mutex::new(Vec::new()));
     let mut registry = JobRegistry::new();
-    registry.register(PartialInvalidCompletionProgressHandler {
+    registry.register(InvalidStoredTotalProgressHandler {
         runs: runs.clone(),
         dead_letters: dead_letters.clone(),
     });
@@ -559,7 +559,7 @@ async fn process_claimed_job_terminally_fails_stale_partial_success_progress_wit
 }
 
 #[tokio::test]
-async fn stale_partial_continuation_progress_reports_the_continuation_path() {
+async fn handler_validation_reports_the_continuation_path() {
     let (pool, database) =
         setup_ephemeral_pool("jobs_worker_stale_partial_continuation_progress", 8).await;
     let (job_id, claimed_job) = enqueue_and_claim_job(
@@ -591,7 +591,7 @@ async fn stale_partial_continuation_progress_reports_the_continuation_path() {
     let runs = Arc::new(AtomicUsize::new(0));
     let dead_letters = Arc::new(Mutex::new(Vec::new()));
     let mut registry = JobRegistry::new();
-    registry.register(PartialInvalidContinuationProgressHandler {
+    registry.register(InvalidContinuationProgressHandler {
         runs: runs.clone(),
         dead_letters: dead_letters.clone(),
     });

@@ -602,9 +602,15 @@ builders:
 use std::time::Duration;
 
 let completion = JobCompletion::continue_after(Duration::from_secs(5))
-    .progress(processed, total)
+    .progress(processed, total)?
     .checkpoint(serde_json::json!({ "cursor": next_cursor }));
 ```
+
+Progress construction rejects negative counts and `processed > total`. A
+continuation delay is rounded up to microseconds for persistence and must fit
+in signed 64-bit microseconds; the resulting PostgreSQL timestamp must also be
+representable. The runtime terminally dead-letters an out-of-range delay with
+`job.invalid_continuation_delay`.
 
 On the next claim, the handler reads that committed value from
 `context.checkpoint`; the original payload remains unchanged. A first run, or a

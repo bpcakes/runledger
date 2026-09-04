@@ -9,11 +9,24 @@ pub struct ScopedEnv {
 }
 
 impl ScopedEnv {
+    /// Temporarily overrides process environment variables and restores them
+    /// when the returned guard is dropped.
+    ///
+    /// Prefer injecting configuration values directly or setting variables on
+    /// a child process. The process environment is global shared state, and
+    /// this helper's mutex can coordinate only callers of this helper.
+    ///
+    /// # Safety
+    ///
+    /// No other thread may read or modify the process environment from before
+    /// this call begins until after the returned guard is dropped. Every caller
+    /// participating in the test process must uphold that invariant; this
+    /// helper cannot enforce it.
     #[allow(
         unsafe_code,
-        reason = "Rust 2024 requires unsafe environment mutation, serialized here by ENV_LOCK"
+        reason = "caller upholds the process-wide environment access invariant"
     )]
-    pub fn set(overrides: &[(&str, Option<&str>)]) -> Self {
+    pub unsafe fn set(overrides: &[(&str, Option<&str>)]) -> Self {
         let guard = ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -24,7 +37,9 @@ impl ScopedEnv {
             .map(|(key, _)| (key.to_string(), std::env::var(key).ok()))
             .collect();
 
-        // SAFETY: env mutation is serialized through ENV_LOCK.
+        // SAFETY: the caller promises exclusive process-environment access for
+        // the guard's full lifetime; ENV_LOCK additionally serializes callers
+        // of this helper.
         unsafe {
             for (key, value) in overrides {
                 match value {
@@ -44,10 +59,11 @@ impl ScopedEnv {
 impl Drop for ScopedEnv {
     #[allow(
         unsafe_code,
-        reason = "Rust 2024 requires unsafe environment mutation, serialized here by the held ENV_LOCK guard"
+        reason = "the constructor's caller upholds the invariant until this guard is dropped"
     )]
     fn drop(&mut self) {
-        // SAFETY: env mutation is serialized through ENV_LOCK.
+        // SAFETY: ScopedEnv::set requires the caller to exclude all other
+        // process-environment access until this restoration completes.
         unsafe {
             for (key, value) in self.prior.drain(..) {
                 match value {
@@ -56,29 +72,5 @@ impl Drop for ScopedEnv {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ScopedEnv;
-
-    #[test]
-    fn applies_and_restores_environment_overrides() {
-        const SET_KEY: &str = "RUNLEDGER_SCOPED_ENV_SET_TEST";
-        const REMOVE_KEY: &str = "RUNLEDGER_SCOPED_ENV_REMOVE_TEST";
-
-        let prior_set_value = std::env::var_os(SET_KEY);
-        let prior_remove_value = std::env::var_os(REMOVE_KEY);
-
-        {
-            let _env = ScopedEnv::set(&[(SET_KEY, Some("temporary")), (REMOVE_KEY, None)]);
-
-            assert_eq!(std::env::var(SET_KEY).as_deref(), Ok("temporary"));
-            assert_eq!(std::env::var_os(REMOVE_KEY), None);
-        }
-
-        assert_eq!(std::env::var_os(SET_KEY), prior_set_value);
-        assert_eq!(std::env::var_os(REMOVE_KEY), prior_remove_value);
     }
 }

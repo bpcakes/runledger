@@ -452,7 +452,7 @@ async fn opted_in_workflow_managed_handler_continuation_runs_again_then_succeeds
 }
 
 #[tokio::test]
-async fn process_claimed_job_success_observer_reports_committed_coalesced_progress() {
+async fn process_claimed_job_success_observer_reports_committed_progress() {
     const JOB_TYPE: &str = "jobs.test.observer.coalesced_success_progress";
 
     let (pool, database) = setup_ephemeral_pool("jobs_worker_observer_success_progress", 8).await;
@@ -488,9 +488,9 @@ async fn process_claimed_job_success_observer_reports_committed_coalesced_progre
     registry.register(FixedSuccessHandler {
         job_type_name: JOB_TYPE,
         completion: {
-            let mut completion = JobCompletion::success();
-            completion.progress_done = Some(7);
-            completion
+            JobCompletion::success()
+                .progress(7, 10)
+                .expect("observer test progress is valid")
         },
         runs: runs.clone(),
     });

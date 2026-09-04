@@ -48,7 +48,14 @@ impl JobCatalog {
             .await
             .map_err(CatalogError::from_definition_catalog_sync_error)?;
 
-        tx.commit().await.map_err(CatalogError::CommitFailure)?;
+        tx.commit().await.map_err(|error| {
+            CatalogError::CommitFailure(Box::new(
+                runledger_postgres::Error::from_query_sqlx_with_context(
+                    "commit job catalog definition sync",
+                    error,
+                ),
+            ))
+        })?;
 
         Ok(JobCatalogSyncReport {
             disabled_catalog_job_types: report.disabled_catalog_job_types,
@@ -97,7 +104,14 @@ impl JobCatalog {
             .await
             .map_err(CatalogError::from_definition_catalog_sync_error)?;
 
-        tx.commit().await.map_err(CatalogError::CommitFailure)?;
+        tx.commit().await.map_err(|error| {
+            CatalogError::CommitFailure(Box::new(
+                runledger_postgres::Error::from_query_sqlx_with_context(
+                    "commit exact job catalog definition sync",
+                    error,
+                ),
+            ))
+        })?;
 
         Ok(JobCatalogExactSyncReport {
             disabled_absent_job_types: report.disabled_absent_job_types,
