@@ -27,7 +27,8 @@ pub use self::enqueue::{
 };
 pub use self::intents::{
     delete_promoted_job_enqueue_intents_before, delete_promoted_job_enqueue_intents_for_jobs_tx,
-    get_job_enqueue_intent_by_id, get_job_enqueue_intent_metrics, list_job_enqueue_intents,
+    get_job_enqueue_intent_by_id, get_job_enqueue_intent_by_id_with_scope,
+    get_job_enqueue_intent_metrics, list_job_enqueue_intents, list_job_enqueue_intents_with_scope,
     promote_job_enqueue_intents_for_types, record_job_enqueue_intent, record_job_enqueue_intent_tx,
 };
 #[allow(

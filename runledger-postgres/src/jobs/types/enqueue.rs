@@ -6,6 +6,8 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
+use super::admin::JobReadScope;
+
 #[derive(Clone, Debug)]
 pub struct JobEnqueue<'a> {
     pub job_type: JobType<'a>,
@@ -420,7 +422,10 @@ impl JobEnqueueIntentRecord {
     }
 }
 
-/// Bounded filters for listing durable enqueue intents.
+/// Legacy filters for listing durable enqueue intents.
+///
+/// Without an organization ID, reads include global and all organization-owned
+/// intents. Prefer [`JobEnqueueIntentReadListFilter`] for explicit visibility.
 #[derive(Clone, Debug)]
 pub struct JobEnqueueIntentListFilter<'a> {
     pub(crate) organization_id: Option<Uuid>,
@@ -446,6 +451,45 @@ impl<'a> JobEnqueueIntentListFilter<'a> {
     pub const fn with_organization_id(mut self, organization_id: Uuid) -> Self {
         self.organization_id = Some(organization_id);
         self
+    }
+
+    #[must_use]
+    pub const fn with_status(mut self, status: JobEnqueueIntentStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Filters by a case-insensitive job-type substring.
+    ///
+    /// PostgreSQL `ILIKE` metacharacters in `job_type_query` retain their
+    /// normal wildcard meaning, matching the crate's other admin filters.
+    #[must_use]
+    pub const fn with_job_type_query(mut self, job_type_query: &'a str) -> Self {
+        self.job_type_query = Some(job_type_query);
+        self
+    }
+}
+
+/// Explicit-scope filters for listing durable enqueue intents.
+#[derive(Clone, Debug)]
+pub struct JobEnqueueIntentReadListFilter<'a> {
+    pub(crate) scope: JobReadScope,
+    pub(crate) status: Option<JobEnqueueIntentStatus>,
+    pub(crate) job_type_query: Option<&'a str>,
+    pub(crate) limit: i64,
+    pub(crate) offset: i64,
+}
+
+impl<'a> JobEnqueueIntentReadListFilter<'a> {
+    #[must_use]
+    pub const fn new(scope: JobReadScope, limit: i64, offset: i64) -> Self {
+        Self {
+            scope,
+            status: None,
+            job_type_query: None,
+            limit,
+            offset,
+        }
     }
 
     #[must_use]

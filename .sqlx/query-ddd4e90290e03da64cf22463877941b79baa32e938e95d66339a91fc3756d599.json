@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            id,\n            job_type,\n            organization_id,\n            payload,\n            status::text AS \"status!\",\n            priority,\n            run_number,\n            attempt,\n            max_attempts,\n            timeout_seconds,\n            next_run_at,\n            lease_expires_at,\n            last_heartbeat_at,\n            worker_id,\n            started_at,\n            finished_at,\n            stage,\n            progress_done,\n            progress_total,\n            progress_pct::float8 AS progress_pct,\n            checkpoint,\n            output,\n            idempotency_key,\n            status_reason,\n            last_error_code,\n            last_error_message,\n            created_at,\n            updated_at\n         FROM job_queue\n         WHERE ($1::uuid IS NULL OR organization_id = $1)\n           AND ($2::text::job_status IS NULL OR status = $2::text::job_status)\n           AND ($3::text IS NULL OR job_type ILIKE '%' || $3 || '%')\n         ORDER BY created_at DESC, id DESC\n         LIMIT $4\n         OFFSET $5",
+  "query": "SELECT\n            id,\n            job_type,\n            organization_id,\n            payload,\n            status::text AS \"status!\",\n            priority,\n            run_number,\n            attempt,\n            max_attempts,\n            timeout_seconds,\n            next_run_at,\n            lease_expires_at,\n            last_heartbeat_at,\n            worker_id,\n            started_at,\n            finished_at,\n            stage,\n            progress_done,\n            progress_total,\n            progress_pct::float8 AS progress_pct,\n            checkpoint,\n            output,\n            idempotency_key,\n            status_reason,\n            last_error_code,\n            last_error_message,\n            created_at,\n            updated_at\n         FROM job_queue\n         WHERE id = $1\n           AND ($3::bool OR organization_id IS NOT DISTINCT FROM $2::uuid)\n         LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -147,10 +147,8 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Text",
-        "Text",
-        "Int8",
-        "Int8"
+        "Uuid",
+        "Bool"
       ]
     },
     "nullable": [
@@ -184,5 +182,5 @@
       false
     ]
   },
-  "hash": "c2350f3a1f05bb5bf576e20872873d7135e8dfff31412ed42bda795dbeee7586"
+  "hash": "ddd4e90290e03da64cf22463877941b79baa32e938e95d66339a91fc3756d599"
 }

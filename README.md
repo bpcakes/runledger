@@ -1001,7 +1001,21 @@ by continuation, and the highest current run number among those active jobs.
 Passing no organization filter aggregates all scopes; it does not mean exact
 global scope.
 
-Durable event consumers should call `list_job_events` and prefer
+Use `JobReadScope::Global` for jobs and intents with no organization,
+`JobReadScope::Organization(id)` for one tenant, and `JobReadScope::Admin`
+for visibility across all tenants and global rows. Applications must authorize
+the selected scope; the enum only controls row filtering.
+
+Use `get_job_by_id_with_scope`, `list_jobs_with_scope` (with
+`JobReadListFilter`), `list_job_events_with_scope`, and
+`list_job_logs_with_scope` for job inspection. Intent inspection uses
+`get_job_enqueue_intent_by_id_with_scope` and
+`list_job_enqueue_intents_with_scope` (with
+`JobEnqueueIntentReadListFilter::new(scope, limit, offset)`).
+The legacy APIs retain their existing behavior: an absent organization filter
+means unrestricted visibility, including organization-owned rows.
+
+Durable event consumers should call `list_job_events_with_scope` and prefer
 `JobEventRecord::decoded_payload()` for Runledger-authored continuation,
 administrative requeue, and successful-replay payloads. The decoded enums are
 non-exhaustive: keep wildcard arms and retain `JobEventRecord::payload` as the

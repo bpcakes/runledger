@@ -6,9 +6,32 @@ use crate::{DbPool, Error, Result};
 use super::super::errors::{validate_page_limit, validate_pagination};
 use super::super::row_decode::{parse_job_event_type, parse_job_stage};
 use super::super::rows::JobQueueRow;
-use super::super::types::{JobEventRecord, JobListFilter, JobQueueRecord};
+use super::super::types::{
+    JobEventRecord, JobListFilter, JobQueueRecord, JobReadListFilter, JobReadScope,
+};
 
+/// Lists jobs with legacy visibility: a None organization matches every scope.
+/// Prefer [`list_jobs_with_scope`] for new code.
 pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<JobQueueRecord>> {
+    list_jobs_with_scope(
+        pool,
+        &JobReadListFilter {
+            scope: JobReadScope::from_legacy(filter.organization_id),
+            status: filter.status,
+            job_type: filter.job_type,
+            limit: filter.limit,
+            offset: filter.offset,
+        },
+    )
+    .await
+}
+
+/// Lists jobs within an application-authorized, explicit visibility scope.
+pub async fn list_jobs_with_scope(
+    pool: &DbPool,
+    filter: &JobReadListFilter<'_>,
+) -> Result<Vec<JobQueueRecord>> {
+    let (is_admin, organization_id) = filter.scope.visibility_predicate();
     validate_pagination(filter.limit, filter.offset)?;
 
     let status_filter = filter.status.map(JobStatus::as_db_value);
@@ -45,17 +68,18 @@ pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<
             created_at,
             updated_at
          FROM job_queue
-         WHERE ($1::uuid IS NULL OR organization_id = $1)
+         WHERE ($6::bool OR organization_id IS NOT DISTINCT FROM $1::uuid)
            AND ($2::text::job_status IS NULL OR status = $2::text::job_status)
            AND ($3::text IS NULL OR job_type ILIKE '%' || $3 || '%')
          ORDER BY created_at DESC, id DESC
          LIMIT $4
          OFFSET $5",
-        filter.organization_id,
+        organization_id,
         status_filter,
         filter.job_type,
         filter.limit,
         filter.offset,
+        is_admin,
     )
     .fetch_all(pool)
     .await
@@ -64,11 +88,23 @@ pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<
     rows.into_iter().map(JobQueueRow::into_record).collect()
 }
 
+/// Legacy read: None matches global and organization-owned jobs.
+/// Prefer [`get_job_by_id_with_scope`] for new code.
 pub async fn get_job_by_id(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     job_id: Uuid,
 ) -> Result<Option<JobQueueRecord>> {
+    get_job_by_id_with_scope(pool, JobReadScope::from_legacy(organization_id), job_id).await
+}
+
+/// Reads within an application-authorized, explicit job visibility scope.
+pub async fn get_job_by_id_with_scope(
+    pool: &DbPool,
+    scope: JobReadScope,
+    job_id: Uuid,
+) -> Result<Option<JobQueueRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     let row = sqlx::query_as!(
         JobQueueRow,
         "SELECT
@@ -102,10 +138,11 @@ pub async fn get_job_by_id(
             updated_at
          FROM job_queue
          WHERE id = $1
-           AND ($2::uuid IS NULL OR organization_id = $2)
+           AND ($3::bool OR organization_id IS NOT DISTINCT FROM $2::uuid)
          LIMIT 1",
         job_id,
         organization_id,
+        is_admin,
     )
     .fetch_optional(pool)
     .await
@@ -168,6 +205,8 @@ pub async fn get_latest_job_payload_for_run(
     Ok(row.map(|row| (row.id, row.payload)))
 }
 
+/// Legacy read: None matches global and organization-owned jobs.
+/// Prefer [`list_job_events_with_scope`] for new code.
 pub async fn list_job_events(
     pool: &DbPool,
     organization_id: Option<Uuid>,
@@ -175,6 +214,25 @@ pub async fn list_job_events(
     limit: i64,
     after_id: Option<i64>,
 ) -> Result<Vec<JobEventRecord>> {
+    list_job_events_with_scope(
+        pool,
+        JobReadScope::from_legacy(organization_id),
+        job_id,
+        limit,
+        after_id,
+    )
+    .await
+}
+
+/// Reads within an application-authorized, explicit job visibility scope.
+pub async fn list_job_events_with_scope(
+    pool: &DbPool,
+    scope: JobReadScope,
+    job_id: Uuid,
+    limit: i64,
+    after_id: Option<i64>,
+) -> Result<Vec<JobEventRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     validate_page_limit(limit)?;
 
     let rows = sqlx::query!(
@@ -192,7 +250,7 @@ pub async fn list_job_events(
          FROM job_events je
          JOIN job_queue jq ON jq.id = je.job_id
          WHERE je.job_id = $1
-           AND ($2::uuid IS NULL OR jq.organization_id = $2)
+           AND ($5::bool OR jq.organization_id IS NOT DISTINCT FROM $2::uuid)
            AND ($3::bigint IS NULL OR je.id > $3)
          ORDER BY je.id ASC
          LIMIT $4",
@@ -200,6 +258,7 @@ pub async fn list_job_events(
         organization_id,
         after_id,
         limit,
+        is_admin,
     )
     .fetch_all(pool)
     .await

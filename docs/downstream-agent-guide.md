@@ -516,10 +516,16 @@ fallback for malformed, historical, custom, and future payloads:
 ```rust
 use runledger_postgres::prelude::{
     DecodedJobEventPayload, DecodedRequeuedEventPayload,
-    SuccessfulReplayEnqueuedEventPayload, list_job_events,
+    SuccessfulReplayEnqueuedEventPayload, JobReadScope, list_job_events_with_scope,
 };
 
-let events = list_job_events(&pool, organization_id, job_id, 200, None).await?;
+// Authorize access to this exact job scope in the application first.
+// Here organization_id comes from the application's job ownership record.
+let scope = match organization_id {
+    Some(id) => JobReadScope::Organization(id),
+    None => JobReadScope::Global,
+};
+let events = list_job_events_with_scope(&pool, scope, job_id, 200, None).await?;
 
 for event in events {
     match event.decoded_payload() {
