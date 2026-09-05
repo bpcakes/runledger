@@ -7,6 +7,8 @@ SMOKE_MANIFEST="$ROOT_DIR/smoke/external-consumer/Cargo.toml"
 
 cd "$ROOT_DIR"
 
+python3 scripts/check-readme.py
+
 cargo fmt --all -- --check
 cargo fmt --manifest-path "$SMOKE_MANIFEST" -- --check
 
