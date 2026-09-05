@@ -105,6 +105,7 @@ fn compiled_manifest_has_the_independently_pinned_up_and_down_history() {
         202608230001,
         202608240001,
         202608240002,
+        202609050001,
     ];
     let actual: Vec<_> = migration_bundle()
         .migrations()
@@ -125,7 +126,7 @@ fn compiled_manifest_has_the_independently_pinned_up_and_down_history() {
     // history requires reviewing this content snapshot as well as the versions.
     assert_eq!(
         hex(migration_bundle().bundle_fingerprint()),
-        "77005335e2e12fbcc96bd95c50d8a9c75b56293a0b91afee05b3a433ec96271c"
+        "a4fc356878542c81b29151d3636a7d267141a0b2573c0204257f0813733aac6f"
     );
     assert_eq!(
         migration_bundle().pipeline_fingerprint(),

@@ -1,0 +1,34 @@
+   Compiling runledger-core v0.12.0 (/home/aa/Documents/runledger/runledger-core)
+   Compiling runledger-test-support v0.12.0 (/home/aa/Documents/runledger/runledger-test-support)
+   Compiling runledger-postgres v0.12.0 (/home/aa/Documents/runledger/runledger-postgres)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.99s
+     Running tests/operational_costs.rs (target/debug/deps/operational_costs-0c0064ed170bb3b9)
+
+running 1 test
+PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2); server_version_num=180006; pool max=1
+full offset=0 json_bytes=1232100: median_ms=13.680 p95_ms=15.665
+full offset=9000 json_bytes=1232100: median_ms=18.089 p95_ms=20.593
+compact after=false json_bytes=0: median_ms=2.239 p95_ms=2.675
+compact after=true json_bytes=0: median_ms=2.192 p95_ms=3.041
+compact raw cursor at depth 9000: median_ms=1.936 p95_ms=3.116
+compact raw offset=9000: median_ms=6.860 p95_ms=8.327
+workflow V=10 E=9: median_ms=14.975 p95_ms=21.292
+12 enqueues: [("edge inserts", 12), ("other statements", 168), ("step inserts", 12)]
+workflow V=10 E=30: median_ms=12.503 p95_ms=14.025
+12 enqueues: [("edge inserts", 12), ("other statements", 168), ("step inserts", 12)]
+workflow V=100 E=99: median_ms=29.641 p95_ms=36.293
+12 enqueues: [("edge inserts", 12), ("other statements", 168), ("step inserts", 12)]
+workflow V=100 E=390: median_ms=49.734 p95_ms=51.762
+12 enqueues: [("edge inserts", 24), ("other statements", 168), ("step inserts", 12)]
+workflow V=600 E=599: median_ms=139.296 p95_ms=163.562
+12 enqueues: [("edge inserts", 36), ("other statements", 168), ("step inserts", 36)]
+workflow V=600 E=2390: median_ms=342.758 p95_ms=353.946
+12 enqueues: [("edge inserts", 120), ("other statements", 168), ("step inserts", 36)]
+100 direct jobs own_transaction=true: median_ms=874.670 p95_ms=894.247
+12 direct groups: total statements=4800
+100 direct jobs own_transaction=false: median_ms=80.602 p95_ms=91.991
+12 direct groups: total statements=2424
+connections=1, idle=0
+test measure_operational_costs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.16s

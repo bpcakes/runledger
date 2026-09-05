@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workflow_step_dependencies (\n            workflow_run_id, prerequisite_step_id, dependent_step_id, release_mode\n         ) SELECT $1, r.prerequisite_step_id, r.dependent_step_id,\n            r.release_mode::workflow_dependency_release_mode\n         FROM jsonb_to_recordset($2::jsonb) AS r(\n            prerequisite_step_id uuid, dependent_step_id uuid, release_mode text)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ba9acdf8f6c1427f2488aec9ab85ac3eddf200e7f69494de198b3560888d03f7"
+}

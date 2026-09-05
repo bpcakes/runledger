@@ -1,0 +1,15 @@
+   Compiling runledger-postgres v0.12.0 (/home/aa/Documents/runledger/runledger-postgres)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.44s
+     Running tests/job_summary_plans.rs (target/debug/deps/job_summary_plans-7a506079c94e6d52)
+
+running 1 test
+summary plans PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2)
+force_custom_plan Global: execution=0.064 ms, shared buffers=4
+force_custom_plan Organization(c4ca4238-a0b9-2382-0dcc-509a6f75849b): execution=0.031 ms, shared buffers=5
+force_custom_plan Admin: execution=0.058 ms, shared buffers=3
+force_generic_plan Global: execution=0.065 ms, shared buffers=4
+force_generic_plan Organization(c4ca4238-a0b9-2382-0dcc-509a6f75849b): execution=0.055 ms, shared buffers=4
+force_generic_plan Admin: execution=0.044 ms, shared buffers=3
+test actual_summary_cursor_constrains_index_with_custom_and_generic_plans ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.56s

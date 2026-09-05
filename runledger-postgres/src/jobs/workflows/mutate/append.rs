@@ -35,9 +35,9 @@ use super::super::release::{
 use super::super::runtime::{recompute_workflow_run_status_tx, resolve_terminal_step_queue_tx};
 use super::super::snapshot::{CanonicalAppendRequest, canonical_append_request};
 use super::super::steps::{
-    WorkflowStepDependencyWriteContext, WorkflowStepIdsByKey, dependency_count_total,
-    fetch_job_definition_defaults_tx, insert_workflow_step_dependencies_tx,
-    insert_workflow_step_record_tx, workflow_step_effective_organization_id,
+    INSERT_CHUNK_ROWS, StepInsert, WorkflowStepDependencyWriteContext, WorkflowStepIdsByKey,
+    dependency_count_total, fetch_job_definition_defaults_tx, insert_step_chunk_tx,
+    insert_workflow_step_dependencies_tx, workflow_step_effective_organization_id,
 };
 use super::super::validation::workflow_dag_validation_error;
 use super::idempotency::{
@@ -205,21 +205,31 @@ async fn insert_appended_step_records_tx(
         .collect::<WorkflowStepIdsByKey>();
     let mut appended_step_ids = Vec::with_capacity(steps.len());
 
-    for step in steps {
-        let (dependency_count_pending, dependency_count_unsatisfied) =
-            initial_dependency_counters(&existing_statuses_by_key, &new_step_keys, step)?;
-        let step_id = insert_workflow_step_record_tx(
-            tx,
-            workflow_run_id,
-            workflow_step_effective_organization_id(workflow_organization_id, step),
-            step,
-            &defaults_by_job_type,
-            dependency_count_pending,
-            dependency_count_unsatisfied,
-        )
-        .await?;
-        step_id_by_key.insert(step.step_key().as_str().to_owned(), step_id);
-        appended_step_ids.push(step_id);
+    for chunk in steps.chunks(INSERT_CHUNK_ROWS) {
+        let records = chunk
+            .iter()
+            .map(|step| {
+                let (pending, unsatisfied) =
+                    initial_dependency_counters(&existing_statuses_by_key, &new_step_keys, step)?;
+                StepInsert::new(
+                    step,
+                    workflow_step_effective_organization_id(workflow_organization_id, step),
+                    &defaults_by_job_type,
+                    pending,
+                    unsatisfied,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let ids = insert_step_chunk_tx(tx, workflow_run_id, &records).await?;
+        for step in chunk {
+            let id = super::super::steps::step_id_for_key(
+                &ids,
+                step.step_key().as_str(),
+                "missing inserted appended workflow step id",
+            )?;
+            appended_step_ids.push(id);
+        }
+        step_id_by_key.extend(ids);
     }
 
     Ok(InsertedAppend {

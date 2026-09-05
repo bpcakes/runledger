@@ -44,6 +44,8 @@ pub use self::schedules::{
     JobScheduleRecord, JobScheduleUpsert,
 };
 
+pub use self::summary::{JobStatusRecord, JobSummary, JobSummaryCursor, JobSummaryFilter};
+
 mod admin;
 mod definitions;
 mod enqueue;
@@ -51,3 +53,4 @@ mod events;
 mod lifecycle;
 mod reaper;
 mod schedules;
+mod summary;

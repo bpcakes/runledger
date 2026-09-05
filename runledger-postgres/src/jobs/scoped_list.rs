@@ -6,7 +6,7 @@
 // $1 is reserved for organization identity in every branch. Global/Admin bind
 // NULL and test that parameter so the remaining filter positions stay stable.
 macro_rules! scoped_list {
-    ($row:path, $pool:expr, $scope:expr, $prefix:literal, $suffix:literal, $($arg:expr),+ $(,)?) => {
+    ($row:path, $pool:expr, $scope:expr, $prefix:literal, $suffix:expr, $($arg:expr),+ $(,)?) => {
         match $scope {
             $crate::jobs::JobReadScope::Organization(id) => {
                 sqlx::query_as!(

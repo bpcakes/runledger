@@ -425,6 +425,22 @@ on the next run, and completing typed recovery.
 
 ### Exact payload reads
 
+For status dashboards or recovery scans, use `list_job_summaries` with
+`JobSummaryFilter { scope, status, job_type, limit, after }`. `job_type` is an
+optional exact `JobType`, not an ILIKE expression. `after: None` starts the scan;
+use the last returned summary's `cursor()` for the next page. Preserve timestamp
+microseconds and keep filters/scope fixed. Limits are 1–1,000. Empty pages end
+the scan; concurrent status changes can move rows into or out of the filter.
+`JobSummary` never reads payload, checkpoint, output, or free-form error text.
+
+Use `get_job_statuses_with_scope(pool, scope, ids)` for at most 1,000 input IDs.
+Empty input performs no query, duplicates collapse, and missing/out-of-scope
+IDs are omitted without distinguishing them. Results are sorted by ID. Neither
+API authorizes the caller or provides a mutation fence: continue to use the
+exact-scope recovery and lease APIs for writes. Retain application ownership
+joins and authorization checks. Both APIs and their input/record types are
+exported from `runledger_postgres::jobs` and `prelude`.
+
 Use `get_job_payload_by_idempotency_key_with_scope` or
 `get_latest_job_payload_for_run_with_scope` with an authorized `JobScope::Global`
 or `JobScope::Organization(id)`. These lookups select one exact scope and job

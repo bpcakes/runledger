@@ -1184,6 +1184,22 @@ Use `get_job_by_id_with_scope`, `list_jobs_with_scope` (with
 `get_job_enqueue_intent_by_id_with_scope` and
 `list_job_enqueue_intents_with_scope` (with
 `JobEnqueueIntentReadListFilter::new(scope, limit, offset)`).
+
+For dashboards and recovery scans, `list_job_summaries` accepts a
+`JobSummaryFilter` with an explicit `JobReadScope`, optional status and exact
+`JobType`, a limit of 1–1,000, and an optional `after` cursor. It omits payload,
+checkpoint, output, and free-form errors. Continue with the last row's
+`cursor()`; preserve timestamp microseconds and keep the scope and filters
+unchanged. Pages use descending `(created_at, id)` order and are observations,
+not a snapshot across concurrent status changes. `get_job_statuses_with_scope`
+reads up to 1,000 input IDs in one statement, returning unique visible rows in
+ID order; absent and unauthorized-scope IDs are both omitted.
+
+Initial and appended workflow graphs insert steps and dependencies in chunks
+of at most 256 rows within the existing transaction. Root releases still use
+the ordinary enqueue/audit path. See the
+[PostgreSQL 18 measurements and batch design](docs/operational-costs-2026-09-05.md)
+for results, atomicity, and direct-job batch considerations.
 The legacy APIs retain their existing behavior: an absent organization filter
 means unrestricted visibility, including organization-owned rows.
 
@@ -1377,6 +1393,10 @@ forward migrations:
   anti-joins, removes the compatibility triggers, reciprocal FK/unique
   constraint, and `job_queue.workflow_step_id`, then advances the custom
   compatibility fence so pre-contract binaries refuse the destructive schema.
+- `202609050001_job_summary_pagination` — adds scope/creation/ID and creation/ID
+  indexes for compact cursor pages. This additive migration is outside the
+  custom compatibility fence. Its ordinary index builds block queue writes
+  until the migration commits; schedule it for an appropriate deployment window.
 
 Every forward migration from
 `202607190001_job_replays_and_continuation_metrics` through

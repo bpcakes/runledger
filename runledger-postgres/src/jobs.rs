@@ -37,9 +37,9 @@ pub use admin::{
     get_job_by_id_with_scope, get_job_continuation_metrics,
     get_job_continuation_metrics_with_scope, get_job_metrics, get_job_metrics_with_scope,
     get_job_payload_by_idempotency_key, get_job_payload_by_idempotency_key_with_scope,
-    get_latest_job_payload_for_run, get_latest_job_payload_for_run_with_scope, list_job_events,
-    list_job_events_with_scope, list_jobs, list_jobs_with_scope,
-    update_job_payload_uuid_array_field,
+    get_job_statuses_with_scope, get_latest_job_payload_for_run,
+    get_latest_job_payload_for_run_with_scope, list_job_events, list_job_events_with_scope,
+    list_job_summaries, list_jobs, list_jobs_with_scope, update_job_payload_uuid_array_field,
 };
 pub use logs::{insert_job_log, list_job_logs, list_job_logs_with_scope};
 #[allow(
@@ -105,11 +105,11 @@ pub use types::{
     JobOrdinaryProgressUpdate, JobProgressUpdate, JobQueueRecord, JobReadListFilter, JobReadScope,
     JobRequeueStatePolicy, JobRunningUpdate, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
     JobRuntimeConfigUpsert, JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport,
-    JobScheduleJobTypeReference, JobScheduleRecord, JobScheduleUpsert, JobScope,
-    JobSuccessCompletionOutcome, NonRequeueableJobStatusError, ReapExpiredLeaseCleanupError,
-    ReapExpiredLeaseCleanupOperation, ReapExpiredLeaseDeferredError,
-    ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult, ReapedLeaseDisposition,
-    ReapedLeaseRecord, ReapedTerminalLeaseRecord, RequeueableJobStatus,
+    JobScheduleJobTypeReference, JobScheduleRecord, JobScheduleUpsert, JobScope, JobStatusRecord,
+    JobSuccessCompletionOutcome, JobSummary, JobSummaryCursor, JobSummaryFilter,
+    NonRequeueableJobStatusError, ReapExpiredLeaseCleanupError, ReapExpiredLeaseCleanupOperation,
+    ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult,
+    ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord, RequeueableJobStatus,
     SuccessfulReplayEnqueuedEventPayload,
 };
 pub use workflow_types::{

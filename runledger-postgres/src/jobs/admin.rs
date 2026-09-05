@@ -2,6 +2,7 @@ mod metrics;
 mod payload;
 mod read;
 mod recovery;
+mod summary;
 
 pub use metrics::{
     get_job_continuation_metrics, get_job_continuation_metrics_with_scope, get_job_metrics,
@@ -20,5 +21,7 @@ pub use read::{
 pub use recovery::{
     cancel_job, cancel_job_with_scope, compare_and_requeue_job, compare_and_requeue_job_tx,
 };
+
+pub use summary::{get_job_statuses_with_scope, list_job_summaries};
 
 pub(crate) use recovery::cancel_job_with_scope_tx;

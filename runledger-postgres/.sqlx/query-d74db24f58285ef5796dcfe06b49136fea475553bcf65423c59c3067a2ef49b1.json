@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workflow_steps (\n            workflow_run_id, step_key, execution_kind, job_type, organization_id, payload,\n            priority, max_attempts, timeout_seconds, stage, allow_handler_continuation,\n            execution_resource_key, status, dependency_count_total,\n            dependency_count_pending, dependency_count_unsatisfied\n         ) SELECT $1, r.step_key, r.execution_kind::workflow_step_execution_kind,\n            r.job_type, r.organization_id, COALESCE(r.payload, 'null'::jsonb), r.priority, r.max_attempts,\n            r.timeout_seconds, r.stage, r.allow_handler_continuation, r.execution_resource_key,\n            'BLOCKED', r.dependency_count_total, r.dependency_count_pending, r.dependency_count_unsatisfied\n         FROM jsonb_to_recordset($2::jsonb) AS r(\n            step_key text, execution_kind text, job_type text, organization_id uuid, payload jsonb,\n            priority int, max_attempts int, timeout_seconds int, stage text,\n            allow_handler_continuation bool, execution_resource_key text,\n            dependency_count_total int, dependency_count_pending int, dependency_count_unsatisfied int)\n         RETURNING id, step_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "step_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "d74db24f58285ef5796dcfe06b49136fea475553bcf65423c59c3067a2ef49b1"
+}
