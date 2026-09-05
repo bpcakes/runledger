@@ -960,6 +960,13 @@ not provide an implicit union helper because that can hide ownership mistakes.
 
 ### Job definition catalog
 
+Producer processes can share provider-free `JobSpec` / `JobContract` definitions
+with workers. Use `JobCatalog::from_specs` to validate complete worker bindings,
+`TypedJobHandler` for opt-in payload decoding, and `JobContract::submit` for typed
+direct requests. The pool-owning `enqueue_job_with_outcome` distinguishes new
+work from identical retries. See the [shared contracts guide](docs/shared-job-specs.md)
+for synchronization, wire compatibility, and migration examples.
+
 `sync_definitions` is **additive**: it owns the definition fields it writes
 (`version`, retry limits, timeout, priority), restoring them to effective catalog
 values on each startup. It preserves an existing *disabled* row, so operator

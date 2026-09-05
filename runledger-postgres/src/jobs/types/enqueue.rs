@@ -24,6 +24,23 @@ pub struct JobEnqueue<'a> {
     pub stage: Option<JobStage>,
 }
 
+/// Borrows an owned core submission without changing its JSON or request overrides.
+impl<'a> From<&'a runledger_core::jobs::JobSubmission> for JobEnqueue<'a> {
+    fn from(request: &'a runledger_core::jobs::JobSubmission) -> Self {
+        Self {
+            job_type: request.job_type,
+            payload: &request.payload,
+            organization_id: request.organization_id,
+            priority: request.priority,
+            max_attempts: request.max_attempts,
+            timeout_seconds: request.timeout_seconds,
+            next_run_at: request.next_run_at,
+            idempotency_key: request.idempotency_key.as_deref(),
+            stage: request.stage,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum JobEnqueueDisposition {

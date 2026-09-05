@@ -1,0 +1,384 @@
+diff --git a/crates/identitypro-jobs/src/billing_renewal.rs b/crates/identitypro-jobs/src/billing_renewal.rs
+index 2f2d128..8972411 100644
+--- a/crates/identitypro-jobs/src/billing_renewal.rs
++++ b/crates/identitypro-jobs/src/billing_renewal.rs
+@@ -1,14 +1,17 @@
+ use chrono::{DateTime, Utc};
+ use identitypro_billing::{BillingError, BillingService, SubscriptionRenewalOutcome};
+ use identitypro_db::Db;
+-use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobHandler, JobType};
+-use runledger_postgres::jobs::{JobEnqueue, enqueue_job};
++use runledger_core::jobs::{
++    JobCompletion, JobContext, JobContract, JobFailure, JobHandler, JobSpec, JobType,
++    TypedJobHandler,
++};
++use runledger_postgres::jobs::{JobEnqueue, JobEnqueueDisposition, enqueue_job_with_outcome};
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ use uuid::Uuid;
+
+ use crate::{
+-    BILLING_RENEWAL_CHARGE_JOB_TYPE, BILLING_RENEWAL_DISPATCH_JOB_TYPE,
++    BILLING_RENEWAL_DISPATCH_JOB_TYPE,
+     billing_failure::{BillingFailureDisposition, classify_billing_failure},
+     definitions::BILLING_RENEWAL_CHARGE_DEFINITION,
+ };
+@@ -26,12 +29,22 @@ pub(crate) struct BillingRenewalChargeHandler {
+
+ #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+ #[serde(deny_unknown_fields)]
+-struct RenewalPayload {
++pub(crate) struct RenewalPayload {
+     billing_scope_id: Uuid,
+     subscription_id: Uuid,
+     period_start_at: DateTime<Utc>,
+ }
+
++pub(crate) struct BillingRenewalCharge;
++
++impl JobContract for BillingRenewalCharge {
++    type Payload = RenewalPayload;
++
++    fn spec() -> JobSpec {
++        BILLING_RENEWAL_CHARGE_DEFINITION.shared_spec()
++    }
++}
++
+ impl BillingRenewalDispatchHandler {
+     pub(crate) fn new(db: Db, billing: Option<BillingService>) -> Self {
+         Self { db, billing }
+@@ -67,7 +80,6 @@ impl JobHandler for BillingRenewalDispatchHandler {
+                 subscription_id: dispatch.subscription_id().into_uuid(),
+                 period_start_at: *dispatch.period_start_at(),
+             };
+-            let value = serde_json::to_value(&payload).expect("renewal payload is serializable");
+             let idempotency_key = format!(
+                 "billing-renewal:{}:{}:{}:{}",
+                 payload.subscription_id,
+@@ -75,22 +87,19 @@ impl JobHandler for BillingRenewalDispatchHandler {
+                 dispatch.attempt_sequence_count(),
+                 enqueue_window,
+             );
+-            let enqueue_overrides = BILLING_RENEWAL_CHARGE_DEFINITION.enqueue_overrides();
+-            let job = JobEnqueue {
+-                job_type: JobType::new(BILLING_RENEWAL_CHARGE_JOB_TYPE),
+-                organization_id: Some(payload.billing_scope_id),
+-                payload: &value,
+-                priority: None,
+-                max_attempts: enqueue_overrides.max_attempts,
+-                timeout_seconds: enqueue_overrides.timeout_seconds,
+-                next_run_at: None,
+-                idempotency_key: Some(&idempotency_key),
+-                stage: None,
+-            };
+-            match enqueue_job(self.db.pool(), &job).await {
+-                Ok(_) => enqueued += 1,
+-                Err(runledger_postgres::Error::QueryError(error))
+-                    if error.code() == "job.already_enqueued" => {}
++            // Retain the explicit overrides used in already-durable request snapshots.
++            let job = BillingRenewalCharge::submit(&payload)
++                .expect("static renewal contract and serializable payload")
++                .organization_id(payload.billing_scope_id)
++                .max_attempts(BILLING_RENEWAL_CHARGE_DEFINITION.max_attempts)
++                .timeout_seconds(BILLING_RENEWAL_CHARGE_DEFINITION.timeout_seconds)
++                .idempotency_key(idempotency_key);
++            match enqueue_job_with_outcome(self.db.pool(), &JobEnqueue::from(&job)).await {
++                Ok(outcome) => {
++                    if outcome.disposition == JobEnqueueDisposition::Inserted {
++                        enqueued += 1;
++                    }
++                }
+                 Err(error) => {
+                     tracing::error!(error = ?error, "could not enqueue billing renewal");
+                     return Err(JobFailure::retryable(
+@@ -108,23 +117,22 @@ impl JobHandler for BillingRenewalDispatchHandler {
+ }
+
+ #[async_trait::async_trait]
+-impl JobHandler for BillingRenewalChargeHandler {
+-    fn job_type(&self) -> JobType<'static> {
+-        JobType::new(BILLING_RENEWAL_CHARGE_JOB_TYPE)
++impl TypedJobHandler for BillingRenewalChargeHandler {
++    type Contract = BillingRenewalCharge;
++
++    fn malformed_payload(&self, _source: &serde_json::Error) -> JobFailure {
++        tracing::warn!("billing renewal payload had an invalid shape");
++        JobFailure::terminal(
++            "identitypro.billing.invalid_renewal_payload",
++            "invalid billing renewal payload",
++        )
+     }
+
+     async fn execute(
+         &self,
+         context: JobContext,
+-        payload: Value,
++        payload: RenewalPayload,
+     ) -> Result<JobCompletion, JobFailure> {
+-        let payload: RenewalPayload = serde_json::from_value(payload).map_err(|error| {
+-            tracing::warn!(error = ?error, "billing renewal payload had an invalid shape");
+-            JobFailure::terminal(
+-                "identitypro.billing.invalid_renewal_payload",
+-                "invalid billing renewal payload",
+-            )
+-        })?;
+         if context.organization_id != Some(payload.billing_scope_id) {
+             return Err(JobFailure::terminal(
+                 "identitypro.billing.invalid_renewal_context",
+@@ -169,3 +177,74 @@ fn billing_failure(error: BillingError) -> JobFailure {
+         ),
+     }
+ }
++
++#[cfg(test)]
++mod typed_contract_tests {
++    use super::*;
++    use serde_json::json;
++
++    fn context(scope: Uuid) -> JobContext {
++        JobContext {
++            job_id: Uuid::now_v7(),
++            run_number: 1,
++            attempt: 1,
++            organization_id: Some(scope),
++            worker_id: "test".into(),
++            checkpoint: None,
++        }
++    }
++
++    #[test]
++    fn typed_submission_preserves_legacy_payload_and_explicit_overrides() {
++        let payload = RenewalPayload {
++            billing_scope_id: Uuid::nil(),
++            subscription_id: Uuid::nil(),
++            period_start_at: "2026-09-05T12:00:00Z".parse().expect("timestamp"),
++        };
++        let request = BillingRenewalCharge::submit(&payload)
++            .expect("typed submit")
++            .max_attempts(BILLING_RENEWAL_CHARGE_DEFINITION.max_attempts)
++            .timeout_seconds(BILLING_RENEWAL_CHARGE_DEFINITION.timeout_seconds);
++        assert_eq!(
++            request.payload,
++            json!({"billing_scope_id":Uuid::nil(), "subscription_id":Uuid::nil(), "period_start_at":"2026-09-05T12:00:00Z"})
++        );
++        let old = BILLING_RENEWAL_CHARGE_DEFINITION.enqueue_overrides();
++        assert_eq!(request.max_attempts, old.max_attempts);
++        assert_eq!(request.timeout_seconds, old.timeout_seconds);
++    }
++
++    #[tokio::test]
++    async fn typed_handler_preserves_shape_failures_and_scope_validation() {
++        let handler = BillingRenewalChargeHandler::new(None).into_job_handler();
++        let scope = Uuid::now_v7();
++        let error = handler
++            .execute(
++                context(scope),
++                json!({"billing_scope_id":"private-invalid-value"}),
++            )
++            .await
++            .expect_err("malformed");
++        assert_eq!(error.kind, runledger_core::jobs::JobFailureKind::Terminal);
++        assert_eq!(error.code, "identitypro.billing.invalid_renewal_payload");
++        assert_eq!(error.message, "invalid billing renewal payload");
++        let payload = json!({"billing_scope_id":Uuid::nil(),"subscription_id":Uuid::nil(),"period_start_at":"2026-09-05T12:00:00Z"});
++        let error = handler
++            .execute(context(scope), payload.clone())
++            .await
++            .expect_err("scope mismatch");
++        assert_eq!(error.code, "identitypro.billing.invalid_renewal_context");
++        let error = handler
++            .execute(context(Uuid::nil()), payload.clone())
++            .await
++            .expect_err("provider absent");
++        assert_eq!(error.code, "identitypro.billing.not_configured");
++        let mut unknown = payload;
++        unknown["unrecognized"] = json!(true);
++        let error = handler
++            .execute(context(Uuid::nil()), unknown)
++            .await
++            .expect_err("retain deny_unknown_fields");
++        assert_eq!(error.code, "identitypro.billing.invalid_renewal_payload");
++    }
++}
+diff --git a/crates/identitypro-jobs/src/catalog.rs b/crates/identitypro-jobs/src/catalog.rs
+index b3bf6b1..603d0df 100644
+--- a/crates/identitypro-jobs/src/catalog.rs
++++ b/crates/identitypro-jobs/src/catalog.rs
+@@ -221,7 +221,9 @@ fn build_catalog(
+     );
+     let cancellation_attention_dispatch =
+         SubscriptionCancellationAttentionDispatchHandler::new(db.clone());
+-    let billing_charge = BillingRenewalChargeHandler::new(billing);
++    let billing_charge = runledger_core::jobs::TypedJobHandler::into_job_handler(
++        BillingRenewalChargeHandler::new(billing),
++    );
+     let cleanup_handler = AuthCleanupHandler::new(db.clone());
+     let admin_billing_view_audit_cleanup_handler =
+         AdminBillingViewAuditCleanupHandler::new(db.clone());
+@@ -368,12 +370,9 @@ where
+     H: JobHandler + 'static,
+ {
+     let payload = serde_json::json!({});
+-    assert_eq!(
+-        handler.job_type().as_str(),
+-        contract.job_type(),
+-        "job handler type must match its IdentityPro job contract"
+-    );
+-    let catalog = catalog.handler_with_definition_overrides(handler, contract.runtime_overrides());
++    let catalog = catalog
++        .try_handler_for_spec(&contract.definition.shared_spec(), handler)
++        .expect("job handler type must match its IdentityPro job contract");
+
+     match contract.runtime_schedule(&payload, billing_enabled) {
+         Some(schedule) => catalog.schedule(schedule),
+diff --git a/crates/identitypro-jobs/src/definitions.rs b/crates/identitypro-jobs/src/definitions.rs
+index d98de37..9741a41 100644
+--- a/crates/identitypro-jobs/src/definitions.rs
++++ b/crates/identitypro-jobs/src/definitions.rs
+@@ -1,11 +1,11 @@
+ #[cfg(feature = "storage")]
+-use runledger_core::jobs::JobType as ContractJobType;
++use runledger_core::jobs::{JobDefinitionSettings, JobSpec, JobType as ContractJobType};
+ #[cfg(feature = "worker")]
+ use {
+     chrono::{DateTime, Utc},
+     runledger_core::jobs::JobType,
+     runledger_postgres::jobs::{JobScheduleCatalogSyncEntry, JobScheduleUpsert},
+-    runledger_runtime::catalog::{CatalogJobScheduleSpec, JobCatalogDefinitionOverrides},
++    runledger_runtime::catalog::CatalogJobScheduleSpec,
+     serde_json::Value,
+ };
+
+@@ -760,14 +760,18 @@ const _: () = assert!(LONGEST_JOB_TIMEOUT_SECONDS > 0);
+
+ #[cfg(feature = "storage")]
+ impl JobDefinitionSpec {
+-    #[cfg(feature = "worker")]
+-    pub(crate) fn runtime_overrides(self) -> JobCatalogDefinitionOverrides {
+-        JobCatalogDefinitionOverrides::new()
+-            .version(self.version)
+-            .max_attempts(self.max_attempts)
+-            .timeout_seconds(self.timeout_seconds)
+-            .priority(self.priority)
+-            .enabled(self.enabled)
++    pub(crate) fn shared_spec(self) -> JobSpec {
++        JobSpec::new(ContractJobType::new(self.job_type))
++            .expect("static IdentityPro job identity")
++            .with_settings(
++                JobDefinitionSettings::new()
++                    .version(self.version)
++                    .max_attempts(self.max_attempts)
++                    .timeout_seconds(self.timeout_seconds)
++                    .priority(self.priority)
++                    .enabled(self.enabled),
++            )
++            .expect("static IdentityPro job settings")
+     }
+
+     pub(crate) const fn enqueue_overrides(self) -> JobEnqueueOverrides {
+@@ -780,19 +784,13 @@ impl JobDefinitionSpec {
+
+ #[cfg(feature = "storage")]
+ impl JobContract {
++    #[cfg(feature = "worker")]
+     pub(crate) const fn job_type(self) -> &'static str {
+         self.definition.job_type
+     }
+
+     fn definition_upsert(self) -> runledger_postgres::jobs::JobDefinitionUpsert<'static> {
+-        runledger_postgres::jobs::JobDefinitionUpsert {
+-            job_type: ContractJobType::new(self.job_type()),
+-            version: self.definition.version,
+-            max_attempts: self.definition.max_attempts,
+-            default_timeout_seconds: self.definition.timeout_seconds,
+-            default_priority: self.definition.priority,
+-            is_enabled: self.definition.enabled,
+-        }
++        runledger_postgres::jobs::JobDefinitionUpsert::from(&self.definition.shared_spec())
+     }
+
+     #[cfg(feature = "worker")]
+@@ -805,11 +803,6 @@ impl JobContract {
+         self.schedule
+     }
+
+-    #[cfg(feature = "worker")]
+-    pub(crate) fn runtime_overrides(self) -> JobCatalogDefinitionOverrides {
+-        self.definition.runtime_overrides()
+-    }
+-
+     #[cfg(feature = "worker")]
+     pub(crate) fn schedule_sync_entry<'a>(
+         self,
+@@ -1003,15 +996,12 @@ mod tests {
+             assert_eq!(upsert.default_priority, definition.priority);
+             assert_eq!(upsert.is_enabled, definition.enabled);
+
+-            let debug = format!("{:?}", contract.runtime_overrides());
+-            assert!(debug.contains(&format!("version: Some({})", definition.version)));
+-            assert!(debug.contains(&format!("max_attempts: Some({})", definition.max_attempts)));
+-            assert!(debug.contains(&format!(
+-                "default_timeout_seconds: Some({})",
+-                definition.timeout_seconds
+-            )));
+-            assert!(debug.contains(&format!("default_priority: Some({})", definition.priority)));
+-            assert!(debug.contains(&format!("is_enabled: Some({})", definition.enabled)));
++            let settings = contract.definition.shared_spec().settings();
++            assert_eq!(settings.version, definition.version);
++            assert_eq!(settings.max_attempts, definition.max_attempts);
++            assert_eq!(settings.default_timeout_seconds, definition.timeout_seconds);
++            assert_eq!(settings.default_priority, definition.priority);
++            assert_eq!(settings.is_enabled, definition.enabled);
+         }
+     }
+
+diff --git a/crates/identitypro-jobs/src/identity_protect_alert.rs b/crates/identitypro-jobs/src/identity_protect_alert.rs
+index 97ac44b..59d067f 100644
+--- a/crates/identitypro-jobs/src/identity_protect_alert.rs
++++ b/crates/identitypro-jobs/src/identity_protect_alert.rs
+@@ -444,7 +444,7 @@ mod tests {
+             JobCompletionDisposition::ContinueAfter(std::time::Duration::from_secs(60))
+         );
+         assert!(
+-            continuation.checkpoint.is_none(),
++            continuation.checkpoint_value().is_none(),
+             "capacity waiting must not enter the exhaustion phase"
+         );
+         assert_eq!(
+@@ -582,7 +582,7 @@ mod tests {
+             JobCompletionDisposition::ContinueAfter(Duration::ZERO)
+         );
+         assert_eq!(
+-            hydration_phase(continuation.checkpoint.as_ref()).unwrap(),
++            hydration_phase(continuation.checkpoint_value()).unwrap(),
+             Some(IdentityProtectAlertHydrationCheckpoint::PersistExhaustion {
+                 attempt_id: expected_attempt_id,
+             })
+@@ -612,7 +612,7 @@ mod tests {
+             JobCompletionDisposition::ContinueAfter(HYDRATION_CONTENTION_DELAY)
+         );
+         assert!(
+-            continuation.checkpoint.is_none(),
++            continuation.checkpoint_value().is_none(),
+             "claim contention must not enter the exhaustion phase"
+         );
+     }
+@@ -642,7 +642,7 @@ mod tests {
+             continuation.disposition(),
+             JobCompletionDisposition::Succeed
+         );
+-        assert!(continuation.checkpoint.is_none());
++        assert!(continuation.checkpoint_value().is_none());
+         assert_eq!(hydration.exhaustion_calls.load(Ordering::SeqCst), 1);
+     }
+
+@@ -717,7 +717,8 @@ mod tests {
+             JobCompletionDisposition::ContinueAfter(std::time::Duration::ZERO)
+         );
+         let checkpoint = continuation
+-            .checkpoint
++            .checkpoint_value()
++            .cloned()
+             .expect("the continuation persists its exhaustion phase");
+         assert_eq!(
+             hydration_phase(Some(&checkpoint)).unwrap(),

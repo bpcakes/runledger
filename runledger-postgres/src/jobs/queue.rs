@@ -23,7 +23,7 @@ pub use self::definitions::{
 pub(in crate::jobs) use self::enqueue::enqueue_replayed_job_with_outcome_tx;
 pub use self::enqueue::{
     enqueue_job, enqueue_job_tx, enqueue_job_with_execution_resource,
-    enqueue_job_with_execution_resource_tx, enqueue_job_with_outcome_tx,
+    enqueue_job_with_execution_resource_tx, enqueue_job_with_outcome, enqueue_job_with_outcome_tx,
 };
 pub use self::intents::{
     delete_promoted_job_enqueue_intents_before, delete_promoted_job_enqueue_intents_for_jobs_tx,

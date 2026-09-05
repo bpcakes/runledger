@@ -11,7 +11,10 @@ mod handler;
 mod identifier_macros;
 mod identifiers;
 mod runtime_types;
+mod spec;
 mod status;
+mod submission;
+mod typed_handler;
 mod workflow_enqueue;
 
 pub use execution::{JobExecution, JobExecutionError, JobExecutionServices, JobExecutionUpdate};
@@ -35,3 +38,7 @@ pub use workflow_enqueue::{
     WorkflowStepExecution, WorkflowStepExecutionKind, validate_workflow_dag,
     validate_workflow_run_enqueue, validate_workflow_step_append,
 };
+
+pub use spec::{JobDefinitionSettings, JobSpec, JobSpecError, JobSpecs};
+pub use submission::{JobContract, JobSubmission, JobSubmissionError};
+pub use typed_handler::{TypedHandlerAdapter, TypedJobHandler, malformed_job_payload};

@@ -13,6 +13,20 @@ pub struct JobDefinitionUpsert<'a> {
     pub is_enabled: bool,
 }
 
+impl From<&runledger_core::jobs::JobSpec> for JobDefinitionUpsert<'static> {
+    fn from(spec: &runledger_core::jobs::JobSpec) -> Self {
+        let settings = spec.settings();
+        Self {
+            job_type: spec.job_type(),
+            version: settings.version,
+            max_attempts: settings.max_attempts,
+            default_timeout_seconds: settings.default_timeout_seconds,
+            default_priority: settings.default_priority,
+            is_enabled: settings.is_enabled,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct JobDefinitionRecord {
     pub job_type: JobTypeName,

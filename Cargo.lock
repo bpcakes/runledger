@@ -2479,6 +2479,7 @@ dependencies = [
  "runledger-core",
  "runledger-postgres",
  "runledger-test-support",
+ "serde",
  "serde_json",
  "sqlx",
  "thiserror",

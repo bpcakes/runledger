@@ -41,6 +41,7 @@
 //! and scope for [`JobCatalog::sync_schedules_exact_with`]; Runledger does not
 //! provide an implicit union helper because that can hide ownership mistakes.
 
+mod bindings;
 mod error;
 mod inputs;
 mod registration;
@@ -50,6 +51,7 @@ mod sync_schedules;
 mod types;
 mod workflow;
 
+pub use bindings::JobBindingError;
 pub use error::CatalogError;
 pub use inputs::{CatalogJobEnqueueInput, CatalogJobScheduleInput};
 pub use schedule_spec::CatalogJobScheduleSpec;

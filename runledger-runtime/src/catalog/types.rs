@@ -6,90 +6,7 @@ use runledger_core::jobs::{JobHandler, JobType, JobTypeName};
 
 use super::CatalogError;
 
-/// Default values applied when syncing catalog jobs to `job_definitions`.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JobCatalogDefaults {
-    /// Definition version written for catalog jobs.
-    pub version: i32,
-    /// Default maximum attempts written for catalog jobs.
-    pub max_attempts: i32,
-    /// Default execution timeout, in seconds, written for catalog jobs.
-    pub default_timeout_seconds: i32,
-    /// Default queue priority written for catalog jobs.
-    pub default_priority: i32,
-    /// Whether catalog jobs should be synced as enabled.
-    pub is_enabled: bool,
-}
-
-impl Default for JobCatalogDefaults {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            max_attempts: 3,
-            default_timeout_seconds: 300,
-            default_priority: 0,
-            is_enabled: true,
-        }
-    }
-}
-
-impl JobCatalogDefaults {
-    /// Creates the default catalog definition values.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Sets the definition version written for catalog jobs.
-    #[must_use]
-    pub fn version(mut self, version: i32) -> Self {
-        self.version = version;
-        self
-    }
-
-    /// Sets the default maximum attempts written for catalog jobs.
-    #[must_use]
-    pub fn max_attempts(mut self, max_attempts: i32) -> Self {
-        self.max_attempts = max_attempts;
-        self
-    }
-
-    /// Sets the default execution timeout, in seconds, written for catalog jobs.
-    #[must_use]
-    pub fn timeout_seconds(mut self, default_timeout_seconds: i32) -> Self {
-        self.default_timeout_seconds = default_timeout_seconds;
-        self
-    }
-
-    /// Sets the default queue priority written for catalog jobs.
-    #[must_use]
-    pub fn priority(mut self, default_priority: i32) -> Self {
-        self.default_priority = default_priority;
-        self
-    }
-
-    /// Sets whether catalog jobs should be synced as enabled.
-    #[must_use]
-    pub fn enabled(mut self, is_enabled: bool) -> Self {
-        self.is_enabled = is_enabled;
-        self
-    }
-
-    pub(super) fn validate(self) -> Result<(), &'static str> {
-        if self.version <= 0 {
-            return Err("version");
-        }
-        if self.max_attempts <= 0 {
-            return Err("max_attempts");
-        }
-        if self.default_timeout_seconds <= 0 {
-            return Err("default_timeout_seconds");
-        }
-        // default_priority intentionally accepts zero and negative values.
-        Ok(())
-    }
-}
+pub use runledger_core::jobs::JobDefinitionSettings as JobCatalogDefaults;
 
 /// Per-job definition values that override [`JobCatalogDefaults`].
 #[non_exhaustive]
@@ -167,15 +84,15 @@ impl JobCatalogDefinitionOverrides {
     }
 
     pub(super) fn apply_to(self, defaults: JobCatalogDefaults) -> JobCatalogDefaults {
-        JobCatalogDefaults {
-            version: self.version.unwrap_or(defaults.version),
-            max_attempts: self.max_attempts.unwrap_or(defaults.max_attempts),
-            default_timeout_seconds: self
-                .default_timeout_seconds
-                .unwrap_or(defaults.default_timeout_seconds),
-            default_priority: self.default_priority.unwrap_or(defaults.default_priority),
-            is_enabled: self.is_enabled.unwrap_or(defaults.is_enabled),
-        }
+        defaults
+            .version(self.version.unwrap_or(defaults.version))
+            .max_attempts(self.max_attempts.unwrap_or(defaults.max_attempts))
+            .timeout_seconds(
+                self.default_timeout_seconds
+                    .unwrap_or(defaults.default_timeout_seconds),
+            )
+            .priority(self.default_priority.unwrap_or(defaults.default_priority))
+            .enabled(self.is_enabled.unwrap_or(defaults.is_enabled))
     }
 }
 
