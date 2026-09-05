@@ -100,10 +100,62 @@ impl JobProgress {
 /// Continuation is invalid for external workflow steps and cannot carry final
 /// output.
 ///
-/// Its serde representation supports same-version use and reading older stored
-/// values with newer Runledger versions. It is not a rolling-upgrade wire
+/// Its serde representation supports same-version use and reading valid older
+/// stored values with newer Runledger versions. Legacy partial or invalid progress
+/// requires repair as described below. It is not a rolling-upgrade wire
 /// protocol: an older consumer cannot safely interpret dispositions introduced
 /// by a newer Runledger version.
+///
+/// # Migrating legacy persisted completions
+///
+/// Earlier public fields allowed serializing partial progress, such as
+/// `progress_done: 4` with `progress_total: null`. Deserialization now requires
+/// both counts to be absent/null, or both to be non-negative `i64` values with
+/// `progress_done <= progress_total`.
+///
+/// Before deploying strict readers, update or stop legacy writers so they no
+/// longer produce invalid pairs, then back up and repair application-stored
+/// completions. Read JSON into [`serde_json::Value`] (or an application-owned
+/// legacy DTO) first so rejected values remain available for inspection. Supply
+/// missing or corrected counts from authoritative application state; do not
+/// guess an unknown total or clamp invalid counts. If the counts cannot be
+/// recovered, retain the record for manual repair, or explicitly discard its
+/// progress update by setting **both** fields to null. Discarding the update
+/// loses its counts; it does not reset progress already persisted on the job.
+///
+/// Preserve the disposition, checkpoint, output, and any application metadata.
+/// Validate each repaired value as `JobCompletion` before persisting the repaired
+/// JSON and enabling strict readers. Leave other deserialization failures for
+/// inspection rather than replacing the completion with success.
+///
+/// This example repairs a missing total after the application has established
+/// that the job has ten work items:
+///
+/// ```
+/// use runledger_core::jobs::{JobCompletion, JobCompletionDisposition};
+/// use serde_json::{Value, json};
+///
+/// let stored = r#"{
+///     "progress_done": 4,
+///     "progress_total": null,
+///     "checkpoint": {"cursor": 4},
+///     "output": {"result": "ok"}
+/// }"#;
+/// let mut repaired: Value = serde_json::from_str(stored)?;
+/// repaired["progress_total"] = json!(10); // From authoritative application state.
+/// let completion: JobCompletion = serde_json::from_value(repaired.clone())?;
+/// assert_eq!(completion.progress_done(), Some(4));
+/// assert_eq!(completion.progress_total(), Some(10));
+/// assert_eq!(completion.checkpoint_value(), Some(&json!({"cursor": 4})));
+/// assert_eq!(completion.output(), Some(&json!({"result": "ok"})));
+/// // Legacy payloads without a disposition still default to terminal success.
+/// assert_eq!(completion.disposition(), JobCompletionDisposition::Succeed);
+///
+/// // Persist this validated JSON through the application's storage mechanism.
+/// // Serializing the Value preserves any fields outside JobCompletion's schema.
+/// let repaired_json = serde_json::to_string(&repaired)?;
+/// # Ok::<(), serde_json::Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobCompletion {
     disposition: JobCompletionDisposition,

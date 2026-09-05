@@ -24,7 +24,17 @@ All notable changes to this workspace are documented here.
   access with `progress_done()`, `progress_total()`, and `checkpoint_value()`.
 - Serialized `JobCompletion` values with partial or invalid progress are now
   rejected during deserialization; valid existing representations are
-  unchanged.
+  unchanged. Before deploying strict readers, update or stop legacy writers,
+  back up application-stored completions, and read them into `serde_json::Value`
+  or an application-owned legacy DTO for repair. Restore both counts from
+  authoritative application state so `0 <= progress_done <= progress_total`;
+  if they cannot be recovered, retain the record for manual repair or explicitly
+  discard its progress update by setting both fields to null. Preserve all other
+  fields, validate with `serde_json::from_value::<JobCompletion>`, and persist
+  repaired JSON before enabling strict readers. The
+  [`JobCompletion` rustdoc](runledger-core/src/jobs/runtime_types.rs) includes a
+  runnable migration example. This concerns application-serialized completions;
+  no Runledger database migration is required for this change.
 
 ## [0.12.0] - 2026-08-26
 [Compare changes](https://github.com/bpcakes/runledger/compare/v0.11.0...v0.12.0)
