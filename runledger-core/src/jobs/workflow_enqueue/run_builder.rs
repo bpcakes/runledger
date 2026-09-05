@@ -57,7 +57,7 @@ pub struct WorkflowRunEnqueueBuilder<'a> {
     idempotency_key: Option<&'a str>,
     active_key: Option<&'a str>,
     result_step_key: Option<StepKey<'a>>,
-    steps: Vec<WorkflowStepEnqueue<'a>>,
+    pub(super) steps: Vec<WorkflowStepEnqueue<'a>>,
 }
 
 impl<'a> WorkflowRunEnqueueBuilder<'a> {

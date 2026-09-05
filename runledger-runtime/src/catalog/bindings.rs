@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use runledger_core::jobs::{JobHandler, JobSpec, JobSpecs};
 
@@ -77,7 +77,6 @@ impl JobCatalog {
         handlers: impl IntoIterator<Item = Arc<dyn JobHandler>>,
     ) -> Result<Self, JobBindingError> {
         let mut catalog = Self::new();
-        let mut bound = BTreeSet::new();
         for handler in handlers {
             let job_type = handler.job_type();
             let spec = specs
@@ -86,10 +85,9 @@ impl JobCatalog {
             catalog = catalog
                 .insert_spec_handler(spec, handler)
                 .map_err(JobBindingError::Catalog)?;
-            bound.insert(job_type);
         }
         for spec in specs.iter() {
-            if !bound.contains(&spec.job_type()) {
+            if !catalog.contains(spec.job_type()) {
                 return Err(JobBindingError::MissingHandler(
                     spec.job_type().as_str().to_owned(),
                 ));

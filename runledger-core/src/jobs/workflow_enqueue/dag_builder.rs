@@ -59,13 +59,7 @@ use super::types::{
 #[doc(alias = "dependencies")]
 #[derive(Debug, Clone)]
 pub struct WorkflowDagBuilder<'a> {
-    workflow_type: WorkflowType<'a>,
-    organization_id: Option<Uuid>,
-    metadata: &'a serde_json::Value,
-    idempotency_key: Option<&'a str>,
-    active_key: Option<&'a str>,
-    result_step_key: Option<StepKey<'a>>,
-    steps: Vec<WorkflowStepEnqueue<'a>>,
+    inner: WorkflowRunEnqueueBuilder<'a>,
 }
 
 impl<'a> WorkflowDagBuilder<'a> {
@@ -76,13 +70,7 @@ impl<'a> WorkflowDagBuilder<'a> {
     #[must_use]
     pub fn new(workflow_type: &'a str, metadata: &'a serde_json::Value) -> Self {
         Self {
-            workflow_type: WorkflowType::new(workflow_type),
-            organization_id: None,
-            metadata,
-            idempotency_key: None,
-            active_key: None,
-            result_step_key: None,
-            steps: Vec::new(),
+            inner: WorkflowRunEnqueueBuilder::new(WorkflowType::new(workflow_type), metadata),
         }
     }
 
@@ -94,44 +82,36 @@ impl<'a> WorkflowDagBuilder<'a> {
         workflow_type: &'a str,
         metadata: &'a serde_json::Value,
     ) -> Result<Self, WorkflowBuildError> {
-        let workflow_type = WorkflowType::try_new(workflow_type)
-            .map_err(|_| WorkflowBuildError::BlankWorkflowType)?;
         Ok(Self {
-            workflow_type,
-            organization_id: None,
-            metadata,
-            idempotency_key: None,
-            active_key: None,
-            result_step_key: None,
-            steps: Vec::new(),
+            inner: WorkflowRunEnqueueBuilder::try_new(workflow_type, metadata)?,
         })
     }
 
     /// Sets the workflow organization scope.
     #[must_use]
     pub fn organization_id(mut self, organization_id: Uuid) -> Self {
-        self.organization_id = Some(organization_id);
+        self.inner = self.inner.organization_id(organization_id);
         self
     }
 
     /// Clears any previously configured workflow organization scope.
     #[must_use]
     pub fn clear_organization_id(mut self) -> Self {
-        self.organization_id = None;
+        self.inner = self.inner.clear_organization_id();
         self
     }
 
     /// Sets a deduplication key for idempotent enqueue behavior.
     #[must_use]
     pub fn idempotency_key(mut self, idempotency_key: &'a str) -> Self {
-        self.idempotency_key = Some(idempotency_key);
+        self.inner = self.inner.idempotency_key(idempotency_key);
         self
     }
 
     /// Clears any previously configured idempotency key.
     #[must_use]
     pub fn clear_idempotency_key(mut self) -> Self {
-        self.idempotency_key = None;
+        self.inner = self.inner.clear_idempotency_key();
         self
     }
 
@@ -143,14 +123,14 @@ impl<'a> WorkflowDagBuilder<'a> {
     /// independent of permanent request idempotency.
     #[must_use]
     pub fn active_key(mut self, active_key: &'a str) -> Self {
-        self.active_key = Some(active_key);
+        self.inner = self.inner.active_key(active_key);
         self
     }
 
     /// Clears the reusable active workflow key.
     #[must_use]
     pub fn clear_active_key(mut self) -> Self {
-        self.active_key = None;
+        self.inner = self.inner.clear_active_key();
         self
     }
 
@@ -159,15 +139,14 @@ impl<'a> WorkflowDagBuilder<'a> {
     /// # Errors
     /// Returns [`WorkflowBuildError::BlankResultStepKey`] when the step key is blank.
     pub fn result_step(mut self, step_key: &'a str) -> Result<Self, WorkflowBuildError> {
-        self.result_step_key =
-            Some(StepKey::try_new(step_key).map_err(|_| WorkflowBuildError::BlankResultStepKey)?);
+        self.inner = self.inner.try_result_step_key(step_key)?;
         Ok(self)
     }
 
     /// Clears any previously configured result step.
     #[must_use]
     pub fn clear_result_step(mut self) -> Self {
-        self.result_step_key = None;
+        self.inner = self.inner.clear_result_step_key();
         self
     }
 
@@ -188,7 +167,7 @@ impl<'a> WorkflowDagBuilder<'a> {
     ) -> Result<Self, WorkflowBuildError> {
         self.check_new_step_key(step_key)?;
         let step = WorkflowStepEnqueueBuilder::try_new(step_key, job_type, payload)?.try_build()?;
-        self.steps.push(step);
+        self.inner = self.inner.step(step);
         Ok(self)
     }
 
@@ -219,7 +198,7 @@ impl<'a> WorkflowDagBuilder<'a> {
     /// ```
     pub fn step(mut self, step: WorkflowStepEnqueue<'a>) -> Result<Self, WorkflowBuildError> {
         self.check_new_step_key(step.step_key().as_str())?;
-        self.steps.push(step);
+        self.inner = self.inner.step(step);
         Ok(self)
     }
 
@@ -240,7 +219,12 @@ impl<'a> WorkflowDagBuilder<'a> {
     fn check_new_step_key(&self, step_key: &str) -> Result<(), WorkflowBuildError> {
         let step_key = StepKey::try_new(step_key)
             .map_err(|_| WorkflowBuildError::BlankStepKey { step_index: None })?;
-        if self.steps.iter().any(|step| step.step_key() == step_key) {
+        if self
+            .inner
+            .steps
+            .iter()
+            .any(|step| step.step_key() == step_key)
+        {
             return Err(WorkflowBuildError::DuplicateStepKey {
                 step_key: step_key.as_str().to_owned(),
             });
@@ -325,6 +309,7 @@ impl<'a> WorkflowDagBuilder<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         let step = self
+            .inner
             .steps
             .iter_mut()
             .find(|step| step.step_key() == target_step_key)
@@ -371,24 +356,10 @@ impl<'a> WorkflowDagBuilder<'a> {
     /// graph contains a cycle.
     pub fn try_build(self) -> Result<WorkflowRunEnqueue<'a>, WorkflowBuildError> {
         // Preserve per-step error precedence before validating run fields.
-        for step in &self.steps {
+        for step in &self.inner.steps {
             validate_step_enqueue(step)?;
         }
 
-        let mut run_builder = WorkflowRunEnqueueBuilder::new(self.workflow_type, self.metadata);
-        if let Some(organization_id) = self.organization_id {
-            run_builder = run_builder.organization_id(organization_id);
-        }
-        if let Some(idempotency_key) = self.idempotency_key {
-            run_builder = run_builder.idempotency_key(idempotency_key);
-        }
-        if let Some(active_key) = self.active_key {
-            run_builder = run_builder.active_key(active_key);
-        }
-        if let Some(result_step_key) = self.result_step_key {
-            run_builder = run_builder.result_step_key(result_step_key);
-        }
-
-        run_builder.extend_steps(self.steps).try_build()
+        self.inner.try_build()
     }
 }
