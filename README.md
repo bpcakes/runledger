@@ -340,7 +340,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
 | Commit application state and a future job request before its definition exists | `JobEnqueueIntent` and `record_job_enqueue_intent_tx` |
-| Multi-step work with dependencies | `WorkflowDagBuilder` (simple DAGs), or `WorkflowRunEnqueueBuilder` / `WorkflowStepEnqueueBuilder` (advanced), then `enqueue_workflow_run` |
+| Multi-step work with dependencies | `WorkflowDagBuilder` (`.step(...)` for configured steps, `.external(...)` for external work), or the low-level run/step builders, then `enqueue_workflow_run` |
 | Multi-step work with a durable JSON result | Declare a result step, enqueue with `enqueue_workflow_run_handle`, then call `WorkflowRunHandle::get_result` |
 | Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal` (or lower-level `depends_on_success` / `depends_on_terminal`) |
 | Human/API approval or another external gate | External workflow steps and `complete_external_workflow_step` |

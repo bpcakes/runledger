@@ -246,10 +246,17 @@ in 0.11.0 and later.
 If the task requires step dependencies, build a workflow DAG:
 
 1. Prefer `WorkflowDagBuilder` with `.job(...)`, `.after_success(...)`, and `.build()`.
-2. Use `WorkflowStepEnqueueBuilder` and `WorkflowRunEnqueueBuilder` for advanced per-step
-   settings, external steps, hand-authored dependency specs, or call sites that
-   pass explicit `StepKey` and `JobType` values.
-3. Persist the run with `runledger_postgres::jobs::enqueue_workflow_run`.
+2. For per-step tenants, queue settings, continuations, execution resources, or
+   hand-authored dependencies, configure `WorkflowStepEnqueueBuilder`, call
+   `.try_build()`, and pass the result to `.step(...)`. Use `.external(...)` for
+   external work. `JobCatalog::workflow_dag` supports the same composition and
+   checks configured job steps against its own enabled catalog entries;
+   `JobCatalog::workflow_step` supplies a configurable step builder.
+   `WorkflowRunEnqueueBuilder` remains available for direct step collections.
+3. Persist the run with `runledger_postgres::jobs::enqueue_workflow_run`. For
+   reusable active-cycle coordination, set `.active_key(...)` and use
+   `enqueue_or_get_active_workflow`. The active key is separate from request
+   idempotency and can be cleared with `.clear_active_key()`.
 
 If callers need a durable workflow result, declare one DAG step as the
 result step with `WorkflowDagBuilder::result_step(...)` or
