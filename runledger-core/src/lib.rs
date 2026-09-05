@@ -92,11 +92,13 @@ pub mod prelude {
     pub use async_trait::async_trait;
 
     pub use crate::jobs::{
-        IdentifierValidationError, JobCompletion, JobCompletionDisposition, JobContext,
-        JobDeadLetterInfo, JobDeadLetterReason, JobEventType, JobFailure, JobFailureKind,
-        JobHandler, JobHandlerRegistry, JobProgressValidationError, JobRetryTiming, JobStage,
-        JobStatus, JobType, JobTypeName, StepKey, StepKeyName, WorkflowBuildError,
-        WorkflowDagBuilder, WorkflowDagDependencyValidationInput, WorkflowDagStepValidationInput,
+        ExecutionHandlerAdapter, IdentifierValidationError, JobCompletion,
+        JobCompletionDisposition, JobContext, JobDeadLetterInfo, JobDeadLetterReason, JobEventType,
+        JobExecution, JobExecutionError, JobExecutionHandler, JobExecutionServices,
+        JobExecutionUpdate, JobFailure, JobFailureKind, JobHandler, JobHandlerRegistry,
+        JobProgressValidationError, JobRetryTiming, JobStage, JobStatus, JobType, JobTypeName,
+        StepKey, StepKeyName, WorkflowBuildError, WorkflowDagBuilder,
+        WorkflowDagDependencyValidationInput, WorkflowDagStepValidationInput,
         WorkflowDagValidationError, WorkflowDependencyReleaseMode, WorkflowJobStepExecution,
         WorkflowRunEnqueue, WorkflowRunEnqueueBuilder, WorkflowRunStatus,
         WorkflowStepDependencySpec, WorkflowStepEnqueue, WorkflowStepEnqueueBuilder,

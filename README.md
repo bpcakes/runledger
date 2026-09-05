@@ -521,6 +521,46 @@ compatibility APIs while callers migrate. Completion disposition and final
 output are intentionally private; inspect them with `disposition()` /
 `output()` and use constructors rather than struct literals.
 
+### Live handler execution services
+
+Implement `JobExecutionHandler` when a handler needs the runtime's deadline or
+durable progress writes. Register `handler.into_job_handler()` with the usual
+`JobRegistry` or `JobCatalog`. Existing `JobHandler` implementations continue
+to work unchanged; the worker dispatches through the new default
+`execute_with_services` method. See the compiling
+[counter example](runledger-runtime/examples/checkpointed_counter.rs).
+
+`JobExecution::deadline()` is the same monotonic deadline the worker enforces,
+starting after the running transition succeeds. `remaining_budget()` includes
+time spent awaiting progress writes. `remaining_work_budget(reserve)` subtracts
+an application-selected reserve for its final checkpoint or cleanup and
+saturates at zero. Runtime completion persistence happens after the handler
+returns; this reserve does not impose a deadline on that persistence.
+
+`checkpoint::<T>()` decodes the claimed resume snapshot; applications still
+validate their checkpoint versions and domain invariants.
+`persist_progress(JobExecutionUpdate { .. })` atomically commits ordinary
+progress and a checkpoint using the exact live lease, without a queue reread
+or caller-supplied worker/run/attempt arguments. `save_checkpoint(&value)`
+serializes and commits only a checkpoint. Both operations must be awaited.
+Omitted fields retain their durable values; successful writes do not mutate
+the invocation's resume snapshot.
+
+The handle borrows runtime services, so it cannot escape into a detached task.
+`JobExecutionError` distinguishes lease loss, deadline expiry, persistence
+failure, and invalid input, and converts to `JobFailure` for `?` propagation.
+The worker stops polling a handler when its progress write discovers lease loss,
+even if the handler ignores that error. Successful writes acknowledge commit;
+an error or cancellation can leave an indeterminate commit outcome.
+External effects still require application idempotency.
+
+Custom runtimes must supply `JobExecutionServices` and invoke
+`JobHandler::execute_with_services`. Calling legacy `execute` directly on
+an adapted execution-services handler returns `job.execution_services_required`.
+SQLx pools and persistence errors remain outside the serializable `JobContext`.
+Validated [OneSales and IdentityPro migration patches](docs/execution-services-migrations/README.md)
+show how to replace existing execution-state reconstruction.
+
 ### Handler-selected retry timing
 
 When a provider supplies a dynamic reset time, a handler can attach either a

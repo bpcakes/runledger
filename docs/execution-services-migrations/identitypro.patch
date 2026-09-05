@@ -1,0 +1,260 @@
+diff --git a/crates/identitypro-jobs/src/catalog.rs b/crates/identitypro-jobs/src/catalog.rs
+index b3bf6b1..5cfbc71 100644
+--- a/crates/identitypro-jobs/src/catalog.rs
++++ b/crates/identitypro-jobs/src/catalog.rs
+@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
+ use ::identitypro_core::auth::{EmailVerificationTokenCodec, PasswordResetTokenCodec};
+ use ::identitypro_db::Db;
+ use identitypro_billing::BillingService;
+-use runledger_core::jobs::{JobHandler, JobType};
++use runledger_core::jobs::{JobExecutionHandler, JobHandler, JobType};
+ use runledger_postgres::jobs::{
+     deactivate_schedules_absent_from_names_tx, prepare_schedule_exact_sync_critical_section_tx,
+     sync_catalog_job_schedules_tx,
+@@ -282,7 +282,7 @@ fn build_catalog(
+     let catalog = match protection_enrollment {
+         Some(recovery) => register_protection_enrollment_recovery(
+             catalog,
+-            ProtectionEnrollmentRecoveryHandler::new(recovery),
++            ProtectionEnrollmentRecoveryHandler::new(recovery).into_job_handler(),
+             billing_enabled,
+         ),
+         None => catalog,
+diff --git a/crates/identitypro-jobs/src/definitions.rs b/crates/identitypro-jobs/src/definitions.rs
+index d98de37..9e2d7af 100644
+--- a/crates/identitypro-jobs/src/definitions.rs
++++ b/crates/identitypro-jobs/src/definitions.rs
+@@ -64,7 +64,7 @@ pub const PROTECTION_ENROLLMENT_RECOVERY_WORK_TIMEOUT: std::time::Duration =
+ pub const PROTECTION_ENROLLMENT_RECOVERY_CONTINUATION_SECONDS: u16 = 60;
+ /// Runledger's timeout includes both service work and the time needed to
+ /// durably record the resulting completion.
+-const PROTECTION_ENROLLMENT_DURABLE_COMPLETION_MARGIN_SECONDS: u64 = 15;
++pub(crate) const PROTECTION_ENROLLMENT_DURABLE_COMPLETION_MARGIN_SECONDS: u64 = 15;
+ pub const PROTECTION_ENROLLMENT_RECOVERY_TIMEOUT_SECONDS: i32 =
+     (PROTECTION_ENROLLMENT_RECOVERY_WORK_TIMEOUT.as_secs()
+         + PROTECTION_ENROLLMENT_DURABLE_COMPLETION_MARGIN_SECONDS) as i32;
+diff --git a/crates/identitypro-jobs/src/identity_protect_alert.rs b/crates/identitypro-jobs/src/identity_protect_alert.rs
+index 97ac44b..0617f99 100644
+--- a/crates/identitypro-jobs/src/identity_protect_alert.rs
++++ b/crates/identitypro-jobs/src/identity_protect_alert.rs
+@@ -444,7 +444,7 @@ mod tests {
+             JobCompletionDisposition::ContinueAfter(std::time::Duration::from_secs(60))
+         );
+         assert!(
+-            continuation.checkpoint.is_none(),
++            continuation.checkpoint_value().cloned().is_none(),
+             "capacity waiting must not enter the exhaustion phase"
+         );
+         assert_eq!(
+@@ -582,7 +582,7 @@ mod tests {
+             JobCompletionDisposition::ContinueAfter(Duration::ZERO)
+         );
+         assert_eq!(
+-            hydration_phase(continuation.checkpoint.as_ref()).unwrap(),
++            hydration_phase(continuation.checkpoint_value()).unwrap(),
+             Some(IdentityProtectAlertHydrationCheckpoint::PersistExhaustion {
+                 attempt_id: expected_attempt_id,
+             })
+@@ -612,7 +612,7 @@ mod tests {
+             JobCompletionDisposition::ContinueAfter(HYDRATION_CONTENTION_DELAY)
+         );
+         assert!(
+-            continuation.checkpoint.is_none(),
++            continuation.checkpoint_value().cloned().is_none(),
+             "claim contention must not enter the exhaustion phase"
+         );
+     }
+@@ -642,7 +642,7 @@ mod tests {
+             continuation.disposition(),
+             JobCompletionDisposition::Succeed
+         );
+-        assert!(continuation.checkpoint.is_none());
++        assert!(continuation.checkpoint_value().cloned().is_none());
+         assert_eq!(hydration.exhaustion_calls.load(Ordering::SeqCst), 1);
+     }
+
+@@ -717,7 +717,8 @@ mod tests {
+             JobCompletionDisposition::ContinueAfter(std::time::Duration::ZERO)
+         );
+         let checkpoint = continuation
+-            .checkpoint
++            .checkpoint_value()
++            .cloned()
+             .expect("the continuation persists its exhaustion phase");
+         assert_eq!(
+             hydration_phase(Some(&checkpoint)).unwrap(),
+diff --git a/crates/identitypro-jobs/src/protection_enrollment.rs b/crates/identitypro-jobs/src/protection_enrollment.rs
+index 66d9d33..565e17c 100644
+--- a/crates/identitypro-jobs/src/protection_enrollment.rs
++++ b/crates/identitypro-jobs/src/protection_enrollment.rs
+@@ -5,7 +5,9 @@ use std::time::Duration;
+ use async_trait::async_trait;
+ use runledger_core::jobs::JobType;
+ #[cfg(feature = "worker")]
+-use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobHandler};
++use runledger_core::jobs::{
++    JobCompletion, JobContext, JobExecution, JobExecutionHandler, JobFailure,
++};
+ use runledger_postgres::jobs::{JobEnqueue, enqueue_job_tx};
+ use serde::{Deserialize, Serialize};
+ #[cfg(feature = "worker")]
+@@ -16,7 +18,7 @@ use uuid::Uuid;
+ #[cfg(feature = "worker")]
+ use crate::{
+     PROTECTION_ENROLLMENT_RECOVERY_CONTINUATION_SECONDS,
+-    PROTECTION_ENROLLMENT_RECOVERY_WORK_TIMEOUT,
++    definitions::PROTECTION_ENROLLMENT_DURABLE_COMPLETION_MARGIN_SECONDS,
+ };
+ use crate::{
+     PROTECTION_ENROLLMENT_RECOVERY_JOB_TYPE, definitions::PROTECTION_ENROLLMENT_RECOVERY_DEFINITION,
+@@ -210,22 +212,23 @@ impl ProtectionEnrollmentRecoveryHandler {
+ #[cfg(all(feature = "worker", any(test, feature = "test-support")))]
+ pub fn protection_enrollment_recovery_handler_for_tests(
+     recovery: Arc<dyn ProtectionEnrollmentRecovery>,
+-) -> impl JobHandler {
+-    ProtectionEnrollmentRecoveryHandler::new(recovery)
++) -> impl runledger_core::jobs::JobHandler {
++    TestProtectionEnrollmentHandler(ProtectionEnrollmentRecoveryHandler::new(recovery))
+ }
+
+ #[cfg(feature = "worker")]
+ #[async_trait]
+-impl JobHandler for ProtectionEnrollmentRecoveryHandler {
++impl JobExecutionHandler for ProtectionEnrollmentRecoveryHandler {
+     fn job_type(&self) -> JobType<'static> {
+         JobType::new(PROTECTION_ENROLLMENT_RECOVERY_JOB_TYPE)
+     }
+
+     async fn execute(
+         &self,
+-        context: JobContext,
++        execution: JobExecution<'_>,
+         payload: Value,
+     ) -> Result<JobCompletion, JobFailure> {
++        let context = execution.context();
+         let payload: ProtectionEnrollmentRecoveryJobPayload = serde_json::from_value(payload)
+             .map_err(|error| {
+                 tracing::warn!(
+@@ -241,10 +244,11 @@ impl JobHandler for ProtectionEnrollmentRecoveryHandler {
+             .recovery
+             .recover_protection_enrollment(
+                 ProtectionEnrollmentRecoveryRequest {
+-                    job_id: context.job_id,
++                    job_id: execution.context().job_id,
+                     user_id: payload.user_id,
+                 },
+-                tokio::time::Instant::now() + PROTECTION_ENROLLMENT_RECOVERY_WORK_TIMEOUT,
++                tokio::time::Instant::from_std(execution.deadline())
++                    - Duration::from_secs(PROTECTION_ENROLLMENT_DURABLE_COMPLETION_MARGIN_SECONDS),
+             )
+             .await
+             .map_err(|error| {
+@@ -347,6 +351,43 @@ mod tests {
+         }
+     }
+
++    struct DeadlineRecovery(std::sync::Mutex<Option<tokio::time::Instant>>);
++
++    #[async_trait]
++    impl ProtectionEnrollmentRecovery for DeadlineRecovery {
++        async fn recover_protection_enrollment(
++            &self,
++            _request: ProtectionEnrollmentRecoveryRequest,
++            deadline: tokio::time::Instant,
++        ) -> anyhow::Result<ProtectionEnrollmentRecoveryOutcome> {
++            *self.0.lock().unwrap() = Some(deadline);
++            Ok(ProtectionEnrollmentRecoveryOutcome::Complete)
++        }
++    }
++
++    #[tokio::test]
++    async fn uses_supplied_runtime_deadline_and_preserves_completion_reserve() {
++        let recovery = Arc::new(DeadlineRecovery(std::sync::Mutex::new(None)));
++        let handler = ProtectionEnrollmentRecoveryHandler::new(recovery.clone());
++        // Different from the configured 145-second timeout: the handler must
++        // obey this invocation's effective budget rather than reconstruct it.
++        let deadline = std::time::Instant::now() + Duration::from_secs(25);
++        let services = TestExecutionBudget(deadline);
++        let context = context(1);
++        let completion = JobExecutionHandler::execute(
++            &handler,
++            JobExecution::new(&context, &services),
++            payload(),
++        )
++        .await
++        .unwrap();
++        assert_eq!(completion.disposition(), JobCompletionDisposition::Succeed);
++        assert_eq!(
++            *recovery.0.lock().unwrap(),
++            Some(tokio::time::Instant::from_std(deadline) - Duration::from_secs(15))
++        );
++    }
++
+     fn context(run_number: i32) -> JobContext {
+         JobContext {
+             job_id: Uuid::now_v7(),
+@@ -503,3 +544,64 @@ mod tests {
+         );
+     }
+ }
++
++#[cfg(all(any(test, feature = "test-support"), feature = "worker"))]
++struct TestExecutionBudget(std::time::Instant);
++
++#[cfg(all(any(test, feature = "test-support"), feature = "worker"))]
++#[async_trait]
++impl runledger_core::jobs::JobExecutionServices for TestExecutionBudget {
++    fn deadline(&self) -> std::time::Instant {
++        self.0
++    }
++    fn remaining_budget(&self) -> Duration {
++        self.0.saturating_duration_since(std::time::Instant::now())
++    }
++    async fn persist_progress(
++        &self,
++        _: runledger_core::jobs::JobExecutionUpdate<'_>,
++    ) -> Result<(), runledger_core::jobs::JobExecutionError> {
++        panic!("protection-enrollment test handler does not persist progress");
++    }
++}
++
++#[cfg(all(any(test, feature = "test-support"), feature = "worker"))]
++impl ProtectionEnrollmentRecoveryHandler {
++    async fn execute(
++        &self,
++        context: JobContext,
++        payload: Value,
++    ) -> Result<JobCompletion, JobFailure> {
++        let services = TestExecutionBudget(
++            std::time::Instant::now()
++                + Duration::from_secs(crate::PROTECTION_ENROLLMENT_RECOVERY_TIMEOUT_SECONDS as u64),
++        );
++        JobExecutionHandler::execute(self, JobExecution::new(&context, &services), payload).await
++    }
++}
++
++#[cfg(all(any(test, feature = "test-support"), feature = "worker"))]
++struct TestProtectionEnrollmentHandler(ProtectionEnrollmentRecoveryHandler);
++
++#[cfg(all(any(test, feature = "test-support"), feature = "worker"))]
++#[async_trait]
++impl runledger_core::jobs::JobHandler for TestProtectionEnrollmentHandler {
++    fn job_type(&self) -> JobType<'static> {
++        JobExecutionHandler::job_type(&self.0)
++    }
++    async fn execute(
++        &self,
++        context: JobContext,
++        payload: Value,
++    ) -> Result<JobCompletion, JobFailure> {
++        self.0.execute(context, payload).await
++    }
++    async fn on_dead_letter(
++        &self,
++        context: JobContext,
++        payload: Value,
++        info: runledger_core::jobs::JobDeadLetterInfo,
++    ) {
++        JobExecutionHandler::on_dead_letter(&self.0, context, payload, info).await;
++    }
++}

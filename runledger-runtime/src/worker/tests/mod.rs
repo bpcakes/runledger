@@ -48,6 +48,7 @@ use crate::registry::{JobHandler, JobRegistry};
 
 mod capacity;
 mod completion_and_retry;
+mod execution_services;
 mod heartbeat_progress;
 mod lease_fencing;
 mod observer_tasks;

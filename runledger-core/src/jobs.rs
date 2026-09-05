@@ -6,6 +6,7 @@
 //! reusable active keys, execution-resource keys, and the explicit
 //! handler-continuation opt-in consumed by `runledger-postgres`.
 
+mod execution;
 mod handler;
 mod identifier_macros;
 mod identifiers;
@@ -13,7 +14,8 @@ mod runtime_types;
 mod status;
 mod workflow_enqueue;
 
-pub use handler::{JobHandler, JobHandlerRegistry};
+pub use execution::{JobExecution, JobExecutionError, JobExecutionServices, JobExecutionUpdate};
+pub use handler::{ExecutionHandlerAdapter, JobExecutionHandler, JobHandler, JobHandlerRegistry};
 pub use identifiers::{
     IdentifierValidationError, JobType, JobTypeName, StepKey, StepKeyName, WorkflowType,
     WorkflowTypeName,
