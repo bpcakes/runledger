@@ -1408,6 +1408,41 @@ in-place upgrade from the older multi-file standalone history; apply later
 forward migrations normally. The workspace-root `migrations/` directory is the
 canonical source for development and review.
 
+### Migration identity and bundle manifest
+
+`runledger_postgres::migration_bundle()` inspects the compiled crate without
+opening a database or reading workspace files:
+
+```rust
+let bundle = runledger_postgres::migration_bundle();
+let library_version = bundle.library_version(); // also RUNLEDGER_POSTGRES_VERSION
+let content: [u8; 32] = bundle.bundle_fingerprint();
+let pipeline: [u8; 32] = bundle.pipeline_fingerprint();
+for migration in bundle.migrations() {
+    // version, description, migration_type, checksum, no_tx, and exact SQL
+    println!("{} {}", migration.version, migration.description);
+}
+```
+
+The manifest includes up and down entries, sorted by version then direction
+(Simple, ReversibleUp, ReversibleDown). The content fingerprint hashes their
+metadata and raw SQLx checksums. The pipeline fingerprint additionally includes
+the compiled `runledger-postgres` version, so a new library release invalidates
+cached templates even when its SQL is unchanged. Rustdoc specifies the versioned,
+length-framed SHA-256 encoding; fingerprints are 32 raw bytes, not hex strings.
+
+Use the pipeline fingerprint as one input to your application's template/schema
+fingerprint. Retain the host pipeline revision, other libraries' inputs, and host
+migration ordering. Helper-only changes in same-version path/patched builds
+require an additional host-owned source revision. Neither fingerprint proves a
+live database is compatible or includes your application's SQLx history.
+
+The [composition example](runledger-postgres/examples/migration_identity.rs)
+shows how to combine these inputs. The [consumer guide](docs/migration-identity/README.md)
+includes an IdentityPro adapter patch and validation against HOCR's historical
+vendored SQL. Keep application migration ordering and cutover decisions in the
+application, and use the startup helpers below to apply or validate live state.
+
 ### Applying or validating the schema
 
 Two supported startup modes:

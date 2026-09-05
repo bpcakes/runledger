@@ -1,0 +1,40 @@
+--- a/crates/identitypro-db/src/migrations/bundle.rs
++++ b/crates/identitypro-db/src/migrations/bundle.rs
+@@ -246,23 +246,20 @@
+     "identitypro-db-migration-pipeline-v16";
+
+ #[cfg(feature = "test-support")]
+-pub(crate) const RUNLEDGER_POSTGRES_MIGRATION_PIPELINE_VERSION: &str = "0.12.0";
+-
+-#[cfg(feature = "test-support")]
+ pub(crate) const RUNLIMIT_POSTGRES_MIGRATION_PIPELINE_VERSION: &str = "0.3.0";
+
+ /// Returns the raw content identity inputs for the complete migration pipeline
+ /// used by shared test-database templates.
+ #[cfg(feature = "test-support")]
+ pub fn test_template_migration_fingerprint_inputs() -> Vec<(String, Vec<u8>)> {
+-    // These exact-pinned versions are load-bearing: they capture behavior
+-    // changes in the Runledger and Runlimit migration helpers beyond their raw
+-    // MIGRATOR data without making this package depend on workspace files.
++    // Library pipeline identities capture helper behavior beyond raw SQL.
++    // Runledger includes its own release and bundle identity; retain the host
++    // domain and Runlimit inputs for the rest of the migration pipeline.
+     let mut inputs = vec![
+         (
+-            "runledger-postgres:pipeline-version".to_owned(),
+-            RUNLEDGER_POSTGRES_MIGRATION_PIPELINE_VERSION
+-                .as_bytes()
++            "runledger-postgres:pipeline-fingerprint".to_owned(),
++            runledger_postgres::migration_bundle()
++                .pipeline_fingerprint()
+                 .to_vec(),
+         ),
+         (
+@@ -272,7 +269,6 @@
+                 .to_vec(),
+         ),
+     ];
+-    add_migrator_fingerprint_inputs(&mut inputs, "runledger", &runledger_postgres::MIGRATOR);
+     add_migrator_fingerprint_inputs(&mut inputs, "runlimit", &runlimit_postgres::MIGRATOR);
+     add_migrator_fingerprint_inputs(&mut inputs, "identitypro", &IDENTITYPRO_MIGRATOR);
+     inputs

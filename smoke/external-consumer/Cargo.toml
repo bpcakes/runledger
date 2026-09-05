@@ -30,6 +30,7 @@ workspace = true
 [dev-dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+postgres-test-harness = { version = "=0.2.0", default-features = false }
 # Direct `cargo test --manifest-path smoke/external-consumer/Cargo.toml` uses
 # local paths so contributors are not blocked before the next crates.io release.
 # scripts/run-external-consumer-smoke.sh rewrites these to packaged version

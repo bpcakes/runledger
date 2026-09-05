@@ -1,5 +1,8 @@
 # Migration pipeline identity audit
 
+Implementation follow-up: [migration identity and consumer composition](migration-identity/README.md).
+The findings below record the source state at the audited commit.
+
 Audited `runledger-runledger-simplification-audit-7cy` on 2026-09-05 against
 Runledger commit `d10037a647afc7f7ea73747c93be48ea7c4a5369` and the current local
 consumer sources. The issue remains justified at P2 and is not implemented.

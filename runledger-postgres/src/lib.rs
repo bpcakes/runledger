@@ -324,6 +324,7 @@ use std::fmt;
 
 mod error;
 pub mod jobs;
+mod migration_identity;
 mod migrations;
 
 pub use error::{
@@ -331,6 +332,7 @@ pub use error::{
     classify_framework_constraint, classify_query_error,
     classify_query_error_with_constraint_classifier, has_framework_constraint_classifier,
 };
+pub use migration_identity::{MigrationBundle, RUNLEDGER_POSTGRES_VERSION, migration_bundle};
 pub use migrations::{
     MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
     WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,

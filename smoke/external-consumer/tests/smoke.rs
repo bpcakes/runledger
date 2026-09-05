@@ -32,6 +32,9 @@ use sqlx::types::Uuid;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{Instant, sleep, timeout};
 
+#[path = "support/migration_identity.rs"]
+mod migration_identity;
+
 const SMOKE_JOB_TYPE: &str = "jobs.external.smoke";
 const SMOKE_POOL_MAX_CONNECTIONS: u32 = 12;
 const CONTINUATION_CHECKPOINT_VERSION: i64 = 1;
