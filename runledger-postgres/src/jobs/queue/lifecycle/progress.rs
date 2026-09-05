@@ -11,7 +11,7 @@ use super::super::super::types::JobProgressUpdate;
 use super::super::super::types::{JobLeaseIdentity, JobOrdinaryProgressUpdate, JobRunningUpdate};
 use super::common::{
     UPDATE_PROGRESS_LEASE_MISMATCH_CONTEXT, cap_bounded_job_lifecycle_timeouts_tx,
-    lock_live_job_lease_tx, rollback_and_return_lease_mismatch,
+    lock_live_job_lease_with_current_timeouts_tx, rollback_and_return_lease_mismatch,
 };
 
 #[derive(Clone, Copy)]
@@ -60,27 +60,22 @@ async fn update_job_progress_row_tx(
     identity: JobLeaseIdentity<'_>,
     progress: ProgressMutation<'_>,
 ) -> Result<u64> {
+    // The caller holds the live lease row through validation and this write.
+    // Recheck wall-clock expiry immediately before mutation, without acquiring
+    // the same lock in a second CTE.
     let rows_affected = sqlx::query!(
-        "WITH locked_job AS MATERIALIZED (
-             SELECT id
-             FROM job_queue
-             WHERE id = $1
-               AND run_number = $2
-               AND attempt = $3
-               AND worker_id = $4
-               AND status = 'LEASED'
-               AND lease_expires_at IS NOT NULL
-             FOR UPDATE
-         )
-         UPDATE job_queue
+        "UPDATE job_queue
          SET stage = COALESCE($5, stage),
              progress_done = COALESCE($6, progress_done),
              progress_total = COALESCE($7, progress_total),
              checkpoint = COALESCE($8::jsonb, checkpoint),
              updated_at = now()
-         FROM locked_job
-         WHERE job_queue.id = locked_job.id
-           AND job_queue.lease_expires_at > clock_timestamp()",
+         WHERE id = $1
+           AND run_number = $2
+           AND attempt = $3
+           AND worker_id = $4
+           AND status = 'LEASED'
+           AND lease_expires_at > clock_timestamp()",
         identity.job_id,
         identity.run_number,
         identity.attempt,
@@ -191,10 +186,12 @@ async fn persist_progress_mutation_for_lease(
     cap_bounded_job_lifecycle_timeouts_tx(&mut tx, "cap progress lifecycle timeouts").await?;
 
     // Partial updates can only be validated against the current locked values,
-    // never the handler's invocation snapshot. Keep the original update for
-    // persistence and audit events so omitted fields retain their semantics.
+    // never the handler's invocation snapshot. This owned transaction already
+    // has lifecycle timeout caps, which stay active through its audit writes.
+    // Keep the original partial values for persistence and audit events.
     let Some(existing) =
-        lock_live_job_lease_tx(&mut tx, identity, "lock job progress lease").await?
+        lock_live_job_lease_with_current_timeouts_tx(&mut tx, identity, "lock job progress lease")
+            .await?
     else {
         return rollback_and_return_lease_mismatch(tx, UPDATE_PROGRESS_LEASE_MISMATCH_CONTEXT)
             .await;

@@ -583,7 +583,7 @@ pub async fn list_job_enqueue_intents_with_scope(
     validate_pagination(filter.limit, filter.offset)?;
     let status = filter.status.map(JobEnqueueIntentStatus::as_db_value);
 
-    let rows = super::super::scoped_list::scoped_list!(
+    let rows = super::super::scoped_read::scoped_list!(
         JobEnqueueIntentRecordRow,
         pool,
         filter.scope,

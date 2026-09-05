@@ -366,7 +366,22 @@ async fn failed_progress_transaction_does_not_acknowledge_or_persist_checkpoint(
 
 #[tokio::test]
 async fn handler_deadline_bounds_a_progress_write_waiting_for_a_row_lock() {
-    let (pool, database) = setup_ephemeral_pool("execution_services_blocked_write", 4).await;
+    for connections in [1, 2, 4] {
+        assert_deadline_bounds_blocked_progress(connections).await;
+    }
+}
+
+async fn assert_deadline_bounds_blocked_progress(connections: u32) {
+    let (pool, database) =
+        setup_ephemeral_pool("execution_services_blocked_write", connections).await;
+    record_postgres_server_version(&pool, "blocked progress with a small pool").await;
+    // An independent connection holds the contended row. Even a one-connection
+    // worker pool must reclaim its cancelled progress transaction for completion.
+    let lock_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .expect("lock pool");
     let (job_id, mut job) =
         enqueue_and_claim_job(&pool, JOB_TYPE, 1, json!({}), "services-worker").await;
     job.timeout_seconds = 1;
@@ -385,7 +400,7 @@ async fn handler_deadline_bounds_a_progress_write_waiting_for_a_row_lock() {
     timeout(Duration::from_secs(3), started.notified())
         .await
         .expect("handler starts");
-    let mut tx = pool.begin().await.expect("begin row lock");
+    let mut tx = lock_pool.begin().await.expect("begin row lock");
     sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
         .bind(job_id)
         .fetch_one(&mut *tx)
@@ -419,5 +434,72 @@ async fn handler_deadline_bounds_a_progress_write_waiting_for_a_row_lock() {
         saved.last_error_code.as_deref(),
         Some("job.timeout_exceeded")
     );
+    lock_pool.close().await;
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+struct LateCompletionHandler {
+    completion: JobCompletion,
+    returned: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl JobExecutionHandler for LateCompletionHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JOB_TYPE
+    }
+
+    async fn execute(
+        &self,
+        execution: JobExecution<'_>,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        // Deliberately cross the cutoff without yielding. The execution branch
+        // returns Ready in this poll, so the timer branch cannot enforce policy.
+        // This models a slow synchronous handler section or delayed worker poll.
+        while execution.remaining_budget() > Duration::ZERO {
+            std::thread::sleep(execution.remaining_budget());
+        }
+        self.returned.fetch_add(1, Ordering::SeqCst);
+        Ok(self.completion.clone())
+    }
+}
+
+#[tokio::test]
+async fn a_handler_returning_success_or_continuation_after_the_cutoff_is_timed_out() {
+    let (pool, database) = setup_ephemeral_pool("execution_services_late_result", 1).await;
+    for completion in [JobCompletion::success(), JobCompletion::continue_now()] {
+        let (job_id, mut job) =
+            enqueue_and_claim_job(&pool, JOB_TYPE, 1, json!({}), "late-worker").await;
+        job.timeout_seconds = 1;
+        let returned = Arc::new(AtomicUsize::new(0));
+        let mut registry = JobRegistry::new();
+        registry.register(
+            LateCompletionHandler {
+                completion,
+                returned: returned.clone(),
+            }
+            .into_job_handler(),
+        );
+        process_claimed_job(pool.clone(), Arc::new(registry), job, 30).await;
+        assert_eq!(
+            returned.load(Ordering::SeqCst),
+            1,
+            "handler actually returned a result"
+        );
+        let saved = get_job_by_id(&pool, None, job_id)
+            .await
+            .expect("read")
+            .expect("job");
+        assert_eq!(saved.status, JobStatus::DeadLettered);
+        assert_eq!(
+            saved.run_number, 1,
+            "late continuation must not schedule a run"
+        );
+        assert_eq!(
+            saved.last_error_code.as_deref(),
+            Some("job.timeout_exceeded")
+        );
+    }
     teardown_ephemeral_pool(pool, database).await;
 }

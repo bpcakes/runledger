@@ -65,6 +65,43 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 
+#[tokio::test]
+async fn summary_indexes_are_required_by_startup_but_not_the_custom_compatibility_fence() {
+    let harness = TestHarness::fresh("summary_index_startup").await;
+    record_postgres_18_server_version(&harness.pool, "summary index startup guard").await;
+    apply_runledger_migrations_through(
+        &harness.pool,
+        WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION,
+    )
+    .await;
+    let error = ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect_err("current startup must require the additive index migration");
+    assert!(
+        matches!(
+            error,
+            SchemaCompatibilityError::Incompatible(sqlx::migrate::MigrateError::VersionTooNew(
+                JOB_SUMMARY_PAGINATION_MIGRATION_VERSION,
+                _
+            ))
+        ),
+        "unexpected startup error: {error}"
+    );
+    apply_runledger_migration(&harness.pool, JOB_SUMMARY_PAGINATION_MIGRATION_VERSION).await;
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("startup accepts SQLx history without a custom fence entry");
+    let recorded: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runledger_migration_history WHERE version = $1)",
+    )
+    .bind(JOB_SUMMARY_PAGINATION_MIGRATION_VERSION)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("custom fence");
+    assert!(!recorded);
+    harness.teardown().await;
+}
+
 struct TestHarness {
     pool: PgPool,
     database: EphemeralDatabase,

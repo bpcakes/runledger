@@ -313,14 +313,7 @@ impl ClaimedJobExecution {
                     if services.lease_was_lost() {
                         return Err(JobExecutionFailure::LeaseMaintenance(lease_owner_mismatch_failure()));
                     }
-                    // A handler may finish in the same poll that reaches its deadline.
-                    if Instant::now() >= timeout_deadline {
-                        return Err(JobExecutionFailure::Handler(JobFailure::timeout(
-                            "job.timeout_exceeded",
-                            "Job exceeded the configured timeout.",
-                        )));
-                    }
-                    return map_handler_join(result);
+                    return map_handler_join(result, timeout_deadline);
                 }
                 _ = services.wait_for_lease_loss() => {
                     return Err(JobExecutionFailure::LeaseMaintenance(lease_owner_mismatch_failure()));
@@ -400,7 +393,16 @@ impl ClaimedJobExecution {
 
 fn map_handler_join(
     result: Result<Result<JobCompletion, JobFailure>, Box<dyn Any + Send>>,
+    timeout_deadline: Instant,
 ) -> Result<JobCompletion, JobExecutionFailure> {
+    // Deadline precedence is independent of select!'s randomized polling order,
+    // including a non-yielding handler that returns after crossing the cutoff.
+    if Instant::now() >= timeout_deadline {
+        return Err(JobExecutionFailure::Handler(JobFailure::timeout(
+            "job.timeout_exceeded",
+            "Job exceeded the configured timeout.",
+        )));
+    }
     match result {
         Ok(result) => result.map_err(JobExecutionFailure::Handler),
         Err(panic_payload) => Err(JobExecutionFailure::Handler(handler_panic_failure(
@@ -585,5 +587,38 @@ mod tests {
         assert_eq!(heartbeat_maintenance_budget(1), Duration::from_millis(333));
         assert_eq!(heartbeat_maintenance_budget(2), Duration::from_millis(666));
         assert_eq!(heartbeat_maintenance_budget(60), Duration::from_secs(20));
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn success_and_continuation_must_be_observed_strictly_before_the_deadline() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        for completion in [
+            JobCompletion::with_output(serde_json::json!({"result": "kept"})),
+            JobCompletion::continue_after(Duration::from_secs(7)),
+        ] {
+            let Ok(accepted) = map_handler_join(Ok(Ok(completion.clone())), deadline) else {
+                panic!("result before the cutoff must be accepted");
+            };
+            assert_eq!(accepted.disposition(), completion.disposition());
+            assert_eq!(accepted.output(), completion.output());
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(Instant::now(), deadline);
+        for lateness in [Duration::ZERO, Duration::from_nanos(1)] {
+            tokio::time::advance(lateness).await;
+            for completion in [JobCompletion::success(), JobCompletion::continue_now()] {
+                let Err(JobExecutionFailure::Handler(failure)) =
+                    map_handler_join(Ok(Ok(completion)), deadline)
+                else {
+                    panic!("completion observed at or after the cutoff must time out");
+                };
+                assert_eq!(failure.code, "job.timeout_exceeded");
+            }
+        }
     }
 }

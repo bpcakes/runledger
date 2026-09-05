@@ -119,6 +119,10 @@ impl<'a> JobExecution<'a> {
 
     /// The authoritative monotonic handler deadline, including time spent
     /// awaiting progress writes. Completion persistence occurs after execution.
+    /// The Runledger worker accepts a handler result only when observed strictly
+    /// before this instant. At or after it, timeout takes precedence over success
+    /// and continuation, even when the handler and timer become ready together.
+    /// Committed checkpoints and external effects are not undone by timeout.
     #[must_use]
     pub fn deadline(&self) -> Instant {
         self.services.deadline()

@@ -10,6 +10,11 @@ use super::super::types::{
     JobEventRecord, JobListFilter, JobQueueRecord, JobReadListFilter, JobReadScope, JobScope,
 };
 
+struct JobPayloadRow {
+    id: Uuid,
+    payload: serde_json::Value,
+}
+
 /// Lists jobs with legacy visibility: a None organization matches every scope.
 /// Prefer [`list_jobs_with_scope`] for new code.
 pub async fn list_jobs(pool: &DbPool, filter: &JobListFilter<'_>) -> Result<Vec<JobQueueRecord>> {
@@ -35,7 +40,7 @@ pub async fn list_jobs_with_scope(
 
     let status_filter = filter.status.map(JobStatus::as_db_value);
 
-    let rows = super::super::scoped_list::scoped_list!(
+    let rows = super::super::scoped_read::scoped_list!(
         JobQueueRow,
         pool,
         filter.scope,
@@ -172,20 +177,17 @@ pub async fn get_job_payload_by_idempotency_key_with_scope(
     job_type: JobType<'_>,
     idempotency_key: &str,
 ) -> Result<Option<(Uuid, serde_json::Value)>> {
-    let organization_id = scope.organization_id();
-    let row = sqlx::query!(
-        "SELECT id, payload
-         FROM job_queue
-         WHERE (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL))
-           AND job_type = $2
+    let row = super::super::scoped_read::scoped_lookup!(
+        JobPayloadRow,
+        pool,
+        scope,
+        "SELECT id, payload FROM job_queue WHERE",
+        "AND job_type = $2
            AND idempotency_key = $3
          LIMIT 1",
-        organization_id,
         job_type as _,
         idempotency_key,
     )
-    .fetch_optional(pool)
-    .await
     .map_err(|error| {
         Error::from_query_sqlx_with_context("get job payload by idempotency key", error)
     })?;
@@ -218,22 +220,19 @@ pub async fn get_latest_job_payload_for_run_with_scope(
     job_type: JobType<'_>,
     run_id: Uuid,
 ) -> Result<Option<(Uuid, serde_json::Value)>> {
-    let organization_id = scope.organization_id();
     let run_id_text = run_id.to_string();
-    let row = sqlx::query!(
-        "SELECT id, payload
-         FROM job_queue
-         WHERE (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL))
-           AND job_type = $2
+    let row = super::super::scoped_read::scoped_lookup!(
+        JobPayloadRow,
+        pool,
+        scope,
+        "SELECT id, payload FROM job_queue WHERE",
+        "AND job_type = $2
            AND payload->>'run_id' = $3
          ORDER BY created_at DESC, id DESC
          LIMIT 1",
-        organization_id,
         job_type as _,
         run_id_text,
     )
-    .fetch_optional(pool)
-    .await
     .map_err(|error| {
         Error::from_query_sqlx_with_context("get latest job payload for run", error)
     })?;

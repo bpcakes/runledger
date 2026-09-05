@@ -638,6 +638,10 @@ time spent awaiting progress writes. `remaining_work_budget(reserve)` subtracts
 an application-selected reserve for its final checkpoint or cleanup and
 saturates at zero. Runtime completion persistence happens after the handler
 returns; this reserve does not impose a deadline on that persistence.
+The worker must observe the handler result strictly before the deadline. At or
+after it, timeout takes precedence over success or continuation, including when
+the handler and timer become ready together or a long poll crosses the deadline.
+Already committed checkpoints and external effects are not undone.
 
 `checkpoint::<T>()` decodes the claimed resume snapshot; applications still
 validate their checkpoint versions and domain invariants.

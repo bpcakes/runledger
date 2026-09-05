@@ -31,3 +31,26 @@ macro_rules! scoped_list {
 }
 
 pub(super) use scoped_list;
+
+// Exact-scope lookups deliberately accept JobScope, so an administrative
+// wildcard cannot accidentally turn tenant-local keys into global identities.
+macro_rules! scoped_lookup {
+    ($row:path, $pool:expr, $scope:expr, $prefix:literal, $suffix:expr, $($arg:expr),+ $(,)?) => {
+        match $scope {
+            $crate::jobs::JobScope::Organization(id) => {
+                sqlx::query_as!(
+                    $row, $prefix + " organization_id = $1 " + $suffix,
+                    Some(id), $($arg),+
+                ).fetch_optional($pool).await
+            }
+            $crate::jobs::JobScope::Global => {
+                sqlx::query_as!(
+                    $row, $prefix + " ($1::uuid IS NULL AND organization_id IS NULL) " + $suffix,
+                    None::<sqlx::types::Uuid>, $($arg),+
+                ).fetch_optional($pool).await
+            }
+        }
+    };
+}
+
+pub(super) use scoped_lookup;

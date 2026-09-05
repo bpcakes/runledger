@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, payload\n         FROM job_queue\n         WHERE (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL))\n           AND job_type = $2\n           AND payload->>'run_id' = $3\n         ORDER BY created_at DESC, id DESC\n         LIMIT 1",
+  "query": "SELECT id, payload FROM job_queue WHERE organization_id = $1 AND job_type = $2\n           AND payload->>'run_id' = $3\n         ORDER BY created_at DESC, id DESC\n         LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -26,5 +26,5 @@
       false
     ]
   },
-  "hash": "7a055372b1b79b46e8ebda2ca23f7d7b573afd9a3a17ef9bde91a5c153686070"
+  "hash": "10269f3f8cd79707daaba3c26771d5aa97e7c9c08801cbfd18f70bbd8670e17a"
 }

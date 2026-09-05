@@ -19,6 +19,10 @@ All notable changes to this workspace are documented here.
 
 ### Changed
 
+- Keep exact-scope payload lookups indexable under generic prepared plans.
+- Remove redundant timeout-policy statements and duplicate locking from progress
+  writes while preserving locked-state validation, lease fencing, and audit
+  atomicity. Document and test strict handler deadline precedence.
 - Breaking: `JobCompletion` now keeps progress and checkpoint state private.
   `.progress(done, total)` validates non-negative values and `done <= total`,
   returning `Result`; use the new accessors when inspecting a completion.
@@ -31,6 +35,13 @@ All notable changes to this workspace are documented here.
   for handler continuation delays.
 
 ### Upgrade notes
+
+- Apply `202609050001_job_summary_pagination` before starting the new runtime.
+  Its two ordinary index builds block queue writes until the SQLx migration
+  commits; schedule an appropriate deployment window. The migration is recorded
+  in `_sqlx_migrations`, but is deliberately outside the custom
+  `runledger_migration_history` compatibility fence. The current startup guard
+  still requires it. See the README migration guide for rollout details.
 
 - Scope APIs are additive and require no new database migration. Legacy metric
   calls still aggregate all scopes when the organization filter is absent;

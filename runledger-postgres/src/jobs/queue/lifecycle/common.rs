@@ -41,6 +41,24 @@ pub(super) async fn lock_live_job_lease_tx(
         "cap job completion row-lock acquisition timeout",
     )
     .await?;
+    let row = lock_live_job_lease_with_current_timeouts_tx(tx, identity, error_context).await?;
+    restore_completion_job_row_lock_timeout_tx(
+        tx,
+        &previous_lock_timeout,
+        "restore job completion row-lock timeout",
+    )
+    .await?;
+    Ok(row)
+}
+
+/// Acquires the live row using the transaction's existing timeout policy.
+/// Bounded progress transactions keep their caps until commit; completion
+/// transactions use the wrapper above to cap only initial lock acquisition.
+pub(super) async fn lock_live_job_lease_with_current_timeouts_tx(
+    tx: &mut DbTx<'_>,
+    identity: JobLeaseIdentity<'_>,
+    error_context: &'static str,
+) -> Result<Option<LiveJobLeaseRow>> {
     let row = sqlx::query_as!(
         LiveJobLeaseRow,
         r#"SELECT
@@ -67,12 +85,6 @@ pub(super) async fn lock_live_job_lease_tx(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context(error_context, error))?;
-    restore_completion_job_row_lock_timeout_tx(
-        tx,
-        &previous_lock_timeout,
-        "restore job completion row-lock timeout",
-    )
-    .await?;
     Ok(row)
 }
 

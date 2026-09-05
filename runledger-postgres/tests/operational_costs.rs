@@ -295,3 +295,87 @@ async fn measure_operational_costs() {
     println!("connections={}, idle={}", pool.size(), pool.num_idle());
     teardown_ephemeral_pool(pool, database).await;
 }
+
+#[tokio::test]
+#[ignore = "manual PostgreSQL 18 measurement; requires shared_preload_libraries=pg_stat_statements"]
+async fn measure_progress_costs() {
+    let (pool, database) = setup_ephemeral_pool("progress_costs", 1).await;
+    let version: String = sqlx::query_scalar("SHOW server_version")
+        .fetch_one(&pool)
+        .await
+        .expect("version");
+    assert!(version.starts_with("18."));
+    println!("progress costs PostgreSQL {version}; pool max=1");
+    sqlx::raw_sql("CREATE EXTENSION pg_stat_statements")
+        .execute(&pool)
+        .await
+        .expect("extension");
+    support::register_test_job_definition(&pool, "cost.progress").await;
+    let id = support::enqueue_test_job(&pool, "cost.progress", None, &json!({})).await;
+    let job = support::claim_one_job(&pool, "progress-cost-worker").await;
+    let identity = JobLeaseIdentity::new(id, job.run_number, job.attempt, "progress-cost-worker");
+    let checkpoint = json!({"page": 1});
+    let update = JobOrdinaryProgressUpdate {
+        progress_done: Some(1),
+        progress_total: Some(10),
+        checkpoint: Some(&checkpoint),
+    };
+    update_job_ordinary_progress_for_lease(&pool, identity, &update)
+        .await
+        .expect("warm up");
+    sqlx::query("SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()))")
+        .execute(&pool).await.expect("reset this database's statistics");
+    let mut samples = Vec::new();
+    for _ in 0..64 {
+        let start = Instant::now();
+        update_job_ordinary_progress_for_lease(&pool, identity, &update)
+            .await
+            .expect("progress commits");
+        samples.push(start.elapsed().as_secs_f64() * 1000.);
+    }
+    let statements: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT query, sum(calls)::bigint FROM pg_stat_statements
+         WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND toplevel AND query NOT ILIKE '%pg_stat_statements%'
+         GROUP BY query ORDER BY query",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("actual progress statements");
+    let calls: i64 = statements.iter().map(|(_, calls)| calls).sum();
+    println!(
+        "progress: writes=64, total_statements={calls}, statements_per_write={}",
+        calls / 64
+    );
+    assert!(
+        calls <= 64 * 6,
+        "ordinary progress exceeded its six-statement budget: {statements:?}"
+    );
+    for (query, calls) in &statements {
+        println!(
+            "calls={calls}: {}",
+            query.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
+    }
+    report("ordinary progress with checkpoint and audit event", samples);
+    let saved = get_job_by_id(&pool, None, id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(saved.checkpoint, Some(checkpoint));
+    assert_eq!(
+        (saved.progress_done, saved.progress_total),
+        (Some(1), Some(10))
+    );
+    let events = list_job_events(&pool, None, id, 100, None)
+        .await
+        .expect("events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == runledger_core::jobs::JobEventType::Progress)
+            .count(),
+        65
+    );
+    teardown_ephemeral_pool(pool, database).await;
+}

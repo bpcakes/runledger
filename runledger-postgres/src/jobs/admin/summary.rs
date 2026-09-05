@@ -39,7 +39,7 @@ pub async fn list_job_summaries(
     // even when PostgreSQL chooses a generic prepared plan.
     macro_rules! page {
         ($cursor_predicate:literal, $($cursor_arg:expr),* $(,)?) => {
-            crate::jobs::scoped_list::scoped_list!(
+            crate::jobs::scoped_read::scoped_list!(
                 SummaryRow, pool, filter.scope,
                 "SELECT id, job_type, organization_id, status::text AS \"status!\",
                     priority, run_number, attempt, max_attempts, next_run_at, stage,
@@ -105,7 +105,7 @@ pub async fn get_job_statuses_with_scope(
         return Ok(Vec::new());
     }
     validate_page_limit(i64::try_from(job_ids.len()).unwrap_or(i64::MAX))?;
-    let rows = crate::jobs::scoped_list::scoped_list!(
+    let rows = crate::jobs::scoped_read::scoped_list!(
         StatusRow,
         pool,
         scope,

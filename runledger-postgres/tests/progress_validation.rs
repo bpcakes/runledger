@@ -101,3 +101,86 @@ async fn competing_partial_progress_updates_validate_against_the_locked_row() {
     .expect("later valid update");
     teardown_ephemeral_pool(pool, database).await;
 }
+
+#[tokio::test]
+async fn progress_cannot_write_after_its_lease_expires_while_waiting_for_the_row() {
+    let (pool, database) = setup_ephemeral_pool("progress_expiry_during_lock", 3).await;
+    support::register_test_job_definition(&pool, "jobs.test.progress_expiry").await;
+    let id = support::enqueue_test_job(&pool, "jobs.test.progress_expiry", None, &json!({})).await;
+    let job = support::claim_one_job(&pool, "expiring-progress-worker").await;
+    sqlx::query("UPDATE job_queue SET lease_expires_at = clock_timestamp() + interval '1 second' WHERE id = $1")
+        .bind(id).execute(&pool).await.expect("short live lease");
+    let mut holder = pool.begin().await.expect("holder transaction");
+    sqlx::query("SELECT id FROM job_queue WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_one(&mut *holder)
+        .await
+        .expect("hold job row");
+    let writer_pool = pool.clone();
+    let writer = tokio::spawn(async move {
+        update_job_ordinary_progress_for_lease(
+            &writer_pool,
+            JobLeaseIdentity::new(id, job.run_number, job.attempt, "expiring-progress-worker"),
+            &JobOrdinaryProgressUpdate {
+                progress_done: Some(1),
+                progress_total: Some(2),
+                checkpoint: Some(&json!("too late")),
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query LIKE '%FROM job_queue%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("observe lock waiter");
+            if blocked {
+                break;
+            }
+            assert!(!writer.is_finished(), "writer must wait on the live row");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        loop {
+            let expired: bool = sqlx::query_scalar(
+                "SELECT lease_expires_at <= clock_timestamp() FROM job_queue WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("database clock expiry");
+            if expired {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("writer blocks before database lease expiry");
+    holder.rollback().await.expect("release expired row");
+    let error = writer
+        .await
+        .expect("writer joins")
+        .expect_err("expired lease cannot write");
+    assert!(
+        matches!(error, Error::QueryError(ref query) if query.code() == "job.lease_owner_mismatch")
+    );
+    let saved = get_job_by_id(&pool, None, id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(saved.checkpoint, None);
+    assert_eq!(saved.progress_done, None);
+    assert!(
+        !list_job_events(&pool, None, id, 100, None)
+            .await
+            .expect("events")
+            .iter()
+            .any(|event| event.event_type == runledger_core::jobs::JobEventType::Progress)
+    );
+    teardown_ephemeral_pool(pool, database).await;
+}

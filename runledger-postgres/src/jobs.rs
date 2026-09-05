@@ -24,7 +24,7 @@ mod rows;
 mod runtime_configs;
 mod schedule_definition_guard;
 mod schedules;
-mod scoped_list;
+mod scoped_read;
 mod transaction_isolation;
 mod transaction_settings;
 mod types;

@@ -1,4 +1,5 @@
 //! Plans for the actual SQLx-prepared public list queries, using production indexes.
+use runledger_core::jobs::JobType;
 use runledger_postgres::prelude::*;
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::Value;
@@ -158,6 +159,149 @@ async fn selective_scopes_use_indexes_with_custom_and_generic_prepared_plans() {
                     .all(|intent| intent.organization_id == organization)
             );
             assert_prepared_plan(&pool, "job_enqueue_intents", organization).await;
+        }
+    }
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+async fn assert_payload_plan(pool: &DbPool, predicate: &str, scope: JobScope, key: &str) {
+    let name: String = sqlx::query_scalar(
+        "SELECT name FROM pg_prepared_statements
+         WHERE statement LIKE 'SELECT id, payload%'
+           AND position($1 IN statement) > 0",
+    )
+    .bind(predicate)
+    .fetch_one(pool)
+    .await
+    .expect("actual public payload statement");
+    let organization = scope.organization_id();
+    let global_indexes = if organization.is_none() {
+        sqlx::query_scalar::<_, String>(
+            "SELECT indexrelid::regclass::text FROM pg_index
+             WHERE indrelid = 'job_queue'::regclass
+               AND pg_get_expr(indpred, indrelid) LIKE '%organization_id IS NULL%'",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("global indexes")
+    } else {
+        Vec::new()
+    };
+    let organization = organization.map_or_else(|| "NULL".into(), |id| format!("'{id}'::uuid"));
+    let statement = format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING OFF) EXECUTE \"{}\" \
+         ({organization}, '{JOB_TYPE}', '{}')",
+        name.replace('"', "\"\""),
+        key.replace('\'', "''"),
+    );
+    let plan: Value = sqlx::query_scalar(&statement)
+        .fetch_one(pool)
+        .await
+        .expect("explain payload lookup");
+    eprintln!(
+        "payload {predicate} {scope:?}: execution={} ms, shared buffers={}",
+        plan[0]["Execution Time"], plan[0]["Plan"]["Shared Hit Blocks"]
+    );
+    assert!(
+        has_scope_index_access(&plan, &global_indexes),
+        "payload lookup must constrain scope through an index: {plan}"
+    );
+    assert!(
+        plan[0]["Plan"]["Shared Hit Blocks"]
+            .as_u64()
+            .expect("buffer count")
+            < 100,
+        "one payload must not read hundreds of buffers in this indexed fixture: {plan}"
+    );
+}
+
+#[tokio::test]
+async fn payload_scopes_use_indexes_with_custom_and_generic_prepared_plans() {
+    let (pool, database) = setup_ephemeral_pool("payload_read_plans", 1).await;
+    let version: String = sqlx::query_scalar("SHOW server_version")
+        .fetch_one(&pool)
+        .await
+        .expect("version");
+    eprintln!("payload plans PostgreSQL {version}");
+    assert!(version.starts_with("18."));
+    support::register_test_job_definition(&pool, JOB_TYPE).await;
+    let run = Uuid::from_u128(42);
+    // Twenty busy tenants with interleaved creation order and repeated keys/run
+    // IDs. Global rows are oldest, preventing an unscoped ordering scan from
+    // getting lucky with LIMIT. Each tenant has roughly 1,000 matching rows.
+    sqlx::query(
+        "INSERT INTO job_queue (job_type, organization_id, max_attempts, created_at,
+             idempotency_key, enqueue_request, payload)
+         SELECT 'jobs.test.read_plans', organization, 3,
+             now() - (20001 - n) * interval '1 second',
+             CASE WHEN organization IS NULL THEN n::text ELSE (n / 20)::text END,
+             '{}'::jsonb, jsonb_build_object('run_id', $1::text, 'organization', organization)
+         FROM generate_series(1, 20000) n
+         CROSS JOIN LATERAL (
+             SELECT CASE WHEN n <= 20 THEN NULL ELSE md5((n % 20)::text)::uuid END AS organization
+         ) scopes",
+    )
+    .bind(run.to_string())
+    .execute(&pool)
+    .await
+    .expect("payload fixture");
+    sqlx::raw_sql("ANALYZE job_queue")
+        .execute(&pool)
+        .await
+        .expect("analyze");
+    let tenant: Uuid = sqlx::query_scalar("SELECT md5('19')::uuid")
+        .fetch_one(&pool)
+        .await
+        .expect("tenant");
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        sqlx::raw_sql(&format!("SET plan_cache_mode = {mode}"))
+            .execute(&pool)
+            .await
+            .expect("plan mode");
+        for scope in [JobScope::Global, JobScope::Organization(tenant)] {
+            let key: String = sqlx::query_scalar(
+                "SELECT idempotency_key FROM job_queue
+                 WHERE organization_id IS NOT DISTINCT FROM $1
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(scope.organization_id())
+            .fetch_one(&pool)
+            .await
+            .expect("key");
+            pool.acquire()
+                .await
+                .expect("connection")
+                .clear_cached_statements()
+                .await
+                .expect("clear cache");
+            let (_, payload) = get_job_payload_by_idempotency_key_with_scope(
+                &pool,
+                scope,
+                JobType::new(JOB_TYPE),
+                &key,
+            )
+            .await
+            .expect("lookup key")
+            .expect("payload");
+            assert_eq!(
+                payload["organization"],
+                serde_json::json!(scope.organization_id())
+            );
+            assert_payload_plan(&pool, "idempotency_key = $3", scope, &key).await;
+            let (_, payload) = get_latest_job_payload_for_run_with_scope(
+                &pool,
+                scope,
+                JobType::new(JOB_TYPE),
+                run,
+            )
+            .await
+            .expect("lookup run")
+            .expect("payload");
+            assert_eq!(
+                payload["organization"],
+                serde_json::json!(scope.organization_id())
+            );
+            assert_payload_plan(&pool, "payload->>'run_id' = $3", scope, &run.to_string()).await;
         }
     }
     teardown_ephemeral_pool(pool, database).await;
