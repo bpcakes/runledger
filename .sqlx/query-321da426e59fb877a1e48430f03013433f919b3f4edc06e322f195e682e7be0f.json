@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            jd.job_type AS \"job_type!\",\n            COALESCE(SUM(jmr.pending_count), 0)::bigint AS \"pending_count!\",\n            COALESCE(SUM(jmr.leased_count), 0)::bigint AS \"leased_count!\",\n            COALESCE(SUM(jmr.stale_leases), 0)::bigint AS \"stale_leases!\",\n            COALESCE(SUM(jmr.succeeded_24h), 0)::bigint AS \"succeeded_24h!\",\n            COALESCE(SUM(jmr.retryable_24h), 0)::bigint AS \"retryable_24h!\",\n            COALESCE(SUM(jmr.terminal_24h), 0)::bigint AS \"terminal_24h!\",\n            COALESCE(SUM(jmr.panicked_24h), 0)::bigint AS \"panicked_24h!\",\n            COALESCE(SUM(jmr.timeout_24h), 0)::bigint AS \"timeout_24h!\",\n            COALESCE(SUM(jmr.dead_lettered_24h), 0)::bigint AS \"dead_lettered_24h!\",\n            AVG(jmr.p50_duration_ms_24h) AS p50_duration_ms_24h,\n            AVG(jmr.p95_duration_ms_24h) AS p95_duration_ms_24h\n         FROM job_definitions jd\n         LEFT JOIN job_metrics_rollup jmr\n           ON jmr.job_type = jd.job_type\n          AND ($1::uuid IS NULL OR jmr.organization_id = $1)\n         WHERE ($2::text IS NULL OR jd.job_type = $2)\n         GROUP BY jd.job_type\n         ORDER BY jd.job_type ASC",
+  "query": "SELECT\n            jd.job_type AS \"job_type!\",\n            COALESCE(SUM(jmr.pending_count), 0)::bigint AS \"pending_count!\",\n            COALESCE(SUM(jmr.leased_count), 0)::bigint AS \"leased_count!\",\n            COALESCE(SUM(jmr.stale_leases), 0)::bigint AS \"stale_leases!\",\n            COALESCE(SUM(jmr.succeeded_24h), 0)::bigint AS \"succeeded_24h!\",\n            COALESCE(SUM(jmr.retryable_24h), 0)::bigint AS \"retryable_24h!\",\n            COALESCE(SUM(jmr.terminal_24h), 0)::bigint AS \"terminal_24h!\",\n            COALESCE(SUM(jmr.panicked_24h), 0)::bigint AS \"panicked_24h!\",\n            COALESCE(SUM(jmr.timeout_24h), 0)::bigint AS \"timeout_24h!\",\n            COALESCE(SUM(jmr.dead_lettered_24h), 0)::bigint AS \"dead_lettered_24h!\",\n            AVG(jmr.p50_duration_ms_24h) AS p50_duration_ms_24h,\n            AVG(jmr.p95_duration_ms_24h) AS p95_duration_ms_24h\n         FROM job_definitions jd\n         LEFT JOIN job_metrics_rollup jmr\n           ON jmr.job_type = jd.job_type\n          AND ($3::boolean OR (jmr.organization_id = $1 OR ($1::uuid IS NULL AND jmr.organization_id IS NULL)))\n         WHERE ($2::text IS NULL OR jd.job_type = $2)\n         GROUP BY jd.job_type\n         ORDER BY jd.job_type ASC",
   "describe": {
     "columns": [
       {
@@ -67,7 +67,8 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Text"
+        "Text",
+        "Bool"
       ]
     },
     "nullable": [
@@ -85,5 +86,5 @@
       null
     ]
   },
-  "hash": "9f9c494b36d03026a351373e70483c382d2e53386fac1d737a5f2e20818007d8"
+  "hash": "321da426e59fb877a1e48430f03013433f919b3f4edc06e322f195e682e7be0f"
 }

@@ -4,12 +4,13 @@ use chrono::{Duration as ChronoDuration, Utc};
 use runledger_core::jobs::{JobStage, JobStatus, JobType};
 use runledger_postgres::jobs::{
     JobDefinitionUpdate, JobEnqueue, JobEnqueueIntent, JobEnqueueIntentDisposition,
-    JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentState,
-    JobEnqueueIntentStatus, delete_promoted_job_enqueue_intents_before,
-    delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, get_job_by_id,
-    get_job_enqueue_intent_by_id, get_job_enqueue_intent_metrics, list_job_enqueue_intents,
-    list_job_events, promote_job_enqueue_intents_for_types, record_job_enqueue_intent,
-    record_job_enqueue_intent_tx, update_job_definition,
+    JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentMetricsRecord,
+    JobEnqueueIntentReadMetricsFilter, JobEnqueueIntentState, JobEnqueueIntentStatus, JobReadScope,
+    delete_promoted_job_enqueue_intents_before, delete_promoted_job_enqueue_intents_for_jobs_tx,
+    enqueue_job, get_job_by_id, get_job_enqueue_intent_by_id, get_job_enqueue_intent_metrics,
+    get_job_enqueue_intent_metrics_with_scope, list_job_enqueue_intents, list_job_events,
+    promote_job_enqueue_intents_for_types, record_job_enqueue_intent, record_job_enqueue_intent_tx,
+    update_job_definition,
 };
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::{Value, json};
@@ -2779,4 +2780,313 @@ async fn enqueue_event_failure_defers_only_failed_intent_and_rolls_back_its_job(
     assert!(failing.promotion_error().is_none());
 
     teardown_ephemeral_pool(pool, database).await;
+}
+
+async fn seed_metric_intent(
+    pool: &sqlx::PgPool,
+    organization_id: Option<Uuid>,
+    job_type: &str,
+    key: &str,
+    status: &str,
+    created_at: chrono::DateTime<Utc>,
+    recent: bool,
+) {
+    let payload = json!({"fixture": key});
+    let request = JobEnqueueIntent::new(JobType::new(job_type), &payload, key);
+    let request = match organization_id {
+        Some(id) => request.with_organization_id(id),
+        None => request,
+    };
+    let intent = record_job_enqueue_intent(pool, &request)
+        .await
+        .expect("intent metrics fixture or read succeeds");
+    sqlx::query("UPDATE job_enqueue_intents SET created_at = $2 WHERE id = $1")
+        .bind(intent.intent_id)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("intent metrics fixture or read succeeds");
+    if status == "FRESH" {
+        return;
+    }
+    if status == "PROMOTED" {
+        let job = enqueue_job(
+            pool,
+            &JobEnqueue {
+                job_type: JobType::new(job_type),
+                organization_id,
+                payload: &payload,
+                idempotency_key: Some(key),
+                priority: None,
+                max_attempts: None,
+                timeout_seconds: None,
+                next_run_at: None,
+                stage: None,
+            },
+        )
+        .await
+        .expect("intent metrics fixture or read succeeds");
+        sqlx::query("UPDATE job_enqueue_intents SET status = 'PROMOTED', promotion_attempts = 99, last_attempted_at = now(), promoted_at = now() - make_interval(hours => $3), promoted_job_id = $2 WHERE id = $1")
+            .bind(intent.intent_id).bind(job).bind(if recent { 1 } else { 25 }).execute(pool).await.expect("intent metrics fixture or read succeeds");
+    } else {
+        sqlx::query("UPDATE job_enqueue_intents SET status = $2, promotion_attempts = $3, last_attempted_at = now(), last_error_code = 'fixture', last_error_message = 'fixture', conflicted_at = CASE WHEN $2 = 'CONFLICTED' THEN now() - make_interval(hours => $4) END WHERE id = $1")
+            .bind(intent.intent_id).bind(status).bind(if status == "PENDING" { 3 } else { 99 }).bind(if recent { 1 } else { 25 }).execute(pool).await.expect("intent metrics fixture or read succeeds");
+    }
+}
+
+#[tokio::test]
+async fn exact_intent_metrics_scope_every_population_and_preserve_windows_and_pages() {
+    let (pool, database) = setup_ephemeral_pool("exact_intent_metrics", 4).await;
+    record_postgres_server_version(&pool, "exact intent metrics").await;
+    register_test_job_definition(&pool, JOB_TYPE).await;
+    let tenants = [Uuid::now_v7(), Uuid::now_v7()];
+    let job_types = [
+        "jobs.test.metrics.a",
+        "jobs.test.metrics.b",
+        "jobs.test.metrics.c",
+    ];
+    let old_type = "jobs.test.metrics.old";
+    let base = Utc::now() - ChronoDuration::days(3);
+    let base = chrono::DateTime::from_timestamp_micros(base.timestamp_micros())
+        .expect("current timestamp fits microsecond precision");
+    seed_metric_populations(&pool, tenants, job_types, old_type, base).await;
+    for (scope, pending, retries, conflicts, promoted, oldest) in [
+        (
+            JobReadScope::Global,
+            2,
+            1,
+            2,
+            3,
+            Some(base - ChronoDuration::hours(1)),
+        ),
+        (
+            JobReadScope::Organization(tenants[0]),
+            3,
+            2,
+            3,
+            4,
+            Some(base - ChronoDuration::hours(2)),
+        ),
+        (
+            JobReadScope::Organization(tenants[1]),
+            5,
+            4,
+            5,
+            6,
+            Some(base - ChronoDuration::hours(4)),
+        ),
+        (
+            JobReadScope::Admin,
+            10,
+            7,
+            10,
+            13,
+            Some(base - ChronoDuration::hours(4)),
+        ),
+        (JobReadScope::Organization(Uuid::now_v7()), 0, 0, 0, 0, None),
+    ] {
+        let filter = JobEnqueueIntentReadMetricsFilter::new(scope, 10, 0)
+            .with_job_type(JobType::new(job_types[0]));
+        let rows = get_job_enqueue_intent_metrics_with_scope(&pool, &filter)
+            .await
+            .expect("intent metrics fixture or read succeeds");
+        assert_eq!(rows.len(), usize::from(pending > 0));
+        if let Some(row) = rows.first() {
+            assert_eq!(
+                (
+                    row.pending_count,
+                    row.retrying_count,
+                    row.max_promotion_attempts,
+                    row.conflicted_24h,
+                    row.promoted_24h,
+                    row.oldest_pending_at
+                ),
+                (pending, retries, 3, conflicts, promoted, oldest)
+            );
+        }
+        let all = get_job_enqueue_intent_metrics_with_scope(
+            &pool,
+            &JobEnqueueIntentReadMetricsFilter::new(scope, 10, 0),
+        )
+        .await
+        .expect("intent metrics fixture or read succeeds");
+        if pending > 0 {
+            assert_eq!(
+                all.iter()
+                    .map(|row| row.job_type.as_str())
+                    .collect::<Vec<_>>(),
+                job_types
+            );
+            let terminal = &all[1];
+            assert_eq!(
+                (
+                    terminal.pending_count,
+                    terminal.retrying_count,
+                    terminal.max_promotion_attempts,
+                    terminal.oldest_pending_at
+                ),
+                (0, 0, 0, None)
+            );
+            assert_eq!(
+                terminal.promoted_24h,
+                if scope == JobReadScope::Admin { 3 } else { 1 }
+            );
+            assert_eq!(terminal.conflicted_24h, 0);
+        } else {
+            assert!(all.is_empty());
+        }
+        assert_metric_page(&pool, scope, &all).await;
+        for nonmatch in [old_type, "jobs.test.metrics", "jobs.test.metrics.%"] {
+            assert!(
+                get_job_enqueue_intent_metrics_with_scope(
+                    &pool,
+                    &JobEnqueueIntentReadMetricsFilter::new(scope, 10, 0)
+                        .with_job_type(JobType::new(nonmatch))
+                )
+                .await
+                .expect("intent metrics fixture or read succeeds")
+                .is_empty()
+            );
+        }
+        for (limit, offset) in [(0, 0), (-1, 0), (1001, 0), (1, -1)] {
+            assert!(
+                get_job_enqueue_intent_metrics_with_scope(
+                    &pool,
+                    &JobEnqueueIntentReadMetricsFilter::new(scope, limit, offset)
+                )
+                .await
+                .is_err()
+            );
+        }
+        let legacy = match scope {
+            JobReadScope::Global => continue,
+            JobReadScope::Organization(id) => {
+                JobEnqueueIntentMetricsFilter::new(10, 0).with_organization_id(id)
+            }
+            JobReadScope::Admin => JobEnqueueIntentMetricsFilter::new(10, 0),
+        };
+        assert_eq!(
+            get_job_enqueue_intent_metrics(&pool, &legacy)
+                .await
+                .expect("intent metrics fixture or read succeeds"),
+            all
+        );
+    }
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+async fn seed_metric_populations(
+    pool: &sqlx::PgPool,
+    tenants: [Uuid; 2],
+    job_types: [&str; 3],
+    old_type: &str,
+    base: chrono::DateTime<Utc>,
+) {
+    for job_type in job_types.into_iter().chain([old_type]) {
+        register_test_job_definition(pool, job_type).await;
+    }
+    for (organization_id, count) in [(None, 1), (Some(tenants[0]), 2), (Some(tenants[1]), 4)] {
+        let oldest = base - ChronoDuration::hours(i64::from(count));
+        for (status, total) in [
+            ("PENDING", count),
+            ("CONFLICTED", count + 1),
+            ("PROMOTED", count + 2),
+        ] {
+            for index in 0..total {
+                seed_metric_intent(
+                    pool,
+                    organization_id,
+                    job_types[0],
+                    &format!("{status}-{index}"),
+                    status,
+                    if status == "PENDING" {
+                        oldest + ChronoDuration::minutes(i64::from(index))
+                    } else {
+                        base - ChronoDuration::days(30)
+                    },
+                    true,
+                )
+                .await;
+            }
+        }
+        seed_metric_intent(
+            pool,
+            organization_id,
+            job_types[0],
+            "fresh",
+            "FRESH",
+            base,
+            true,
+        )
+        .await;
+        for status in ["CONFLICTED", "PROMOTED"] {
+            // Ancient terminal creation/attempt counts must not pollute pending age or retries.
+            seed_metric_intent(
+                pool,
+                organization_id,
+                job_types[0],
+                &format!("old-{status}"),
+                status,
+                base - ChronoDuration::days(30),
+                false,
+            )
+            .await;
+            seed_metric_intent(
+                pool,
+                organization_id,
+                old_type,
+                &format!("only-old-{status}"),
+                status,
+                base,
+                false,
+            )
+            .await;
+        }
+        seed_metric_intent(
+            pool,
+            organization_id,
+            job_types[1],
+            "terminal-only",
+            "PROMOTED",
+            base,
+            true,
+        )
+        .await;
+        seed_metric_intent(
+            pool,
+            organization_id,
+            job_types[2],
+            "pending-only",
+            "FRESH",
+            base,
+            true,
+        )
+        .await;
+    }
+}
+
+async fn assert_metric_page(
+    pool: &sqlx::PgPool,
+    scope: JobReadScope,
+    all: &[JobEnqueueIntentMetricsRecord],
+) {
+    let page = get_job_enqueue_intent_metrics_with_scope(
+        pool,
+        &JobEnqueueIntentReadMetricsFilter::new(scope, 1, 1),
+    )
+    .await
+    .expect("intent metrics fixture or read succeeds");
+    assert_eq!(
+        page,
+        all.iter().skip(1).take(1).cloned().collect::<Vec<_>>()
+    );
+    assert!(
+        get_job_enqueue_intent_metrics_with_scope(
+            pool,
+            &JobEnqueueIntentReadMetricsFilter::new(scope, 1, 3)
+        )
+        .await
+        .expect("intent metrics fixture or read succeeds")
+        .is_empty()
+    );
 }

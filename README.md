@@ -1142,12 +1142,33 @@ trusted all-tenant surface. The legacy nullable read helpers remain available:
 their `None` scope retains the historical admin wildcard. These helpers use the
 same workflow-type substring filtering as the TUI.
 
-Use `get_job_continuation_metrics` for continuation canaries and runaway-loop
-alerts. Each `JobContinuationMetricsRecord` reports the prior 24 hours' successful
+Use `get_job_metrics_with_scope` and `get_job_continuation_metrics_with_scope`
+with `JobReadScope::{Global, Organization, Admin}` for queue counters and
+continuation canaries. Registered job types remain visible with zero counts
+when the selected scope has no matching rows. Job duration metrics retain the
+average of per-scope percentiles when aggregating scopes. Each
+`JobContinuationMetricsRecord` reports the prior 24 hours' successful
 continuations, the number of pending/leased jobs whose current run was created
 by continuation, and the highest current run number among those active jobs.
-Passing no organization filter aggregates all scopes; it does not mean exact
-global scope.
+
+Use `get_job_enqueue_intent_metrics_with_scope` with
+`JobEnqueueIntentReadMetricsFilter::new(scope, limit, offset)` for intent metrics.
+Its optional `with_job_type` filter is exact. Backlog, retries, and oldest age
+include pending intents only; promoted and conflicted counts cover the last
+24 hours. Types with only older terminal history are omitted. Results are
+ordered by job type, with limits of 1–1000 and nonnegative offsets.
+All three legacy metric APIs retain `None` (or no organization filter) as
+all scopes and `Some(id)` as exactly that tenant.
+
+For payload reads, use `get_job_payload_by_idempotency_key_with_scope` or
+`get_latest_job_payload_for_run_with_scope` with `JobScope::Global` or
+`JobScope::Organization(id)`. Keys and JSON `run_id` values may repeat across
+scopes, so these single-result lookups have no admin wildcard. The latest
+lookup orders by `created_at DESC, id DESC`. Both return `None` for an absent
+match; nil UUIDs are ordinary UUID values, not global/admin sentinels. Their
+legacy counterparts still require a tenant UUID. These APIs and the new intent
+filter are exported through both `jobs` and `prelude`. Applications must
+authorize every selected read scope, including exact payload scopes.
 
 Use `JobReadScope::Global` for jobs and intents with no organization,
 `JobReadScope::Organization(id)` for one tenant, and `JobReadScope::Admin`

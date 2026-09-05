@@ -3,13 +3,26 @@ use sqlx::types::Uuid;
 use crate::{DbPool, Error, Result};
 
 use super::super::row_decode::parse_job_type_name;
-use super::super::types::{JobContinuationMetricsRecord, JobMetricsRecord};
+use super::super::types::{JobContinuationMetricsRecord, JobMetricsRecord, JobReadScope};
 
+/// Legacy read: `None` aggregates all scopes; `Some(id)` selects one tenant.
+/// Prefer [`get_job_metrics_with_scope`] for explicit visibility.
 pub async fn get_job_metrics(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     job_type: Option<&str>,
 ) -> Result<Vec<JobMetricsRecord>> {
+    get_job_metrics_with_scope(pool, JobReadScope::from_legacy(organization_id), job_type).await
+}
+
+/// Returns metrics for exactly the selected visibility, including zero-count definitions.
+/// Applications must authorize the selected [`JobReadScope`].
+pub async fn get_job_metrics_with_scope(
+    pool: &DbPool,
+    scope: JobReadScope,
+    job_type: Option<&str>,
+) -> Result<Vec<JobMetricsRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     let rows = sqlx::query!(
         "SELECT
             jd.job_type AS \"job_type!\",
@@ -27,12 +40,13 @@ pub async fn get_job_metrics(
          FROM job_definitions jd
          LEFT JOIN job_metrics_rollup jmr
            ON jmr.job_type = jd.job_type
-          AND ($1::uuid IS NULL OR jmr.organization_id = $1)
+          AND ($3::boolean OR (jmr.organization_id = $1 OR ($1::uuid IS NULL AND jmr.organization_id IS NULL)))
          WHERE ($2::text IS NULL OR jd.job_type = $2)
          GROUP BY jd.job_type
          ORDER BY jd.job_type ASC",
         organization_id,
         job_type,
+        is_admin,
     )
     .fetch_all(pool)
     .await
@@ -59,11 +73,29 @@ pub async fn get_job_metrics(
 }
 
 /// Returns continuation-specific canary and runaway-loop signals by job type.
+/// Legacy read: `None` aggregates all scopes; `Some(id)` selects one tenant.
+/// Prefer [`get_job_continuation_metrics_with_scope`] for explicit visibility.
 pub async fn get_job_continuation_metrics(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     job_type: Option<&str>,
 ) -> Result<Vec<JobContinuationMetricsRecord>> {
+    get_job_continuation_metrics_with_scope(
+        pool,
+        JobReadScope::from_legacy(organization_id),
+        job_type,
+    )
+    .await
+}
+
+/// Returns metrics for exactly the selected visibility, including zero-count definitions.
+/// Applications must authorize the selected [`JobReadScope`].
+pub async fn get_job_continuation_metrics_with_scope(
+    pool: &DbPool,
+    scope: JobReadScope,
+    job_type: Option<&str>,
+) -> Result<Vec<JobContinuationMetricsRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     let rows = sqlx::query!(
         "SELECT
             jd.job_type AS \"job_type!\",
@@ -73,12 +105,13 @@ pub async fn get_job_continuation_metrics(
          FROM job_definitions jd
          LEFT JOIN job_continuation_metrics_rollup jcmr
            ON jcmr.job_type = jd.job_type
-          AND ($1::uuid IS NULL OR jcmr.organization_id = $1)
+          AND ($3::boolean OR (jcmr.organization_id = $1 OR ($1::uuid IS NULL AND jcmr.organization_id IS NULL)))
          WHERE ($2::text IS NULL OR jd.job_type = $2)
          GROUP BY jd.job_type
          ORDER BY jd.job_type ASC",
         organization_id,
         job_type,
+        is_admin,
     )
     .fetch_all(pool)
     .await

@@ -1131,3 +1131,71 @@ fn payload_kind(payload: &Value) -> &str {
         .and_then(Value::as_str)
         .unwrap_or("unknown")
 }
+
+#[tokio::test]
+async fn packaged_prelude_exports_explicit_metric_and_payload_scopes() {
+    use runledger_postgres::prelude::{
+        JobEnqueueIntentReadMetricsFilter, JobReadScope, JobScope,
+        get_job_continuation_metrics_with_scope, get_job_enqueue_intent_metrics_with_scope,
+        get_job_metrics_with_scope, get_job_payload_by_idempotency_key_with_scope,
+        get_latest_job_payload_for_run_with_scope,
+    };
+    let (pool, database) = setup_unmigrated_ephemeral_pool("consumer_explicit_scopes", 2).await;
+    runledger_postgres::migrate_after_idempotency_cutover(&pool)
+        .await
+        .expect("packaged explicit scope API succeeds");
+    let tenant = Uuid::now_v7();
+    for scope in [
+        JobReadScope::Global,
+        JobReadScope::Organization(tenant),
+        JobReadScope::Admin,
+    ] {
+        assert!(
+            get_job_metrics_with_scope(&pool, scope, Some(SMOKE_JOB_TYPE))
+                .await
+                .expect("packaged explicit scope API succeeds")
+                .is_empty()
+        );
+        assert!(
+            get_job_continuation_metrics_with_scope(&pool, scope, Some(SMOKE_JOB_TYPE))
+                .await
+                .expect("packaged explicit scope API succeeds")
+                .is_empty()
+        );
+        assert!(
+            get_job_enqueue_intent_metrics_with_scope(
+                &pool,
+                &JobEnqueueIntentReadMetricsFilter::new(scope, 10, 0)
+                    .with_job_type(JobType::new(SMOKE_JOB_TYPE))
+            )
+            .await
+            .expect("packaged explicit scope API succeeds")
+            .is_empty()
+        );
+    }
+    for scope in [JobScope::Global, JobScope::Organization(tenant)] {
+        assert_eq!(
+            get_job_payload_by_idempotency_key_with_scope(
+                &pool,
+                scope,
+                JobType::new(SMOKE_JOB_TYPE),
+                "missing"
+            )
+            .await
+            .expect("packaged explicit scope API succeeds"),
+            None
+        );
+        assert_eq!(
+            get_latest_job_payload_for_run_with_scope(
+                &pool,
+                scope,
+                JobType::new(SMOKE_JOB_TYPE),
+                Uuid::nil()
+            )
+            .await
+            .expect("packaged explicit scope API succeeds"),
+            None
+        );
+    }
+    teardown_ephemeral_pool(pool, database).await;
+}

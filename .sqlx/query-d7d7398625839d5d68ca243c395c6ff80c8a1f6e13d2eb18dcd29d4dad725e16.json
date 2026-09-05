@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, payload\n         FROM job_queue\n         WHERE organization_id = $1\n           AND job_type = $2\n           AND idempotency_key = $3\n         LIMIT 1",
+  "query": "SELECT id, payload\n         FROM job_queue\n         WHERE (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL))\n           AND job_type = $2\n           AND idempotency_key = $3\n         LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -26,5 +26,5 @@
       false
     ]
   },
-  "hash": "76c178ef26a5e63480d6f03da8016bc623846f7f78de717025ebbd40c1b848e0"
+  "hash": "d7d7398625839d5d68ca243c395c6ff80c8a1f6e13d2eb18dcd29d4dad725e16"
 }

@@ -26,7 +26,8 @@ use super::super::types::{
     JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentDisposition,
     JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentMetricsRecord,
     JobEnqueueIntentOutcome, JobEnqueueIntentOutcomeState, JobEnqueueIntentPromotionReport,
-    JobEnqueueIntentReadListFilter, JobEnqueueIntentRecord, JobEnqueueIntentStatus, JobReadScope,
+    JobEnqueueIntentReadListFilter, JobEnqueueIntentReadMetricsFilter, JobEnqueueIntentRecord,
+    JobEnqueueIntentStatus, JobReadScope,
 };
 use super::enqueue::{
     IntentEnqueueResolution, JOB_ENQUEUE_REQUEST_VERSION, canonical_job_enqueue_request_v1,
@@ -631,6 +632,9 @@ pub async fn list_job_enqueue_intents_with_scope(
 
 /// Returns durable intent backlog and promotion signals grouped by job type.
 ///
+/// Legacy scope: no organization filter aggregates all scopes; an organization
+/// selects only that tenant. Prefer [`get_job_enqueue_intent_metrics_with_scope`].
+///
 /// Each lifecycle population is aggregated behind its own selective predicate.
 /// `pending_count`, `retrying_count`, `max_promotion_attempts`, and
 /// `oldest_pending_at` describe only intents that are currently pending;
@@ -645,6 +649,26 @@ pub async fn get_job_enqueue_intent_metrics(
     pool: &DbPool,
     filter: &JobEnqueueIntentMetricsFilter<'_>,
 ) -> Result<Vec<JobEnqueueIntentMetricsRecord>> {
+    get_job_enqueue_intent_metrics_with_scope(
+        pool,
+        &JobEnqueueIntentReadMetricsFilter {
+            scope: JobReadScope::from_legacy(filter.organization_id),
+            job_type: filter.job_type,
+            limit: filter.limit,
+            offset: filter.offset,
+        },
+    )
+    .await
+}
+
+/// Returns intent metrics for the selected visibility with the same lifecycle,
+/// ordering, and pagination semantics as [`get_job_enqueue_intent_metrics`].
+/// Applications must authorize the selected [`JobReadScope`].
+pub async fn get_job_enqueue_intent_metrics_with_scope(
+    pool: &DbPool,
+    filter: &JobEnqueueIntentReadMetricsFilter<'_>,
+) -> Result<Vec<JobEnqueueIntentMetricsRecord>> {
+    let (is_admin, organization_id) = filter.scope.visibility_predicate();
     validate_pagination(filter.limit, filter.offset)?;
     let job_type = filter.job_type.map(|job_type| job_type.as_str());
     let rows = sqlx::query_as!(
@@ -660,7 +684,7 @@ pub async fn get_job_enqueue_intent_metrics(
                 MIN(created_at) AS oldest_pending_at
             FROM job_enqueue_intents
             WHERE status = 'PENDING'
-              AND ($1::uuid IS NULL OR organization_id = $1)
+              AND ($5::boolean OR (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL)))
               AND ($2::text IS NULL OR job_type = $2)
             GROUP BY job_type
 
@@ -677,7 +701,7 @@ pub async fn get_job_enqueue_intent_metrics(
             FROM job_enqueue_intents
             WHERE status = 'CONFLICTED'
               AND conflicted_at >= now() - interval '24 hours'
-              AND ($1::uuid IS NULL OR organization_id = $1)
+              AND ($5::boolean OR (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL)))
               AND ($2::text IS NULL OR job_type = $2)
             GROUP BY job_type
 
@@ -694,7 +718,7 @@ pub async fn get_job_enqueue_intent_metrics(
             FROM job_enqueue_intents
             WHERE status = 'PROMOTED'
               AND promoted_at >= now() - interval '24 hours'
-              AND ($1::uuid IS NULL OR organization_id = $1)
+              AND ($5::boolean OR (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL)))
               AND ($2::text IS NULL OR job_type = $2)
             GROUP BY job_type
          )
@@ -711,10 +735,11 @@ pub async fn get_job_enqueue_intent_metrics(
          ORDER BY job_type
          LIMIT $3
          OFFSET $4",
-        filter.organization_id,
+        organization_id,
         job_type,
         filter.limit,
         filter.offset,
+        is_admin,
     )
     .fetch_all(pool)
     .await

@@ -143,3 +143,61 @@ Ordinary-progress throughput was not benchmarked; no throughput claim is made.
 There are no migration, serialization, authorization, unsafe, dependency, or
 runtime-dispatch changes. Exact-global metrics and payload APIs are tracked
 separately rather than redefining legacy optional arguments.
+
+## Exact-scope metrics and payload follow-up (`60g`)
+
+`runledger-runledger-simplification-audit-60g` adds
+`get_job_metrics_with_scope`, `get_job_continuation_metrics_with_scope`, and
+`get_job_enqueue_intent_metrics_with_scope`. Metrics use `JobReadScope`; intent
+metrics take `JobEnqueueIntentReadMetricsFilter`. Legacy calls still interpret
+`None` or an omitted organization filter as Admin, and a tenant UUID as that
+exact tenant. Scope predicates remain in the job/continuation LEFT JOINs so
+registered definitions survive with zero counts. Existing sums, maxima, and
+averages of per-scope duration percentiles are unchanged.
+
+`get_job_payload_by_idempotency_key_with_scope` and
+`get_latest_job_payload_for_run_with_scope` use the existing exact `JobScope`.
+Neither accepts an Admin wildcard. Legacy payload helpers remain tenant-only,
+and absent matches still return `None`. Latest payload ordering remains
+`created_at DESC, id DESC`. All new APIs and the filter are exported through
+`jobs` and `prelude`; README and API docs describe application authorization
+responsibility and compatibility.
+
+Acceptance evidence:
+
+- `tests/legacy_read_contracts.rs`: global, two tenants, Admin, and an unrelated
+  tenant; all nine job counters and both duration metrics; zero-count
+  definitions; exact type filtering and ordering; legacy equivalence. Payload
+  fixtures repeat keys and JSON run IDs across global and two tenants, with
+  multiple rows per scope, timestamp ties, a larger but older UUID, a newer
+  unrelated row, wrong-type rows, missing matches, and absent/present nil UUIDs.
+- `tests/job_continuation.rs`: distinct continuation populations in global and
+  two tenants, Admin sums/maxima, an unrelated tenant, empty definitions, and
+  equivalence with legacy aggregation and tenant calls. The existing plan
+  diagnostic now uses the new scope predicate.
+- `tests/job_enqueue_intents.rs`: all three lifecycle populations in each
+  scope; pending-only age/retry/max-attempt values despite older creation times
+  and larger attempt counts on terminal rows; recent and expired terminal
+  windows; omission of old-only history; terminal-only groups; exact type
+  filters, stable pagination, invalid pagination, and legacy equivalence.
+- `smoke/external-consumer/tests/smoke.rs`: imports and calls all five APIs and
+  the new filter from the prelude in a consumer built from packaged crates.
+
+Final validation used an isolated `postgres:18` container reporting
+`18.6 (Debian 18.6-1.pgdg13+2)` (`server_version_num=180006`) with all 16 current
+migrations applied. `RUNLEDGER_TEST_ADMIN_DATABASE_URL` selected this server for
+regressions and the packaged consumer.
+
+- `cargo test -p runledger-postgres --test legacy_read_contracts --test
+  job_continuation --test job_enqueue_intents`: 46 passed, one existing slow
+  promotion transaction-timeout test explicitly ignored.
+- `scripts/lint.sh`: passed workspace/all-target/all-feature Clippy, consumer
+  Clippy, formatting, README and migration-info checks, and warning-free rustdoc.
+- `scripts/refresh-sqlx-cache.sh`: passed against the PostgreSQL 18.6 server with
+  current migrations, including offline workspace compilation and package
+  metadata checks. The three SQLx directories contain identical sets of 148
+  query records; five query records were replaced in each directory.
+- `scripts/run-external-consumer-smoke.sh`: both packaged-consumer tests passed.
+
+This follow-up adds read APIs only; it does not change migrations, persisted
+formats, mutation permissions, or the legacy callers' scope meanings.

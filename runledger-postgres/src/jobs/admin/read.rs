@@ -7,7 +7,7 @@ use super::super::errors::{validate_page_limit, validate_pagination};
 use super::super::row_decode::{parse_job_event_type, parse_job_stage};
 use super::super::rows::JobQueueRow;
 use super::super::types::{
-    JobEventRecord, JobListFilter, JobQueueRecord, JobReadListFilter, JobReadScope,
+    JobEventRecord, JobListFilter, JobQueueRecord, JobReadListFilter, JobReadScope, JobScope,
 };
 
 /// Lists jobs with legacy visibility: a None organization matches every scope.
@@ -148,16 +148,35 @@ pub async fn get_job_by_id_with_scope(
     row.map(JobQueueRow::into_record).transpose()
 }
 
+/// Tenant-only compatibility wrapper for [`get_job_payload_by_idempotency_key_with_scope`].
 pub async fn get_job_payload_by_idempotency_key(
     pool: &DbPool,
     organization_id: Uuid,
     job_type: JobType<'_>,
     idempotency_key: &str,
 ) -> Result<Option<(Uuid, serde_json::Value)>> {
+    get_job_payload_by_idempotency_key_with_scope(
+        pool,
+        JobScope::Organization(organization_id),
+        job_type,
+        idempotency_key,
+    )
+    .await
+}
+
+/// Looks up a payload in one exact global or tenant scope, returning `None` if absent.
+/// Applications must authorize the selected [`JobScope`]; keys are not unique across scopes.
+pub async fn get_job_payload_by_idempotency_key_with_scope(
+    pool: &DbPool,
+    scope: JobScope,
+    job_type: JobType<'_>,
+    idempotency_key: &str,
+) -> Result<Option<(Uuid, serde_json::Value)>> {
+    let organization_id = scope.organization_id();
     let row = sqlx::query!(
         "SELECT id, payload
          FROM job_queue
-         WHERE organization_id = $1
+         WHERE (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL))
            AND job_type = $2
            AND idempotency_key = $3
          LIMIT 1",
@@ -174,17 +193,37 @@ pub async fn get_job_payload_by_idempotency_key(
     Ok(row.map(|row| (row.id, row.payload)))
 }
 
+/// Tenant-only compatibility wrapper for [`get_latest_job_payload_for_run_with_scope`].
 pub async fn get_latest_job_payload_for_run(
     pool: &DbPool,
     organization_id: Uuid,
     job_type: JobType<'_>,
     run_id: Uuid,
 ) -> Result<Option<(Uuid, serde_json::Value)>> {
+    get_latest_job_payload_for_run_with_scope(
+        pool,
+        JobScope::Organization(organization_id),
+        job_type,
+        run_id,
+    )
+    .await
+}
+
+/// Looks up a payload in one exact global or tenant scope, returning `None` if absent.
+/// Applications must authorize the selected [`JobScope`]; keys are not unique across scopes.
+/// Selects the newest `created_at`, breaking timestamp ties by descending job ID.
+pub async fn get_latest_job_payload_for_run_with_scope(
+    pool: &DbPool,
+    scope: JobScope,
+    job_type: JobType<'_>,
+    run_id: Uuid,
+) -> Result<Option<(Uuid, serde_json::Value)>> {
+    let organization_id = scope.organization_id();
     let run_id_text = run_id.to_string();
     let row = sqlx::query!(
         "SELECT id, payload
          FROM job_queue
-         WHERE organization_id = $1
+         WHERE (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL))
            AND job_type = $2
            AND payload->>'run_id' = $3
          ORDER BY created_at DESC, id DESC

@@ -9,7 +9,7 @@ use sqlx::types::Uuid;
 /// allowing operators to inspect a large page when needed.
 pub const JOB_LIST_PAGE_LIMIT_MAX: i64 = 1_000;
 
-/// Explicit visibility for job, event, log, and enqueue-intent reads.
+/// Explicit visibility for job, event, log, enqueue-intent, and metrics reads.
 ///
 /// This selects rows, not authorization. Applications must authorize the chosen
 /// scope, especially `Admin`, before calling a read API. It grants no mutation
