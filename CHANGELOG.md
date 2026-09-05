@@ -4,6 +4,19 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add `get_job_metrics_with_scope`, `get_job_continuation_metrics_with_scope`,
+  and `get_job_enqueue_intent_metrics_with_scope` for exact global, exact tenant,
+  or administrative visibility through `JobReadScope`. Intent metrics use
+  `JobEnqueueIntentReadMetricsFilter`; job and continuation metrics preserve
+  zero-count registered definitions.
+- Add `get_job_payload_by_idempotency_key_with_scope` and
+  `get_latest_job_payload_for_run_with_scope` using `JobScope::{Global,
+  Organization}`. Payload lookups have no Admin wildcard because keys and JSON
+  run IDs can repeat across scopes. All five APIs and the new intent filter
+  are available through `jobs` and `prelude`.
+
 ### Changed
 
 - Breaking: `JobCompletion` now keeps progress and checkpoint state private.
@@ -18,6 +31,11 @@ All notable changes to this workspace are documented here.
   for handler continuation delays.
 
 ### Upgrade notes
+
+- Scope APIs are additive and require no new database migration. Legacy metric
+  calls still aggregate all scopes when the organization filter is absent;
+  legacy payload lookups remain tenant-only. Use the `_with_scope` variants for
+  exact-global reads and authorize the chosen scope in application code.
 
 - Update completion builders to handle the `Result` returned by `.progress`
   and replace direct `progress_done`, `progress_total`, or `checkpoint` field

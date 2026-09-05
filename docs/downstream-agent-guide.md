@@ -124,7 +124,11 @@ retain coverage for every job type that can receive intents. Database
 failures retry indefinitely so a prolonged outage cannot silently discard work;
 alert on oldest pending age, pending-only `retrying_count`, and pending-only
 `max_promotion_attempts` from
-`get_job_enqueue_intent_metrics`, then repair the database policy. Conflicted
+`get_job_enqueue_intent_metrics_with_scope` with
+`JobEnqueueIntentReadMetricsFilter::new(scope, limit, offset)`, then repair the
+database policy. Choose an authorized `JobReadScope::Global`,
+`Organization(id)`, or `Admin`; the legacy `JobEnqueueIntentMetricsFilter`
+without an organization still aggregates all scopes. Conflicted
 intents remain immutable evidence; safe replacement work requires a deliberately
 new application idempotency key. Metrics aggregate pending, conflicted, and
 recently promoted populations through separate selective predicates;
@@ -145,7 +149,7 @@ Deploy this capability in order:
 3. Switch application writers to `record_job_enqueue_intent_tx` only after the
    retention prerequisite is complete.
 4. Alert on oldest pending age and `conflicted_24h` from
-   `get_job_enqueue_intent_metrics`.
+   `get_job_enqueue_intent_metrics_with_scope` for the authorized read scope.
 
 Queue retention must remove promoted-intent links first. In the same
 transaction that deletes selected queue rows, call
@@ -412,9 +416,24 @@ The packaged external-consumer
 compile-checked reference for returning a checkpointed continuation, reading it
 on the next run, and completing typed recovery.
 
+### Exact payload reads
+
+Use `get_job_payload_by_idempotency_key_with_scope` or
+`get_latest_job_payload_for_run_with_scope` with an authorized `JobScope::Global`
+or `JobScope::Organization(id)`. These lookups select one exact scope and job
+type; they have no Admin wildcard. The latest-run helper matches the JSON
+`run_id` and orders by `created_at DESC, id DESC`. Both return
+`Option<(Uuid, Value)>`, including `None` for an absent match. Nil UUIDs are
+ordinary tenant/run values, not sentinels. Legacy helpers keep their tenant UUID
+signatures. The scoped metrics and payload APIs and the intent filter are
+exported through both `runledger_postgres::jobs` and `prelude`.
+
 ### Continuation operational queries
 
-Use `get_job_continuation_metrics` for service dashboards and alerts. It returns
+Use `get_job_continuation_metrics_with_scope` for service dashboards and alerts.
+Select `JobReadScope::Global` for global jobs, `Organization(id)` for one tenant,
+or `Admin` for aggregation across all scopes. Authorize that selection in the
+application. The function returns
 one `JobContinuationMetricsRecord` per job type:
 
 - `continued_24h` is the number of committed handler continuations in the last
@@ -425,8 +444,10 @@ one `JobContinuationMetricsRecord` per job type:
   continuation-created runs. A later admin recovery is deliberately excluded,
   so this is a focused runaway-depth signal rather than lifetime ancestry.
 
-The optional organization argument follows the admin-metrics convention:
-`None` aggregates every scope rather than selecting only global jobs. Choose
+The legacy `get_job_continuation_metrics` optional organization argument retains
+its meaning: `None` aggregates every scope, and `Some(id)` selects one tenant.
+`get_job_metrics_with_scope` uses the same explicit scopes for queue metrics;
+both APIs retain registered definitions with zero counts in empty scopes. Choose
 alert thresholds from the expected slice size and schedule; a fixed global
 threshold is usually misleading.
 

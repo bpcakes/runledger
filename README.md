@@ -437,7 +437,9 @@ deferred, so an operator can restore consistency and retry without replacing
 the durable request. Runledger keeps
 conflicted intents as immutable evidence; if replacement work is safe, the
 application must submit it deliberately under a new idempotency key.
-Query `get_job_enqueue_intent_metrics` to alert on oldest pending age,
+Query `get_job_enqueue_intent_metrics_with_scope` with a
+`JobEnqueueIntentReadMetricsFilter` selecting the authorized `JobReadScope` to
+alert on oldest pending age,
 `retrying_count`, `max_promotion_attempts`, and increases in `conflicted_24h`.
 The retry count and maximum attempt count describe only intents that are still
 pending, so resolved promoted or conflicted history cannot inflate the active
@@ -786,7 +788,8 @@ condition; use a nonzero delay for polling-style work and do not return
 `continue_now()` forever. Production handlers should version their checkpoint
 shape, make every slice idempotent, enforce a logical deadline or run limit,
 canary activation by job type or tenant, and alert on continuation rate and run
-depth. `get_job_continuation_metrics` returns a
+depth. `get_job_continuation_metrics_with_scope` takes an explicit
+`JobReadScope` and returns a
 `JobContinuationMetricsRecord` per job type with `continued_24h`,
 `active_continued_count`, and `max_active_run_number` for canary and runaway-loop
 alerts. Active counts include only jobs whose current run was created by a
@@ -1183,15 +1186,6 @@ Use `get_job_by_id_with_scope`, `list_jobs_with_scope` (with
 `JobEnqueueIntentReadListFilter::new(scope, limit, offset)`).
 The legacy APIs retain their existing behavior: an absent organization filter
 means unrestricted visibility, including organization-owned rows.
-
-Scope coverage currently ends at those inspection APIs. `get_job_metrics`,
-`get_job_continuation_metrics`, and `get_job_enqueue_intent_metrics` still use
-their legacy optional organization filters: `None` aggregates global and tenant
-rows, and cannot express global-only metrics. The payload helpers
-`get_job_payload_by_idempotency_key` and `get_latest_job_payload_for_run` require
-an exact organization UUID; they provide neither global nor admin lookup.
-Idempotency keys are unique within a scope, so an unrestricted single-result
-lookup would be ambiguous when tenants reuse a key.
 
 Durable event consumers should call `list_job_events_with_scope` and prefer
 `JobEventRecord::decoded_payload()` for Runledger-authored continuation,

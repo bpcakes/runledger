@@ -8,20 +8,24 @@ remain compatible. Generated SQLx metadata is refreshed from current migrations.
 
 ## Open-question research
 
+The findings below describe the original review scope. The metrics and payload
+coverage gaps were subsequently resolved by the
+[60g follow-up](#exact-scope-metrics-and-payload-follow-up-60g).
+
 - API-004 in `api-audit-2026-09-05.md` explicitly proposed scoped job, event,
   log, and intent inspection. The implemented surface matches that list.
   `get_job_metrics` and `get_job_continuation_metrics` apply optional organization
   filtering to rollup views; `get_job_enqueue_intent_metrics` filters three
   lifecycle populations. For all three, `None` intentionally aggregates global
   and tenant rows. The TUI dashboard uses that legacy aggregation contract.
-  Exact-global metrics are an additive coverage gap, not a reason to change
+  Exact-global metrics were an additive coverage gap; the follow-up preserves
   existing callers' results.
-- Both payload helpers require a tenant UUID. The queue has separate tenant
+- Both legacy payload helpers require a tenant UUID. The queue has separate tenant
   and global idempotency indexes; the same key can legally exist in multiple
   scopes. An admin wildcard on a single-result key lookup would be ambiguous.
-  A future global lookup needs an exact scope contract without an admin variant.
+  The new scoped lookups use an exact scope contract without an admin variant.
   The latest-payload helper's `run_id` is a JSON field, not a globally unique
-  queue identity. Legacy signatures and behavior stay intact. Follow-up:
+  queue identity. Legacy signatures and behavior stay intact. Completed follow-up:
   `runledger-runledger-simplification-audit-60g`.
 - The producer outcome helper was exported through `jobs` but omitted from
   `prelude` when introduced in `b724223`. There is no documented exclusion,
@@ -141,8 +145,8 @@ It reuses existing timeout bounds and holds the lock through validation/write,
 which prevents concurrent partial updates from validating against stale state.
 Ordinary-progress throughput was not benchmarked; no throughput claim is made.
 There are no migration, serialization, authorization, unsafe, dependency, or
-runtime-dispatch changes. Exact-global metrics and payload APIs are tracked
-separately rather than redefining legacy optional arguments.
+runtime-dispatch changes. Exact-global metrics and payload APIs were implemented
+in the follow-up below while preserving legacy optional arguments.
 
 ## Exact-scope metrics and payload follow-up (`60g`)
 
