@@ -56,6 +56,32 @@ impl std::fmt::Display for JobProgressValidationError {
 
 impl std::error::Error for JobProgressValidationError {}
 
+/// Validates the supplied progress values against the durable nonnegative and
+/// done-at-most-total invariant. Missing values impose no constraint here.
+/// Persistence implementations must first merge partial updates with the locked
+/// durable row, then validate the effective values with this same function.
+pub const fn validate_job_progress(
+    progress_done: Option<i64>,
+    progress_total: Option<i64>,
+) -> Result<(), JobProgressValidationError> {
+    if let Some(actual) = progress_done
+        && actual < 0
+    {
+        return Err(JobProgressValidationError::NegativeDone { actual });
+    }
+    if let Some(actual) = progress_total
+        && actual < 0
+    {
+        return Err(JobProgressValidationError::NegativeTotal { actual });
+    }
+    if let (Some(done), Some(total)) = (progress_done, progress_total)
+        && done > total
+    {
+        return Err(JobProgressValidationError::DoneExceedsTotal { done, total });
+    }
+    Ok(())
+}
+
 /// Validated progress reported by a job handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct JobProgress {
@@ -66,14 +92,9 @@ struct JobProgress {
 impl JobProgress {
     /// Creates progress after validating its durable invariants.
     const fn new(done: i64, total: i64) -> Result<Self, JobProgressValidationError> {
-        if done < 0 {
-            return Err(JobProgressValidationError::NegativeDone { actual: done });
-        }
-        if total < 0 {
-            return Err(JobProgressValidationError::NegativeTotal { actual: total });
-        }
-        if done > total {
-            return Err(JobProgressValidationError::DoneExceedsTotal { done, total });
+        match validate_job_progress(Some(done), Some(total)) {
+            Ok(()) => {}
+            Err(error) => return Err(error),
         }
         Ok(Self { done, total })
     }

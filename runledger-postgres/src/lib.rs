@@ -399,7 +399,7 @@ pub mod prelude {
         delete_promoted_job_enqueue_intents_before,
         delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, enqueue_job_tx,
         enqueue_job_with_execution_resource, enqueue_job_with_execution_resource_tx,
-        enqueue_job_with_outcome_tx, enqueue_or_get_active_workflow,
+        enqueue_job_with_outcome, enqueue_job_with_outcome_tx, enqueue_or_get_active_workflow,
         enqueue_or_get_active_workflow_tx, enqueue_workflow_run, enqueue_workflow_run_handle,
         enqueue_workflow_run_tx, get_job_by_id, get_job_by_id_with_scope,
         get_job_continuation_metrics, get_job_definition_by_type, get_job_enqueue_intent_by_id,

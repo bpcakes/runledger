@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            id,\n            job_type,\n            organization_id,\n            payload,\n            priority,\n            max_attempts,\n            timeout_seconds,\n            next_run_at,\n            idempotency_key,\n            stage,\n            enqueue_request_version,\n            execution_resource_key,\n            promotion_attempts,\n            next_promotion_at,\n            last_attempted_at,\n            status,\n            promoted_job_id,\n            promoted_at,\n            conflicted_at,\n            last_error_code,\n            last_error_message,\n            created_at,\n            updated_at\n         FROM job_enqueue_intents\n         WHERE ($6::bool OR organization_id IS NOT DISTINCT FROM $1::uuid)\n           AND ($2::text IS NULL OR status = $2)\n           AND ($3::text IS NULL OR job_type ILIKE '%' || $3 || '%')\n         ORDER BY created_at DESC, id DESC\n         LIMIT $4\n         OFFSET $5",
+  "query": "SELECT\n            id,\n            job_type,\n            organization_id,\n            payload,\n            priority,\n            max_attempts,\n            timeout_seconds,\n            next_run_at,\n            idempotency_key,\n            stage,\n            enqueue_request_version,\n            execution_resource_key,\n            promotion_attempts,\n            next_promotion_at,\n            last_attempted_at,\n            status,\n            promoted_job_id,\n            promoted_at,\n            conflicted_at,\n            last_error_code,\n            last_error_message,\n            created_at,\n            updated_at\n         FROM job_enqueue_intents\n         WHERE $1::uuid IS NULL AND ($2::text IS NULL OR status = $2)\n           AND ($3::text IS NULL OR job_type ILIKE '%' || $3 || '%')\n         ORDER BY created_at DESC, id DESC\n         LIMIT $4\n         OFFSET $5",
   "describe": {
     "columns": [
       {
@@ -125,8 +125,7 @@
         "Text",
         "Text",
         "Int8",
-        "Int8",
-        "Bool"
+        "Int8"
       ]
     },
     "nullable": [
@@ -155,5 +154,5 @@
       false
     ]
   },
-  "hash": "3f6de45bde4bd43bcf6174c4500d0bd9113d954515d4e38e14015f4d99de0937"
+  "hash": "290943331ceeb17e0d9e726a3bb5a2afb203b501dccdf13baa3b2390800515f7"
 }

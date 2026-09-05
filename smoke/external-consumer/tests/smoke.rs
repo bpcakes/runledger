@@ -19,7 +19,8 @@ use runledger_postgres::jobs::{
     get_job_enqueue_intent_by_id, record_job_enqueue_intent_tx, upsert_job_definition_tx,
 };
 use runledger_postgres::prelude::{
-    DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord, list_job_events,
+    DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord,
+    enqueue_job_with_outcome, list_job_events,
 };
 use runledger_runtime::Supervisor;
 use runledger_runtime::catalog::JobCatalog;
@@ -208,19 +209,13 @@ async fn assert_keyed_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid 
         idempotency_key: Some("external-smoke-recovery"),
         stage: None,
     };
-    let mut recovery_enqueue_tx = pool.begin().await.expect("begin recovery enqueue");
-    let inserted_recovery =
-        enqueue_job_with_outcome_tx(&mut recovery_enqueue_tx, &recovery_request)
-            .await
-            .expect("insert recovery job with outcome");
+    let inserted_recovery = enqueue_job_with_outcome(pool, &recovery_request)
+        .await
+        .expect("insert recovery job with outcome");
     assert_eq!(
         inserted_recovery.disposition,
         JobEnqueueDisposition::Inserted
     );
-    recovery_enqueue_tx
-        .commit()
-        .await
-        .expect("commit recovery enqueue");
     cancel_job_with_scope(
         pool,
         JobCancellationScope::Global,

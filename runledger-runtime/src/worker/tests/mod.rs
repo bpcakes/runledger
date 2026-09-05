@@ -55,6 +55,7 @@ mod observer_tasks;
 mod prestart_recovery;
 mod support;
 mod terminal_hooks;
+mod typed_execution;
 
 struct CountingHandler {
     runs: Arc<AtomicUsize>,

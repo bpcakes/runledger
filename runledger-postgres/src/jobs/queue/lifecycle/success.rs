@@ -14,8 +14,7 @@ use super::super::super::types::{
 use super::super::super::workflows::on_terminal;
 use super::common::{
     COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT, coalesce_completion_progress,
-    finish_successful_attempt_tx, lock_live_completion_lease_tx,
-    rollback_and_return_lease_mismatch,
+    finish_successful_attempt_tx, lock_live_job_lease_tx, rollback_and_return_lease_mismatch,
 };
 
 struct SuccessProgressUpdate<'a> {
@@ -178,7 +177,7 @@ pub async fn complete_job_success_with_outcome_for_lease(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     let Some(lookup) =
-        lock_live_completion_lease_tx(&mut tx, identity, "lock job success progress").await?
+        lock_live_job_lease_tx(&mut tx, identity, "lock job success progress").await?
     else {
         return rollback_and_return_lease_mismatch(tx, COMPLETE_SUCCESS_LEASE_MISMATCH_CONTEXT)
             .await;

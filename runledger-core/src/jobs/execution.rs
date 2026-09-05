@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use super::{JobContext, JobFailure, JobProgressValidationError};
+use super::{JobContext, JobFailure, JobProgressValidationError, validate_job_progress};
 
 /// An atomic ordinary-progress/checkpoint update. Omitted fields retain their
 /// durable values. This cannot change job stage, lease identity, or final output.
@@ -160,7 +160,8 @@ impl<'a> JobExecution<'a> {
         &self,
         update: JobExecutionUpdate<'_>,
     ) -> Result<(), JobExecutionError> {
-        validate_progress(update).map_err(JobExecutionError::InvalidProgress)?;
+        validate_job_progress(update.progress_done, update.progress_total)
+            .map_err(JobExecutionError::InvalidProgress)?;
         self.services.persist_progress(update).await
     }
 
@@ -177,23 +178,4 @@ impl<'a> JobExecution<'a> {
         })
         .await
     }
-}
-
-fn validate_progress(update: JobExecutionUpdate<'_>) -> Result<(), JobProgressValidationError> {
-    if let Some(actual) = update.progress_done
-        && actual < 0
-    {
-        return Err(JobProgressValidationError::NegativeDone { actual });
-    }
-    if let Some(actual) = update.progress_total
-        && actual < 0
-    {
-        return Err(JobProgressValidationError::NegativeTotal { actual });
-    }
-    if let (Some(done), Some(total)) = (update.progress_done, update.progress_total)
-        && done > total
-    {
-        return Err(JobProgressValidationError::DoneExceedsTotal { done, total });
-    }
-    Ok(())
 }

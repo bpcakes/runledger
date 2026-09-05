@@ -31,13 +31,14 @@ pub async fn list_jobs_with_scope(
     pool: &DbPool,
     filter: &JobReadListFilter<'_>,
 ) -> Result<Vec<JobQueueRecord>> {
-    let (is_admin, organization_id) = filter.scope.visibility_predicate();
     validate_pagination(filter.limit, filter.offset)?;
 
     let status_filter = filter.status.map(JobStatus::as_db_value);
 
-    let rows = sqlx::query_as!(
+    let rows = super::super::scoped_list::scoped_list!(
         JobQueueRow,
+        pool,
+        filter.scope,
         "SELECT
             id,
             job_type,
@@ -68,21 +69,17 @@ pub async fn list_jobs_with_scope(
             created_at,
             updated_at
          FROM job_queue
-         WHERE ($6::bool OR organization_id IS NOT DISTINCT FROM $1::uuid)
-           AND ($2::text::job_status IS NULL OR status = $2::text::job_status)
+         WHERE",
+        "AND ($2::text::job_status IS NULL OR status = $2::text::job_status)
            AND ($3::text IS NULL OR job_type ILIKE '%' || $3 || '%')
          ORDER BY created_at DESC, id DESC
          LIMIT $4
          OFFSET $5",
-        organization_id,
         status_filter,
         filter.job_type,
         filter.limit,
         filter.offset,
-        is_admin,
     )
-    .fetch_all(pool)
-    .await
     .map_err(|error| Error::from_query_sqlx_with_context("list jobs", error))?;
 
     rows.into_iter().map(JobQueueRow::into_record).collect()

@@ -1062,6 +1062,15 @@ Use `get_job_by_id_with_scope`, `list_jobs_with_scope` (with
 The legacy APIs retain their existing behavior: an absent organization filter
 means unrestricted visibility, including organization-owned rows.
 
+Scope coverage currently ends at those inspection APIs. `get_job_metrics`,
+`get_job_continuation_metrics`, and `get_job_enqueue_intent_metrics` still use
+their legacy optional organization filters: `None` aggregates global and tenant
+rows, and cannot express global-only metrics. The payload helpers
+`get_job_payload_by_idempotency_key` and `get_latest_job_payload_for_run` require
+an exact organization UUID; they provide neither global nor admin lookup.
+Idempotency keys are unique within a scope, so an unrestricted single-result
+lookup would be ambiguous when tenants reuse a key.
+
 Durable event consumers should call `list_job_events_with_scope` and prefer
 `JobEventRecord::decoded_payload()` for Runledger-authored continuation,
 administrative requeue, and successful-replay payloads. The decoded enums are

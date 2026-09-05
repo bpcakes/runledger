@@ -2,9 +2,9 @@
 use runledger_core::jobs::{JobContract, JobDefinitionSettings, JobSpec, JobSpecs, JobType};
 use runledger_postgres::jobs::{
     JobDefinitionCatalogSyncMode, JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition,
-    enqueue_job_with_outcome, sync_catalog_job_definitions_exact_tx,
-    sync_catalog_job_definitions_tx,
+    sync_catalog_job_definitions_exact_tx, sync_catalog_job_definitions_tx,
 };
+use runledger_postgres::prelude::enqueue_job_with_outcome;
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

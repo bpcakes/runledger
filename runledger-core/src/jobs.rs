@@ -25,7 +25,7 @@ pub use identifiers::{
 };
 pub use runtime_types::{
     JobCompletion, JobCompletionDisposition, JobContext, JobDeadLetterInfo, JobDeadLetterReason,
-    JobFailure, JobProgressValidationError, JobRetryTiming,
+    JobFailure, JobProgressValidationError, JobRetryTiming, validate_job_progress,
 };
 pub use status::{
     JobEventType, JobFailureKind, JobStage, JobStatus, WorkflowRunStatus, WorkflowStepStatus,

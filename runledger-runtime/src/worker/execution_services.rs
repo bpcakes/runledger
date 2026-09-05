@@ -2,10 +2,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use runledger_core::jobs::{JobExecutionError, JobExecutionServices, JobExecutionUpdate};
-use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{
     JobLeaseIdentity, JobOrdinaryProgressUpdate, update_job_ordinary_progress_for_lease,
 };
+use runledger_postgres::{DbPool, Error};
 use tokio::sync::Notify;
 use tokio::time::{Duration, Instant, timeout_at};
 
@@ -82,6 +82,11 @@ impl JobExecutionServices for LeaseExecutionServices<'_> {
                 Err(JobExecutionError::LeaseLost)
             }
             Ok(Err(error)) => {
+                if let Error::QueryError(query_error) = &error
+                    && let Some(progress_error) = query_error.progress_validation_error()
+                {
+                    return Err(JobExecutionError::InvalidProgress(progress_error));
+                }
                 tracing::warn!(
                     job_id = %self.identity.job_id,
                     run_number = self.identity.run_number,
