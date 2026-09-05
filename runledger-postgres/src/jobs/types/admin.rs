@@ -9,6 +9,49 @@ use sqlx::types::Uuid;
 /// allowing operators to inspect a large page when needed.
 pub const JOB_LIST_PAGE_LIMIT_MAX: i64 = 1_000;
 
+/// Explicit visibility for job, event, log, enqueue-intent, and metrics reads.
+///
+/// This selects rows, not authorization. Applications must authorize the chosen
+/// scope, especially `Admin`, before calling a read API. It grants no mutation
+/// or cancellation permission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobReadScope {
+    /// Match only rows whose job or intent has a NULL organization.
+    Global,
+    /// Match only rows belonging to this exact organization.
+    Organization(Uuid),
+    /// Match both global and organization-owned rows.
+    Admin,
+}
+
+impl JobReadScope {
+    pub(in crate::jobs) const fn from_legacy(organization_id: Option<Uuid>) -> Self {
+        match organization_id {
+            Some(organization_id) => Self::Organization(organization_id),
+            None => Self::Admin,
+        }
+    }
+
+    pub(in crate::jobs) const fn visibility_predicate(self) -> (bool, Option<Uuid>) {
+        match self {
+            Self::Global => (false, None),
+            Self::Organization(organization_id) => (false, Some(organization_id)),
+            Self::Admin => (true, None),
+        }
+    }
+}
+
+/// Explicit-scope input for listing jobs.
+#[derive(Clone, Debug)]
+pub struct JobReadListFilter<'a> {
+    pub scope: JobReadScope,
+    pub status: Option<JobStatus>,
+    /// Case-insensitive job-type substring; SQL ILIKE wildcards retain their meaning.
+    pub job_type: Option<&'a str>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 /// Authorization scope for canceling a job.
 ///
 /// Unlike legacy cancellation APIs that use `None` as an admin wildcard, this
@@ -79,6 +122,7 @@ pub struct JobLogRecordInput {
 
 #[derive(Clone, Debug)]
 pub struct JobListFilter<'a> {
+    /// Legacy visibility: None matches all organizations and global jobs.
     pub organization_id: Option<Uuid>,
     pub status: Option<JobStatus>,
     /// Admin list query input used for `ILIKE` substring matching, not a canonical persisted

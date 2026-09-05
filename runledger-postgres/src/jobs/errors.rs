@@ -122,31 +122,19 @@ pub(super) fn validate_completion_progress(
     progress_done: Option<i64>,
     progress_total: Option<i64>,
 ) -> Result<()> {
-    if let Some(progress_done) = progress_done
-        && progress_done < 0
-    {
-        return Err(invalid_completion_progress_error(format!(
-            "progress_done must be greater than or equal to zero, got {progress_done}"
-        )));
-    }
-
-    if let Some(progress_total) = progress_total
-        && progress_total < 0
-    {
-        return Err(invalid_completion_progress_error(format!(
-            "progress_total must be greater than or equal to zero, got {progress_total}"
-        )));
-    }
-
-    if let (Some(progress_done), Some(progress_total)) = (progress_done, progress_total)
-        && progress_done > progress_total
-    {
-        return Err(invalid_completion_progress_error(format!(
-            "progress_done must not exceed progress_total, got progress_done={progress_done}, progress_total={progress_total}"
-        )));
-    }
-
-    Ok(())
+    runledger_core::jobs::validate_job_progress(progress_done, progress_total).map_err(|error| {
+        use runledger_core::jobs::JobProgressValidationError;
+        let detail = match error {
+            JobProgressValidationError::NegativeDone { actual } => {
+                format!("progress_done must be greater than or equal to zero, got {actual}")
+            }
+            JobProgressValidationError::NegativeTotal { actual } => {
+                format!("progress_total must be greater than or equal to zero, got {actual}")
+            }
+            _ => error.to_string(),
+        };
+        invalid_completion_progress_error(detail)
+    })
 }
 
 pub(super) fn invalid_continuation_delay_error(detail: String) -> Error {

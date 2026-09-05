@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job_queue\n         SET stage = COALESCE($5, stage),\n             progress_done = COALESCE($6, progress_done),\n             progress_total = COALESCE($7, progress_total),\n             checkpoint = COALESCE($8::jsonb, checkpoint),\n             updated_at = now()\n         WHERE id = $1\n           AND run_number = $2\n           AND attempt = $3\n           AND worker_id = $4\n           AND status = 'LEASED'\n           AND lease_expires_at > clock_timestamp()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6ab23505891fce132239b6cd02ab480be547302313aeb4be81f2c14bb20c0569"
+}

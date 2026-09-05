@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            jd.job_type AS \"job_type!\",\n            COALESCE(SUM(jcmr.continued_24h), 0)::bigint AS \"continued_24h!\",\n            COALESCE(SUM(jcmr.active_continued_count), 0)::bigint AS \"active_continued_count!\",\n            COALESCE(MAX(jcmr.max_active_run_number), 0)::int4 AS \"max_active_run_number!\"\n         FROM job_definitions jd\n         LEFT JOIN job_continuation_metrics_rollup jcmr\n           ON jcmr.job_type = jd.job_type\n          AND ($3::boolean OR (jcmr.organization_id = $1 OR ($1::uuid IS NULL AND jcmr.organization_id IS NULL)))\n         WHERE ($2::text IS NULL OR jd.job_type = $2)\n         GROUP BY jd.job_type\n         ORDER BY jd.job_type ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "continued_24h!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "active_continued_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "max_active_run_number!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "d3fdc5ee034100f4b1d0feca12b9e0cca4d8a97b4d1700f4f1cd4b2380e6ba43"
+}

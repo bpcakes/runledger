@@ -19,7 +19,8 @@ use runledger_postgres::jobs::{
     get_job_enqueue_intent_by_id, record_job_enqueue_intent_tx, upsert_job_definition_tx,
 };
 use runledger_postgres::prelude::{
-    DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord, list_job_events,
+    DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord,
+    enqueue_job_with_outcome, list_job_events,
 };
 use runledger_runtime::Supervisor;
 use runledger_runtime::catalog::JobCatalog;
@@ -30,6 +31,9 @@ use serde_json::{Value, json};
 use sqlx::types::Uuid;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{Instant, sleep, timeout};
+
+#[path = "support/migration_identity.rs"]
+mod migration_identity;
 
 const SMOKE_JOB_TYPE: &str = "jobs.external.smoke";
 const SMOKE_POOL_MAX_CONNECTIONS: u32 = 12;
@@ -208,19 +212,13 @@ async fn assert_keyed_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid 
         idempotency_key: Some("external-smoke-recovery"),
         stage: None,
     };
-    let mut recovery_enqueue_tx = pool.begin().await.expect("begin recovery enqueue");
-    let inserted_recovery =
-        enqueue_job_with_outcome_tx(&mut recovery_enqueue_tx, &recovery_request)
-            .await
-            .expect("insert recovery job with outcome");
+    let inserted_recovery = enqueue_job_with_outcome(pool, &recovery_request)
+        .await
+        .expect("insert recovery job with outcome");
     assert_eq!(
         inserted_recovery.disposition,
         JobEnqueueDisposition::Inserted
     );
-    recovery_enqueue_tx
-        .commit()
-        .await
-        .expect("commit recovery enqueue");
     cancel_job_with_scope(
         pool,
         JobCancellationScope::Global,
@@ -653,9 +651,7 @@ impl SmokeHandler {
         if slice < max_runs {
             Ok(JobCompletion::continue_after(Duration::from_millis(25))
                 .progress(slice, max_runs)
-                .map_err(|error| {
-                    JobFailure::terminal("smoke.invalid_progress", error.to_string())
-                })?
+                .map_err(|error| JobFailure::terminal("smoke.invalid_progress", error.to_string()))?
                 .checkpoint(json!({
                     "version": CONTINUATION_CHECKPOINT_VERSION,
                     "cursor": slice,
@@ -663,9 +659,7 @@ impl SmokeHandler {
         } else {
             JobCompletion::success()
                 .progress(slice, max_runs)
-                .map_err(|error| {
-                    JobFailure::terminal("smoke.invalid_progress", error.to_string())
-                })
+                .map_err(|error| JobFailure::terminal("smoke.invalid_progress", error.to_string()))
         }
     }
 }
@@ -1139,4 +1133,72 @@ fn payload_kind(payload: &Value) -> &str {
         .get("kind")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
+}
+
+#[tokio::test]
+async fn packaged_prelude_exports_explicit_metric_and_payload_scopes() {
+    use runledger_postgres::prelude::{
+        JobEnqueueIntentReadMetricsFilter, JobReadScope, JobScope,
+        get_job_continuation_metrics_with_scope, get_job_enqueue_intent_metrics_with_scope,
+        get_job_metrics_with_scope, get_job_payload_by_idempotency_key_with_scope,
+        get_latest_job_payload_for_run_with_scope,
+    };
+    let (pool, database) = setup_unmigrated_ephemeral_pool("consumer_explicit_scopes", 2).await;
+    runledger_postgres::migrate_after_idempotency_cutover(&pool)
+        .await
+        .expect("packaged explicit scope API succeeds");
+    let tenant = Uuid::now_v7();
+    for scope in [
+        JobReadScope::Global,
+        JobReadScope::Organization(tenant),
+        JobReadScope::Admin,
+    ] {
+        assert!(
+            get_job_metrics_with_scope(&pool, scope, Some(SMOKE_JOB_TYPE))
+                .await
+                .expect("packaged explicit scope API succeeds")
+                .is_empty()
+        );
+        assert!(
+            get_job_continuation_metrics_with_scope(&pool, scope, Some(SMOKE_JOB_TYPE))
+                .await
+                .expect("packaged explicit scope API succeeds")
+                .is_empty()
+        );
+        assert!(
+            get_job_enqueue_intent_metrics_with_scope(
+                &pool,
+                &JobEnqueueIntentReadMetricsFilter::new(scope, 10, 0)
+                    .with_job_type(JobType::new(SMOKE_JOB_TYPE))
+            )
+            .await
+            .expect("packaged explicit scope API succeeds")
+            .is_empty()
+        );
+    }
+    for scope in [JobScope::Global, JobScope::Organization(tenant)] {
+        assert_eq!(
+            get_job_payload_by_idempotency_key_with_scope(
+                &pool,
+                scope,
+                JobType::new(SMOKE_JOB_TYPE),
+                "missing"
+            )
+            .await
+            .expect("packaged explicit scope API succeeds"),
+            None
+        );
+        assert_eq!(
+            get_latest_job_payload_for_run_with_scope(
+                &pool,
+                scope,
+                JobType::new(SMOKE_JOB_TYPE),
+                Uuid::nil()
+            )
+            .await
+            .expect("packaged explicit scope API succeeds"),
+            None
+        );
+    }
+    teardown_ephemeral_pool(pool, database).await;
 }

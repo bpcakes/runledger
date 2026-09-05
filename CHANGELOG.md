@@ -4,8 +4,50 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add explicit `JobReadScope` selection to job, event, log, and enqueue-intent
+  reads through `get_job_by_id_with_scope`, `list_jobs_with_scope`,
+  `list_job_events_with_scope`, `list_job_logs_with_scope`,
+  `get_job_enqueue_intent_by_id_with_scope`, and
+  `list_job_enqueue_intents_with_scope`, with `JobReadListFilter` and
+  `JobEnqueueIntentReadListFilter` for scoped lists.
+- Add `get_job_metrics_with_scope`, `get_job_continuation_metrics_with_scope`,
+  and `get_job_enqueue_intent_metrics_with_scope` for exact global, exact tenant,
+  or administrative visibility through `JobReadScope`. Intent metrics use
+  `JobEnqueueIntentReadMetricsFilter`; job and continuation metrics preserve
+  zero-count registered definitions.
+- Add `get_job_payload_by_idempotency_key_with_scope` and
+  `get_latest_job_payload_for_run_with_scope` using `JobScope::{Global,
+  Organization}`. Payload lookups have no Admin wildcard because keys and JSON
+  run IDs can repeat across scopes. These metric and payload APIs and the new
+  intent metrics filter are available through `jobs` and `prelude`.
+- Add shared `JobSpec`, `JobSpecs`, and `JobDefinitionSettings` for producers
+  and workers, plus `JobCatalog::from_specs` and `try_handler_for_spec` to
+  validate handler bindings against those definitions.
+- Add `JobContract` and owned `JobSubmission` requests for typed producers,
+  and opt-in `TypedJobHandler` adapters for decoding payloads at dispatch.
+  Malformed payloads produce a terminal failure by default.
+- Add `JobExecution` and `JobExecutionServices` for handler deadline and budget
+  access, checkpoint reads, and lease-fenced progress and checkpoint writes.
+  Handlers can opt in through `execute_with_services` or `JobExecutionHandler`.
+- Add `enqueue_job_with_outcome` to manage its own transaction and return
+  whether a job was inserted or an existing strict-idempotent request matched.
+- Add `list_job_summaries` with `JobSummaryFilter`, `JobSummaryCursor`, and
+  `JobSummary` for keyset pagination without JSON bodies, plus
+  `get_job_statuses_with_scope` and `JobStatusRecord` for scoped bulk status reads.
+- Add `migration_bundle`, `MigrationBundle`, and `RUNLEDGER_POSTGRES_VERSION`
+  to inspect embedded migrations and compose application migration fingerprints.
+  Live database compatibility still requires the existing startup checks.
+- Add `WorkflowDagBuilder::step` and `external` for fluent step insertion, plus
+  `active_key` and `clear_active_key` for workflow active-key configuration.
+
 ### Changed
 
+- Keep exact-scope payload lookups indexable under generic prepared plans.
+- Remove redundant timeout-policy statements and duplicate locking from progress
+  writes while preserving locked-state validation, lease fencing, and audit
+  atomicity. Document and test strict handler deadline precedence.
 - Breaking: `JobCompletion` now keeps progress and checkpoint state private.
   `.progress(done, total)` validates non-negative values and `done <= total`,
   returning `Result`; use the new accessors when inspecting a completion.
@@ -18,6 +60,18 @@ All notable changes to this workspace are documented here.
   for handler continuation delays.
 
 ### Upgrade notes
+
+- Apply `202609050001_job_summary_pagination` before starting the new runtime.
+  Its two ordinary index builds block queue writes until the SQLx migration
+  commits; schedule an appropriate deployment window. The migration is recorded
+  in `_sqlx_migrations`, but is deliberately outside the custom
+  `runledger_migration_history` compatibility fence. The current startup guard
+  still requires it. See the README migration guide for rollout details.
+
+- Scope APIs are additive and require no new database migration. Legacy metric
+  calls still aggregate all scopes when the organization filter is absent;
+  legacy payload lookups remain tenant-only. Use the `_with_scope` variants for
+  exact-global reads and authorize the chosen scope in application code.
 
 - Update completion builders to handle the `Result` returned by `.progress`
   and replace direct `progress_done`, `progress_total`, or `checkpoint` field

@@ -36,6 +36,7 @@ release_generated_path() {
 
   case "$path" in
     Cargo.toml | \
+      README.md | \
       Cargo.lock | \
       smoke/external-consumer/Cargo.lock | \
       .sqlx/* | \
@@ -224,6 +225,7 @@ cd "$ROOT_DIR"
 require_command cargo
 require_command curl
 require_command git
+require_command python3
 validate_version "$VERSION"
 require_clean_or_resumable_worktree "$VERSION"
 
@@ -240,6 +242,8 @@ for crate in "${WORKSPACE_DEPENDENCY_CRATES[@]}"; do
 done
 
 require_manifest_versions "$VERSION"
+
+python3 scripts/check-readme.py --write
 
 cargo update -w
 cargo update \

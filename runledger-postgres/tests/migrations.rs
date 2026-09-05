@@ -34,6 +34,7 @@ const JOB_ENQUEUE_INTENTS_MIGRATION_VERSION: i64 = 202608180001;
 const CONTINUATION_METRICS_CTE_MIGRATION_VERSION: i64 = 202608230001;
 const WORKFLOW_STEP_JOB_LINK_EXPAND_MIGRATION_VERSION: i64 = 202608240001;
 const WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION: i64 = 202608240002;
+const JOB_SUMMARY_PAGINATION_MIGRATION_VERSION: i64 = 202609050001;
 const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Adds replay lineage and a read-only metrics view without changing legacy writes.
     REPLAY_METRICS_MIGRATION_VERSION,
@@ -60,8 +61,46 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     // Keeps the legacy reciprocal column as a trigger-maintained projection so
     // old and new binaries can coexist before the fenced contract migration.
     WORKFLOW_STEP_JOB_LINK_EXPAND_MIGRATION_VERSION,
+    JOB_SUMMARY_PAGINATION_MIGRATION_VERSION, // Additive pagination indexes.
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
+
+#[tokio::test]
+async fn summary_indexes_are_required_by_startup_but_not_the_custom_compatibility_fence() {
+    let harness = TestHarness::fresh("summary_index_startup").await;
+    record_postgres_18_server_version(&harness.pool, "summary index startup guard").await;
+    apply_runledger_migrations_through(
+        &harness.pool,
+        WORKFLOW_STEP_JOB_LINK_CONTRACT_MIGRATION_VERSION,
+    )
+    .await;
+    let error = ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect_err("current startup must require the additive index migration");
+    assert!(
+        matches!(
+            error,
+            SchemaCompatibilityError::Incompatible(sqlx::migrate::MigrateError::VersionTooNew(
+                JOB_SUMMARY_PAGINATION_MIGRATION_VERSION,
+                _
+            ))
+        ),
+        "unexpected startup error: {error}"
+    );
+    apply_runledger_migration(&harness.pool, JOB_SUMMARY_PAGINATION_MIGRATION_VERSION).await;
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("startup accepts SQLx history without a custom fence entry");
+    let recorded: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runledger_migration_history WHERE version = $1)",
+    )
+    .bind(JOB_SUMMARY_PAGINATION_MIGRATION_VERSION)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("custom fence");
+    assert!(!recorded);
+    harness.teardown().await;
+}
 
 struct TestHarness {
     pool: PgPool,
@@ -933,6 +972,9 @@ async fn workflow_step_job_link_rollout_backfills_and_supports_mixed_writers() {
         .await;
 
     let workflow_run_id = seed_and_expand_workflow_job_links(&harness.pool).await;
+    // Apply later additive indexes while deliberately retaining expand-schema
+    // triggers and mixed writers; the contract migration remains unapplied.
+    apply_runledger_migration(&harness.pool, JOB_SUMMARY_PAGINATION_MIGRATION_VERSION).await;
     let new_job_id = assert_expand_mixed_writers(&harness.pool, workflow_run_id).await;
     assert_expand_trigger_guard_rejections(&harness.pool).await;
     assert_expand_trigger_modes(&harness.pool).await;

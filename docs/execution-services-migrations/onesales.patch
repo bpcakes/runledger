@@ -1,0 +1,966 @@
+diff --git a/crates/onesales-jobs/src/buyer_enrichment/account_handler_tests.rs b/crates/onesales-jobs/src/buyer_enrichment/account_handler_tests.rs
+index 25e1b5ac0..4f0c391e9 100644
+--- a/crates/onesales-jobs/src/buyer_enrichment/account_handler_tests.rs
++++ b/crates/onesales-jobs/src/buyer_enrichment/account_handler_tests.rs
+@@ -78,7 +78,10 @@ async fn account_handler_continues_across_slices_until_every_contact_is_complete
+         first.disposition(),
+         JobCompletionDisposition::ContinueAfter(Duration::ZERO)
+     );
+-    let checkpoint = first.checkpoint.expect("first slice checkpoint");
++    let checkpoint = first
++        .checkpoint_value()
++        .cloned()
++        .expect("first slice checkpoint");
+     assert_eq!(checkpoint["contactsProcessed"], 25);
+     assert_eq!(checkpoint["slicesCompleted"], 1);
+
+@@ -216,7 +219,10 @@ async fn account_handler_preserves_email_completion_when_profile_lookup_is_defer
+         first.disposition(),
+         JobCompletionDisposition::ContinueAfter(delay) if delay > Duration::ZERO
+     ));
+-    let checkpoint = first.checkpoint.expect("deferred run checkpoint");
++    let checkpoint = first
++        .checkpoint_value()
++        .cloned()
++        .expect("deferred run checkpoint");
+     assert!(checkpoint["afterContactId"].is_null());
+     assert_eq!(checkpoint["stats"]["email_found"], 1);
+     assert_eq!(checkpoint["stats"]["provider_attempted_candidates"], 1);
+diff --git a/crates/onesales-jobs/src/buyer_enrichment_tests.rs b/crates/onesales-jobs/src/buyer_enrichment_tests.rs
+index e54ef963f..91ee1e014 100644
+--- a/crates/onesales-jobs/src/buyer_enrichment_tests.rs
++++ b/crates/onesales-jobs/src/buyer_enrichment_tests.rs
+@@ -94,7 +94,10 @@ fn continuation_persists_cursor_and_more_than_the_old_500_contact_cap() {
+         completion.disposition(),
+         JobCompletionDisposition::ContinueAfter(std::time::Duration::ZERO)
+     );
+-    let persisted = completion.checkpoint.expect("continuation checkpoint");
++    let persisted = completion
++        .checkpoint_value()
++        .cloned()
++        .expect("continuation checkpoint");
+     assert_eq!(persisted["contactsProcessed"], 625);
+     assert_eq!(persisted["slicesCompleted"], 1);
+     assert_eq!(persisted["afterContactId"], after_contact_id.to_string());
+@@ -118,7 +121,7 @@ fn delayed_continuation_keeps_the_last_completed_cursor() {
+         JobCompletionDisposition::ContinueAfter(delay)
+     );
+     assert_eq!(
+-        completion.checkpoint.expect("checkpoint")["afterContactId"],
++        completion.checkpoint_value().cloned().expect("checkpoint")["afterContactId"],
+         after_contact_id.to_string()
+     );
+ }
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync.rs b/crates/onesales-jobs/src/crm_accounts_sync.rs
+index 42a3e21e7..c1e68834a 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync.rs
+@@ -1,5 +1,3 @@
+-use std::time::Instant;
+-
+ use chrono::{DateTime, Duration, Utc};
+ use onesales_core::crm_sync_contracts::{CrmSyncAccountsPayload, CrmSyncContactsPayload};
+ use onesales_db::crm::{
+@@ -11,7 +9,9 @@ use onesales_db::crm::{
+ };
+ use onesales_hubspot as hubspot_api;
+ use onesales_salesforce as salesforce_api;
+-use runledger_core::jobs::{JobContext, JobFailure, JobFailureKind, JobHandler};
++use runledger_core::jobs::{
++    JobContext, JobExecution, JobExecutionHandler, JobFailure, JobFailureKind,
++};
+ use runledger_postgres::jobs::{JobEnqueue, JobEnqueueDisposition};
+ use runledger_runtime::registry::JobRegistry;
+ use serde_json::Value;
+@@ -141,11 +141,9 @@ impl CrmSyncAccountsHandler {
+         context: &JobContext,
+         organization_id: Uuid,
+         connection: &mut SalesforceSyncConnectionRecord,
+-        handler_started_at: Instant,
++        execution: JobExecution<'_>,
+     ) -> Result<SyncJobOutcome, JobFailure> {
+-        let mut execution_state = self
+-            .load_sync_execution_state(context, organization_id, handler_started_at)
+-            .await?;
++        let mut execution_state = self.load_sync_execution_state(execution).await?;
+         execution_state.checkpoint.ensure_source_context(context);
+
+         info!(
+@@ -183,6 +181,7 @@ impl CrmSyncAccountsHandler {
+         let mut page_adapter = AccountPageSyncAdapter::new(
+             self,
+             context,
++            execution,
+             organization_id,
+             connection,
+             account_query_capabilities,
+@@ -788,7 +787,7 @@ pub fn register_crm_sync_accounts_handler(
+     pool: onesales_db::DbPool,
+     http_client: reqwest::Client,
+ ) {
+-    registry.register(CrmSyncAccountsHandler::new(pool, http_client));
++    registry.register(CrmSyncAccountsHandler::new(pool, http_client).into_job_handler());
+ }
+
+ fn account_payload_invalid_message(error: &serde_json::Error) -> String {
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/checkpoint.rs b/crates/onesales-jobs/src/crm_accounts_sync/checkpoint.rs
+index e526947f0..5378ce348 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/checkpoint.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/checkpoint.rs
+@@ -1,15 +1,13 @@
++use runledger_core::jobs::JobExecution;
+ use runledger_core::jobs::{JobContext, JobFailure};
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+-use std::time::Instant;
+ use uuid::Uuid;
+
+ use super::CrmSyncAccountsHandler;
+ use super::constants::{HUBSPOT_CHECKPOINT_VERSION, SALESFORCE_CHECKPOINT_VERSION};
+ use crate::crm_sync_common::{self, SyncExecutionState as SharedSyncExecutionState};
+
+-const ENTITY_LABEL: &str = "CRM account sync";
+-
+ #[derive(Clone, Debug, Deserialize, Serialize)]
+ pub(super) struct SalesforceSyncCheckpoint {
+     pub(super) version: u8,
+@@ -149,69 +147,79 @@ pub(super) type HubSpotSyncExecutionState = SharedSyncExecutionState<HubSpotSync
+ impl CrmSyncAccountsHandler {
+     pub(super) async fn load_sync_execution_state(
+         &self,
+-        context: &JobContext,
+-        organization_id: Uuid,
+-        handler_started_at: Instant,
++        execution: JobExecution<'_>,
+     ) -> Result<SyncExecutionState, JobFailure> {
+-        crm_sync_common::load_sync_execution_state(
+-            &self.pool,
+-            context,
+-            organization_id,
+-            ENTITY_LABEL,
+-            handler_started_at,
+-            parse_salesforce_sync_checkpoint,
+-            super::derive_max_pages_per_attempt,
+-        )
+-        .await
++        Ok(SharedSyncExecutionState {
++            checkpoint: parse_salesforce_sync_checkpoint(execution.checkpoint_value())?,
++            progress_mode: crm_sync_common::SyncProgressMode::RuntimeServices,
++            max_pages_per_attempt: Some(super::derive_max_pages_per_attempt(
++                remaining_timeout_seconds(execution),
++            )),
++            attempt_deadline: Some(execution.deadline()),
++        })
+     }
+
+     pub(super) async fn persist_sync_progress(
+         &self,
++        execution: JobExecution<'_>,
+         execution_state: &SyncExecutionState,
+     ) -> Result<(), JobFailure> {
+-        crm_sync_common::persist_sync_progress(
+-            &self.pool,
+-            execution_state,
++        persist_checkpoint(
++            execution,
++            &execution_state.checkpoint,
+             crm_sync_common::SALESFORCE_CHECKPOINT_INVALID_FAILURE_CODE,
+             "CRM account sync produced an invalid checkpoint payload.",
+-            ENTITY_LABEL,
+         )
+         .await
+     }
+
+     pub(super) async fn load_hubspot_sync_execution_state(
+         &self,
+-        context: &JobContext,
+-        organization_id: Uuid,
+-        handler_started_at: Instant,
++        execution: JobExecution<'_>,
+     ) -> Result<HubSpotSyncExecutionState, JobFailure> {
+-        crm_sync_common::load_sync_execution_state(
+-            &self.pool,
+-            context,
+-            organization_id,
+-            ENTITY_LABEL,
+-            handler_started_at,
+-            parse_hubspot_sync_checkpoint,
+-            super::derive_hubspot_max_pages_per_attempt,
+-        )
+-        .await
++        Ok(SharedSyncExecutionState {
++            checkpoint: parse_hubspot_sync_checkpoint(execution.checkpoint_value())?,
++            progress_mode: crm_sync_common::SyncProgressMode::RuntimeServices,
++            max_pages_per_attempt: Some(super::derive_hubspot_max_pages_per_attempt(
++                remaining_timeout_seconds(execution),
++            )),
++            attempt_deadline: Some(execution.deadline()),
++        })
+     }
+
+     pub(super) async fn persist_hubspot_sync_progress(
+         &self,
++        execution: JobExecution<'_>,
+         execution_state: &HubSpotSyncExecutionState,
+     ) -> Result<(), JobFailure> {
+-        crm_sync_common::persist_sync_progress(
+-            &self.pool,
+-            execution_state,
++        persist_checkpoint(
++            execution,
++            &execution_state.checkpoint,
+             crm_sync_common::SYNC_CHECKPOINT_INVALID_FAILURE_CODE,
+             "CRM account sync produced an invalid HubSpot checkpoint payload.",
+-            ENTITY_LABEL,
+         )
+         .await
+     }
+ }
+
++async fn persist_checkpoint(
++    execution: JobExecution<'_>,
++    checkpoint: &(impl Serialize + Sync + crm_sync_common::SyncCheckpoint),
++    invalid_code: &'static str,
++    invalid_message: &'static str,
++) -> Result<(), JobFailure> {
++    let value = serde_json::to_value(checkpoint)
++        .map_err(|_| JobFailure::terminal(invalid_code, invalid_message))?;
++    execution
++        .persist_progress(runledger_core::jobs::JobExecutionUpdate {
++            progress_done: Some(i64::try_from(checkpoint.records_processed()).unwrap_or(i64::MAX)),
++            progress_total: None,
++            checkpoint: Some(&value),
++        })
++        .await
++        .map_err(Into::into)
++}
++
+ pub(super) fn parse_salesforce_sync_checkpoint(
+     raw_checkpoint: Option<&Value>,
+ ) -> Result<SalesforceSyncCheckpoint, JobFailure> {
+@@ -252,3 +260,11 @@ pub(super) fn parse_hubspot_sync_checkpoint(
+     )?;
+     Ok(checkpoint)
+ }
++
++fn remaining_timeout_seconds(execution: JobExecution<'_>) -> i32 {
++    let remaining = execution.remaining_budget();
++    // Preserve page-quota rounding at startup; exact deadline guards still
++    // bound every provider page and all progress writes.
++    let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0);
++    i32::try_from(seconds).unwrap_or(i32::MAX)
++}
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/hubspot/sync.rs b/crates/onesales-jobs/src/crm_accounts_sync/hubspot/sync.rs
+index f211aec4c..78f92b966 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/hubspot/sync.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/hubspot/sync.rs
+@@ -1,7 +1,6 @@
+ use onesales_db::crm::HubSpotSyncConnectionRecord;
+ use onesales_hubspot as hubspot;
+-use runledger_core::jobs::{JobContext, JobFailure};
+-use std::time::Instant;
++use runledger_core::jobs::{JobContext, JobExecution, JobFailure};
+ use tracing::{info, warn};
+ use uuid::Uuid;
+
+@@ -19,7 +18,7 @@ impl CrmSyncAccountsHandler {
+         context: &JobContext,
+         organization_id: Uuid,
+         connection: &HubSpotSyncConnectionRecord,
+-        handler_started_at: Instant,
++        execution: JobExecution<'_>,
+         token_fingerprint: &str,
+     ) -> Result<SyncJobOutcome, JobFailure> {
+         ensure_hubspot_sync_scopes(connection.scope.as_deref())?;
+@@ -34,9 +33,7 @@ impl CrmSyncAccountsHandler {
+
+         self.ensure_hubspot_account_mapper_version().await?;
+
+-        let mut execution_state = self
+-            .load_hubspot_sync_execution_state(context, organization_id, handler_started_at)
+-            .await?;
++        let mut execution_state = self.load_hubspot_sync_execution_state(execution).await?;
+         execution_state.checkpoint.ensure_source_context(context);
+         let max_pages_per_attempt = execution_state.max_pages_per_attempt.unwrap_or(u32::MAX);
+         let mut pages_processed_this_attempt = 0_u32;
+@@ -55,7 +52,8 @@ impl CrmSyncAccountsHandler {
+                     return Ok(SyncJobOutcome::Completed);
+                 }
+                 if pages_processed_this_attempt >= max_pages_per_attempt {
+-                    self.persist_hubspot_sync_progress(&execution_state).await?;
++                    self.persist_hubspot_sync_progress(execution, &execution_state)
++                        .await?;
+                     return SyncJobOutcome::continue_with_checkpoint(
+                         &execution_state.checkpoint,
+                         crate::crm_sync_common::SYNC_CHECKPOINT_INVALID_FAILURE_CODE,
+@@ -68,7 +66,8 @@ impl CrmSyncAccountsHandler {
+                     constants::HUBSPOT_PAGE_CAP_PROCESSING_GUARD_SECONDS,
+                     constants::HUBSPOT_PAGE_CAP_FINALIZATION_GUARD_SECONDS,
+                 ) {
+-                    self.persist_hubspot_sync_progress(&execution_state).await?;
++                    self.persist_hubspot_sync_progress(execution, &execution_state)
++                        .await?;
+                     return SyncJobOutcome::continue_with_checkpoint(
+                         &execution_state.checkpoint,
+                         crate::crm_sync_common::SYNC_CHECKPOINT_INVALID_FAILURE_CODE,
+@@ -160,18 +159,21 @@ impl CrmSyncAccountsHandler {
+                 execution_state.checkpoint.after = next_after;
+
+                 if execution_state.checkpoint.after.is_some() {
+-                    self.persist_hubspot_sync_progress(&execution_state).await?;
++                    self.persist_hubspot_sync_progress(execution, &execution_state)
++                        .await?;
+                     continue;
+                 }
+
+                 if !execution_state.checkpoint.archived {
+                     execution_state.checkpoint.archived = true;
+-                    self.persist_hubspot_sync_progress(&execution_state).await?;
++                    self.persist_hubspot_sync_progress(execution, &execution_state)
++                        .await?;
+                     continue;
+                 }
+
+                 execution_state.checkpoint.phase = HubSpotSyncPhase::ContactEnqueuePending;
+-                self.persist_hubspot_sync_progress(&execution_state).await?;
++                self.persist_hubspot_sync_progress(execution, &execution_state)
++                    .await?;
+                 break;
+             }
+         }
+@@ -209,7 +211,8 @@ impl CrmSyncAccountsHandler {
+                 );
+             })?;
+             execution_state.checkpoint.phase = HubSpotSyncPhase::ContactEnqueueCompleted;
+-            self.persist_hubspot_sync_progress(&execution_state).await?;
++            self.persist_hubspot_sync_progress(execution, &execution_state)
++                .await?;
+         }
+
+         info!(
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/job_handler.rs b/crates/onesales-jobs/src/crm_accounts_sync/job_handler.rs
+index efe9f9dde..894a8cc05 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/job_handler.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/job_handler.rs
+@@ -2,17 +2,17 @@ use super::*;
+ use runledger_core::jobs::JobCompletion;
+
+ #[async_trait::async_trait]
+-impl JobHandler for CrmSyncAccountsHandler {
++impl JobExecutionHandler for CrmSyncAccountsHandler {
+     fn job_type(&self) -> runledger_core::jobs::JobType<'static> {
+         CRM_SYNC_ACCOUNTS_JOB_TYPE
+     }
+
+     async fn execute(
+         &self,
+-        context: JobContext,
++        execution: JobExecution<'_>,
+         payload: Value,
+     ) -> Result<JobCompletion, JobFailure> {
+-        let handler_started_at = Instant::now();
++        let context = execution.context().clone();
+         let organization_id = context.organization_id.ok_or_else(|| {
+             terminal_failure(
+                 "job.organization_required",
+@@ -75,7 +75,7 @@ impl JobHandler for CrmSyncAccountsHandler {
+                         &context,
+                         organization_id,
+                         &mut connection,
+-                        handler_started_at,
++                        execution,
+                     )
+                     .await;
+
+@@ -148,7 +148,7 @@ impl JobHandler for CrmSyncAccountsHandler {
+                         &context,
+                         organization_id,
+                         &connection,
+-                        handler_started_at,
++                        execution,
+                         &current_token_fingerprint,
+                     )
+                     .await;
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/salesforce/page_adapter.rs b/crates/onesales-jobs/src/crm_accounts_sync/salesforce/page_adapter.rs
+index 8dca127fa..52c279b96 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/salesforce/page_adapter.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/salesforce/page_adapter.rs
+@@ -1,7 +1,7 @@
+ use async_trait::async_trait;
+ use onesales_db::crm::SalesforceSyncConnectionRecord;
+ use onesales_salesforce as salesforce;
+-use runledger_core::jobs::{JobContext, JobFailure};
++use runledger_core::jobs::{JobContext, JobExecution, JobFailure};
+ use serde_json::Value;
+ use tracing::{error, info, warn};
+ use url::Url;
+@@ -23,6 +23,7 @@ use super::{
+ pub(in crate::crm_accounts_sync) struct AccountPageSyncAdapter<'a> {
+     handler: &'a CrmSyncAccountsHandler,
+     context: &'a JobContext,
++    execution: JobExecution<'a>,
+     organization_id: Uuid,
+     connection: &'a mut SalesforceSyncConnectionRecord,
+     account_query_capabilities: AccountQueryCapabilities,
+@@ -35,6 +36,7 @@ impl<'a> AccountPageSyncAdapter<'a> {
+     pub(in crate::crm_accounts_sync) fn new(
+         handler: &'a CrmSyncAccountsHandler,
+         context: &'a JobContext,
++        execution: JobExecution<'a>,
+         organization_id: Uuid,
+         connection: &'a mut SalesforceSyncConnectionRecord,
+         account_query_capabilities: AccountQueryCapabilities,
+@@ -43,6 +45,7 @@ impl<'a> AccountPageSyncAdapter<'a> {
+         Self {
+             handler,
+             context,
++            execution,
+             organization_id,
+             connection,
+             account_query_capabilities,
+@@ -310,7 +313,9 @@ impl SalesforcePageSyncAdapter for AccountPageSyncAdapter<'_> {
+         &mut self,
+         execution_state: &checkpoint::SyncExecutionState,
+     ) -> Result<(), JobFailure> {
+-        self.handler.persist_sync_progress(execution_state).await
++        self.handler
++            .persist_sync_progress(self.execution, execution_state)
++            .await
+     }
+
+     fn prepare_checkpoint_snapshot(
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/tests.rs b/crates/onesales-jobs/src/crm_accounts_sync/tests.rs
+index f54e2e12f..d1b61ab4c 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/tests.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/tests.rs
+@@ -16,3 +16,89 @@ mod sync_flow_tests;
+ mod token_refresh_tests;
+ #[path = "tests/unit_tests.rs"]
+ mod unit_tests;
++
++#[async_trait::async_trait]
++impl runledger_core::jobs::JobExecutionServices for TestExecutionServices<'_> {
++    fn deadline(&self) -> std::time::Instant {
++        self.deadline
++    }
++    fn remaining_budget(&self) -> std::time::Duration {
++        self.deadline
++            .saturating_duration_since(std::time::Instant::now())
++    }
++    async fn persist_progress(
++        &self,
++        update: runledger_core::jobs::JobExecutionUpdate<'_>,
++    ) -> Result<(), runledger_core::jobs::JobExecutionError> {
++        use runledger_core::jobs::JobExecutionError;
++        // Older provider-only tests deliberately have no queue row.
++        if !self.queued {
++            return Ok(());
++        }
++        runledger_postgres::jobs::update_job_ordinary_progress_for_lease(
++            self.pool,
++            runledger_postgres::jobs::JobLeaseIdentity::new(
++                self.context.job_id,
++                self.context.run_number,
++                self.context.attempt,
++                &self.context.worker_id,
++            ),
++            &runledger_postgres::jobs::JobOrdinaryProgressUpdate {
++                progress_done: update.progress_done,
++                progress_total: update.progress_total,
++                checkpoint: update.checkpoint,
++            },
++        )
++        .await
++        .map_err(|error| match error {
++            runledger_postgres::Error::QueryError(ref error)
++                if error.code() == "job.lease_owner_mismatch" =>
++            {
++                JobExecutionError::LeaseLost
++            }
++            _ => JobExecutionError::PersistenceFailed,
++        })
++    }
++}
++
++struct TestExecutionServices<'a> {
++    pool: &'a onesales_db::DbPool,
++    context: &'a runledger_core::jobs::JobContext,
++    deadline: std::time::Instant,
++    queued: bool,
++}
++
++impl super::CrmSyncAccountsHandler {
++    async fn execute(
++        &self,
++        context: runledger_core::jobs::JobContext,
++        payload: serde_json::Value,
++    ) -> Result<runledger_core::jobs::JobCompletion, runledger_core::jobs::JobFailure> {
++        use runledger_core::jobs::{JobExecution, JobExecutionHandler};
++        // Invalid-input unit tests must not need a database.
++        let needs_database = context.organization_id.is_some()
++            && serde_json::from_value::<onesales_core::crm_sync_contracts::CrmSyncAccountsPayload>(
++                payload.clone(),
++            )
++            .is_ok();
++        let job = if needs_database {
++            runledger_postgres::jobs::get_job_by_id(
++                &self.pool,
++                context.organization_id,
++                context.job_id,
++            )
++            .await
++            .expect("load test execution fixture")
++        } else {
++            None
++        };
++        let timeout = job.as_ref().map_or(3600, |job| job.timeout_seconds.max(1)) as u64;
++        let services = TestExecutionServices {
++            pool: &self.pool,
++            context: &context,
++            queued: job.is_some(),
++            deadline: std::time::Instant::now() + std::time::Duration::from_secs(timeout),
++        };
++        JobExecutionHandler::execute(self, JobExecution::new(&context, &services), payload).await
++    }
++}
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/tests/checkpoint_resume_tests.rs b/crates/onesales-jobs/src/crm_accounts_sync/tests/checkpoint_resume_tests.rs
+index 14de1ea78..23bd38c5c 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/tests/checkpoint_resume_tests.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/tests/checkpoint_resume_tests.rs
+@@ -6,8 +6,6 @@ use runledger_postgres::jobs::{
+ };
+ use serde_json::json;
+
+-use crate::registry::JobHandler;
+-
+ use super::super::checkpoint::parse_salesforce_sync_checkpoint;
+ use super::super::*;
+ use super::db_helpers::{
+@@ -22,6 +20,12 @@ use super::mock_salesforce_server::{
+ #[tokio::test]
+ async fn sync_resumes_from_checkpoint_after_page_cap_continuation() {
+     let harness = db_harness("crm-sync-resume-after-page-cap").await;
++    let version: String = sqlx::query_scalar("SHOW server_version")
++        .fetch_one(&harness.pool)
++        .await
++        .expect("read PostgreSQL version");
++    eprintln!("CRM execution-services migration: PostgreSQL {version}");
++    assert!(version.starts_with("18."));
+     let timeout_seconds = PAGE_CAP_GUARD_SECONDS + (PAGE_CAP_SECONDS_PER_PAGE * 2);
+     register_crm_sync_job_definition(&harness.pool, timeout_seconds).await;
+     let (instance_url, query_all_hits, page_two_hits, page_three_hits, server) =
+@@ -88,7 +92,7 @@ async fn sync_resumes_from_checkpoint_after_page_cap_continuation() {
+     assert_eq!(checkpoint_after_first.source_job_id, Some(job_id));
+     assert_eq!(checkpoint_after_first.source_run_number, Some(1));
+     assert_eq!(
+-        first_completion.checkpoint.as_ref(),
++        first_completion.checkpoint_value(),
+         after_first_attempt.checkpoint.as_ref()
+     );
+
+@@ -100,9 +104,9 @@ async fn sync_resumes_from_checkpoint_after_page_cap_continuation() {
+         "resume-worker",
+         &JobContinuationUpdate {
+             delay: std::time::Duration::ZERO,
+-            progress_done: first_completion.progress_done,
+-            progress_total: first_completion.progress_total,
+-            checkpoint: first_completion.checkpoint.as_ref(),
++            progress_done: first_completion.progress_done(),
++            progress_total: first_completion.progress_total(),
++            checkpoint: first_completion.checkpoint_value(),
+         },
+     )
+     .await
+@@ -134,9 +138,9 @@ async fn sync_resumes_from_checkpoint_after_page_cap_continuation() {
+         claimed_second_job.attempt,
+         "resume-worker",
+         Some(&JobCompletionUpdate {
+-            progress_done: final_completion.progress_done,
+-            progress_total: final_completion.progress_total,
+-            checkpoint: final_completion.checkpoint.as_ref(),
++            progress_done: final_completion.progress_done(),
++            progress_total: final_completion.progress_total(),
++            checkpoint: final_completion.checkpoint_value(),
+             output: final_completion.output(),
+         }),
+     )
+@@ -217,12 +221,6 @@ async fn sync_returns_terminal_failure_for_invalid_checkpoint_shape() {
+     .await
+     .expect("enqueue crm.sync.accounts");
+
+-    let claimed = claim_jobs(&harness.pool, "checkpoint-worker", 60, 1)
+-        .await
+-        .expect("claim job");
+-    assert_eq!(claimed.len(), 1);
+-    let claimed_job = &claimed[0];
+-
+     sqlx::query(
+         "UPDATE job_queue
+          SET checkpoint = $2::jsonb
+@@ -239,6 +237,13 @@ async fn sync_returns_terminal_failure_for_invalid_checkpoint_shape() {
+     .await
+     .expect("set invalid checkpoint payload");
+
++    // Resume state must be durable before the runtime captures the claimed snapshot.
++    let claimed = claim_jobs(&harness.pool, "checkpoint-worker", 60, 1)
++        .await
++        .expect("claim job");
++    assert_eq!(claimed.len(), 1);
++    let claimed_job = &claimed[0];
++
+     let err = handler
+         .execute(context_from_claimed_job(claimed_job), payload)
+         .await
+@@ -292,12 +297,6 @@ async fn sync_retry_without_next_records_url_uses_base_query_when_owner_profile_
+     .await
+     .expect("enqueue crm.sync.accounts");
+
+-    let claimed = claim_jobs(&harness.pool, "resume-worker", 60, 1)
+-        .await
+-        .expect("claim job");
+-    assert_eq!(claimed.len(), 1);
+-    let claimed_job = &claimed[0];
+-
+     sqlx::query(
+         "UPDATE job_queue
+          SET checkpoint = $2::jsonb
+@@ -315,6 +314,13 @@ async fn sync_retry_without_next_records_url_uses_base_query_when_owner_profile_
+     .await
+     .expect("set retry checkpoint payload");
+
++    // Resume state must be durable before the runtime captures the claimed snapshot.
++    let claimed = claim_jobs(&harness.pool, "resume-worker", 60, 1)
++        .await
++        .expect("claim job");
++    assert_eq!(claimed.len(), 1);
++    let claimed_job = &claimed[0];
++
+     handler
+         .execute(context_from_claimed_job(claimed_job), payload)
+         .await
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/tests/contact_fanout_tests.rs b/crates/onesales-jobs/src/crm_accounts_sync/tests/contact_fanout_tests.rs
+index 4a6198bc9..c42e7c926 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/tests/contact_fanout_tests.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/tests/contact_fanout_tests.rs
+@@ -3,8 +3,6 @@ use runledger_core::jobs::JobContext;
+ use serde_json::json;
+ use uuid::Uuid;
+
+-use crate::registry::JobHandler;
+-
+ use super::db_helpers::{
+     insert_connected_salesforce_connection, seed_additional_mapping_for_existing_account,
+     seed_deleted_mapping, seed_mapping_with_external_id,
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/tests/sync_flow_tests.rs b/crates/onesales-jobs/src/crm_accounts_sync/tests/sync_flow_tests.rs
+index 5e61ca5f1..f3f2a1f78 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/tests/sync_flow_tests.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/tests/sync_flow_tests.rs
+@@ -15,8 +15,6 @@ use serde_json::json;
+ use tokio::net::TcpListener;
+ use uuid::Uuid;
+
+-use crate::registry::JobHandler;
+-
+ use super::db_helpers::context_from_claimed_job;
+ use super::db_helpers::{
+     count_connection_user_mappings, insert_connected_hubspot_connection,
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/tests/sync_flow_tests/hubspot_enqueue.rs b/crates/onesales-jobs/src/crm_accounts_sync/tests/sync_flow_tests/hubspot_enqueue.rs
+index b4f1d68f2..1171bda8a 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/tests/sync_flow_tests/hubspot_enqueue.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/tests/sync_flow_tests/hubspot_enqueue.rs
+@@ -220,8 +220,7 @@ async fn hubspot_company_sync_page_cap_continues_same_job_with_checkpoint() {
+     assert_eq!(page_hits.load(Ordering::SeqCst), 1);
+
+     let checkpoint = completion
+-        .checkpoint
+-        .as_ref()
++        .checkpoint_value()
+         .expect("continuation should carry checkpoint");
+     assert_eq!(checkpoint["after"], "page-2");
+     assert_eq!(checkpoint["pages_completed"], 1);
+@@ -238,9 +237,9 @@ async fn hubspot_company_sync_page_cap_continues_same_job_with_checkpoint() {
+         "hubspot-account-continuation-worker",
+         &JobContinuationUpdate {
+             delay: std::time::Duration::ZERO,
+-            progress_done: completion.progress_done,
+-            progress_total: completion.progress_total,
+-            checkpoint: completion.checkpoint.as_ref(),
++            progress_done: completion.progress_done(),
++            progress_total: completion.progress_total(),
++            checkpoint: completion.checkpoint_value(),
+         },
+     )
+     .await
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/tests/token_refresh_tests.rs b/crates/onesales-jobs/src/crm_accounts_sync/tests/token_refresh_tests.rs
+index 05220736a..adf55b0fb 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/tests/token_refresh_tests.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/tests/token_refresh_tests.rs
+@@ -6,8 +6,6 @@ use runledger_core::jobs::{JobContext, JobFailureKind};
+ use serde_json::json;
+ use uuid::Uuid;
+
+-use crate::registry::JobHandler;
+-
+ use super::db_helpers::{
+     insert_connected_salesforce_connection,
+     insert_connected_salesforce_connection_with_oauth_client, load_connection_status_and_error,
+diff --git a/crates/onesales-jobs/src/crm_accounts_sync/tests/unit_tests.rs b/crates/onesales-jobs/src/crm_accounts_sync/tests/unit_tests.rs
+index e00dc608f..2cf91a7ad 100644
+--- a/crates/onesales-jobs/src/crm_accounts_sync/tests/unit_tests.rs
++++ b/crates/onesales-jobs/src/crm_accounts_sync/tests/unit_tests.rs
+@@ -5,8 +5,6 @@ use runledger_postgres::QueryErrorCategory;
+ use serde_json::json;
+ use uuid::Uuid;
+
+-use crate::registry::JobHandler;
+-
+ use super::super::checkpoint::{parse_hubspot_sync_checkpoint, parse_salesforce_sync_checkpoint};
+ use super::super::*;
+ use super::db_helpers::test_handler;
+diff --git a/crates/onesales-jobs/src/crm_contacts_sync/tests/checkpoint_resume_tests.rs b/crates/onesales-jobs/src/crm_contacts_sync/tests/checkpoint_resume_tests.rs
+index 92e626a81..b3d96f95b 100644
+--- a/crates/onesales-jobs/src/crm_contacts_sync/tests/checkpoint_resume_tests.rs
++++ b/crates/onesales-jobs/src/crm_contacts_sync/tests/checkpoint_resume_tests.rs
+@@ -88,7 +88,7 @@ async fn sync_resumes_from_checkpoint_after_page_cap_continuation_and_preserves_
+     );
+     assert_eq!(after_first_attempt.progress_done, Some(2));
+     assert_eq!(
+-        first_completion.checkpoint.as_ref(),
++        first_completion.checkpoint_value(),
+         after_first_attempt.checkpoint.as_ref()
+     );
+
+@@ -100,9 +100,9 @@ async fn sync_resumes_from_checkpoint_after_page_cap_continuation_and_preserves_
+         "resume-worker",
+         &JobContinuationUpdate {
+             delay: std::time::Duration::ZERO,
+-            progress_done: first_completion.progress_done,
+-            progress_total: first_completion.progress_total,
+-            checkpoint: first_completion.checkpoint.as_ref(),
++            progress_done: first_completion.progress_done(),
++            progress_total: first_completion.progress_total(),
++            checkpoint: first_completion.checkpoint_value(),
+         },
+     )
+     .await
+@@ -134,9 +134,9 @@ async fn sync_resumes_from_checkpoint_after_page_cap_continuation_and_preserves_
+         claimed_second_job.attempt,
+         "resume-worker",
+         Some(&JobCompletionUpdate {
+-            progress_done: final_completion.progress_done,
+-            progress_total: final_completion.progress_total,
+-            checkpoint: final_completion.checkpoint.as_ref(),
++            progress_done: final_completion.progress_done(),
++            progress_total: final_completion.progress_total(),
++            checkpoint: final_completion.checkpoint_value(),
+             output: final_completion.output(),
+         }),
+     )
+diff --git a/crates/onesales-jobs/src/crm_contacts_sync/tests/sync_flow_tests/hubspot_reconciliation.rs b/crates/onesales-jobs/src/crm_contacts_sync/tests/sync_flow_tests/hubspot_reconciliation.rs
+index a492b54dd..efc8e0fdc 100644
+--- a/crates/onesales-jobs/src/crm_contacts_sync/tests/sync_flow_tests/hubspot_reconciliation.rs
++++ b/crates/onesales-jobs/src/crm_contacts_sync/tests/sync_flow_tests/hubspot_reconciliation.rs
+@@ -117,8 +117,7 @@ async fn hubspot_contact_sync_reconciliation_resumes_from_checkpoint_without_ref
+     assert_eq!(archived_hits.load(Ordering::SeqCst), 1);
+
+     let checkpoint = first_completion
+-        .checkpoint
+-        .as_ref()
++        .checkpoint_value()
+         .expect("reconciliation continuation should carry checkpoint");
+     assert_eq!(
+         checkpoint["phase"],
+@@ -135,9 +134,9 @@ async fn hubspot_contact_sync_reconciliation_resumes_from_checkpoint_without_ref
+         "hubspot-contact-reconcile-source-worker",
+         &JobContinuationUpdate {
+             delay: std::time::Duration::ZERO,
+-            progress_done: first_completion.progress_done,
+-            progress_total: first_completion.progress_total,
+-            checkpoint: first_completion.checkpoint.as_ref(),
++            progress_done: first_completion.progress_done(),
++            progress_total: first_completion.progress_total(),
++            checkpoint: first_completion.checkpoint_value(),
+         },
+     )
+     .await
+diff --git a/crates/onesales-jobs/src/crm_contacts_sync/tests/sync_flow_tests/hubspot_token_and_pagination.rs b/crates/onesales-jobs/src/crm_contacts_sync/tests/sync_flow_tests/hubspot_token_and_pagination.rs
+index c1bc42839..9c4781ef1 100644
+--- a/crates/onesales-jobs/src/crm_contacts_sync/tests/sync_flow_tests/hubspot_token_and_pagination.rs
++++ b/crates/onesales-jobs/src/crm_contacts_sync/tests/sync_flow_tests/hubspot_token_and_pagination.rs
+@@ -376,8 +376,7 @@ async fn hubspot_contact_sync_page_cap_continues_same_job_with_checkpoint() {
+     assert_eq!(page_hits.load(Ordering::SeqCst), 1);
+
+     let checkpoint = completion
+-        .checkpoint
+-        .as_ref()
++        .checkpoint_value()
+         .expect("continuation should carry checkpoint");
+     assert_eq!(checkpoint["after"], "page-2");
+     assert_eq!(checkpoint["pages_completed"], 1);
+@@ -394,9 +393,9 @@ async fn hubspot_contact_sync_page_cap_continues_same_job_with_checkpoint() {
+         "hubspot-contact-continuation-worker",
+         &JobContinuationUpdate {
+             delay: std::time::Duration::ZERO,
+-            progress_done: completion.progress_done,
+-            progress_total: completion.progress_total,
+-            checkpoint: completion.checkpoint.as_ref(),
++            progress_done: completion.progress_done(),
++            progress_total: completion.progress_total(),
++            checkpoint: completion.checkpoint_value(),
+         },
+     )
+     .await
+@@ -509,8 +508,7 @@ async fn hubspot_contact_sync_continuation_preserves_source_identity_across_runs
+         JobCompletionDisposition::ContinueAfter(std::time::Duration::ZERO)
+     );
+     let first_checkpoint = first_completion
+-        .checkpoint
+-        .as_ref()
++        .checkpoint_value()
+         .expect("first continuation should carry checkpoint");
+     assert_eq!(first_checkpoint["source_job_id"], source_job_id.to_string());
+     assert_eq!(first_checkpoint["source_run_number"], claimed[0].run_number);
+@@ -523,9 +521,9 @@ async fn hubspot_contact_sync_continuation_preserves_source_identity_across_runs
+         "hubspot-contact-source-retry-worker",
+         &JobContinuationUpdate {
+             delay: std::time::Duration::ZERO,
+-            progress_done: first_completion.progress_done,
+-            progress_total: first_completion.progress_total,
+-            checkpoint: first_completion.checkpoint.as_ref(),
++            progress_done: first_completion.progress_done(),
++            progress_total: first_completion.progress_total(),
++            checkpoint: first_completion.checkpoint_value(),
+         },
+     )
+     .await
+@@ -553,8 +551,7 @@ async fn hubspot_contact_sync_continuation_preserves_source_identity_across_runs
+         JobCompletionDisposition::ContinueAfter(std::time::Duration::ZERO)
+     );
+     let second_checkpoint = second_completion
+-        .checkpoint
+-        .as_ref()
++        .checkpoint_value()
+         .expect("second continuation should carry checkpoint");
+     assert_eq!(
+         second_checkpoint["source_job_id"],
+diff --git a/crates/onesales-jobs/src/crm_sync_common.rs b/crates/onesales-jobs/src/crm_sync_common.rs
+index 51538b8cf..e4b660628 100644
+--- a/crates/onesales-jobs/src/crm_sync_common.rs
++++ b/crates/onesales-jobs/src/crm_sync_common.rs
+@@ -1,8 +1,8 @@
+ pub(crate) use auth::refresh_salesforce_access_token;
+ pub(crate) use checkpoint::{
+     SyncCheckpoint, SyncCheckpointFailurePolicy, SyncCheckpointParseConfig, SyncExecutionState,
+-    derive_max_pages_per_attempt, load_sync_execution_state, parse_sync_checkpoint,
+-    persist_sync_progress,
++    SyncProgressMode, derive_max_pages_per_attempt, load_sync_execution_state,
++    parse_sync_checkpoint, persist_sync_progress,
+ };
+ pub(crate) use failures::{
+     SALESFORCE_CHECKPOINT_INVALID_FAILURE_CODE, SYNC_CHECKPOINT_INVALID_FAILURE_CODE,
+diff --git a/crates/onesales-jobs/src/crm_sync_common/checkpoint.rs b/crates/onesales-jobs/src/crm_sync_common/checkpoint.rs
+index 0b95f253c..cc1375632 100644
+--- a/crates/onesales-jobs/src/crm_sync_common/checkpoint.rs
++++ b/crates/onesales-jobs/src/crm_sync_common/checkpoint.rs
+@@ -19,6 +19,7 @@ use super::{
+ #[derive(Clone, Debug)]
+ pub(crate) enum SyncProgressMode {
+     DisabledCompatibility,
++    RuntimeServices,
+     Enabled {
+         job_id: Uuid,
+         run_number: i32,
+@@ -151,6 +152,15 @@ pub(crate) async fn persist_sync_progress<TCheckpoint>(
+ where
+     TCheckpoint: Serialize + SyncCheckpoint,
+ {
++    if matches!(
++        execution_state.progress_mode,
++        SyncProgressMode::RuntimeServices
++    ) {
++        return Err(JobFailure::terminal(
++            "job.execution_services_required",
++            "Runtime-managed progress requires execution services.",
++        ));
++    }
+     let SyncProgressMode::Enabled {
+         job_id,
+         run_number,
+diff --git a/crates/onesales-jobs/src/crm_sync_common/outcome.rs b/crates/onesales-jobs/src/crm_sync_common/outcome.rs
+index f34ed289c..0f4c8ad4e 100644
+--- a/crates/onesales-jobs/src/crm_sync_common/outcome.rs
++++ b/crates/onesales-jobs/src/crm_sync_common/outcome.rs
+@@ -57,6 +57,6 @@ mod tests {
+             completion.disposition(),
+             JobCompletionDisposition::ContinueAfter(std::time::Duration::ZERO)
+         );
+-        assert_eq!(completion.checkpoint.as_ref(), Some(&checkpoint));
++        assert_eq!(completion.checkpoint_value(), Some(&checkpoint));
+     }
+ }
+diff --git a/crates/onesales-jobs/src/outbound_drafts_cleanup.rs b/crates/onesales-jobs/src/outbound_drafts_cleanup.rs
+index f88530d12..dae070298 100644
+--- a/crates/onesales-jobs/src/outbound_drafts_cleanup.rs
++++ b/crates/onesales-jobs/src/outbound_drafts_cleanup.rs
+@@ -211,7 +211,10 @@ mod tests {
+             completion.disposition(),
+             JobCompletionDisposition::ContinueAfter(std::time::Duration::ZERO)
+         );
+-        let checkpoint = completion.checkpoint.expect("continuation checkpoint");
++        let checkpoint = completion
++            .checkpoint_value()
++            .cloned()
++            .expect("continuation checkpoint");
+         assert_eq!(checkpoint["version"], EPHEMERAL_CLEANUP_CHECKPOINT_VERSION);
+         assert_eq!(checkpoint["runs_completed"], 1);
+         assert_eq!(
+@@ -230,7 +233,7 @@ mod tests {
+         .expect("short batch should finish");
+
+         assert_eq!(completion.disposition(), JobCompletionDisposition::Succeed);
+-        assert_eq!(completion.checkpoint, None);
++        assert_eq!(completion.checkpoint_value().cloned(), None);
+     }
+
+     #[test]
+diff --git a/crates/onesales-jobs/tests/account_research_handlers/champion_tracking_monthly_scan_tests/helpers_jobs_and_pipeline.rs b/crates/onesales-jobs/tests/account_research_handlers/champion_tracking_monthly_scan_tests/helpers_jobs_and_pipeline.rs
+index 46fbe49b1..ba681d505 100644
+--- a/crates/onesales-jobs/tests/account_research_handlers/champion_tracking_monthly_scan_tests/helpers_jobs_and_pipeline.rs
++++ b/crates/onesales-jobs/tests/account_research_handlers/champion_tracking_monthly_scan_tests/helpers_jobs_and_pipeline.rs
+@@ -110,9 +110,9 @@ async fn persist_monthly_scan_wait_continuation(
+         worker_id,
+         &JobContinuationUpdate {
+             delay: std::time::Duration::from_secs(30 * 60),
+-            progress_done: completion.progress_done,
+-            progress_total: completion.progress_total,
+-            checkpoint: completion.checkpoint.as_ref(),
++            progress_done: completion.progress_done(),
++            progress_total: completion.progress_total(),
++            checkpoint: completion.checkpoint_value(),
+         },
+     )
+     .await
+diff --git a/crates/onesales-jobs/tests/account_research_handlers/common/pipeline.rs b/crates/onesales-jobs/tests/account_research_handlers/common/pipeline.rs
+index 150eefb61..0608b10f9 100644
+--- a/crates/onesales-jobs/tests/account_research_handlers/common/pipeline.rs
++++ b/crates/onesales-jobs/tests/account_research_handlers/common/pipeline.rs
+@@ -37,8 +37,7 @@ pub(crate) fn assert_robot_poll_continuation(
+         JobCompletionDisposition::ContinueAfter(std::time::Duration::from_secs(delay_seconds))
+     );
+     let checkpoint = completion
+-        .checkpoint
+-        .as_ref()
++        .checkpoint_value()
+         .expect("robot poll continuation checkpoint");
+     assert_eq!(
+         checkpoint
+@@ -64,7 +63,8 @@ pub(crate) fn assert_direct_continuation(
+         JobCompletionDisposition::ContinueAfter(std::time::Duration::from_secs(delay_seconds))
+     );
+     completion
+-        .checkpoint
++        .checkpoint_value()
++        .cloned()
+         .clone()
+         .expect("direct continuation checkpoint")
+ }

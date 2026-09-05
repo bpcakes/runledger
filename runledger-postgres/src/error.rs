@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use runledger_core::jobs::JobProgressValidationError;
 use sqlx::error::ErrorKind;
 
 mod classify;
@@ -158,6 +159,7 @@ impl FrameworkConstraintSpec {
 enum QueryErrorClassification {
     Fixed(QueryErrorKind),
     Classified(QueryErrorSpec),
+    InvalidProgress(JobProgressValidationError),
 }
 
 impl QueryErrorClassification {
@@ -165,13 +167,16 @@ impl QueryErrorClassification {
         match self {
             Self::Fixed(kind) => kind.spec(),
             Self::Classified(spec) => *spec,
+            Self::InvalidProgress(_) => {
+                QueryErrorSpec::validation("job.invalid_progress", "Job progress is invalid.")
+            }
         }
     }
 
     const fn kind(&self) -> Option<QueryErrorKind> {
         match self {
             Self::Fixed(kind) => Some(*kind),
-            Self::Classified(_) => None,
+            Self::Classified(_) | Self::InvalidProgress(_) => None,
         }
     }
 }
@@ -186,6 +191,27 @@ pub struct QueryError {
 }
 
 impl QueryError {
+    pub(crate) fn from_invalid_progress(error: JobProgressValidationError) -> Self {
+        Self {
+            classification: QueryErrorClassification::InvalidProgress(error),
+            sqlstate: None,
+            constraint: None,
+            message: error.to_string(),
+            source: None,
+        }
+    }
+
+    /// Returns the typed violation of the effective durable progress values.
+    /// Runtime adapters can preserve this validation failure without parsing
+    /// diagnostic strings or mistaking it for a transient database failure.
+    #[must_use]
+    pub const fn progress_validation_error(&self) -> Option<JobProgressValidationError> {
+        match self.classification {
+            QueryErrorClassification::InvalidProgress(error) => Some(error),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn from_classified(
         category: QueryErrorCategory,

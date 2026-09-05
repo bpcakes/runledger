@@ -3,7 +3,7 @@ use sqlx::types::Uuid;
 use crate::{DbPool, Error, Result};
 
 use super::errors::validate_page_limit;
-use super::types::{JobLogRecord, JobLogRecordInput};
+use super::types::{JobLogRecord, JobLogRecordInput, JobReadScope};
 
 pub async fn insert_job_log(pool: &DbPool, input: &JobLogRecordInput) -> Result<()> {
     sqlx::query!(
@@ -30,6 +30,8 @@ pub async fn insert_job_log(pool: &DbPool, input: &JobLogRecordInput) -> Result<
     Ok(())
 }
 
+/// Legacy read: None matches logs from global and all organization-owned jobs.
+/// Prefer [`list_job_logs_with_scope`] for new code.
 pub async fn list_job_logs(
     pool: &DbPool,
     organization_id: Option<Uuid>,
@@ -37,6 +39,25 @@ pub async fn list_job_logs(
     limit: i64,
     after_id: Option<i64>,
 ) -> Result<Vec<JobLogRecord>> {
+    list_job_logs_with_scope(
+        pool,
+        JobReadScope::from_legacy(organization_id),
+        job_id,
+        limit,
+        after_id,
+    )
+    .await
+}
+
+/// Lists logs within an application-authorized, explicit job visibility scope.
+pub async fn list_job_logs_with_scope(
+    pool: &DbPool,
+    scope: JobReadScope,
+    job_id: Uuid,
+    limit: i64,
+    after_id: Option<i64>,
+) -> Result<Vec<JobLogRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     validate_page_limit(limit)?;
 
     sqlx::query_as!(
@@ -53,7 +74,7 @@ pub async fn list_job_logs(
          FROM job_logs jl
          JOIN job_queue jq ON jq.id = jl.job_id
          WHERE jl.job_id = $1
-           AND ($2::uuid IS NULL OR jq.organization_id = $2)
+           AND ($5::bool OR jq.organization_id IS NOT DISTINCT FROM $2::uuid)
            AND ($3::bigint IS NULL OR jl.id > $3)
          ORDER BY jl.id ASC
          LIMIT $4",
@@ -61,6 +82,7 @@ pub async fn list_job_logs(
         organization_id,
         after_id,
         limit,
+        is_admin,
     )
     .fetch_all(pool)
     .await

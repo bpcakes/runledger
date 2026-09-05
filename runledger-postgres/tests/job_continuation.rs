@@ -6,10 +6,11 @@ use runledger_core::jobs::{
 };
 use runledger_postgres::jobs::{
     CompareAndRequeueJob, CompareAndRequeueJobOutcome, DecodedJobEventPayload,
-    DecodedRequeuedEventPayload, JobContinuationUpdate, JobRequeueStatePolicy, cancel_job,
-    claim_jobs, compare_and_requeue_job, complete_job_continuation_with_outcome,
+    DecodedRequeuedEventPayload, JobContinuationUpdate, JobReadScope, JobRequeueStatePolicy,
+    cancel_job, claim_jobs, compare_and_requeue_job, complete_job_continuation_with_outcome,
     complete_job_success, enqueue_workflow_run, get_job_by_id, get_job_continuation_metrics,
-    get_workflow_run_by_id, list_job_events, list_workflow_steps,
+    get_job_continuation_metrics_with_scope, get_workflow_run_by_id, list_job_events,
+    list_workflow_steps,
 };
 use runledger_postgres::{DbPool, Error, QueryErrorKind};
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
@@ -369,6 +370,12 @@ async fn continuation_metrics_filter_exact_tenants_and_aggregate_all_scopes() {
     let long_delay = Duration::from_secs(3_600);
 
     enqueue_test_job(&pool, JOB_TYPE, None, &json!({"scope": "global"})).await;
+    continue_next_due_job(
+        &pool,
+        "worker-continuation-metrics-global-first",
+        Duration::ZERO,
+    )
+    .await;
     continue_next_due_job(&pool, "worker-continuation-metrics-global", long_delay).await;
 
     enqueue_test_job(
@@ -395,44 +402,76 @@ async fn continuation_metrics_filter_exact_tenants_and_aggregate_all_scopes() {
     .await;
     continue_next_due_job(&pool, "worker-continuation-metrics-org-b-run-2", long_delay).await;
 
-    let organization_a_metrics =
-        get_job_continuation_metrics(&pool, Some(organization_a), Some(JOB_TYPE))
+    // Make all three populations distinguishable, including active count and max run.
+    enqueue_test_job(
+        &pool,
+        JOB_TYPE,
+        Some(organization_b),
+        &json!({"extra": true}),
+    )
+    .await;
+    continue_next_due_job(&pool, "worker-continuation-metrics-org-b-extra", long_delay).await;
+    for (scope, expected) in [
+        (JobReadScope::Global, (2, 1, 3)),
+        (JobReadScope::Organization(organization_a), (1, 1, 2)),
+        (JobReadScope::Organization(organization_b), (3, 2, 3)),
+        (JobReadScope::Admin, (6, 4, 3)),
+        (
+            JobReadScope::Organization(unrelated_organization),
+            (0, 0, 0),
+        ),
+    ] {
+        let rows = get_job_continuation_metrics_with_scope(&pool, scope, Some(JOB_TYPE))
             .await
-            .expect("load organization A continuation metrics")
-            .pop()
-            .expect("registered job type has organization A metrics");
-    assert_eq!(organization_a_metrics.continued_24h, 1);
-    assert_eq!(organization_a_metrics.active_continued_count, 1);
-    assert_eq!(organization_a_metrics.max_active_run_number, 2);
-
-    let organization_b_metrics =
-        get_job_continuation_metrics(&pool, Some(organization_b), Some(JOB_TYPE))
+            .expect("scoped continuation metrics");
+        assert_eq!(rows.len(), 1, "preserve zero-count definitions");
+        let row = &rows[0];
+        assert_eq!(
+            (
+                row.continued_24h,
+                row.active_continued_count,
+                row.max_active_run_number
+            ),
+            expected
+        );
+        let legacy_scope = match scope {
+            JobReadScope::Global => continue,
+            JobReadScope::Organization(id) => Some(id),
+            JobReadScope::Admin => None,
+        };
+        let legacy = get_job_continuation_metrics(&pool, legacy_scope, Some(JOB_TYPE))
             .await
-            .expect("load organization B continuation metrics")
-            .pop()
-            .expect("registered job type has organization B metrics");
-    assert_eq!(organization_b_metrics.continued_24h, 2);
-    assert_eq!(organization_b_metrics.active_continued_count, 1);
-    assert_eq!(organization_b_metrics.max_active_run_number, 3);
-
-    let unrelated_metrics =
-        get_job_continuation_metrics(&pool, Some(unrelated_organization), Some(JOB_TYPE))
+            .expect("legacy metrics");
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(
+            (
+                legacy[0].continued_24h,
+                legacy[0].active_continued_count,
+                legacy[0].max_active_run_number
+            ),
+            expected
+        );
+    }
+    let empty_type = "jobs.test.continuation.empty";
+    register_test_job_definition(&pool, empty_type).await;
+    for scope in [
+        JobReadScope::Global,
+        JobReadScope::Organization(organization_a),
+        JobReadScope::Admin,
+    ] {
+        let rows = get_job_continuation_metrics_with_scope(&pool, scope, Some(empty_type))
             .await
-            .expect("load unrelated organization continuation metrics")
-            .pop()
-            .expect("registered job type has zero-valued unrelated metrics");
-    assert_eq!(unrelated_metrics.continued_24h, 0);
-    assert_eq!(unrelated_metrics.active_continued_count, 0);
-    assert_eq!(unrelated_metrics.max_active_run_number, 0);
-
-    let aggregate_metrics = get_job_continuation_metrics(&pool, None, Some(JOB_TYPE))
-        .await
-        .expect("load aggregate continuation metrics")
-        .pop()
-        .expect("registered job type has aggregate metrics");
-    assert_eq!(aggregate_metrics.continued_24h, 4);
-    assert_eq!(aggregate_metrics.active_continued_count, 3);
-    assert_eq!(aggregate_metrics.max_active_run_number, 3);
+            .expect("empty definition");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (
+                rows[0].continued_24h,
+                rows[0].active_continued_count,
+                rows[0].max_active_run_number
+            ),
+            (0, 0, 0)
+        );
+    }
 
     let scoped_plan = sqlx::query_scalar::<_, Value>(
         "EXPLAIN (FORMAT JSON)
@@ -446,13 +485,14 @@ async fn continuation_metrics_filter_exact_tenants_and_aggregate_all_scopes() {
          FROM job_definitions jd
          LEFT JOIN job_continuation_metrics_rollup jcmr
            ON jcmr.job_type = jd.job_type
-          AND ($1::uuid IS NULL OR jcmr.organization_id = $1)
+          AND ($3::boolean OR (jcmr.organization_id = $1 OR ($1::uuid IS NULL AND jcmr.organization_id IS NULL)))
          WHERE ($2::text IS NULL OR jd.job_type = $2)
          GROUP BY jd.job_type
          ORDER BY jd.job_type ASC",
     )
     .bind(organization_a)
     .bind(JOB_TYPE)
+    .bind(false)
     .fetch_one(&pool)
     .await
     .expect("explain scoped continuation metrics query");

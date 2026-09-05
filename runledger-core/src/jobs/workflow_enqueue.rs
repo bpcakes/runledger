@@ -5,9 +5,10 @@
 //! up front, and lets the PostgreSQL workflow runtime release downstream steps
 //! as prerequisites finish.
 //!
-//! For ordinary dependent work, prefer [`WorkflowDagBuilder`] for simple DAGs, or
-//! [`WorkflowRunEnqueueBuilder`] and [`WorkflowStepEnqueueBuilder`] for advanced
-//! per-step settings. Direct jobs are best for one independent unit of work.
+//! For dependent work, prefer [`WorkflowDagBuilder`]. Compose configured
+//! [`WorkflowStepEnqueueBuilder`] results with [`WorkflowDagBuilder::step`] for
+//! advanced per-step policies. [`WorkflowRunEnqueueBuilder`] remains available
+//! for assembling step collections directly. Direct jobs suit independent work.
 
 mod build_validation;
 mod dag_builder;

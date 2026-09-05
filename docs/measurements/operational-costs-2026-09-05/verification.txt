@@ -1,0 +1,27 @@
+PostgreSQL: 18.6 (Debian 18.6-1.pgdg13+2), server_version_num=180006
+
+cargo test --workspace --all-features
+  Exit 0; 909 passed, 4 ignored across 60 test/doc-test groups.
+  The final JSON-null SQL change was then covered by the focused rerun below.
+
+cargo test -p runledger-postgres --test workflow_batch_inserts --test workflow_step_defaults --test workflow_dependency_persistence
+  Exit 0; 12 passed (4 batch, 3 defaults, 5 dependency/concurrency).
+
+cargo test -p runledger-postgres --test migrations
+  Exit 0; 21 passed after moving additive-index setup into the rollout fixture.
+
+bash scripts/lint.sh
+  Exit 0; README checks, workspace/external-consumer formatting and Clippy,
+  SQLx migration-info parser checks, and workspace rustdoc with warnings denied.
+
+bash scripts/refresh-sqlx-cache.sh
+  Exit 0 against PostgreSQL 18.6 with current migrations; workspace build and
+  packaged SQLx-cache presence checks passed. Repeated after JSON-null SQL fix.
+
+Directory comparisons
+  Root .sqlx equals runledger-postgres/.sqlx and runledger-runtime/.sqlx.
+  Root migrations equal runledger-postgres/migrations and runledger-test-support/migrations.
+
+Manual timing diagnostic
+  Final ignored operational_costs test explicitly run and passed; see after.txt.
+  timings are not assertions in ordinary CI.

@@ -1,0 +1,552 @@
+diff --git a/crates/creditkit-billing/src/lib.rs b/crates/creditkit-billing/src/lib.rs
+index 0b585311..b23623f8 100644
+--- a/crates/creditkit-billing/src/lib.rs
++++ b/crates/creditkit-billing/src/lib.rs
+@@ -10,7 +10,9 @@ mod nmi_account;
+ mod product_analytics;
+ mod provider_evidence;
+ mod reconciliation;
++mod renewal_contract;
+ mod renewals;
++pub use renewal_contract::{RENEWAL_CHARGE_SETTINGS, RenewalCharge, RenewalChargePayload};
+ mod repository;
+ mod responses;
+ mod service;
+diff --git a/crates/creditkit-billing/src/renewal_contract.rs b/crates/creditkit-billing/src/renewal_contract.rs
+new file mode 100644
+index 00000000..850730b1
+--- /dev/null
++++ b/crates/creditkit-billing/src/renewal_contract.rs
+@@ -0,0 +1,68 @@
++//! Durable renewal contract shared by the producer and worker.
++use chrono::{DateTime, Utc};
++use runledger_core::jobs::{JobContract, JobDefinitionSettings, JobSpec, JobType};
++use serde::{Deserialize, Serialize, Serializer};
++use uuid::Uuid;
++
++use crate::{RENEWAL_CHARGE_JOB_TYPE, RENEWAL_JOB_TIMEOUT_SECONDS};
++
++pub const RENEWAL_CHARGE_SETTINGS: JobDefinitionSettings = JobDefinitionSettings::new()
++    .max_attempts(1)
++    .timeout_seconds(RENEWAL_JOB_TIMEOUT_SECONDS)
++    .priority(100);
++
++#[derive(Debug, Serialize, Deserialize)]
++pub struct RenewalChargePayload {
++    pub tenant_id: Uuid,
++    pub subscription_id: Uuid,
++    // Keep the old producer's +00:00 spelling in idempotency request snapshots.
++    #[serde(serialize_with = "serialize_period")]
++    pub period_start_at: DateTime<Utc>,
++}
++
++fn serialize_period<S: Serializer>(
++    value: &DateTime<Utc>,
++    serializer: S,
++) -> Result<S::Ok, S::Error> {
++    serializer.serialize_str(&value.to_rfc3339())
++}
++
++pub struct RenewalCharge;
++impl JobContract for RenewalCharge {
++    type Payload = RenewalChargePayload;
++    fn spec() -> JobSpec {
++        JobSpec::new(JobType::new(RENEWAL_CHARGE_JOB_TYPE))
++            .expect("static renewal identity")
++            .with_settings(RENEWAL_CHARGE_SETTINGS)
++            .expect("static renewal settings")
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn typed_submission_matches_legacy_json_and_preserves_old_rows() {
++        let payload = RenewalChargePayload {
++            tenant_id: Uuid::nil(),
++            subscription_id: Uuid::nil(),
++            period_start_at: "2026-09-05T10:00:00.123456+00:00"
++                .parse()
++                .expect("timestamp"),
++        };
++        let request = RenewalCharge::submit(&payload).expect("submit");
++        assert_eq!(
++            request.payload,
++            json!({
++                "tenant_id":payload.tenant_id,"subscription_id":payload.subscription_id,
++                "period_start_at":payload.period_start_at.to_rfc3339(),
++            })
++        );
++        let mut old = request.payload;
++        old["extra_legacy_field"] = json!(true);
++        let decoded: RenewalChargePayload = serde_json::from_value(old).expect("old row");
++        assert_eq!(decoded.period_start_at, payload.period_start_at);
++    }
++}
+diff --git a/crates/creditkit-billing/src/renewals.rs b/crates/creditkit-billing/src/renewals.rs
+index 42ba0640..924f8d60 100644
+--- a/crates/creditkit-billing/src/renewals.rs
++++ b/crates/creditkit-billing/src/renewals.rs
+@@ -1,4 +1,6 @@
+ use crate::*;
++use runledger_core::jobs::JobContract;
++use runledger_postgres::jobs::{JobEnqueueDisposition, enqueue_job_with_outcome};
+ use syrup_rail::{ChargeRenewal, PaymentResolutionCode, RenewalDispatch};
+
+ impl BillingService {
+@@ -8,29 +10,30 @@ impl BillingService {
+         let due = state.repository.due_subscriptions().await?;
+         let mut enqueued = 0;
+         for subscription in due {
+-            let payload = json!({
+-                "tenant_id": subscription.billing_scope_id().into_uuid(),
+-                "subscription_id": subscription.subscription_id().into_uuid(),
+-                "period_start_at": subscription.period_start_at().to_rfc3339(),
+-            });
+-            let idempotency_key = renewal_enqueue_idempotency_key(&subscription, enqueue_window);
+-            let job = JobEnqueue {
+-                job_type: JobType::new(RENEWAL_CHARGE_JOB_TYPE),
+-                organization_id: Some(subscription.billing_scope_id().into_uuid()),
+-                payload: &payload,
+-                priority: None,
+-                max_attempts: Some(1),
+-                timeout_seconds: Some(RENEWAL_JOB_TIMEOUT_SECONDS),
+-                next_run_at: None,
+-                // The enqueue window keeps a lagging worker from accumulating
+-                // duplicate renewal jobs while still letting future scheduler
+-                // ticks recover from stale failed queue rows.
+-                idempotency_key: Some(&idempotency_key),
+-                stage: None,
++            let payload = RenewalChargePayload {
++                tenant_id: subscription.billing_scope_id().into_uuid(),
++                subscription_id: subscription.subscription_id().into_uuid(),
++                period_start_at: *subscription.period_start_at(),
+             };
+-            match enqueue_job(state.repository.database().pool(), &job).await {
+-                Ok(_) => enqueued += 1,
+-                Err(error) if is_job_already_enqueued(&error) => {}
++            let idempotency_key = renewal_enqueue_idempotency_key(&subscription, enqueue_window);
++            // Retain overrides and time spelling from the original durable request.
++            let request = RenewalCharge::submit(&payload)
++                .expect("static renewal contract and serializable payload")
++                .organization_id(payload.tenant_id)
++                .max_attempts(RENEWAL_CHARGE_SETTINGS.max_attempts)
++                .timeout_seconds(RENEWAL_CHARGE_SETTINGS.default_timeout_seconds)
++                .idempotency_key(idempotency_key);
++            match enqueue_job_with_outcome(
++                state.repository.database().pool(),
++                &JobEnqueue::from(&request),
++            )
++            .await
++            {
++                Ok(outcome) => {
++                    if outcome.disposition == JobEnqueueDisposition::Inserted {
++                        enqueued += 1;
++                    }
++                }
+                 Err(error) => {
+                     drop(error);
+                     return Err(BillingError::job_enqueue(
+@@ -191,11 +194,3 @@ pub(crate) fn renewal_enqueue_idempotency_key(
+         enqueue_window
+     )
+ }
+-
+-fn is_job_already_enqueued(error: &runledger_postgres::Error) -> bool {
+-    matches!(
+-        error,
+-        runledger_postgres::Error::QueryError(query_error)
+-            if query_error.code() == "job.already_enqueued"
+-    )
+-}
+diff --git a/crates/creditkit-billing/src/tests/renewal_attempt_limits.rs b/crates/creditkit-billing/src/tests/renewal_attempt_limits.rs
+index eb600b64..bea0c1aa 100644
+--- a/crates/creditkit-billing/src/tests/renewal_attempt_limits.rs
++++ b/crates/creditkit-billing/src/tests/renewal_attempt_limits.rs
+@@ -248,6 +248,15 @@ async fn renewal_enqueue_deduplicates_same_period_scheduler_ticks() {
+         Some("vault_enqueue"),
+     )));
+     let (service, database, _postgres, user_id) = test_service(gateway).await;
++    let version: String = sqlx::query_scalar("SHOW server_version")
++        .fetch_one(database.pool())
++        .await
++        .expect("server version");
++    eprintln!("renewal migration server_version={version}");
++    assert!(
++        version.starts_with("18."),
++        "PostgreSQL 18 baseline required: {version}"
++    );
+     insert_renewal_charge_job_definition(&database).await;
+
+     let enrollment = service
+@@ -283,7 +292,7 @@ async fn renewal_enqueue_deduplicates_same_period_scheduler_ticks() {
+         .expect("same-window duplicate should resolve to the existing job row");
+
+     assert_eq!(first, 1);
+-    assert_eq!(second, 1);
++    assert_eq!(second, 0, "identical retries must not count as new work");
+     let jobs: Vec<(Option<Uuid>, serde_json::Value, String)> = sqlx::query_as(
+         r#"
+             SELECT organization_id, payload, idempotency_key
+diff --git a/crates/creditkit/src/jobs/billing.rs b/crates/creditkit/src/jobs/billing.rs
+index 09694bee..a7c143b6 100644
+--- a/crates/creditkit/src/jobs/billing.rs
++++ b/crates/creditkit/src/jobs/billing.rs
+@@ -1,16 +1,15 @@
+ use async_trait::async_trait;
+ use creditkit_billing::{
+     BillingError, BillingService, RECONCILE_NMI_ACCOUNT_JOB_TYPE, RECONCILE_NMI_ATTEMPTS_JOB_TYPE,
+-    RENEWAL_CHARGE_JOB_TYPE, RENEWAL_ENQUEUE_JOB_TYPE,
++    RENEWAL_ENQUEUE_JOB_TYPE, RenewalCharge, RenewalChargePayload,
++};
++use runledger_core::jobs::{
++    JobCompletion, JobContext, JobFailure, JobHandler, JobType, TypedJobHandler,
+ };
+-use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobHandler, JobType};
+ use serde_json::Value;
+ use syrup_rail::GatewayError;
+
+-use super::{
+-    failure::REDACTED_TELEMETRY_ID,
+-    payload::{datetime_payload_field, uuid_payload_field},
+-};
++use super::{failure::REDACTED_TELEMETRY_ID, payload::uuid_payload_field};
+
+ pub(super) struct BillingRenewalEnqueueHandler {
+     pub(super) billing: BillingService,
+@@ -56,47 +55,26 @@ impl JobHandler for BillingRenewalEnqueueHandler {
+ }
+
+ #[async_trait]
+-impl JobHandler for BillingRenewalChargeHandler {
+-    fn job_type(&self) -> JobType<'static> {
+-        JobType::new(RENEWAL_CHARGE_JOB_TYPE)
++impl TypedJobHandler for BillingRenewalChargeHandler {
++    type Contract = RenewalCharge;
++
++    fn malformed_payload(&self, _source: &serde_json::Error) -> JobFailure {
++        JobFailure::terminal(
++            "creditkit.billing.invalid_renewal_payload",
++            "Invalid billing renewal payload.",
++        )
+     }
+
+     async fn execute(
+         &self,
+         context: JobContext,
+-        payload: Value,
++        payload: RenewalChargePayload,
+     ) -> Result<JobCompletion, JobFailure> {
+-        let tenant_id = uuid_payload_field(
+-            &payload,
+-            "tenant_id",
+-            "creditkit.billing.invalid_renewal_payload",
+-            "billing renewal",
+-        )?;
+-        let subscription_id = uuid_payload_field(
+-            &payload,
+-            "subscription_id",
+-            "creditkit.billing.invalid_renewal_payload",
+-            "billing renewal",
+-        )?;
+-        let period_start_at = datetime_payload_field(&payload, "period_start_at")
+-            .map_err(|source| {
+-                tracing::warn!(
+-                    payload_name = "billing renewal",
+-                    field = "period_start_at",
+-                    error = ?source,
+-                    "failed to parse datetime field from job payload"
+-                );
+-                JobFailure::terminal(
+-                    "creditkit.billing.invalid_renewal_payload",
+-                    "billing renewal payload must include period_start_at",
+-                )
+-            })?
+-            .ok_or_else(|| {
+-                JobFailure::terminal(
+-                    "creditkit.billing.invalid_renewal_payload",
+-                    "billing renewal payload must include period_start_at",
+-                )
+-            })?;
++        let RenewalChargePayload {
++            tenant_id,
++            subscription_id,
++            period_start_at,
++        } = payload;
+         if context.organization_id != Some(tenant_id) {
+             tracing::error!(
+                 job_id = REDACTED_TELEMETRY_ID,
+diff --git a/crates/creditkit/src/jobs/catalog.rs b/crates/creditkit/src/jobs/catalog.rs
+index c299115d..bf4bce0f 100644
+--- a/crates/creditkit/src/jobs/catalog.rs
++++ b/crates/creditkit/src/jobs/catalog.rs
+@@ -2,8 +2,9 @@ use chrono::Utc;
+ use creditkit_billing::{
+     BILLING_PROVIDER_RATE_LIMIT_RETRY_AFTER, PRODUCT_ANALYTICS_DELIVERY_JOB_TYPE,
+     RECONCILE_JOB_TIMEOUT_SECONDS, RECONCILE_NMI_ACCOUNT_JOB_TYPE, RECONCILE_NMI_ATTEMPTS_JOB_TYPE,
+-    RENEWAL_CHARGE_JOB_TYPE, RENEWAL_ENQUEUE_JOB_TYPE, RENEWAL_JOB_TIMEOUT_SECONDS,
++    RENEWAL_CHARGE_JOB_TYPE, RENEWAL_CHARGE_SETTINGS, RENEWAL_ENQUEUE_JOB_TYPE, RenewalCharge,
+ };
++use runledger_core::jobs::{JobContract, TypedJobHandler};
+ use runledger_postgres::jobs::{
+     JobScheduleUpsert, set_job_schedule_active_tx, upsert_job_schedule_tx,
+ };
+@@ -551,16 +552,22 @@ pub(super) const CREDITKIT_JOB_SPECS: &[CreditKitJobSpec] = &[
+     },
+     CreditKitJobSpec {
+         job_type: RENEWAL_CHARGE_JOB_TYPE,
+-        definition: CreditKitJobDefinition::standard(RENEWAL_JOB_TIMEOUT_SECONDS)
+-            .with_max_attempts(1),
++        definition: CreditKitJobDefinition {
++            version: RENEWAL_CHARGE_SETTINGS.version,
++            max_attempts: RENEWAL_CHARGE_SETTINGS.max_attempts,
++            timeout_seconds: RENEWAL_CHARGE_SETTINGS.default_timeout_seconds,
++            priority: RENEWAL_CHARGE_SETTINGS.default_priority,
++            enabled: RENEWAL_CHARGE_SETTINGS.is_enabled,
++        },
+         schedule: None,
+         retry_delay: None,
+-        register: |catalog, dependencies, definition| {
+-            catalog.try_handler_with_definition_overrides(
++        register: |catalog, dependencies, _definition| {
++            catalog.try_handler_for_spec(
++                &RenewalCharge::spec(),
+                 BillingRenewalChargeHandler {
+                     billing: dependencies.billing.clone(),
+-                },
+-                definition,
++                }
++                .into_job_handler(),
+             )
+         },
+     },
+diff --git a/crates/creditkit/src/jobs/documents.rs b/crates/creditkit/src/jobs/documents.rs
+index 4efbd1a2..a73c5aaf 100644
+--- a/crates/creditkit/src/jobs/documents.rs
++++ b/crates/creditkit/src/jobs/documents.rs
+@@ -354,6 +354,7 @@ fn native_text_credit_report_progress(
+     };
+     completion
+         .progress(progress_done, 5)
++        .expect("document checkpoint progress is bounded by its five stages")
+         .checkpoint(serde_json::json!({
+             "schema_version": 1,
+             "pipeline_version": pipeline_version,
+diff --git a/crates/creditkit/src/jobs/payload.rs b/crates/creditkit/src/jobs/payload.rs
+index e14ae022..d1f6ae9b 100644
+--- a/crates/creditkit/src/jobs/payload.rs
++++ b/crates/creditkit/src/jobs/payload.rs
+@@ -1,4 +1,3 @@
+-use chrono::{DateTime, Utc};
+ use runledger_core::jobs::JobFailure;
+ use serde_json::Value;
+ use uuid::Uuid;
+@@ -34,18 +33,3 @@ pub(super) fn uuid_payload_field(
+         }
+     }
+ }
+-
+-pub(super) fn datetime_payload_field(
+-    payload: &Value,
+-    field: &'static str,
+-) -> Result<Option<DateTime<Utc>>, chrono::ParseError> {
+-    // Missing and non-string fields stay optional so callers can keep their
+-    // existing required-field failures; malformed strings preserve the parse source.
+-    let Some(value) = payload.get(field) else {
+-        return Ok(None);
+-    };
+-    let Some(value) = value.as_str() else {
+-        return Ok(None);
+-    };
+-    DateTime::parse_from_rfc3339(value).map(|value| Some(value.with_timezone(&Utc)))
+-}
+diff --git a/crates/creditkit/src/jobs/tests.rs b/crates/creditkit/src/jobs/tests.rs
+index 1244a77c..b8dbfcbd 100644
+--- a/crates/creditkit/src/jobs/tests.rs
++++ b/crates/creditkit/src/jobs/tests.rs
+@@ -76,7 +76,6 @@ use super::observability::{
+     safe_job_failure_summary,
+ };
+ use super::outbound_email::OUTBOUND_EMAIL_DISPATCH_JOB_TYPE;
+-use super::payload::datetime_payload_field;
+ use crate::connections::{ConnectionStorageError, MonitoringImportError};
+ use crate::documents::{
+     DOCUMENT_ADVANCE_NATIVE_TEXT_CREDIT_REPORT_JOB_TYPE, DOCUMENT_EXTRACT_TEXT_JOB_TYPE,
+diff --git a/crates/creditkit/src/jobs/tests/basic.rs b/crates/creditkit/src/jobs/tests/basic.rs
+index ddabec49..0606cf0b 100644
+--- a/crates/creditkit/src/jobs/tests/basic.rs
++++ b/crates/creditkit/src/jobs/tests/basic.rs
+@@ -14,10 +14,10 @@ fn native_text_completion_projects_privacy_safe_continuation_state() {
+         completion.disposition(),
+         JobCompletionDisposition::ContinueAfter(Duration::from_secs(7))
+     );
+-    assert_eq!(completion.progress_done, Some(1));
+-    assert_eq!(completion.progress_total, Some(5));
++    assert_eq!(completion.progress_done(), Some(1));
++    assert_eq!(completion.progress_total(), Some(5));
+     assert_eq!(
+-        completion.checkpoint,
++        completion.checkpoint_value().cloned(),
+         Some(json!({
+             "schema_version": 1,
+             "pipeline_version": "native-text-credit-report-v1",
+@@ -33,9 +33,9 @@ fn missing_native_root_completes_without_durable_worker_state() {
+     );
+
+     assert_eq!(completion.disposition(), JobCompletionDisposition::Succeed);
+-    assert_eq!(completion.progress_done, None);
+-    assert_eq!(completion.progress_total, None);
+-    assert_eq!(completion.checkpoint, None);
++    assert_eq!(completion.progress_done(), None);
++    assert_eq!(completion.progress_total(), None);
++    assert_eq!(completion.checkpoint_value().cloned(), None);
+ }
+
+ #[test]
+@@ -48,10 +48,10 @@ fn live_native_retry_exhaustion_returns_runledger_success() {
+     );
+
+     assert_eq!(completion.disposition(), JobCompletionDisposition::Succeed);
+-    assert_eq!(completion.progress_done, Some(5));
+-    assert_eq!(completion.progress_total, Some(5));
++    assert_eq!(completion.progress_done(), Some(5));
++    assert_eq!(completion.progress_total(), Some(5));
+     assert_eq!(
+-        completion.checkpoint,
++        completion.checkpoint_value().cloned(),
+         Some(json!({
+             "schema_version": 1,
+             "pipeline_version": "native-text-credit-report-v1",
+diff --git a/crates/creditkit/src/jobs/tests/billing_cases.rs b/crates/creditkit/src/jobs/tests/billing_cases.rs
+index 58bc2f08..ac970815 100644
+--- a/crates/creditkit/src/jobs/tests/billing_cases.rs
++++ b/crates/creditkit/src/jobs/tests/billing_cases.rs
+@@ -1,4 +1,5 @@
+ use super::*;
++use runledger_core::jobs::TypedJobHandler;
+
+ #[tokio::test]
+ async fn billing_renewal_charge_rejects_mismatched_tenant_context() {
+@@ -7,7 +8,8 @@ async fn billing_renewal_charge_rejects_mismatched_tenant_context() {
+     let subscription_id = Uuid::now_v7();
+     let handler = BillingRenewalChargeHandler {
+         billing: creditkit_billing::BillingService::disabled(),
+-    };
++    }
++    .into_job_handler();
+
+     let error = handler
+         .execute(
+@@ -317,7 +319,7 @@ async fn billing_renewal_charge_accepts_enqueued_payload_and_context() {
+     );
+     assert!(payload["period_start_at"].as_str().is_some());
+
+-    let handler = BillingRenewalChargeHandler { billing };
++    let handler = BillingRenewalChargeHandler { billing }.into_job_handler();
+     handler
+         .execute(
+             JobContext {
+@@ -425,7 +427,7 @@ async fn stale_renewal_job_after_recovery_is_a_noop() {
+     let resolution_count_before = gateway_resolutions.resolution_count();
+     let account_mode_count_before = gateway.account_mode_query_count();
+     let sale_count_before = gateway.sale_count();
+-    let handler = BillingRenewalChargeHandler { billing };
++    let handler = BillingRenewalChargeHandler { billing }.into_job_handler();
+     handler
+         .execute(
+             JobContext {
+@@ -578,7 +580,8 @@ async fn renewal_identity_layers_remain_distinct() {
+     let tenant_id = organization_id.expect("renewal job should carry tenant context");
+     let handler = BillingRenewalChargeHandler {
+         billing: billing.clone(),
+-    };
++    }
++    .into_job_handler();
+     handler
+         .execute(
+             JobContext {
+diff --git a/crates/creditkit/src/jobs/tests/payloads.rs b/crates/creditkit/src/jobs/tests/payloads.rs
+index ef7b79bc..8466cc85 100644
+--- a/crates/creditkit/src/jobs/tests/payloads.rs
++++ b/crates/creditkit/src/jobs/tests/payloads.rs
+@@ -295,25 +295,41 @@ fn native_text_credit_report_payload_rejects_identity_bearing_fields() {
+         .expect_err("identity-bearing native payload fields should be rejected");
+ }
+
+-#[test]
+-fn datetime_payload_field_rejects_malformed_timestamp_without_conflating_absence() {
+-    assert!(
+-        datetime_payload_field(&json!({}), "period_start_at")
+-            .expect("missing field should stay optional")
+-            .is_none()
+-    );
+-    assert!(
+-        datetime_payload_field(&json!({ "period_start_at": 1 }), "period_start_at")
+-            .expect("non-string field should stay optional")
+-            .is_none()
+-    );
+-
+-    let error = datetime_payload_field(
+-        &json!({ "period_start_at": "not-a-timestamp" }),
+-        "period_start_at",
+-    )
+-    .expect_err("malformed timestamp should preserve the parse source");
+-    assert!(!error.to_string().is_empty());
++#[tokio::test]
++async fn typed_renewal_rejects_missing_non_string_and_malformed_timestamps_safely() {
++    use runledger_core::jobs::TypedJobHandler;
++    let handler = BillingRenewalChargeHandler {
++        billing: creditkit_billing::BillingService::disabled(),
++    }
++    .into_job_handler();
++    for period in [
++        None,
++        Some(json!(1)),
++        Some(json!("private-invalid-timestamp")),
++    ] {
++        let tenant_id = Uuid::now_v7();
++        let mut payload = json!({"tenant_id":tenant_id,"subscription_id":Uuid::now_v7()});
++        if let Some(period) = period {
++            payload["period_start_at"] = period;
++        }
++        let error = handler
++            .execute(
++                JobContext {
++                    job_id: Uuid::now_v7(),
++                    run_number: 1,
++                    attempt: 1,
++                    organization_id: Some(tenant_id),
++                    worker_id: "test".into(),
++                    checkpoint: None,
++                },
++                payload,
++            )
++            .await
++            .expect_err("invalid timestamp");
++        assert_eq!(error.kind, JobFailureKind::Terminal);
++        assert_eq!(error.code, "creditkit.billing.invalid_renewal_payload");
++        assert_eq!(error.message, "Invalid billing renewal payload.");
++    }
+ }
+
+ #[test]
+diff --git a/crates/creditkit/src/jobs/tests/workflows.rs b/crates/creditkit/src/jobs/tests/workflows.rs
+index d1a1c74c..3480d5d1 100644
+--- a/crates/creditkit/src/jobs/tests/workflows.rs
++++ b/crates/creditkit/src/jobs/tests/workflows.rs
+@@ -674,9 +674,9 @@ async fn native_text_handler_completes_without_side_effects_after_its_root_is_de
+         .expect("missing root provider should drain before assertions");
+     let (completion, counts) = scenario.expect("missing root scenario should complete");
+     assert_eq!(completion.disposition(), JobCompletionDisposition::Succeed);
+-    assert_eq!(completion.progress_done, None);
+-    assert_eq!(completion.progress_total, None);
+-    assert_eq!(completion.checkpoint, None);
++    assert_eq!(completion.progress_done(), None);
++    assert_eq!(completion.progress_total(), None);
++    assert_eq!(completion.checkpoint_value().cloned(), None);
+     assert_eq!(counts, (0, 0, 0, 1));
+     assert!(
+         provider_requests.is_empty(),

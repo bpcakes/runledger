@@ -22,7 +22,7 @@ pub(super) const COMPLETE_CONTINUATION_LEASE_MISMATCH_CONTEXT: &str =
 pub(super) const COMPLETE_FAILURE_LEASE_MISMATCH_CONTEXT: &str =
     "complete job failure transaction missing leased row";
 
-pub(super) struct CompletionLeaseRow {
+pub(super) struct LiveJobLeaseRow {
     pub(super) job_type: String,
     pub(super) organization_id: Option<Uuid>,
     pub(super) max_attempts: i32,
@@ -31,18 +31,36 @@ pub(super) struct CompletionLeaseRow {
     pub(super) completion_base_at: DateTime<Utc>,
 }
 
-pub(super) async fn lock_live_completion_lease_tx(
+pub(super) async fn lock_live_job_lease_tx(
     tx: &mut DbTx<'_>,
     identity: JobLeaseIdentity<'_>,
     error_context: &'static str,
-) -> Result<Option<CompletionLeaseRow>> {
+) -> Result<Option<LiveJobLeaseRow>> {
     let previous_lock_timeout = cap_completion_job_row_lock_timeout_tx(
         tx,
         "cap job completion row-lock acquisition timeout",
     )
     .await?;
+    let row = lock_live_job_lease_with_current_timeouts_tx(tx, identity, error_context).await?;
+    restore_completion_job_row_lock_timeout_tx(
+        tx,
+        &previous_lock_timeout,
+        "restore job completion row-lock timeout",
+    )
+    .await?;
+    Ok(row)
+}
+
+/// Acquires the live row using the transaction's existing timeout policy.
+/// Bounded progress transactions keep their caps until commit; completion
+/// transactions use the wrapper above to cap only initial lock acquisition.
+pub(super) async fn lock_live_job_lease_with_current_timeouts_tx(
+    tx: &mut DbTx<'_>,
+    identity: JobLeaseIdentity<'_>,
+    error_context: &'static str,
+) -> Result<Option<LiveJobLeaseRow>> {
     let row = sqlx::query_as!(
-        CompletionLeaseRow,
+        LiveJobLeaseRow,
         r#"SELECT
             job_type AS "job_type!",
             organization_id,
@@ -67,19 +85,13 @@ pub(super) async fn lock_live_completion_lease_tx(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| Error::from_query_sqlx_with_context(error_context, error))?;
-    restore_completion_job_row_lock_timeout_tx(
-        tx,
-        &previous_lock_timeout,
-        "restore job completion row-lock timeout",
-    )
-    .await?;
     Ok(row)
 }
 
 pub(super) fn coalesce_completion_progress(
     progress_done: &mut Option<i64>,
     progress_total: &mut Option<i64>,
-    existing: &CompletionLeaseRow,
+    existing: &LiveJobLeaseRow,
 ) -> Result<()> {
     *progress_done = progress_done.or(existing.progress_done);
     *progress_total = progress_total.or(existing.progress_total);

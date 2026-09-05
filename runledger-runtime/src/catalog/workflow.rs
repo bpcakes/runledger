@@ -1,10 +1,32 @@
-use runledger_core::jobs::{WorkflowDagBuilder, WorkflowRunEnqueue};
+use runledger_core::jobs::{WorkflowDagBuilder, WorkflowRunEnqueue, WorkflowStepEnqueue};
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::{CatalogError, JobCatalog};
 
 /// Workflow DAG builder that validates job types against a [`JobCatalog`].
+///
+/// # Examples
+/// ```rust
+/// use runledger_core::jobs::WorkflowStepEnqueueBuilder;
+/// use runledger_runtime::catalog::JobCatalog;
+/// use uuid::Uuid;
+///
+/// let catalog = JobCatalog::new();
+/// let payload = serde_json::json!({"ticket": "review"});
+/// let approval = WorkflowStepEnqueueBuilder::try_new_external("approval", &payload)?
+///     .organization_id(Uuid::nil())
+///     .try_build()?;
+/// let run = catalog.workflow_dag("review", &payload)
+///     .active_key("review:active")
+///     .step(approval)?
+///     .external("receipt", &payload)?
+///     .after_success("receipt", ["approval"])?
+///     .result_step("receipt")?
+///     .build()?;
+/// assert_eq!(run.steps().len(), 2);
+/// # Ok::<_, runledger_runtime::catalog::CatalogError>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct CatalogWorkflowDagBuilder<'a, 'catalog> {
     pub(super) catalog: &'catalog JobCatalog,
@@ -55,6 +77,24 @@ impl<'a, 'catalog> CatalogWorkflowDagBuilder<'a, 'catalog> {
         self
     }
 
+    /// Sets a reusable active-cycle key, independent of request idempotency.
+    ///
+    /// Shared across workflow types in the same organization/global scope.
+    /// Checked for non-blank content and a maximum of 512 bytes at build time.
+    /// Use the request with `enqueue_or_get_active_workflow`.
+    #[must_use]
+    pub fn active_key(mut self, active_key: &'a str) -> Self {
+        self.inner = self.inner.active_key(active_key);
+        self
+    }
+
+    /// Clears the reusable active workflow key.
+    #[must_use]
+    pub fn clear_active_key(mut self) -> Self {
+        self.inner = self.inner.clear_active_key();
+        self
+    }
+
     /// Declares the step whose successful output becomes the workflow result.
     ///
     /// # Errors
@@ -91,6 +131,36 @@ impl<'a, 'catalog> CatalogWorkflowDagBuilder<'a, 'catalog> {
         self.inner = self
             .inner
             .job(step_key, job_type.as_str(), payload)
+            .map_err(CatalogError::WorkflowBuild)?;
+        Ok(self)
+    }
+
+    /// Adds a configured step, checking job steps against this catalog.
+    ///
+    /// Use [`JobCatalog::workflow_step`] or the core step builder to configure
+    /// step policies, then pass its `try_build()` result here. Even steps from
+    /// another catalog must be enabled in this catalog. External steps require
+    /// no job registration. All settings and dependencies are preserved.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError`] for unknown/disabled job types or duplicate keys.
+    pub fn step(mut self, step: WorkflowStepEnqueue<'a>) -> Result<Self, CatalogError> {
+        if let Some(job_type) = step.job_type() {
+            self.catalog
+                .require_catalog_enabled_job_type(job_type.as_str())?;
+        }
+        self.inner = self.inner.step(step).map_err(CatalogError::WorkflowBuild)?;
+        Ok(self)
+    }
+
+    /// Adds a step completed by an external actor; no catalog job is required.
+    ///
+    /// # Errors
+    /// Returns [`CatalogError::WorkflowBuild`] for a blank or duplicate key.
+    pub fn external(mut self, step_key: &'a str, payload: &'a Value) -> Result<Self, CatalogError> {
+        self.inner = self
+            .inner
+            .external(step_key, payload)
             .map_err(CatalogError::WorkflowBuild)?;
         Ok(self)
     }

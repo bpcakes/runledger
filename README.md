@@ -94,12 +94,16 @@ Add the libraries to your service:
 
 ```toml
 [dependencies]
-runledger-core = "0.9"
-runledger-postgres = "0.9"
-runledger-runtime = "0.9"
+runledger-core = "0.12.0"
+runledger-postgres = "0.12.0"
+runledger-runtime = "0.12.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 
 [dev-dependencies]
-runledger-test-support = "0.9"
+runledger-test-support = "0.12.0"
 ```
 
 The published crates require **Rust 1.88+** and **PostgreSQL 18+**. Older
@@ -116,49 +120,91 @@ use runledger_runtime::prelude::*;
 
 ## Quick start
 
-Downstream services typically run a web/API process that enqueues work and a
-separate worker process that runs handlers against the same database. A minimal
-worker:
+Run a producer and a worker as separate processes against the same PostgreSQL 18
+database. This example prints a greeting, using one shared job identity and typed
+payload. It needs only the dependencies above. For a new service, create the
+following files under `src/bin/`, with the shared module at
+`src/bin/shared/mod.rs` (so Cargo does not treat it as another binary).
 
+Shared contract (`src/bin/shared/mod.rs`):
+
+<!-- quick-start-source: runledger-runtime/examples/producer_worker/shared.rs -->
 ```rust
+use runledger_core::jobs::JobType;
+use runledger_postgres::jobs::JobEnqueue;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub const GREETING_JOB: JobType<'static> = JobType::new("jobs.greeting.print");
+
+#[derive(Serialize, Deserialize)]
+pub struct Greeting {
+    pub name: String,
+}
+
+pub fn request<'a>(payload: &'a Value, key: &'a str) -> JobEnqueue<'a> {
+    JobEnqueue {
+        job_type: GREETING_JOB,
+        organization_id: None,
+        payload,
+        priority: None,
+        max_attempts: None,
+        timeout_seconds: None,
+        next_run_at: None,
+        idempotency_key: Some(key),
+        stage: None,
+    }
+}
+```
+
+Worker (`src/bin/worker.rs`):
+
+<!-- quick-start-source: runledger-runtime/examples/producer_worker/worker.rs -->
+```rust
+pub mod shared;
+
 use std::time::Duration;
 
 use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobType};
 use runledger_core::prelude::async_trait;
-use runledger_runtime::Supervisor;
-use runledger_runtime::catalog::JobCatalog;
-use runledger_runtime::config::JobsConfig;
-use runledger_runtime::registry::JobHandler;
+use runledger_runtime::{Supervisor, catalog::JobCatalog, registry::JobHandler};
 use serde_json::Value;
+use shared::{GREETING_JOB, Greeting};
 use sqlx::postgres::PgPoolOptions;
 
-struct SendEmail;
+struct PrintGreeting;
 
 #[async_trait]
-impl JobHandler for SendEmail {
+impl JobHandler for PrintGreeting {
     fn job_type(&self) -> JobType<'static> {
-        JobType::new("jobs.email.send")
+        GREETING_JOB
     }
 
-    async fn execute(&self, _context: JobContext, _payload: Value) -> Result<JobCompletion, JobFailure> {
-        // do the work
-        Ok(JobCompletion::success())
+    async fn execute(
+        &self,
+        _context: JobContext,
+        payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        let greeting: Greeting = serde_json::from_value(payload)
+            .map_err(|_| JobFailure::terminal("greeting.invalid_payload", "Expected a name."))?;
+        println!("Hello, {}!", greeting.name);
+        JobCompletion::success().progress(1, 1).map_err(|_| {
+            JobFailure::terminal("greeting.invalid_progress", "Invalid completion counts.")
+        })
     }
 }
 
-async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPoolOptions::new()
         .connect(&std::env::var("DATABASE_URL")?)
         .await?;
-
-    // Apply the bundled schema (or validate it; see "Database schema and migrations").
+    // For a fresh database. Existing deployments must follow the migration runbook.
     runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
-
-    // Register handlers and sync their job definitions.
-    let catalog = JobCatalog::new().handler(SendEmail);
+    let catalog = JobCatalog::new().handler(PrintGreeting);
     catalog.sync_definitions(&pool).await?;
+    println!("worker ready; producers can now enqueue greetings");
 
-    // Run the supervisor until Ctrl-C, with a 30s shutdown drain deadline.
     let supervisor = Supervisor::builder_from_env(&pool)?
         .with_catalog(&catalog)
         .build()?;
@@ -172,19 +218,73 @@ async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
             Duration::from_secs(30),
         )
         .await;
-
-    // Keep pool cleanup independent from the shutdown result.
     pool.close().await;
     shutdown_result?;
     Ok(())
 }
 ```
 
-From anywhere else (such as your API), enqueue a job against the same pool:
+Producer (`src/bin/producer.rs`):
 
+<!-- quick-start-source: runledger-runtime/examples/producer_worker/producer.rs -->
 ```rust
-let job = runledger_postgres::jobs::enqueue_job(&pool, /* JobEnqueue */).await?;
+pub mod shared;
+
+use runledger_postgres::jobs::enqueue_job_tx;
+use shared::{Greeting, request};
+use sqlx::postgres::PgPoolOptions;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let name = std::env::args()
+        .nth(1)
+        .ok_or("usage: producer <name> <request-key>")?;
+    let key = std::env::args().nth(2).ok_or("missing request-key")?;
+    let pool = PgPoolOptions::new()
+        .connect(&std::env::var("DATABASE_URL")?)
+        .await?;
+    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
+
+    let payload = serde_json::to_value(Greeting { name })?;
+    let mut tx = pool.begin().await?;
+    // Persist application changes with this same transaction when needed.
+    let job_id = enqueue_job_tx(&mut tx, &request(&payload, &key)).await?;
+    tx.commit().await?;
+    println!("enqueued {job_id}");
+    pool.close().await;
+    Ok(())
+}
 ```
+
+Start the worker first; it applies the schema to a fresh database and syncs the
+job definition. Existing deployments should follow the
+[migration runbook](#database-schema-and-migrations) before starting this worker.
+Wait for `worker ready`, then submit from a second terminal using the same
+`DATABASE_URL`:
+
+```bash
+# Terminal 1
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/runledger
+cargo run --bin worker
+
+# Terminal 2
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/runledger
+cargo run --bin producer -- Ada greeting:1
+```
+
+Inside this repository, use `cargo run -p runledger-runtime --example worker`
+and `cargo run -p runledger-runtime --example producer -- Ada greeting:1` instead.
+The worker prints `Hello, Ada!` and persists completion progress of 1/1. Press
+Ctrl-C to drain and stop it. Execution is at least once, so even this print can
+repeat after an interrupted attempt; real external effects need their own
+idempotency protection.
+
+The producer commits the enqueue before reporting success. Application writes
+can share that transaction: rolling it back also removes the enqueue. Reuse the
+same request key and payload to retry a submission; use a new key for new work.
+A changed payload with the same key is an idempotency conflict. This direct
+submission requires an enabled job definition. If the producer must commit
+before worker registration, use the [durable transactional handoff](#durable-transactional-handoff).
 
 Notes on the worker lifecycle:
 
@@ -240,7 +340,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
 | Commit application state and a future job request before its definition exists | `JobEnqueueIntent` and `record_job_enqueue_intent_tx` |
-| Multi-step work with dependencies | `WorkflowDagBuilder` (simple DAGs), or `WorkflowRunEnqueueBuilder` / `WorkflowStepEnqueueBuilder` (advanced), then `enqueue_workflow_run` |
+| Multi-step work with dependencies | `WorkflowDagBuilder` (`.step(...)` for configured steps, `.external(...)` for external work), or the low-level run/step builders, then `enqueue_workflow_run` |
 | Multi-step work with a durable JSON result | Declare a result step, enqueue with `enqueue_workflow_run_handle`, then call `WorkflowRunHandle::get_result` |
 | Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal` (or lower-level `depends_on_success` / `depends_on_terminal`) |
 | Human/API approval or another external gate | External workflow steps and `complete_external_workflow_step` |
@@ -337,7 +437,9 @@ deferred, so an operator can restore consistency and retry without replacing
 the durable request. Runledger keeps
 conflicted intents as immutable evidence; if replacement work is safe, the
 application must submit it deliberately under a new idempotency key.
-Query `get_job_enqueue_intent_metrics` to alert on oldest pending age,
+Query `get_job_enqueue_intent_metrics_with_scope` with a
+`JobEnqueueIntentReadMetricsFilter` selecting the authorized `JobReadScope` to
+alert on oldest pending age,
 `retrying_count`, `max_promotion_attempts`, and increases in `conflicted_24h`.
 The retry count and maximum attempt count describe only intents that are still
 pending, so resolved promoted or conflicted history cannot inflate the active
@@ -521,6 +623,50 @@ compatibility APIs while callers migrate. Completion disposition and final
 output are intentionally private; inspect them with `disposition()` /
 `output()` and use constructors rather than struct literals.
 
+### Live handler execution services
+
+Implement `JobExecutionHandler` when a handler needs the runtime's deadline or
+durable progress writes. Register `handler.into_job_handler()` with the usual
+`JobRegistry` or `JobCatalog`. Existing `JobHandler` implementations continue
+to work unchanged; the worker dispatches through the new default
+`execute_with_services` method. See the compiling
+[counter example](runledger-runtime/examples/checkpointed_counter.rs).
+
+`JobExecution::deadline()` is the same monotonic deadline the worker enforces,
+starting after the running transition succeeds. `remaining_budget()` includes
+time spent awaiting progress writes. `remaining_work_budget(reserve)` subtracts
+an application-selected reserve for its final checkpoint or cleanup and
+saturates at zero. Runtime completion persistence happens after the handler
+returns; this reserve does not impose a deadline on that persistence.
+The worker must observe the handler result strictly before the deadline. At or
+after it, timeout takes precedence over success or continuation, including when
+the handler and timer become ready together or a long poll crosses the deadline.
+Already committed checkpoints and external effects are not undone.
+
+`checkpoint::<T>()` decodes the claimed resume snapshot; applications still
+validate their checkpoint versions and domain invariants.
+`persist_progress(JobExecutionUpdate { .. })` atomically commits ordinary
+progress and a checkpoint using the exact live lease, without a queue reread
+or caller-supplied worker/run/attempt arguments. `save_checkpoint(&value)`
+serializes and commits only a checkpoint. Both operations must be awaited.
+Omitted fields retain their durable values; successful writes do not mutate
+the invocation's resume snapshot.
+
+The handle borrows runtime services, so it cannot escape into a detached task.
+`JobExecutionError` distinguishes lease loss, deadline expiry, persistence
+failure, and invalid input, and converts to `JobFailure` for `?` propagation.
+The worker stops polling a handler when its progress write discovers lease loss,
+even if the handler ignores that error. Successful writes acknowledge commit;
+an error or cancellation can leave an indeterminate commit outcome.
+External effects still require application idempotency.
+
+Custom runtimes must supply `JobExecutionServices` and invoke
+`JobHandler::execute_with_services`. Calling legacy `execute` directly on
+an adapted execution-services handler returns `job.execution_services_required`.
+SQLx pools and persistence errors remain outside the serializable `JobContext`.
+Validated [OneSales and IdentityPro migration patches](docs/execution-services-migrations/README.md)
+show how to replace existing execution-state reconstruction.
+
 ### Handler-selected retry timing
 
 When a provider supplies a dynamic reset time, a handler can attach either a
@@ -646,7 +792,8 @@ condition; use a nonzero delay for polling-style work and do not return
 `continue_now()` forever. Production handlers should version their checkpoint
 shape, make every slice idempotent, enforce a logical deadline or run limit,
 canary activation by job type or tenant, and alert on continuation rate and run
-depth. `get_job_continuation_metrics` returns a
+depth. `get_job_continuation_metrics_with_scope` takes an explicit
+`JobReadScope` and returns a
 `JobContinuationMetricsRecord` per job type with `continued_24h`,
 `active_continued_count`, and `max_active_run_number` for canary and runaway-loop
 alerts. Active counts include only jobs whose current run was created by a
@@ -920,6 +1067,13 @@ not provide an implicit union helper because that can hide ownership mistakes.
 
 ### Job definition catalog
 
+Producer processes can share provider-free `JobSpec` / `JobContract` definitions
+with workers. Use `JobCatalog::from_specs` to validate complete worker bindings,
+`TypedJobHandler` for opt-in payload decoding, and `JobContract::submit` for typed
+direct requests. The pool-owning `enqueue_job_with_outcome` distinguishes new
+work from identical retries. See the [shared contracts guide](docs/shared-job-specs.md)
+for synchronization, wire compatibility, and migration examples.
+
 `sync_definitions` is **additive**: it owns the definition fields it writes
 (`version`, retry limits, timeout, priority), restoring them to effective catalog
 values on each startup. It preserves an existing *disabled* row, so operator
@@ -975,6 +1129,7 @@ These examples and integration references are compile-checked:
 - [External workflow gate](runledger-postgres/examples/external_gate.rs)
 - [Append workflow steps](runledger-postgres/examples/append_workflow_steps.rs)
 - [Scheduled job entrypoint](runledger-postgres/examples/schedule_job.rs)
+- [Shared producer/worker quick start](runledger-runtime/examples/producer_worker/)
 - [Worker binary skeleton](runledger-runtime/examples/worker_binary.rs)
 - [Packaged continuation, retry timing, direct recovery, replay, and metrics smoke test](smoke/external-consumer/tests/smoke.rs)
 - [Active-workflow key integration reference](runledger-postgres/tests/workflow_active_claims.rs)
@@ -994,14 +1149,65 @@ trusted all-tenant surface. The legacy nullable read helpers remain available:
 their `None` scope retains the historical admin wildcard. These helpers use the
 same workflow-type substring filtering as the TUI.
 
-Use `get_job_continuation_metrics` for continuation canaries and runaway-loop
-alerts. Each `JobContinuationMetricsRecord` reports the prior 24 hours' successful
+Use `get_job_metrics_with_scope` and `get_job_continuation_metrics_with_scope`
+with `JobReadScope::{Global, Organization, Admin}` for queue counters and
+continuation canaries. Registered job types remain visible with zero counts
+when the selected scope has no matching rows. Job duration metrics retain the
+average of per-scope percentiles when aggregating scopes. Each
+`JobContinuationMetricsRecord` reports the prior 24 hours' successful
 continuations, the number of pending/leased jobs whose current run was created
 by continuation, and the highest current run number among those active jobs.
-Passing no organization filter aggregates all scopes; it does not mean exact
-global scope.
 
-Durable event consumers should call `list_job_events` and prefer
+Use `get_job_enqueue_intent_metrics_with_scope` with
+`JobEnqueueIntentReadMetricsFilter::new(scope, limit, offset)` for intent metrics.
+Its optional `with_job_type` filter is exact. Backlog, retries, and oldest age
+include pending intents only; promoted and conflicted counts cover the last
+24 hours. Types with only older terminal history are omitted. Results are
+ordered by job type, with limits of 1–1000 and nonnegative offsets.
+All three legacy metric APIs retain `None` (or no organization filter) as
+all scopes and `Some(id)` as exactly that tenant.
+
+For payload reads, use `get_job_payload_by_idempotency_key_with_scope` or
+`get_latest_job_payload_for_run_with_scope` with `JobScope::Global` or
+`JobScope::Organization(id)`. Keys and JSON `run_id` values may repeat across
+scopes, so these single-result lookups have no admin wildcard. The latest
+lookup orders by `created_at DESC, id DESC`. Both return `None` for an absent
+match; nil UUIDs are ordinary UUID values, not global/admin sentinels. Their
+legacy counterparts still require a tenant UUID. These APIs and the new intent
+filter are exported through both `jobs` and `prelude`. Applications must
+authorize every selected read scope, including exact payload scopes.
+
+Use `JobReadScope::Global` for jobs and intents with no organization,
+`JobReadScope::Organization(id)` for one tenant, and `JobReadScope::Admin`
+for visibility across all tenants and global rows. Applications must authorize
+the selected scope; the enum only controls row filtering.
+
+Use `get_job_by_id_with_scope`, `list_jobs_with_scope` (with
+`JobReadListFilter`), `list_job_events_with_scope`, and
+`list_job_logs_with_scope` for job inspection. Intent inspection uses
+`get_job_enqueue_intent_by_id_with_scope` and
+`list_job_enqueue_intents_with_scope` (with
+`JobEnqueueIntentReadListFilter::new(scope, limit, offset)`).
+
+For dashboards and recovery scans, `list_job_summaries` accepts a
+`JobSummaryFilter` with an explicit `JobReadScope`, optional status and exact
+`JobType`, a limit of 1–1,000, and an optional `after` cursor. It omits payload,
+checkpoint, output, and free-form errors. Continue with the last row's
+`cursor()`; preserve timestamp microseconds and keep the scope and filters
+unchanged. Pages use descending `(created_at, id)` order and are observations,
+not a snapshot across concurrent status changes. `get_job_statuses_with_scope`
+reads up to 1,000 input IDs in one statement, returning unique visible rows in
+ID order; absent and unauthorized-scope IDs are both omitted.
+
+Initial and appended workflow graphs insert steps and dependencies in chunks
+of at most 256 rows within the existing transaction. Root releases still use
+the ordinary enqueue/audit path. See the
+[PostgreSQL 18 measurements and batch design](docs/operational-costs-2026-09-05.md)
+for results, atomicity, and direct-job batch considerations.
+The legacy APIs retain their existing behavior: an absent organization filter
+means unrestricted visibility, including organization-owned rows.
+
+Durable event consumers should call `list_job_events_with_scope` and prefer
 `JobEventRecord::decoded_payload()` for Runledger-authored continuation,
 administrative requeue, and successful-replay payloads. The decoded enums are
 non-exhaustive: keep wildcard arms and retain `JobEventRecord::payload` as the
@@ -1191,6 +1397,10 @@ forward migrations:
   anti-joins, removes the compatibility triggers, reciprocal FK/unique
   constraint, and `job_queue.workflow_step_id`, then advances the custom
   compatibility fence so pre-contract binaries refuse the destructive schema.
+- `202609050001_job_summary_pagination` — adds scope/creation/ID and creation/ID
+  indexes for compact cursor pages. This additive migration is outside the
+  custom compatibility fence. Its ordinary index builds block queue writes
+  until the migration commits; schedule it for an appropriate deployment window.
 
 Every forward migration from
 `202607190001_job_replays_and_continuation_metrics` through
@@ -1221,6 +1431,41 @@ Treat the flattened baseline as a from-scratch schema definition, not an
 in-place upgrade from the older multi-file standalone history; apply later
 forward migrations normally. The workspace-root `migrations/` directory is the
 canonical source for development and review.
+
+### Migration identity and bundle manifest
+
+`runledger_postgres::migration_bundle()` inspects the compiled crate without
+opening a database or reading workspace files:
+
+```rust
+let bundle = runledger_postgres::migration_bundle();
+let library_version = bundle.library_version(); // also RUNLEDGER_POSTGRES_VERSION
+let content: [u8; 32] = bundle.bundle_fingerprint();
+let pipeline: [u8; 32] = bundle.pipeline_fingerprint();
+for migration in bundle.migrations() {
+    // version, description, migration_type, checksum, no_tx, and exact SQL
+    println!("{} {}", migration.version, migration.description);
+}
+```
+
+The manifest includes up and down entries, sorted by version then direction
+(Simple, ReversibleUp, ReversibleDown). The content fingerprint hashes their
+metadata and raw SQLx checksums. The pipeline fingerprint additionally includes
+the compiled `runledger-postgres` version, so a new library release invalidates
+cached templates even when its SQL is unchanged. Rustdoc specifies the versioned,
+length-framed SHA-256 encoding; fingerprints are 32 raw bytes, not hex strings.
+
+Use the pipeline fingerprint as one input to your application's template/schema
+fingerprint. Retain the host pipeline revision, other libraries' inputs, and host
+migration ordering. Helper-only changes in same-version path/patched builds
+require an additional host-owned source revision. Neither fingerprint proves a
+live database is compatible or includes your application's SQLx history.
+
+The [composition example](runledger-postgres/examples/migration_identity.rs)
+shows how to combine these inputs. The [consumer guide](docs/migration-identity/README.md)
+includes an IdentityPro adapter patch and validation against HOCR's historical
+vendored SQL. Keep application migration ordering and cutover decisions in the
+application, and use the startup helpers below to apply or validate live state.
 
 ### Applying or validating the schema
 
@@ -1547,13 +1792,19 @@ The preparation script starts from a clean working tree or resumes an existing
 generated release diff whose manifests are already at the requested version.
 It rejects changes outside the files it generates. The script bumps publishable
 crates through their shared workspace package version, updates the explicit
-published workspace dependency pins, refreshes the root and standalone smoke
+published workspace dependency pins and README installation/release versions, refreshes the root and standalone smoke
 lockfiles plus SQLx offline metadata, runs workspace tests and the locked
 packaged smoke test, dry-runs `runledger-core`, packages the library crates,
 and build-verifies the packaged `runledger-tui` binary. It also verifies that
 every crate archive contains the repository license. If publishing manually,
 run `./scripts/refresh-sqlx-cache.sh` before publishing `runledger-postgres`
 or `runledger-runtime` and commit any resulting `.sqlx/` changes.
+
+`python3 scripts/check-readme.py` (Python 3.11+) checks current installation and release command
+versions against `Cargo.toml` and checks the quick-start snippets against the
+compiled example sources. CI and both release scripts run this check; historical
+upgrade notes retain their original versions. The PostgreSQL example test runs
+with `cargo test -p runledger-runtime --example worker`.
 
 After reviewing and committing the prepared diff:
 

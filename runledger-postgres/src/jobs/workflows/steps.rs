@@ -1,8 +1,13 @@
+mod batch;
+pub(in crate::jobs::workflows) use batch::{
+    INSERT_CHUNK_ROWS, StepInsert, insert_step_chunk_tx, insert_workflow_step_dependencies_tx,
+    insert_workflow_steps_tx,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use runledger_core::jobs::{
-    JobStage, WorkflowJobStepExecution, WorkflowRunEnqueue, WorkflowStepEnqueue,
-    WorkflowStepExecution,
+    JobStage, WorkflowJobStepExecution, WorkflowStepEnqueue, WorkflowStepExecution,
 };
 use sqlx::types::Uuid;
 
@@ -81,119 +86,6 @@ pub(in crate::jobs::workflows) fn workflow_step_defaults<'a>(
         .ok_or_else(|| workflow_definition_not_available_error(job_type.as_str()))
 }
 
-pub(in crate::jobs::workflows) async fn insert_workflow_step_record_tx(
-    tx: &mut DbTx<'_>,
-    workflow_run_id: Uuid,
-    organization_id: Option<Uuid>,
-    step: &WorkflowStepEnqueue<'_>,
-    defaults_by_job_type: &DefaultsByJobType,
-    dependency_count_pending: i32,
-    dependency_count_unsatisfied: i32,
-) -> Result<Uuid> {
-    let dependency_count_total = dependency_count_total(step)?;
-    let (job_type, priority, max_attempts, timeout_seconds, stage) = match step.execution() {
-        WorkflowStepExecution::Job(execution) => {
-            let defaults = workflow_step_defaults(defaults_by_job_type, execution)?;
-
-            (
-                Some(execution.job_type().as_str()),
-                Some(execution.priority().unwrap_or(defaults.default_priority)),
-                Some(execution.max_attempts().unwrap_or(defaults.max_attempts)),
-                Some(
-                    execution
-                        .timeout_seconds()
-                        .unwrap_or(defaults.default_timeout_seconds),
-                ),
-                workflow_step_effective_stage(step),
-            )
-        }
-        WorkflowStepExecution::External => (None, None, None, None, None),
-    };
-    let step_id: Uuid = sqlx::query_scalar!(
-        "INSERT INTO workflow_steps (
-            workflow_run_id,
-            step_key,
-            execution_kind,
-            job_type,
-            organization_id,
-            payload,
-            priority,
-            max_attempts,
-            timeout_seconds,
-            stage,
-            allow_handler_continuation,
-            execution_resource_key,
-            status,
-            dependency_count_total,
-            dependency_count_pending,
-            dependency_count_unsatisfied
-         )
-         VALUES (
-            $1,
-            $2,
-            $3::text::workflow_step_execution_kind,
-            $4,
-            $5,
-            $6::jsonb,
-            $7,
-            $8,
-            $9,
-            $10,
-            $11,
-            $12,
-            'BLOCKED',
-            $13,
-            $14,
-            $15
-         )
-         RETURNING id",
-        workflow_run_id,
-        step.step_key() as _,
-        step.execution_kind().as_db_value(),
-        job_type,
-        organization_id,
-        step.payload(),
-        priority,
-        max_attempts,
-        timeout_seconds,
-        stage,
-        step.allows_handler_continuation(),
-        step.execution_resource_key(),
-        dependency_count_total,
-        dependency_count_pending,
-        dependency_count_unsatisfied,
-    )
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| Error::from_query_sqlx_with_context("insert workflow step", error))?;
-
-    Ok(step_id)
-}
-
-pub(in crate::jobs::workflows) async fn insert_workflow_steps_tx(
-    tx: &mut DbTx<'_>,
-    payload: &WorkflowRunEnqueue<'_>,
-    workflow_run_id: Uuid,
-    defaults_by_job_type: &DefaultsByJobType,
-) -> Result<WorkflowStepIdsByKey> {
-    let mut step_id_by_key = WorkflowStepIdsByKey::new();
-    for step in payload.steps() {
-        let step_id = insert_workflow_step_record_tx(
-            tx,
-            workflow_run_id,
-            workflow_step_effective_organization_id(payload.organization_id(), step),
-            step,
-            defaults_by_job_type,
-            dependency_count_total(step)?,
-            0,
-        )
-        .await?;
-        step_id_by_key.insert(step.step_key().as_str().to_owned(), step_id);
-    }
-
-    Ok(step_id_by_key)
-}
-
 pub(in crate::jobs::workflows) fn step_id_for_key(
     step_id_by_key: &WorkflowStepIdsByKey,
     step_key: &str,
@@ -203,69 +95,6 @@ pub(in crate::jobs::workflows) fn step_id_for_key(
         .get(step_key)
         .copied()
         .ok_or_else(|| workflow_internal_state_error(missing_error))
-}
-
-pub(in crate::jobs::workflows) async fn insert_workflow_step_dependency_record_tx(
-    tx: &mut DbTx<'_>,
-    workflow_run_id: Uuid,
-    prerequisite_step_id: Uuid,
-    dependent_step_id: Uuid,
-    release_mode: &str,
-) -> Result<()> {
-    sqlx::query!(
-        "INSERT INTO workflow_step_dependencies (
-            workflow_run_id,
-            prerequisite_step_id,
-            dependent_step_id,
-            release_mode
-         )
-         VALUES ($1, $2, $3, $4::text::workflow_dependency_release_mode)",
-        workflow_run_id,
-        prerequisite_step_id,
-        dependent_step_id,
-        release_mode,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| {
-        Error::from_query_sqlx_with_context("insert workflow step dependency", error)
-    })?;
-
-    Ok(())
-}
-
-pub(in crate::jobs::workflows) async fn insert_workflow_step_dependencies_tx(
-    tx: &mut DbTx<'_>,
-    steps: &[WorkflowStepEnqueue<'_>],
-    workflow_run_id: Uuid,
-    step_id_by_key: &WorkflowStepIdsByKey,
-    context: WorkflowStepDependencyWriteContext,
-) -> Result<()> {
-    for step in steps {
-        let dependent_step_id = step_id_for_key(
-            step_id_by_key,
-            step.step_key().as_str(),
-            context.missing_dependent_step_id_error(),
-        )?;
-        for dependency in step.dependencies() {
-            let prerequisite_step_id = step_id_for_key(
-                step_id_by_key,
-                dependency.prerequisite_step_key.as_str(),
-                context.missing_prerequisite_step_id_error(),
-            )?;
-            let release_mode = dependency.effective_release_mode().as_db_value();
-            insert_workflow_step_dependency_record_tx(
-                tx,
-                workflow_run_id,
-                prerequisite_step_id,
-                dependent_step_id,
-                release_mode,
-            )
-            .await?;
-        }
-    }
-
-    Ok(())
 }
 
 pub(in crate::jobs::workflows) async fn fetch_job_definition_defaults_tx(

@@ -26,7 +26,8 @@ use super::super::types::{
     JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentDisposition,
     JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter, JobEnqueueIntentMetricsRecord,
     JobEnqueueIntentOutcome, JobEnqueueIntentOutcomeState, JobEnqueueIntentPromotionReport,
-    JobEnqueueIntentRecord, JobEnqueueIntentStatus,
+    JobEnqueueIntentReadListFilter, JobEnqueueIntentReadMetricsFilter, JobEnqueueIntentRecord,
+    JobEnqueueIntentStatus, JobReadScope,
 };
 use super::enqueue::{
     IntentEnqueueResolution, JOB_ENQUEUE_REQUEST_VERSION, canonical_job_enqueue_request_v1,
@@ -493,11 +494,27 @@ async fn load_existing_intent_with_key_share(
 ///
 /// Passing an organization ID filters to that tenant. Passing `None` performs
 /// an administrator-wide lookup; authentication remains the caller's concern.
+/// Prefer [`get_job_enqueue_intent_by_id_with_scope`] for new code.
 pub async fn get_job_enqueue_intent_by_id(
     pool: &DbPool,
     organization_id: Option<Uuid>,
     intent_id: Uuid,
 ) -> Result<Option<JobEnqueueIntentRecord>> {
+    get_job_enqueue_intent_by_id_with_scope(
+        pool,
+        JobReadScope::from_legacy(organization_id),
+        intent_id,
+    )
+    .await
+}
+
+/// Loads an intent within an application-authorized, explicit visibility scope.
+pub async fn get_job_enqueue_intent_by_id_with_scope(
+    pool: &DbPool,
+    scope: JobReadScope,
+    intent_id: Uuid,
+) -> Result<Option<JobEnqueueIntentRecord>> {
+    let (is_admin, organization_id) = scope.visibility_predicate();
     let row = sqlx::query_as!(
         JobEnqueueIntentRecordRow,
         "SELECT
@@ -526,10 +543,11 @@ pub async fn get_job_enqueue_intent_by_id(
             updated_at
          FROM job_enqueue_intents
          WHERE id = $1
-           AND ($2::uuid IS NULL OR organization_id = $2)
+           AND ($3::bool OR organization_id IS NOT DISTINCT FROM $2::uuid)
          LIMIT 1",
         intent_id,
         organization_id,
+        is_admin,
     )
     .fetch_optional(pool)
     .await
@@ -538,16 +556,37 @@ pub async fn get_job_enqueue_intent_by_id(
     row.map(JobEnqueueIntentRecordRow::into_record).transpose()
 }
 
-/// Lists durable enqueue intents with bounded pagination.
+/// Lists intents with legacy visibility: no organization filter matches all scopes.
+/// Prefer [`list_job_enqueue_intents_with_scope`] for new code.
 pub async fn list_job_enqueue_intents(
     pool: &DbPool,
     filter: &JobEnqueueIntentListFilter<'_>,
 ) -> Result<Vec<JobEnqueueIntentRecord>> {
+    list_job_enqueue_intents_with_scope(
+        pool,
+        &JobEnqueueIntentReadListFilter {
+            scope: JobReadScope::from_legacy(filter.organization_id),
+            status: filter.status,
+            job_type_query: filter.job_type_query,
+            limit: filter.limit,
+            offset: filter.offset,
+        },
+    )
+    .await
+}
+
+/// Lists intents within an application-authorized, explicit visibility scope.
+pub async fn list_job_enqueue_intents_with_scope(
+    pool: &DbPool,
+    filter: &JobEnqueueIntentReadListFilter<'_>,
+) -> Result<Vec<JobEnqueueIntentRecord>> {
     validate_pagination(filter.limit, filter.offset)?;
     let status = filter.status.map(JobEnqueueIntentStatus::as_db_value);
 
-    let rows = sqlx::query_as!(
+    let rows = super::super::scoped_read::scoped_list!(
         JobEnqueueIntentRecordRow,
+        pool,
+        filter.scope,
         "SELECT
             id,
             job_type,
@@ -573,20 +612,17 @@ pub async fn list_job_enqueue_intents(
             created_at,
             updated_at
          FROM job_enqueue_intents
-         WHERE ($1::uuid IS NULL OR organization_id = $1)
-           AND ($2::text IS NULL OR status = $2)
+         WHERE",
+        "AND ($2::text IS NULL OR status = $2)
            AND ($3::text IS NULL OR job_type ILIKE '%' || $3 || '%')
          ORDER BY created_at DESC, id DESC
          LIMIT $4
          OFFSET $5",
-        filter.organization_id,
         status,
         filter.job_type_query,
         filter.limit,
         filter.offset,
     )
-    .fetch_all(pool)
-    .await
     .map_err(|error| Error::from_query_sqlx_with_context("list job enqueue intents", error))?;
 
     rows.into_iter()
@@ -595,6 +631,9 @@ pub async fn list_job_enqueue_intents(
 }
 
 /// Returns durable intent backlog and promotion signals grouped by job type.
+///
+/// Legacy scope: no organization filter aggregates all scopes; an organization
+/// selects only that tenant. Prefer [`get_job_enqueue_intent_metrics_with_scope`].
 ///
 /// Each lifecycle population is aggregated behind its own selective predicate.
 /// `pending_count`, `retrying_count`, `max_promotion_attempts`, and
@@ -610,6 +649,26 @@ pub async fn get_job_enqueue_intent_metrics(
     pool: &DbPool,
     filter: &JobEnqueueIntentMetricsFilter<'_>,
 ) -> Result<Vec<JobEnqueueIntentMetricsRecord>> {
+    get_job_enqueue_intent_metrics_with_scope(
+        pool,
+        &JobEnqueueIntentReadMetricsFilter {
+            scope: JobReadScope::from_legacy(filter.organization_id),
+            job_type: filter.job_type,
+            limit: filter.limit,
+            offset: filter.offset,
+        },
+    )
+    .await
+}
+
+/// Returns intent metrics for the selected visibility with the same lifecycle,
+/// ordering, and pagination semantics as [`get_job_enqueue_intent_metrics`].
+/// Applications must authorize the selected [`JobReadScope`].
+pub async fn get_job_enqueue_intent_metrics_with_scope(
+    pool: &DbPool,
+    filter: &JobEnqueueIntentReadMetricsFilter<'_>,
+) -> Result<Vec<JobEnqueueIntentMetricsRecord>> {
+    let (is_admin, organization_id) = filter.scope.visibility_predicate();
     validate_pagination(filter.limit, filter.offset)?;
     let job_type = filter.job_type.map(|job_type| job_type.as_str());
     let rows = sqlx::query_as!(
@@ -625,7 +684,7 @@ pub async fn get_job_enqueue_intent_metrics(
                 MIN(created_at) AS oldest_pending_at
             FROM job_enqueue_intents
             WHERE status = 'PENDING'
-              AND ($1::uuid IS NULL OR organization_id = $1)
+              AND ($5::boolean OR (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL)))
               AND ($2::text IS NULL OR job_type = $2)
             GROUP BY job_type
 
@@ -642,7 +701,7 @@ pub async fn get_job_enqueue_intent_metrics(
             FROM job_enqueue_intents
             WHERE status = 'CONFLICTED'
               AND conflicted_at >= now() - interval '24 hours'
-              AND ($1::uuid IS NULL OR organization_id = $1)
+              AND ($5::boolean OR (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL)))
               AND ($2::text IS NULL OR job_type = $2)
             GROUP BY job_type
 
@@ -659,7 +718,7 @@ pub async fn get_job_enqueue_intent_metrics(
             FROM job_enqueue_intents
             WHERE status = 'PROMOTED'
               AND promoted_at >= now() - interval '24 hours'
-              AND ($1::uuid IS NULL OR organization_id = $1)
+              AND ($5::boolean OR (organization_id = $1 OR ($1::uuid IS NULL AND organization_id IS NULL)))
               AND ($2::text IS NULL OR job_type = $2)
             GROUP BY job_type
          )
@@ -676,10 +735,11 @@ pub async fn get_job_enqueue_intent_metrics(
          ORDER BY job_type
          LIMIT $3
          OFFSET $4",
-        filter.organization_id,
+        organization_id,
         job_type,
         filter.limit,
         filter.offset,
+        is_admin,
     )
     .fetch_all(pool)
     .await

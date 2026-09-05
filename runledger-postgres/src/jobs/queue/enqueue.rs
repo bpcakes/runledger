@@ -726,6 +726,24 @@ pub async fn enqueue_job(pool: &DbPool, payload: &JobEnqueue<'_>) -> Result<Uuid
     Ok(id)
 }
 
+/// Enqueues a job and commits its own transaction, reporting Inserted/Existing.
+/// Identical keyed requests reuse the existing row; changed requests still fail.
+/// Returned state is an observation at commit, not a lock held after return.
+pub async fn enqueue_job_with_outcome(
+    pool: &DbPool,
+    payload: &JobEnqueue<'_>,
+) -> Result<JobEnqueueOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    let outcome = enqueue_job_with_outcome_tx(&mut tx, payload).await?;
+    tx.commit()
+        .await
+        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    Ok(outcome)
+}
+
 /// Enqueues a resource-constrained job in its own transaction.
 ///
 /// See [`enqueue_job_with_execution_resource_tx`] for key scope, validation,

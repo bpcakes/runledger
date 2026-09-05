@@ -6,6 +6,8 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
+use super::admin::JobReadScope;
+
 #[derive(Clone, Debug)]
 pub struct JobEnqueue<'a> {
     pub job_type: JobType<'a>,
@@ -20,6 +22,23 @@ pub struct JobEnqueue<'a> {
     pub next_run_at: Option<DateTime<Utc>>,
     pub idempotency_key: Option<&'a str>,
     pub stage: Option<JobStage>,
+}
+
+/// Borrows an owned core submission without changing its JSON or request overrides.
+impl<'a> From<&'a runledger_core::jobs::JobSubmission> for JobEnqueue<'a> {
+    fn from(request: &'a runledger_core::jobs::JobSubmission) -> Self {
+        Self {
+            job_type: request.job_type,
+            payload: &request.payload,
+            organization_id: request.organization_id,
+            priority: request.priority,
+            max_attempts: request.max_attempts,
+            timeout_seconds: request.timeout_seconds,
+            next_run_at: request.next_run_at,
+            idempotency_key: request.idempotency_key.as_deref(),
+            stage: request.stage,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -420,7 +439,10 @@ impl JobEnqueueIntentRecord {
     }
 }
 
-/// Bounded filters for listing durable enqueue intents.
+/// Legacy filters for listing durable enqueue intents.
+///
+/// Without an organization ID, reads include global and all organization-owned
+/// intents. Prefer [`JobEnqueueIntentReadListFilter`] for explicit visibility.
 #[derive(Clone, Debug)]
 pub struct JobEnqueueIntentListFilter<'a> {
     pub(crate) organization_id: Option<Uuid>,
@@ -465,7 +487,48 @@ impl<'a> JobEnqueueIntentListFilter<'a> {
     }
 }
 
+/// Explicit-scope filters for listing durable enqueue intents.
+#[derive(Clone, Debug)]
+pub struct JobEnqueueIntentReadListFilter<'a> {
+    pub(crate) scope: JobReadScope,
+    pub(crate) status: Option<JobEnqueueIntentStatus>,
+    pub(crate) job_type_query: Option<&'a str>,
+    pub(crate) limit: i64,
+    pub(crate) offset: i64,
+}
+
+impl<'a> JobEnqueueIntentReadListFilter<'a> {
+    #[must_use]
+    pub const fn new(scope: JobReadScope, limit: i64, offset: i64) -> Self {
+        Self {
+            scope,
+            status: None,
+            job_type_query: None,
+            limit,
+            offset,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_status(mut self, status: JobEnqueueIntentStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Filters by a case-insensitive job-type substring.
+    ///
+    /// PostgreSQL `ILIKE` metacharacters in `job_type_query` retain their
+    /// normal wildcard meaning, matching the crate's other admin filters.
+    #[must_use]
+    pub const fn with_job_type_query(mut self, job_type_query: &'a str) -> Self {
+        self.job_type_query = Some(job_type_query);
+        self
+    }
+}
+
 /// Bounded filters for durable enqueue-intent metrics grouped by job type.
+/// Legacy metrics filter: no organization selects all scopes.
+/// Use [`JobEnqueueIntentReadMetricsFilter`] for explicit visibility.
 #[derive(Clone, Debug)]
 pub struct JobEnqueueIntentMetricsFilter<'a> {
     pub(crate) organization_id: Option<Uuid>,
@@ -489,6 +552,34 @@ impl<'a> JobEnqueueIntentMetricsFilter<'a> {
     pub const fn with_organization_id(mut self, organization_id: Uuid) -> Self {
         self.organization_id = Some(organization_id);
         self
+    }
+
+    #[must_use]
+    pub const fn with_job_type(mut self, job_type: JobType<'a>) -> Self {
+        self.job_type = Some(job_type);
+        self
+    }
+}
+
+/// Explicit visibility and bounded pagination for enqueue-intent metrics.
+/// Applications must authorize the selected [`JobReadScope`].
+#[derive(Clone, Debug)]
+pub struct JobEnqueueIntentReadMetricsFilter<'a> {
+    pub(crate) scope: JobReadScope,
+    pub(crate) job_type: Option<JobType<'a>>,
+    pub(crate) limit: i64,
+    pub(crate) offset: i64,
+}
+
+impl<'a> JobEnqueueIntentReadMetricsFilter<'a> {
+    #[must_use]
+    pub const fn new(scope: JobReadScope, limit: i64, offset: i64) -> Self {
+        Self {
+            scope,
+            job_type: None,
+            limit,
+            offset,
+        }
     }
 
     #[must_use]
@@ -557,7 +648,10 @@ impl JobEnqueueIntentPromotionReport {
     }
 }
 
-/// Exact tenant scope for a job mutation.
+/// Exact global or tenant scope for job mutations and payload lookups.
+///
+/// This selects rows, not authorization. Applications must authorize the chosen
+/// scope. There is no admin wildcard: payload keys are unique only within a scope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobScope {
     /// Match only a job whose `organization_id` is `NULL`.

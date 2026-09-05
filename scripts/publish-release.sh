@@ -165,9 +165,11 @@ require_command cargo
 require_command curl
 require_command gh
 require_command git
+require_command python3
 require_clean_worktree
 validate_version "$VERSION"
 require_manifest_versions "$VERSION"
+python3 scripts/check-readme.py
 
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
 if [[ "$current_branch" == "HEAD" ]]; then

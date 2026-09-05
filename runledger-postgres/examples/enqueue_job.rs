@@ -34,6 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     println!("enqueued job_id={job_id} job_type={SEND_EMAIL_JOB}");
+    // This application enqueues global jobs, so it selects exact global visibility.
+    if let Some(job) = get_job_by_id_with_scope(&pool, JobReadScope::Global, job_id).await? {
+        println!("job status={:?}", job.status);
+    }
 
     Ok(())
 }

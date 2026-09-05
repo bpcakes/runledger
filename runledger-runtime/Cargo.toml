@@ -31,6 +31,17 @@ tracing = { workspace = true }
 uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+serde = { version = "1", features = ["derive"] }
 runledger-postgres = { workspace = true, features = ["test-support"] }
 runledger-test-support = { workspace = true }
 tracing-subscriber = "0.3"
+
+[[example]]
+name = "producer"
+path = "examples/producer_worker/producer.rs"
+
+[[example]]
+name = "worker"
+path = "examples/producer_worker/worker.rs"
+test = true

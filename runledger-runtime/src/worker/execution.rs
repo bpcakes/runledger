@@ -3,7 +3,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
-use runledger_core::jobs::{JobCompletion, JobContext, JobFailure};
+use runledger_core::jobs::{JobCompletion, JobContext, JobExecution, JobFailure};
 use runledger_postgres::QueryErrorKind;
 use runledger_postgres::jobs::{self, JobLeaseIdentity, JobRunningUpdate};
 use tokio::time::{Duration, Instant, MissedTickBehavior, sleep_until};
@@ -13,6 +13,7 @@ use super::completion::{
     CompletionContext, CompletionObservation, complete_job_after_handler,
     complete_job_failure_after_handler,
 };
+use super::execution_services::LeaseExecutionServices;
 use super::observers::{JobRunningNotification, TerminalJobObserverEvent, TerminalObserverTasks};
 use crate::WorkerError;
 use crate::observer::{JobLeaseLostEvent, JobLifecycleObservers, ObservedJob};
@@ -286,11 +287,18 @@ impl ClaimedJobExecution {
         context: &JobContext,
     ) -> Result<JobCompletion, JobExecutionFailure> {
         let registry = Arc::clone(&self.registry);
-        let mut execution = Box::pin(
-            AssertUnwindSafe(execute_job_handler(registry, context, &self.job)).catch_unwind(),
-        );
         let timeout_deadline =
             Instant::now() + Duration::from_secs(self.job.timeout_seconds.max(1) as u64);
+        let services =
+            LeaseExecutionServices::new(&self.pool, self.lease_identity(), timeout_deadline);
+        let mut execution = Box::pin(
+            AssertUnwindSafe(execute_job_handler(
+                registry,
+                JobExecution::new(context, &services),
+                &self.job,
+            ))
+            .catch_unwind(),
+        );
         let mut timeout = Box::pin(sleep_until(timeout_deadline));
 
         let heartbeat_budget = heartbeat_maintenance_budget(self.lease_ttl_seconds);
@@ -302,7 +310,13 @@ impl ClaimedJobExecution {
         loop {
             tokio::select! {
                 result = &mut execution => {
-                    return map_handler_join(result);
+                    if services.lease_was_lost() {
+                        return Err(JobExecutionFailure::LeaseMaintenance(lease_owner_mismatch_failure()));
+                    }
+                    return map_handler_join(result, timeout_deadline);
+                }
+                _ = services.wait_for_lease_loss() => {
+                    return Err(JobExecutionFailure::LeaseMaintenance(lease_owner_mismatch_failure()));
                 }
                 _ = &mut timeout => {
                     return Err(JobExecutionFailure::Handler(JobFailure::timeout(
@@ -379,7 +393,16 @@ impl ClaimedJobExecution {
 
 fn map_handler_join(
     result: Result<Result<JobCompletion, JobFailure>, Box<dyn Any + Send>>,
+    timeout_deadline: Instant,
 ) -> Result<JobCompletion, JobExecutionFailure> {
+    // Deadline precedence is independent of select!'s randomized polling order,
+    // including a non-yielding handler that returns after crossing the cutoff.
+    if Instant::now() >= timeout_deadline {
+        return Err(JobExecutionFailure::Handler(JobFailure::timeout(
+            "job.timeout_exceeded",
+            "Job exceeded the configured timeout.",
+        )));
+    }
     match result {
         Ok(result) => result.map_err(JobExecutionFailure::Handler),
         Err(panic_payload) => Err(JobExecutionFailure::Handler(handler_panic_failure(
@@ -489,7 +512,7 @@ async fn heartbeat_within_maintenance_budget(
 
 async fn execute_job_handler(
     registry: Arc<JobRegistry>,
-    context: &JobContext,
+    execution: JobExecution<'_>,
     job: &jobs::JobQueueRecord,
 ) -> Result<JobCompletion, JobFailure> {
     let Some(handler) = registry.get(job.job_type.as_borrowed()) else {
@@ -499,7 +522,9 @@ async fn execute_job_handler(
         ));
     };
 
-    handler.execute(context.clone(), job.payload.clone()).await
+    handler
+        .execute_with_services(execution, job.payload.clone())
+        .await
 }
 
 pub(super) fn lease_owner_mismatch_failure() -> JobFailure {
@@ -562,5 +587,38 @@ mod tests {
         assert_eq!(heartbeat_maintenance_budget(1), Duration::from_millis(333));
         assert_eq!(heartbeat_maintenance_budget(2), Duration::from_millis(666));
         assert_eq!(heartbeat_maintenance_budget(60), Duration::from_secs(20));
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn success_and_continuation_must_be_observed_strictly_before_the_deadline() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        for completion in [
+            JobCompletion::with_output(serde_json::json!({"result": "kept"})),
+            JobCompletion::continue_after(Duration::from_secs(7)),
+        ] {
+            let Ok(accepted) = map_handler_join(Ok(Ok(completion.clone())), deadline) else {
+                panic!("result before the cutoff must be accepted");
+            };
+            assert_eq!(accepted.disposition(), completion.disposition());
+            assert_eq!(accepted.output(), completion.output());
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(Instant::now(), deadline);
+        for lateness in [Duration::ZERO, Duration::from_nanos(1)] {
+            tokio::time::advance(lateness).await;
+            for completion in [JobCompletion::success(), JobCompletion::continue_now()] {
+                let Err(JobExecutionFailure::Handler(failure)) =
+                    map_handler_join(Ok(Ok(completion)), deadline)
+                else {
+                    panic!("completion observed at or after the cutoff must time out");
+                };
+                assert_eq!(failure.code, "job.timeout_exceeded");
+            }
+        }
     }
 }

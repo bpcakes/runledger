@@ -24,6 +24,7 @@ mod rows;
 mod runtime_configs;
 mod schedule_definition_guard;
 mod schedules;
+mod scoped_read;
 mod transaction_isolation;
 mod transaction_settings;
 mod types;
@@ -33,11 +34,14 @@ mod workflows;
 pub use admin::{
     JobPayloadUuidArrayFieldUpdate, JobPayloadUuidArrayFieldUpdateRejection, cancel_job,
     cancel_job_with_scope, compare_and_requeue_job, compare_and_requeue_job_tx, get_job_by_id,
-    get_job_continuation_metrics, get_job_metrics, get_job_payload_by_idempotency_key,
-    get_latest_job_payload_for_run, list_job_events, list_jobs,
-    update_job_payload_uuid_array_field,
+    get_job_by_id_with_scope, get_job_continuation_metrics,
+    get_job_continuation_metrics_with_scope, get_job_metrics, get_job_metrics_with_scope,
+    get_job_payload_by_idempotency_key, get_job_payload_by_idempotency_key_with_scope,
+    get_job_statuses_with_scope, get_latest_job_payload_for_run,
+    get_latest_job_payload_for_run_with_scope, list_job_events, list_job_events_with_scope,
+    list_job_summaries, list_jobs, list_jobs_with_scope, update_job_payload_uuid_array_field,
 };
-pub use logs::{insert_job_log, list_job_logs};
+pub use logs::{insert_job_log, list_job_logs, list_job_logs_with_scope};
 #[allow(
     deprecated,
     reason = "deprecated stage-bearing progress APIs remain re-exported for semver compatibility"
@@ -53,13 +57,14 @@ pub use queue::{
     complete_job_success_with_outcome_for_lease, delete_promoted_job_enqueue_intents_before,
     delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, enqueue_job_tx,
     enqueue_job_with_execution_resource, enqueue_job_with_execution_resource_tx,
-    enqueue_job_with_outcome_tx, get_job_definition_by_type, get_job_enqueue_intent_by_id,
-    get_job_enqueue_intent_metrics, heartbeat_job, heartbeat_job_for_lease,
-    insert_job_definition_if_missing_tx, list_job_definitions, list_job_enqueue_intents,
-    mark_job_running, mark_job_running_for_lease, promote_job_enqueue_intents_for_types,
-    reap_expired_leases, reap_expired_leases_with_diagnostics,
-    reap_expired_leases_with_terminal_records, record_job_enqueue_intent,
-    record_job_enqueue_intent_tx, release_unstarted_job_claim,
+    enqueue_job_with_outcome, enqueue_job_with_outcome_tx, get_job_definition_by_type,
+    get_job_enqueue_intent_by_id, get_job_enqueue_intent_by_id_with_scope,
+    get_job_enqueue_intent_metrics, get_job_enqueue_intent_metrics_with_scope, heartbeat_job,
+    heartbeat_job_for_lease, insert_job_definition_if_missing_tx, list_job_definitions,
+    list_job_enqueue_intents, list_job_enqueue_intents_with_scope, mark_job_running,
+    mark_job_running_for_lease, promote_job_enqueue_intents_for_types, reap_expired_leases,
+    reap_expired_leases_with_diagnostics, reap_expired_leases_with_terminal_records,
+    record_job_enqueue_intent, record_job_enqueue_intent_tx, release_unstarted_job_claim,
     sync_catalog_job_definitions_exact_tx, sync_catalog_job_definitions_tx, update_job_definition,
     update_job_ordinary_progress, update_job_ordinary_progress_for_lease, update_job_progress,
     update_job_progress_for_lease, upsert_job_definition_tx,
@@ -92,14 +97,16 @@ pub use types::{
     JobDefinitionUpdate, JobDefinitionUpsert, JobEnqueue, JobEnqueueDisposition, JobEnqueueIntent,
     JobEnqueueIntentDisposition, JobEnqueueIntentListFilter, JobEnqueueIntentMetricsFilter,
     JobEnqueueIntentMetricsRecord, JobEnqueueIntentOutcome, JobEnqueueIntentOutcomeState,
-    JobEnqueueIntentPromotionError, JobEnqueueIntentPromotionReport, JobEnqueueIntentRecord,
+    JobEnqueueIntentPromotionError, JobEnqueueIntentPromotionReport,
+    JobEnqueueIntentReadListFilter, JobEnqueueIntentReadMetricsFilter, JobEnqueueIntentRecord,
     JobEnqueueIntentState, JobEnqueueIntentStatus, JobEnqueueOutcome, JobEventRecord,
     JobFailureCompletionDisposition, JobFailureCompletionOutcome, JobFailureUpdate,
     JobLeaseIdentity, JobListFilter, JobLogRecord, JobLogRecordInput, JobMetricsRecord,
-    JobOrdinaryProgressUpdate, JobProgressUpdate, JobQueueRecord, JobRequeueStatePolicy,
-    JobRunningUpdate, JobRuntimeConfigListFilter, JobRuntimeConfigRecord, JobRuntimeConfigUpsert,
-    JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport, JobScheduleJobTypeReference,
-    JobScheduleRecord, JobScheduleUpsert, JobScope, JobSuccessCompletionOutcome,
+    JobOrdinaryProgressUpdate, JobProgressUpdate, JobQueueRecord, JobReadListFilter, JobReadScope,
+    JobRequeueStatePolicy, JobRunningUpdate, JobRuntimeConfigListFilter, JobRuntimeConfigRecord,
+    JobRuntimeConfigUpsert, JobScheduleCatalogSyncEntry, JobScheduleCatalogSyncReport,
+    JobScheduleJobTypeReference, JobScheduleRecord, JobScheduleUpsert, JobScope, JobStatusRecord,
+    JobSuccessCompletionOutcome, JobSummary, JobSummaryCursor, JobSummaryFilter,
     NonRequeueableJobStatusError, ReapExpiredLeaseCleanupError, ReapExpiredLeaseCleanupOperation,
     ReapExpiredLeaseDeferredError, ReapExpiredLeasesDetailedResult, ReapExpiredLeasesResult,
     ReapedLeaseDisposition, ReapedLeaseRecord, ReapedTerminalLeaseRecord, RequeueableJobStatus,

@@ -124,7 +124,11 @@ retain coverage for every job type that can receive intents. Database
 failures retry indefinitely so a prolonged outage cannot silently discard work;
 alert on oldest pending age, pending-only `retrying_count`, and pending-only
 `max_promotion_attempts` from
-`get_job_enqueue_intent_metrics`, then repair the database policy. Conflicted
+`get_job_enqueue_intent_metrics_with_scope` with
+`JobEnqueueIntentReadMetricsFilter::new(scope, limit, offset)`, then repair the
+database policy. Choose an authorized `JobReadScope::Global`,
+`Organization(id)`, or `Admin`; the legacy `JobEnqueueIntentMetricsFilter`
+without an organization still aggregates all scopes. Conflicted
 intents remain immutable evidence; safe replacement work requires a deliberately
 new application idempotency key. Metrics aggregate pending, conflicted, and
 recently promoted populations through separate selective predicates;
@@ -145,7 +149,7 @@ Deploy this capability in order:
 3. Switch application writers to `record_job_enqueue_intent_tx` only after the
    retention prerequisite is complete.
 4. Alert on oldest pending age and `conflicted_24h` from
-   `get_job_enqueue_intent_metrics`.
+   `get_job_enqueue_intent_metrics_with_scope` for the authorized read scope.
 
 Queue retention must remove promoted-intent links first. In the same
 transaction that deletes selected queue rows, call
@@ -242,10 +246,17 @@ in 0.11.0 and later.
 If the task requires step dependencies, build a workflow DAG:
 
 1. Prefer `WorkflowDagBuilder` with `.job(...)`, `.after_success(...)`, and `.build()`.
-2. Use `WorkflowStepEnqueueBuilder` and `WorkflowRunEnqueueBuilder` for advanced per-step
-   settings, external steps, hand-authored dependency specs, or call sites that
-   pass explicit `StepKey` and `JobType` values.
-3. Persist the run with `runledger_postgres::jobs::enqueue_workflow_run`.
+2. For per-step tenants, queue settings, continuations, execution resources, or
+   hand-authored dependencies, configure `WorkflowStepEnqueueBuilder`, call
+   `.try_build()`, and pass the result to `.step(...)`. Use `.external(...)` for
+   external work. `JobCatalog::workflow_dag` supports the same composition and
+   checks configured job steps against its own enabled catalog entries;
+   `JobCatalog::workflow_step` supplies a configurable step builder.
+   `WorkflowRunEnqueueBuilder` remains available for direct step collections.
+3. Persist the run with `runledger_postgres::jobs::enqueue_workflow_run`. For
+   reusable active-cycle coordination, set `.active_key(...)` and use
+   `enqueue_or_get_active_workflow`. The active key is separate from request
+   idempotency and can be cleared with `.clear_active_key()`.
 
 If callers need a durable workflow result, declare one DAG step as the
 result step with `WorkflowDagBuilder::result_step(...)` or
@@ -412,9 +423,40 @@ The packaged external-consumer
 compile-checked reference for returning a checkpointed continuation, reading it
 on the next run, and completing typed recovery.
 
+### Exact payload reads
+
+For status dashboards or recovery scans, use `list_job_summaries` with
+`JobSummaryFilter { scope, status, job_type, limit, after }`. `job_type` is an
+optional exact `JobType`, not an ILIKE expression. `after: None` starts the scan;
+use the last returned summary's `cursor()` for the next page. Preserve timestamp
+microseconds and keep filters/scope fixed. Limits are 1–1,000. Empty pages end
+the scan; concurrent status changes can move rows into or out of the filter.
+`JobSummary` never reads payload, checkpoint, output, or free-form error text.
+
+Use `get_job_statuses_with_scope(pool, scope, ids)` for at most 1,000 input IDs.
+Empty input performs no query, duplicates collapse, and missing/out-of-scope
+IDs are omitted without distinguishing them. Results are sorted by ID. Neither
+API authorizes the caller or provides a mutation fence: continue to use the
+exact-scope recovery and lease APIs for writes. Retain application ownership
+joins and authorization checks. Both APIs and their input/record types are
+exported from `runledger_postgres::jobs` and `prelude`.
+
+Use `get_job_payload_by_idempotency_key_with_scope` or
+`get_latest_job_payload_for_run_with_scope` with an authorized `JobScope::Global`
+or `JobScope::Organization(id)`. These lookups select one exact scope and job
+type; they have no Admin wildcard. The latest-run helper matches the JSON
+`run_id` and orders by `created_at DESC, id DESC`. Both return
+`Option<(Uuid, Value)>`, including `None` for an absent match. Nil UUIDs are
+ordinary tenant/run values, not sentinels. Legacy helpers keep their tenant UUID
+signatures. The scoped metrics and payload APIs and the intent filter are
+exported through both `runledger_postgres::jobs` and `prelude`.
+
 ### Continuation operational queries
 
-Use `get_job_continuation_metrics` for service dashboards and alerts. It returns
+Use `get_job_continuation_metrics_with_scope` for service dashboards and alerts.
+Select `JobReadScope::Global` for global jobs, `Organization(id)` for one tenant,
+or `Admin` for aggregation across all scopes. Authorize that selection in the
+application. The function returns
 one `JobContinuationMetricsRecord` per job type:
 
 - `continued_24h` is the number of committed handler continuations in the last
@@ -425,8 +467,10 @@ one `JobContinuationMetricsRecord` per job type:
   continuation-created runs. A later admin recovery is deliberately excluded,
   so this is a focused runaway-depth signal rather than lifetime ancestry.
 
-The optional organization argument follows the admin-metrics convention:
-`None` aggregates every scope rather than selecting only global jobs. Choose
+The legacy `get_job_continuation_metrics` optional organization argument retains
+its meaning: `None` aggregates every scope, and `Some(id)` selects one tenant.
+`get_job_metrics_with_scope` uses the same explicit scopes for queue metrics;
+both APIs retain registered definitions with zero counts in empty scopes. Choose
 alert thresholds from the expected slice size and schedule; a fixed global
 threshold is usually misleading.
 
@@ -516,10 +560,16 @@ fallback for malformed, historical, custom, and future payloads:
 ```rust
 use runledger_postgres::prelude::{
     DecodedJobEventPayload, DecodedRequeuedEventPayload,
-    SuccessfulReplayEnqueuedEventPayload, list_job_events,
+    SuccessfulReplayEnqueuedEventPayload, JobReadScope, list_job_events_with_scope,
 };
 
-let events = list_job_events(&pool, organization_id, job_id, 200, None).await?;
+// Authorize access to this exact job scope in the application first.
+// Here organization_id comes from the application's job ownership record.
+let scope = match organization_id {
+    Some(id) => JobReadScope::Organization(id),
+    None => JobReadScope::Global,
+};
+let events = list_job_events_with_scope(&pool, scope, job_id, 200, None).await?;
 
 for event in events {
     match event.decoded_payload() {

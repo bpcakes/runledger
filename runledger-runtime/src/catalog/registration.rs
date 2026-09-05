@@ -473,7 +473,7 @@ impl JobCatalog {
         })
     }
 
-    fn insert_handler(
+    pub(super) fn insert_handler(
         mut self,
         job_type: JobType<'static>,
         handler: Arc<dyn JobHandler>,

@@ -1,0 +1,28 @@
+   Compiling runledger-postgres v0.12.0 (/home/aa/Documents/runledger/runledger-postgres)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.92s
+     Running tests/operational_costs.rs (target/debug/deps/operational_costs-0c0064ed170bb3b9)
+
+running 1 test
+PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2); server_version_num=180006; pool max=1
+full offset=0 json_bytes=1232100: median_ms=13.655 p95_ms=14.652
+full offset=9000 json_bytes=1232100: median_ms=17.592 p95_ms=19.048
+compact after=false json_bytes=0: median_ms=1.912 p95_ms=2.588
+compact after=true json_bytes=0: median_ms=2.227 p95_ms=2.722
+compact raw cursor at depth 9000: median_ms=1.499 p95_ms=1.822
+compact raw offset=9000: median_ms=4.967 p95_ms=5.767
+workflow V=10 E=9: median_ms=13.859 p95_ms=737.573
+12 enqueues: [("edge inserts", 12), ("other statements", 168), ("step inserts", 12)]
+workflow V=10 E=30: median_ms=12.125 p95_ms=33.737
+12 enqueues: [("edge inserts", 12), ("other statements", 168), ("step inserts", 12)]
+workflow V=100 E=99: median_ms=24.653 p95_ms=27.136
+12 enqueues: [("edge inserts", 12), ("other statements", 168), ("step inserts", 12)]
+workflow V=100 E=390: median_ms=39.526 p95_ms=47.272
+12 enqueues: [("edge inserts", 24), ("other statements", 168), ("step inserts", 12)]
+workflow V=600 E=599: median_ms=137.274 p95_ms=142.243
+12 enqueues: [("edge inserts", 36), ("other statements", 168), ("step inserts", 36)]
+workflow V=600 E=2390: median_ms=354.841 p95_ms=369.156
+12 enqueues: [("edge inserts", 120), ("other statements", 168), ("step inserts", 36)]
+connections=1, idle=0
+test measure_operational_costs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.83s
