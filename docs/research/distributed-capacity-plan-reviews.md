@@ -134,3 +134,31 @@ the task catalog and graph, README consistency, and whitespace. The disposable
 protocol probe passed against PostgreSQL 18.4 with all 17 current migrations
 applied. It models the proposed SQL protocol; production Rust integration,
 fault coverage, and performance validation remain implementation work.
+
+## Consumer audit amendment
+
+After the initial plan was committed, the user requested a fresh audit of local
+Runledger consumers. The root agent inspected the six primary product checkouts,
+deduplicating 16 manifests/workspaces into five execution integrations and one
+migration/scaffold integration. The [consumer audit](distributed-capacity-consumer-audit-2026-09-06.md)
+records current lockfile versions, source revisions, dirty-tree limitations,
+call sites, and adoption consequences.
+
+Accepted changes: named CreditKit/IdentityPro concurrency fixtures; explicit
+local-resource and no-provider bookkeeping boundaries; OneSales's retained
+provider gate and exclusive resource; Perdify's historical progress/enqueue
+adapters; usable operator-preserving bootstrap and legacy-backlog coverage;
+and conditional rate delivery. P17 is deferred until a consumer accepts exact
+job-admission accounting. Its dependent tasks remain open and blocked.
+
+These changes add consumer acceptance requirements and a delivery precondition;
+they do not change the SQL protocol or the 21-task/31-edge implementation graph.
+The earlier four native planning rounds reviewed the pre-audit plan. No additional
+independent model review, downstream compilation, consumer migration, production
+load measurement, or database experiment is claimed for this source audit.
+
+Validation checked 64 local links/line anchors, all 21 plan task sections, exact
+readback of the ten revised task descriptions/acceptance criteria, unchanged
+dependency sets, 31 internal blocking edges, and a cycle-free Beads graph.
+`bv --robot-plan --label capacity-controls` succeeded. P01 remains the sole
+ready implementation task; P17 is deferred. Whitespace checks passed.

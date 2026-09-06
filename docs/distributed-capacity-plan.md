@@ -2,11 +2,12 @@
 
 Date: 2026-09-06.
 Source baseline: `7cdb9cb`, workspace version 0.12.0.
-Epic: `runledger-distributed-capacity-bp2`; 21 implementation tasks, concurrency before rates.
+Epic: `runledger-distributed-capacity-bp2`; 21 implementation tasks, concurrency first; rate entry deferred pending consumer fit.
 Status: execution plan; production implementation has not started.
 Research: [reinvestigation](research/distributed-capacity-controls.md).
 Protocol evidence: [executable probe](research/probes/capacity_protocol.py).
 Review record: [planning reviews](research/distributed-capacity-plan-reviews.md).
+Consumer evidence: [local consumer audit](research/distributed-capacity-consumer-audit-2026-09-06.md).
 The task catalog below is the implementation contract and Beads conversion source.
 
 ## 1. Outcome and delivery boundaries
@@ -15,7 +16,7 @@ Applications can attach centrally managed capacity policies to queued operations
 All participating workers sharing one PostgreSQL database observe those policies.
 Local worker capacity remains independent and continues to protect each loop.
 The first release provides distributed unit-count concurrency limits.
-The second provides exact rolling-window admission limits, composed atomically.
+The conditional second release provides exact rolling-window admission limits, composed atomically.
 Both releases cover every supported durable producer and recovery path.
 
 An example customer policy allows 20 outstanding admitted leases.
@@ -34,6 +35,64 @@ The implementation epic is complete only after both release gates pass.
 Closing this planning work does not close the implementation epic.
 Do not activate rolling rates as part of the first concurrency rollout.
 Each gate has executable acceptance work and explicit dependency edges below.
+P01–P16 are the current delivery priority. P17 is deferred after consumer review;
+closing P16 does not by itself authorize resuming the rate stage.
+P18–P21 remain dependent on P17. Do not close deferred work as implemented.
+
+### Consumer adoption requirements
+
+The source audit found five execution consumers and one migration/scaffold consumer
+across six product families. Older checkouts are not independent demand signals.
+Current sources show process-local job/provider concurrency controls, but do not
+establish a consumer requirement for exact rolling queue admissions.
+
+P14–P16 must prove a useful concurrency adoption through consumer-shaped fixtures:
+
+- CreditKit document synthesis has a shared process-local provider semaphore of two
+  and a bounded 120-second wait. Demonstrate a bounded job/step with an explicit
+  fleet policy and optional tenant policy across two independent workers. Keep
+  excess jobs pending without capacity-only handler failures or waiting slots.
+  The existing value two is a fixture input, not an approved production fleet limit.
+  Preserve host extraction/encryption limits, synchronous upload handling, durable
+  paid-call claims, saved artifacts, and repair policy. Native synthesis contains
+  no-provider continuation slices; do not count each lease as a paid call.
+- IdentityPro alert hydration has a per-worker semaphore of four and returns a
+  60-second continuation when full. Demonstrate moving capacity-only admission
+  out of the handler. Its PersistExhaustion checkpoint bypasses that semaphore;
+  keep this bookkeeping operable when the provider policy is paused. If separate
+  queued identities are necessary, demonstrate their idempotent handoff in the
+  consumer fixture. Do not add a generic checkpoint-based capacity exemption.
+- OneSales retains a provider:leadspicker exclusive resource and sequential
+  workflow dependencies. Adding a capacity-N policy does not remove either
+  serialization rule. Keep its live-request permits, weighted pacing, calendar
+  quotas, cache/circuit feedback, and direct-call coverage. Perdify's historical
+  progress calls and enqueue JSON reconstruction need explicit upgrade coverage.
+  Vatbot's pump/paid-call ledger and HOCR2's migration scaffold are not substitutes
+  for a demonstrated concurrency adoption.
+
+At least one of the two primary pilots must demonstrate a useful bounded job
+adoption before P16 closes. Both phase/bypass cases must be represented in the
+verification matrix; explain any retained gate instead of claiming its deletion.
+Record the concrete integration code removed, retained, or changed, with exact
+source revisions. Label source-inspired fixtures separately from downstream
+compilation, executed consumer migrations, and deployed evidence.
+Measure handler-slot time spent waiting only for capacity, capacity-only failures
+or continuations, and unrelated-work progress, alongside throughput and latency.
+Select an explicit fixture fleet limit; do not reinterpret a local default as an
+operator-approved fleet policy. No per-customer fairness guarantee follows.
+
+Provision through a create/read recipe that preserves operator-managed mutable
+limits on restart and rejects immutable kind/window conflicts. Attach requirements
+through normal producer helpers, and inventory existing unbound pending work and
+synchronous callers before claiming fleet-wide coverage. Keys coordinate workers
+sharing one database; they do not coordinate separate product databases.
+
+To resume P17, record a named consumer/job whose desired unit is queue admission,
+why an exact trailing window is required, and acceptance of charges for no-op jobs,
+retries, continuation slices, and committed prestart claims without invocation.
+Provide a concrete adoption fixture and identify provider-dispatch controls that
+remain necessary. This audit establishes no such accepted case. Keep P17 deferred
+until that evidence exists; concurrency delivery does not wait for it.
 
 ### Non-goals
 
@@ -579,7 +638,9 @@ Maintain legacy fixture tests unchanged wherever the empty-capacity contract is 
 
 ## 9. Rolling admission rates
 
-Begin rate implementation only after the concurrency release gate is closed.
+Begin rate implementation only after P16 closes and the consumer adoption
+requirements above justify resuming deferred P17. A provider request budget,
+calendar-day spend cap, or local dispatch pacer is not equivalent evidence.
 Reuse the same policy lock and all-or-none candidate savepoint.
 Do not add a rate semaphore or refund path.
 Each distinct policy on each committed admission gets one rate row.
@@ -656,7 +717,8 @@ No environment alias or rename is necessary for this epic.
 6. Deploy compatible binaries and validate empty-capacity regression behavior.
 7. Enable concurrency and provision explicit policies; roll out a small binding set.
 8. Verify bounded occupancy, healthy heartbeats, and backlog progress before broadening.
-9. Close P16 only after the runbook rehearsal and concurrency release evidence exist.
+9. Close P16 only after the runbook rehearsal, named consumer adoption fixture,
+   and concurrency release evidence exist; rate entry remains conditional.
 
 An old binary that has already started is not made safe by a migration-history row.
 The lease guard prevents unconstrained execution of bound work, but repeated old batches can fail.
@@ -694,6 +756,10 @@ Use barriers and observed lock states instead of sleeps to establish race orderi
 Test admission rollback before lease, after permits, during attempt/event writes, and at commit loss.
 Test every row of the producer and lifecycle matrices.
 Test empty-capacity parity, raw old-writer guard failure, and public literal compilation.
+Exercise the CreditKit and IdentityPro resource/phase distinctions, including
+bookkeeping while a provider policy is paused and retained local host limits.
+Measure capacity-only handler waits/continuations and unrelated-work progress;
+record which consumer integration code can actually be removed.
 Measure unconstrained, dispersed-policy, and one-hot-policy distributions separately.
 Record p50/p95/p99 latency, throughput, scanned candidates, buffers, writes, and cleanup work.
 Compare custom and generic query plans where the current claim parity suite does.
@@ -702,6 +768,8 @@ Investigate material regressions before release; do not invent a passing numeric
 ## 12. Task catalog and dependency contract
 
 Every task below is an implementation task, not another request to decide product behavior.
+P17 has an explicit unmet consumer-fit precondition and remains deferred;
+its implementation specification applies only after that precondition is satisfied.
 Each task identifies prerequisites, concrete source boundaries, outputs, tests, and consumers.
 P16 is the concurrency release gate; P21 is the complete expansion release gate.
 Parent-child epic membership is separate from blocking dependencies.
@@ -863,6 +931,7 @@ Required changes:
 
 - Add ensure/create/read APIs for globally scoped exact keys; existing different definitions return a conflict without mutation.
 - Implement expected-revision resize, pause, resume, and archive with actor/reason audit in the same transaction.
+- Provide a create/read bootstrap example that retains operator-resized limits on restart, while rejecting immutable identity/kind/window conflicts; do not blindly ensure default mutable settings at every startup.
 - Keep ID, key, kind, and rolling period immutable; do not add policy deletion or key reuse.
 - Use policy NO KEY UPDATE locks; never acquire queue, step, intent, or schedule row locks while holding a policy administration lock.
 - Archived policies reject new bindings and stay visible to existing references; paused policies accept bindings but deny admission.
@@ -1356,6 +1425,7 @@ Required changes:
 - Preserve lease-maintenance budgets, completion retry behavior, observer isolation, dead-letter hooks, and shutdown cancellation semantics.
 - Integrate bounded capacity cleanup diagnostics through the existing reaper without suppressing ordinary lifecycle work.
 - Keep JOBS_MAX_GLOBAL_CONCURRENCY and default 32 unchanged; document the per-loop interpretation.
+- Preserve consumer local host/fan-out controls and provider-call gates; the new queue token is not an admission API for synchronous calls or arbitrary sub-operations.
 - Do not requery a current admission UUID when reconstructing completion or retry state.
 
 Verification:
@@ -1457,6 +1527,9 @@ The SQL research probe does not exercise the Rust APIs, complete cancellation st
 Required changes:
 
 - Build independent-pool and multi-process claimant tests for shared customer/provider policies composed with legacy resources.
+- Add CreditKit synthesis and IdentityPro hydration fixtures: two workers share an explicit fixture limit, excess work stays pending, and unrelated work progresses without capacity-only handler waits/failures/continuations.
+- Preserve local tool limits and no-provider work. IdentityPro PersistExhaustion must remain operable with a paused provider policy; demonstrate separate queued identities and an idempotent handoff if required instead of a checkpoint exemption.
+- Cover OneSales capacity-N plus its existing exclusive resource, and Perdify-style progress/enqueue adapters; do not claim more parallelism while an exclusive resource or sequential dependency remains.
 - Sample occupancy during interleavings, not only at final completion; count retained canceled owners.
 - Exercise every producer and lifecycle row in the plan, including terminal fan-out, schedules, replay, intent promotion, and appended workflow recovery.
 - Inject failures before lease, after permits, during attempt/event writes, on cleanup, and around ambiguous commit/prestart recovery.
@@ -1470,12 +1543,13 @@ Verification:
 - No denied or rolled-back candidate leaks a permit, resource, attempt, workflow state, or event.
 - New admission tokens survive repeated tuple reuse; stale operations leave all successor state unchanged.
 - Run complete relevant postgres/runtime suites after targeted fault cases pass.
+- Record exact source references and removable/retained consumer code. A source-inspired fixture must be labeled separately from compiling or migrating the actual consumer.
 - Archive a delayed child's policy, complete its prerequisite, and promote/fire already-bound intent/schedule references; materialization commits while admission remains blocked.
 - Lowering a limit below existing occupancy preserves current/retained owners and blocks new admissions until occupancy falls below the new limit.
 
 Acceptance:
 
-Production Rust integration, complete workflow locking, and all durable producer/lifecycle paths pass adversarial PostgreSQL 18 tests.
+Production Rust integration, complete workflow locking, all durable producer/lifecycle paths, and the named consumer phase/resource fixtures pass adversarial PostgreSQL 18 tests.
 
 Completion evidence:
 
@@ -1514,6 +1588,7 @@ Required changes:
 - Record hardware/container settings, exact PostgreSQL 18 version, fixture sizes, policy cardinalities, and the unmodified comparison baseline.
 - Measure unconstrained, dispersed customer, shared provider, and one-hot-policy workloads with equivalent job and worker distributions.
 - Report p50/p95/p99 claim and heartbeat latency, successful claims/second, scanned candidates/success, transaction failures, buffers, writes, and cleanup backlog.
+- For the P14 consumer fixtures, compare capacity-only handler-slot waits, failures/continuations, and unrelated-work progress before and after adoption; keep host limits and provider-dispatch guards equivalent and label synthetic measurements accurately.
 - Compare 24-savepoint batches with justified smaller alternatives; inspect subtransaction pressure and blocked-prefix behavior.
 - Inspect custom/generic query plans and unconstrained fast-path parity against existing claim_plan_parity coverage.
 - Measure canceled-retention cleanup and policy resize while claims continue; distinguish lock contention from genuine exhaustion.
@@ -1565,12 +1640,15 @@ New schema guards and snapshot/token contracts require an explicit fleet-wide cu
 Required changes:
 
 - Publish policy provisioning, direct/owned enqueue, workflow, intent, schedule, and custom runtime token examples.
+- Demonstrate at least one useful bounded-job adoption from the CreditKit synthesis or IdentityPro hydration pilots, with exact removable/retained code and both pilots' no-provider/paused-bookkeeping cases covered by P14.
+- Show create/read startup provisioning that preserves operator limits, explicit helper-based binding, and an upgrade inventory of old unbound pending jobs plus synchronous/provider callers outside the queue cap.
+- Include Perdify's legacy progress and canonical enqueue-rewrite upgrade case; preserve payload-update semantics and immutable capacity membership rather than substituting strict idempotency.
 - Document opt-in global key scope, per-loop local concurrency, retained cancellation behavior, lease-bound guarantees, and omitted-binding behavior.
 - Inventory every writer/claimer/recovery binary and rehearse stop/drain, migration, compatible deployment, activation, and small-cohort expansion.
 - Verify startup compatibility fences reject old binaries after the capacity migration and separately stop already-running old binaries.
 - Rehearse rollback by pausing constrained producers/policies while keeping compatible cleanup/reapers and durable bindings intact.
 - Run migration-copy, SQLx cache, external-consumer, lint, and documentation checks with the completed implementation.
-- Close this gate only with concurrency rollout evidence; it unblocks rate implementation but leaves the overall epic open.
+- Close this gate only with consumer adoption and concurrency rollout evidence; P17 stays deferred until a named consumer accepts exact queue-admission semantics. The overall epic remains open.
 
 Verification:
 
@@ -1581,7 +1659,7 @@ Verification:
 
 Acceptance:
 
-Distributed concurrency is documented, validated, and ready for an explicit activation cutover; rate controls remain disabled.
+Distributed concurrency has a useful named consumer adoption fixture, is documented and validated, and is ready for an explicit activation cutover; rate controls remain disabled and P17's demand condition remains independent.
 
 Completion evidence:
 
@@ -1593,6 +1671,7 @@ Completion evidence:
 ### P17 — Add durable rolling-rate history and safe retention
 
 Stage: rolling admission rates.
+Status: deferred pending an accepted consumer case for exact rolling job admissions.
 Blocked by: P16.
 Unblocks: P18.
 Source boundaries: new rate migration in all three bundles; runledger-postgres/src/jobs/capacity/rate_history.rs; migrations/identity tests; runledger-runtime/src/reaper.rs.
@@ -1613,10 +1692,11 @@ Lease deadlines use raw database time; rate effective-time floors never determin
 
 Rationale:
 
-Rate consumption must outlive attempts and queue retention, and immutable windows make safe history cleanup possible.
+Rate consumption must outlive attempts and queue retention, and immutable windows make safe history cleanup possible. This cost is justified only after a consumer needs queue-admission accounting; the current audit found provider-dispatch/calendar-spend controls with different semantics.
 
 Required changes:
 
+- Before resuming implementation, record the named consumer/job, required trailing-window semantics, an adoption fixture, accepted no-op/retry/continuation/prestart charges, and retained provider-call controls. Keep this task deferred if that evidence is absent; P16 completion alone is insufficient.
 - Add policy/admission-keyed rate history with admitted_at, policy revision, and nullable queue audit linkage using ON DELETE SET NULL.
 - Add a nondecreasing per-rate-policy time floor and immutable whole-second periods of 1–86,400 seconds.
 - Index policy/time/admission ordering for admission counts and bounded cleanup; never cascade history from job or attempt deletion.
@@ -1638,7 +1718,7 @@ Verification:
 
 Acceptance:
 
-Rate history is durable independently of job lifetime, safely bounded by the immutable window, and ready for admission integration.
+An accepted consumer case justifies the stage; rate history is durable independently of job lifetime, safely bounded by the immutable window, and ready for admission integration.
 
 Completion evidence:
 
@@ -1734,6 +1814,7 @@ Required changes:
 - Inject failed candidate writes, canceled futures, ambiguous commits, cleanup errors, stale tokens, and reused attempt tuples.
 - Race rate cleanup, pause/resize/archive, admission, and queue retention with deterministic lock barriers.
 - Check consumption at admission time while deliberately delaying handler invocation; keep the documented dispatch-time limitation visible.
+- Run the accepted P17 consumer fixture with no-op jobs and continuation/prestart charges; prove its stated admission policy without removing provider-call or calendar-budget controls with different semantics.
 - Verify old snapshots/promoters still work, constrained v2 work stays fenced, and rate-disabled deployments reject rate activation/bindings explicitly.
 - Record PostgreSQL 18 evidence and retain no production activation assumptions.
 
@@ -1839,6 +1920,7 @@ Users need precise admission-time semantics and an explicit second activation ga
 Required changes:
 
 - Publish customer-plus-provider examples and explain unit admission costs, no refunds, immutable periods, and current-limit replay behavior.
+- Lead with the named consumer case accepted before P17, including measured adoption value and retained provider-dispatch controls; do not present hypothetical request-per-minute examples as observed consumer demand.
 - Document database logical-time floors, forward/failover clock limits, and the distinction between queue admission and HTTP dispatch.
 - Add history-retention, paused/archived policies, diagnostics, backlog recovery, and scaling guidance tied to measured fixtures.
 - Rehearse rate activation after the compatible concurrency deployment and a rollback retaining unexpired history.
@@ -1868,6 +1950,8 @@ Completion evidence:
 ## 13. Beads execution map
 
 Epic: `runledger-distributed-capacity-bp2` (open; implementation has not started).
+P17 is deferred pending consumer fit; P18–P21 retain their blocking chain.
+P16 completion alone does not resume the rate stage. P01–P16 remain open.
 Completed planning prerequisite: `runledger-bva`; completed research prerequisites: `runledger-cod`, `runledger-ze4`.
 Start implementation with `br show runledger-distributed-capacity-bp2.1 --json` and `br ready --json`.
 Status is authoritative in Beads; this table records the initial dependency mapping.

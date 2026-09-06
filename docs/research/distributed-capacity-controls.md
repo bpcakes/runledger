@@ -20,6 +20,13 @@ internal blocking dependencies. The first implementation task is
 The original investigation below remains useful background; the execution plan
 supersedes its illustrative API, storage, transaction, and rollout choices.
 
+The subsequent [consumer audit](distributed-capacity-consumer-audit-2026-09-06.md)
+supports concurrency first, with CreditKit and IdentityPro adoption fixtures.
+It found no accepted consumer requirement for exact rolling job admissions;
+P17 is deferred pending that evidence, and P18–P21 remain dependent on it.
+OneSales provider pacing and Vatbot paid-call accounting have different units
+and remain outside the queue-admission contract.
+
 The substantive changes are:
 
 - Preserve one atomic outer claim transaction with candidate savepoints. The
@@ -554,8 +561,9 @@ and single-hot-policy workloads before making performance commitments.
    specify durable APIs, compatibility, explicit attachment, and rollout.
 3. `runledger-bva` tracks the reviewed plan and conversion. The implementation
    epic is `runledger-distributed-capacity-bp2`; its dependency graph preserves
-   concurrency release before rate implementation. Consult Beads for live status.
+   concurrency release before any rate implementation. The consumer-fit condition
+   for resuming P17 is additional to that dependency. Consult Beads for live status.
 
-This sequence keeps the immediate product improvement focused: shared customer
-concurrency first, explicit admission rates second, and request-level dispatch
+This sequence keeps the immediate product improvement focused: shared job
+concurrency first, admission rates conditional on consumer fit, and request-level dispatch
 control only if the application needs a stronger boundary than job admission.
