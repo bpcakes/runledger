@@ -1,0 +1,27 @@
+{
+  "server_version": "18.4 (Debian 18.4-1.pgdg13+1)",
+  "migration_sql_files_applied": 17,
+  "source_baseline": "7cdb9cbf7516f7f3a4940215a8c2d46c1843d3c9",
+  "results": {
+    "multi_policy_resource_workflow_claims": 3,
+    "outer_batch_failure_rolls_back_claims_and_audit": true,
+    "denied_savepoint_preserves_earlier_success": true,
+    "policy_lock_allows_requirement_foreign_key": true,
+    "uncommitted_resource_conflict_rolls_back_candidate": true,
+    "workflow_step_contention_skipped": true,
+    "reverse_workflow_step_cycle_broken_by_nowait": true,
+    "cancellation_retention_restricts_job_deletion": true,
+    "reused_attempt_rejects_stale_admission_token": true,
+    "expiry_waits_for_owner_reap": true,
+    "heartbeat_first_keeps_permits_and_reaper_skips_owner": true,
+    "old_lease_writer_rejected": true,
+    "dense_prefix_admission_batches": 13,
+    "head_probe_observes_new_priority": true
+  },
+  "limits": [
+    "SQL protocol model, not Rust API integration",
+    "scanner uses stable rows; production cursor deletion/rollback cases remain",
+    "no rate implementation or throughput claim",
+    "workflow lock order is modeled; full cancellation/recovery Rust paths remain"
+  ]
+}

@@ -1,0 +1,167 @@
+{
+  "purpose": "Proposed canonical wire fixtures for implementation tests; current 0.12.0 code does not yet support capacity.",
+  "source_baseline": "7cdb9cb",
+  "direct": {
+    "legacy_v1": {
+      "payload": {
+        "kind": "golden"
+      },
+      "priority": 10,
+      "max_attempts": 3,
+      "timeout_seconds": 30,
+      "next_run_at": "2026-05-22T10:30:45.000000Z",
+      "stage": "scheduled"
+    },
+    "empty_equivalent": {
+      "payload": {
+        "kind": "golden"
+      },
+      "priority": 10,
+      "max_attempts": 3,
+      "timeout_seconds": 30,
+      "next_run_at": "2026-05-22T10:30:45.000000Z",
+      "stage": "scheduled",
+      "capacity_policy_keys": []
+    },
+    "constrained_v2": {
+      "payload": {
+        "kind": "golden"
+      },
+      "priority": 10,
+      "max_attempts": 3,
+      "timeout_seconds": 30,
+      "next_run_at": "2026-05-22T10:30:45.000000Z",
+      "stage": "scheduled",
+      "capacity_policy_keys": [
+        "customer:123:operations",
+        "provider:abc:requests"
+      ]
+    },
+    "changed_membership_conflicts": {
+      "payload": {
+        "kind": "golden"
+      },
+      "priority": 10,
+      "max_attempts": 3,
+      "timeout_seconds": 30,
+      "next_run_at": "2026-05-22T10:30:45.000000Z",
+      "stage": "scheduled",
+      "capacity_policy_keys": [
+        "customer:123:operations"
+      ]
+    }
+  },
+  "intent": {
+    "legacy_request_version": 1,
+    "constrained_request_version": 2,
+    "canonical_request_source": "Use corresponding direct fixture; intent envelope and identity scope remain as existing tests specify."
+  },
+  "workflow": {
+    "legacy": {
+      "metadata": {
+        "source": "capacity-plan"
+      },
+      "steps": [
+        {
+          "step_key": "send",
+          "execution_kind": "JOB",
+          "job_type": "jobs.test.send",
+          "organization_id": null,
+          "payload": {
+            "send": true
+          },
+          "priority": 8,
+          "max_attempts": 4,
+          "timeout_seconds": 45,
+          "stage": "scheduled",
+          "allow_handler_continuation": true,
+          "execution_resource_key": "provider-account:send",
+          "dependencies": []
+        }
+      ]
+    },
+    "constrained": {
+      "metadata": {
+        "source": "capacity-plan"
+      },
+      "steps": [
+        {
+          "step_key": "send",
+          "execution_kind": "JOB",
+          "job_type": "jobs.test.send",
+          "organization_id": null,
+          "payload": {
+            "send": true
+          },
+          "priority": 8,
+          "max_attempts": 4,
+          "timeout_seconds": 45,
+          "stage": "scheduled",
+          "allow_handler_continuation": true,
+          "execution_resource_key": "provider-account:send",
+          "dependencies": [],
+          "capacity_policy_keys": [
+            "customer:123:operations",
+            "provider:abc:requests"
+          ]
+        }
+      ]
+    }
+  },
+  "append": {
+    "legacy": {
+      "append_window_step_key": "window",
+      "steps": [
+        {
+          "step_key": "send",
+          "execution_kind": "JOB",
+          "job_type": "jobs.test.send",
+          "organization_id": null,
+          "payload": {
+            "send": true
+          },
+          "priority": 8,
+          "max_attempts": 4,
+          "timeout_seconds": 45,
+          "stage": "scheduled",
+          "allow_handler_continuation": true,
+          "execution_resource_key": "provider-account:send",
+          "dependencies": []
+        }
+      ]
+    },
+    "constrained": {
+      "append_window_step_key": "window",
+      "steps": [
+        {
+          "step_key": "send",
+          "execution_kind": "JOB",
+          "job_type": "jobs.test.send",
+          "organization_id": null,
+          "payload": {
+            "send": true
+          },
+          "priority": 8,
+          "max_attempts": 4,
+          "timeout_seconds": 45,
+          "stage": "scheduled",
+          "allow_handler_continuation": true,
+          "execution_resource_key": "provider-account:send",
+          "dependencies": [],
+          "capacity_policy_keys": [
+            "customer:123:operations",
+            "provider:abc:requests"
+          ]
+        }
+      ]
+    }
+  },
+  "expected": {
+    "absent_equals_empty": true,
+    "changed_membership_conflicts": true,
+    "limit_resize_does_not_change_canonical": true,
+    "unknown_recovery_fields_rejected": true,
+    "duplicate_keys_rejected": true,
+    "archived_keys_cannot_be_reused": true
+  }
+}

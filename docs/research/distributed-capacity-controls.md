@@ -7,6 +7,79 @@ New submission adapters and workflow batching/builders add propagation surfaces
 described below.
 Tracking: `runledger-1iv`.
 
+## Reinvestigation and epic plan (2026-09-06)
+
+Reinvestigated against `7cdb9cb`, including the complete current claim, workflow
+lock, submission, intent, catalog schedule, recovery, and migration contracts.
+The executable implementation specification is now
+[`docs/distributed-capacity-plan.md`](../distributed-capacity-plan.md).
+Its task catalog separates concurrency delivery from rolling admission rates.
+Implementation epic: `runledger-distributed-capacity-bp2`, with 21 tasks and 31
+internal blocking dependencies. The first implementation task is
+`runledger-distributed-capacity-bp2.1`.
+The original investigation below remains useful background; the execution plan
+supersedes its illustrative API, storage, transaction, and rollout choices.
+
+The substantive changes are:
+
+- Preserve one atomic outer claim transaction with candidate savepoints. The
+  proposed engine uses nonblocking job and workflow-step prelocks, then sorted
+  policy `FOR NO KEY UPDATE NOWAIT` locks and a separate occupancy command.
+  This avoids introducing partial committed batch results. The workflow-step
+  prelock breaks a reverse-order cycle with external workflow transitions.
+- Bound lock-acquiring savepoints at 24 initially, following the current intent
+  promoter's subtransaction rationale. A larger read window and a continuing
+  keyset cursor are separate bounds. Alternate head and continuation passes;
+  do not reset traversal after each successful claim.
+- Carry a fresh admission UUID through constrained lifecycle writes, including
+  prestart release. The current attempt tuple can be reused, so UUIDs cannot
+  be limited to rate-history deduplication. New claim/token wrappers preserve
+  public literals. Custom runtimes adopt those APIs; legacy claimers explicitly
+  skip bound work and legacy tuple mutations reject it.
+- Freeze exact globally scoped keys, unit costs, at most eight requirements,
+  revisioned policy changes, empty-field canonical compatibility, dual intent
+  request versions, and explicit schedule options. Preserve bindings on legacy
+  schedule upserts. Use a maintenance cutover because compatibility history can
+  prevent old binaries from restarting after the schema change.
+
+The new [protocol probe](probes/capacity_protocol.py) creates its own disposable
+`postgres:18` container and applies all **17 current upward migration files**.
+It then layers a diagnostic capacity protocol over real Runledger queue,
+workflow, execution-resource, attempt, and event tables. It does not execute
+the Rust APIs or SQLx's migration-history validator.
+
+Recorded server: **18.4 (Debian 18.4-1.pgdg13+1)**.
+The [machine-readable results](probes/capacity-protocol-result-2026-09-06.json)
+record the exact source commit and tested assertions.
+
+| Reinvestigation experiment | Observed result |
+| --- | --- |
+| 24 independent sessions, two policies of capacity three, resources and workflow jobs | Three claims, six permits, three resources, and three attempt rows. |
+| Unexpected error after two candidate successes | Entire batch and audit writes rolled back. |
+| Later candidate denied by a held policy lock | Earlier candidate committed; denied job stayed pending. |
+| Policy lock while another session creates an FK reference | `NO KEY UPDATE` allowed reference creation. |
+| Uncommitted legacy resource conflict with disjoint policies | Candidate rolled back under the bounded uniqueness wait. |
+| Reverse workflow step ordering with a blocked competing session | NOWAIT step prelock broke the modeled cycle. |
+| Live cancellation followed by queue deletion | Retained permits prevented deletion and the legacy-resource cascade. |
+| Reused run/attempt/worker with a stale admission UUID | Stale update affected zero rows; successor permits remained. |
+| Expiry/reaper and heartbeat-first orderings | Ordinary expired permits remained until owner transition; renewal kept matching deadlines. |
+| Old-style lease write without capacity proof | Database guard rejected it. |
+| 300 saturated-prefix jobs before an unrelated eligible job | Cursor reached and admitted the unrelated job in 13 batches capped at 24 candidate savepoints. |
+| New higher-priority job during traversal | A separate head probe observed it. |
+
+Reproduce from the repository with:
+
+```sh
+uv run docs/research/probes/capacity_protocol.py
+```
+
+This is protocol-model evidence, not a production integration or performance
+claim. Full Rust workflow cancellation/recovery, cursor deletion/rollback,
+multi-process runtime behavior, rate history, and fault/throughput measurements
+are explicit implementation gates. Proposed old/new canonical examples are in
+[capacity-contract-fixtures.json](capacity-contract-fixtures.json); P01/P04/P06
+turn those planning fixtures into executable tests.
+
 ## Recommendation
 
 Add PostgreSQL-backed admission policies, beginning with distributed counting
@@ -20,12 +93,10 @@ including on workflow steps and enqueue intents. Release semaphore permits throu
 the existing fenced lease lifecycle. Rate admissions are durable consumption and
 are not released when the job completes.
 
-This is an investigation and an implementation outline, not a fully reviewed
-ExecPlan. The planning-workflow skill distinguishes discovery from execution
-planning. No four-round independent plan review, complete feature implementation,
-or full lifecycle proof is claimed here. The PostgreSQL experiment below validates
-only the proposed serialization primitive. The remaining protocol questions are
-explicit prerequisites for an executable plan.
+The following sections preserve the initial investigation and its original
+single-policy experiment. Consult the linked execution plan and its review record
+for the revised protocol, complete implementation tasks, and actual review status.
+No complete feature implementation or full lifecycle proof is claimed here.
 
 ## What the repository does today
 
@@ -475,15 +546,15 @@ successful claims/second, scanned candidates/success, lock contention, heartbeat
 latency, cleanup backlog, and database write load for unconstrained, dispersed,
 and single-hot-policy workloads before making performance commitments.
 
-### Next investigation gates
+### Planning gates and implementation handoff
 
-1. `runledger-cod`: prototype the full multi-policy claim/lifecycle protocol on PostgreSQL 18,
-   including the per-candidate commit/return issue and existing workflow locks.
-2. `runledger-ze4`: freeze the durable API and compatibility contract, using old snapshot fixtures
-   and an explicit answer for required versus opt-in bindings.
-3. `runledger-bva`: convert the resolved design to a reviewed ExecPlan and implementation beads
-   with the stage dependencies intact. The first two gates can proceed
-   independently; both block the execution plan.
+1. `runledger-cod` is complete: the PostgreSQL 18 protocol model and its evidence
+   resolve the planning questions; full Rust integration remains P14/P19 work.
+2. `runledger-ze4` is complete: the execution plan and proposed old/new fixtures
+   specify durable APIs, compatibility, explicit attachment, and rollout.
+3. `runledger-bva` tracks the reviewed plan and conversion. The implementation
+   epic is `runledger-distributed-capacity-bp2`; its dependency graph preserves
+   concurrency release before rate implementation. Consult Beads for live status.
 
 This sequence keeps the immediate product improvement focused: shared customer
 concurrency first, explicit admission rates second, and request-level dispatch
