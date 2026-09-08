@@ -53,7 +53,7 @@ pub(super) async fn insert_workflow_run_record_tx(
             updated_at",
         enqueue_workflow_run_idempotency_conflict_clause(payload),
     );
-    let run_row = sqlx::query_as::<_, WorkflowRunEnqueueRow>(&insert_sql)
+    let run_row = sqlx::query_as::<_, WorkflowRunEnqueueRow>(sqlx::AssertSqlSafe(insert_sql))
         .bind(payload.workflow_type())
         .bind(payload.organization_id())
         .bind(payload.idempotency_key())

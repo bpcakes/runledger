@@ -289,11 +289,13 @@ async fn progress_detects_expired_and_replaced_leases_and_aborts_even_if_error_i
         timeout(Duration::from_secs(3), started.notified())
             .await
             .expect("handler starts");
-        sqlx::query(&format!("UPDATE job_queue SET {mutation} WHERE id = $1"))
-            .bind(job_id)
-            .execute(&pool)
-            .await
-            .expect("invalidate lease");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE job_queue SET {mutation} WHERE id = $1"
+        )))
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .expect("invalidate lease");
         write.notify_one();
         await_spawned_task(
             &mut task,

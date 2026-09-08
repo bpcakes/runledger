@@ -531,7 +531,14 @@ async fn malformed_cross_run_dependencies_fail_closed_before_dependent_mutation(
     assert_cross_run_completion_rejected(&pool, &mut listener, source_run_id, dependent_step_id)
         .await;
 
-    teardown_ephemeral_pool(pool, database).await;
+    // SQLx waits for every checked-out connection, including an idle listener, on close.
+    drop(listener);
+    timeout(
+        Duration::from_secs(5),
+        teardown_ephemeral_pool(pool, database),
+    )
+    .await
+    .expect("close the pool after releasing the listener");
 }
 
 #[tokio::test]

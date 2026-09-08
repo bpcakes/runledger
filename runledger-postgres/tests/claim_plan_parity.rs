@@ -149,7 +149,7 @@ async fn seed_queue(pool: &PgPool, shape: QueueShape) {
             END
          FROM generate_series(1, 20000) AS ordinal"
     );
-    sqlx::query(&insert_sql)
+    sqlx::query(sqlx::AssertSqlSafe(insert_sql))
         .execute(pool)
         .await
         .expect("insert claim parity jobs");
@@ -160,17 +160,20 @@ async fn seed_queue(pool: &PgPool, shape: QueueShape) {
 }
 
 async fn prepare_statements(conn: &mut PgConnection, mode: PlanMode, filtered: bool) {
-    sqlx::query(&format!("SET plan_cache_mode = {}", mode.setting()))
-        .execute(&mut *conn)
-        .await
-        .expect("set claim parity plan mode");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET plan_cache_mode = {}",
+        mode.setting()
+    )))
+    .execute(&mut *conn)
+    .await
+    .expect("set claim parity plan mode");
     for (name, sql) in [
         ("baseline_claim", baseline_sql(filtered)),
         ("unified_claim", UNIFIED_SQL.to_owned()),
     ] {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "PREPARE {name}(bigint, text, integer, text[], bigint) AS {sql}"
-        ))
+        )))
         .execute(&mut *conn)
         .await
         .unwrap_or_else(|error| panic!("prepare {name}: {error}"));
@@ -191,9 +194,9 @@ fn execute_arguments(allowed_types: &[&str]) -> String {
 }
 
 async fn explain_statement(conn: &mut PgConnection, statement: &str, arguments: &str) -> Value {
-    sqlx::query_scalar::<_, Value>(&format!(
+    sqlx::query_scalar::<_, Value>(sqlx::AssertSqlSafe(format!(
         "EXPLAIN (FORMAT JSON) EXECUTE {statement}({arguments})"
-    ))
+    )))
     .fetch_one(conn)
     .await
     .unwrap_or_else(|error| panic!("explain {statement}: {error}"))
@@ -239,7 +242,7 @@ async fn execute_statement(
     let sql = format!("EXECUTE {statement}({arguments})");
     let mut tx = conn.begin().await.expect("begin claim parity sample");
     let started = Instant::now();
-    let ids = sqlx::query_scalar::<_, sqlx::types::Uuid>(&sql)
+    let ids = sqlx::query_scalar::<_, sqlx::types::Uuid>(sqlx::AssertSqlSafe(sql))
         .fetch_all(&mut *tx)
         .await
         .unwrap_or_else(|error| panic!("execute {statement}: {error}"));

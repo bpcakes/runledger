@@ -2,7 +2,7 @@
 name = "runledger-runtime"
 version.workspace = true
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 license = "MIT"
 description = "Async worker, scheduler, and reaper runtime for the Runledger job system"
 readme = "../README.md"
@@ -24,7 +24,7 @@ futures-util = "0.3"
 runledger-core = { workspace = true }
 runledger-postgres = { workspace = true }
 serde_json = "1"
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros"] }
 thiserror = "2"
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -121,7 +121,7 @@ async fn compact_reads(pool: &DbPool) {
     let mut offset_samples = Vec::new();
     for sample in 0..32 {
         let start = Instant::now();
-        let cursor_rows = sqlx::query(&cursor_sql)
+        let cursor_rows = sqlx::query(sqlx::AssertSqlSafe(cursor_sql.as_str()))
             .bind(None::<sqlx::types::Uuid>)
             .bind(None::<String>)
             .bind(None::<String>)
@@ -133,7 +133,7 @@ async fn compact_reads(pool: &DbPool) {
             .expect("cursor raw");
         let cursor_elapsed = start.elapsed().as_secs_f64() * 1000.;
         let start = Instant::now();
-        let offset_rows = sqlx::query(&offset_sql)
+        let offset_rows = sqlx::query(sqlx::AssertSqlSafe(offset_sql.as_str()))
             .bind(None::<sqlx::types::Uuid>)
             .bind(None::<String>)
             .bind(None::<String>)

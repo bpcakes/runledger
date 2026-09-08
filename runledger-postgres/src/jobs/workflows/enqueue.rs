@@ -178,20 +178,19 @@ async fn enqueue_workflow_run_classified_tx_inner(
     if let Some(active_key) = payload.active_key() {
         lock_workflow_active_key_tx(tx, payload.organization_id(), active_key).await?;
 
-        if let Some(idempotency_key) = payload.idempotency_key() {
-            if let Some(existing) = try_load_existing_idempotent_workflow_run_tx(
+        if let Some(idempotency_key) = payload.idempotency_key()
+            && let Some(existing) = try_load_existing_idempotent_workflow_run_tx(
                 tx,
                 payload,
                 idempotency_key,
                 &enqueue_request,
             )
             .await?
-            {
-                validate_existing_idempotent_workflow_run(&existing)?;
-                return Ok(EnqueueActiveWorkflowOutcome::ExistingIdempotent(
-                    existing.into_record()?,
-                ));
-            }
+        {
+            validate_existing_idempotent_workflow_run(&existing)?;
+            return Ok(EnqueueActiveWorkflowOutcome::ExistingIdempotent(
+                existing.into_record()?,
+            ));
         }
 
         if let Some(existing) =

@@ -358,7 +358,7 @@ async fn enqueue_job_with_existing_lock_tx_inner(
          RETURNING id, status::text AS status, run_number",
         enqueue_job_idempotency_conflict_clause(&prepared, payload.organization_id),
     );
-    let row = sqlx::query_as::<_, EnqueuedJobRow>(&insert_sql)
+    let row = sqlx::query_as::<_, EnqueuedJobRow>(sqlx::AssertSqlSafe(insert_sql))
         .bind(payload.job_type)
         .bind(payload.organization_id)
         .bind(payload.payload)

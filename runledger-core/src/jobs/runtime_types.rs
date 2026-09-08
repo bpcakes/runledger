@@ -9,20 +9,15 @@ use super::JobFailureKind;
 
 /// What Runledger should do after a handler successfully finishes its bounded
 /// unit of work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobCompletionDisposition {
     /// Finish the logical job successfully.
+    #[default]
     Succeed,
     /// Close the current attempt successfully and schedule the same logical
     /// job for another run.
     ContinueAfter(Duration),
-}
-
-impl Default for JobCompletionDisposition {
-    fn default() -> Self {
-        Self::Succeed
-    }
 }
 
 /// Invalid progress supplied by a job handler.

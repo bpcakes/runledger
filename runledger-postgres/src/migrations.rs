@@ -874,7 +874,7 @@ fn applied_runledger_migrations(
 async fn run_migrations_with_filtered_history(
     conn: &mut PgPoolConnection,
 ) -> Result<(), MigrateError> {
-    (**conn).ensure_migrations_table().await?;
+    (**conn).ensure_migrations_table("_sqlx_migrations").await?;
 
     let expected_migrations = expected_runledger_migrations();
     let history = list_migration_history(conn).await?;
@@ -911,7 +911,7 @@ async fn run_migrations_with_filtered_history(
                 validate_checksum(migration.version, applied_migration, migration)?
             }
             None => {
-                (**conn).apply(migration).await?;
+                (**conn).apply("_sqlx_migrations", migration).await?;
             }
         }
     }

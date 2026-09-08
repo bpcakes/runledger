@@ -1,5 +1,6 @@
 use postgres_test_harness::{FingerprintBuilder, TemplateFingerprint};
 use runledger_postgres::{RUNLEDGER_POSTGRES_VERSION, migration_bundle};
+use sqlx::SqlSafeStr;
 use sqlx::migrate::{Migration, MigrationType};
 
 const HISTORICAL_VERSIONS: [i64; 5] = [
@@ -58,7 +59,7 @@ fn composed_identity(
                     1,
                     "limit".into(),
                     MigrationType::Simple,
-                    runlimit_sql.into(),
+                    runlimit_sql.into_sql_str(),
                     false,
                 )],
             ),
@@ -69,7 +70,7 @@ fn composed_identity(
                     2,
                     "host".into(),
                     MigrationType::Simple,
-                    host_sql.into(),
+                    host_sql.into_sql_str(),
                     false,
                 )],
             ),
@@ -165,7 +166,7 @@ fn hocr_historical_bundle_matches_published_manifest_and_detects_drift() {
         changed[0].version,
         changed[0].description.clone(),
         changed[0].migration_type,
-        "SELECT 'modified historical SQL'".into(),
+        "SELECT 'modified historical SQL'".into_sql_str(),
         changed[0].no_tx,
     );
     assert_eq!(
@@ -173,7 +174,7 @@ fn hocr_historical_bundle_matches_published_manifest_and_detects_drift() {
         Err("historical SQL or checksum differs")
     );
     changed = originals.clone();
-    changed[0].sql = "SELECT 'tampered without updating checksum'".into();
+    changed[0].sql = "SELECT 'tampered without updating checksum'".into_sql_str();
     assert_eq!(
         verify_historical_bundle(&changed, &upstream),
         Err("historical SQL or checksum differs")

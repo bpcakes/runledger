@@ -59,7 +59,7 @@ async fn actual_summary_cursor_constrains_index_with_custom_and_generic_plans() 
         .single()
         .expect("timestamp");
     for mode in ["force_custom_plan", "force_generic_plan"] {
-        sqlx::raw_sql(&format!("SET plan_cache_mode = {mode}"))
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET plan_cache_mode = {mode}")))
             .execute(&pool)
             .await
             .expect("plan mode");
@@ -154,8 +154,8 @@ async fn assert_summary_plan(
     };
     let status_sql = status.map_or_else(|| "NULL".into(), |s| format!("'{}'", s.as_db_value()));
     let type_sql = job_type.map_or_else(|| "NULL".into(), |t| format!("'{}'", t.as_str()));
-    let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING OFF)
-                EXECUTE \"{}\" ({organization}, {status_sql}, {type_sql}, 20, '2026-01-01 00:16:40+00', '00000000-0000-0000-0000-000000000000')", name.replace('"', "\"\"")))
+    let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING OFF)
+                EXECUTE \"{}\" ({organization}, {status_sql}, {type_sql}, 20, '2026-01-01 00:16:40+00', '00000000-0000-0000-0000-000000000000')", name.replace('"', "\"\""))))
                 .fetch_one(pool).await.expect("explain");
     // A selective custom plan may use the existing type/status/time index,
     // applying the UUID tie-break as a residual filter. That is valid bounded

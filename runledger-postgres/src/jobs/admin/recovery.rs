@@ -302,7 +302,8 @@ async fn lock_compare_and_requeue_candidate_tx(
            )
          FOR NO KEY UPDATE"
     );
-    let row = sqlx::query_as::<_, CompareAndRequeueCandidateRow>(&sql)
+    // Only the fixed column projection is interpolated; request values are bound.
+    let row = sqlx::query_as::<_, CompareAndRequeueCandidateRow>(sqlx::AssertSqlSafe(sql))
         .bind(request.job_id)
         .bind(request.scope.organization_id())
         .bind(request.expected_status.as_db_value())
@@ -348,7 +349,8 @@ async fn load_compare_and_requeue_candidate_for_classification_tx(
          WHERE id = $1
            AND organization_id IS NOT DISTINCT FROM $2::uuid"
     );
-    let row = sqlx::query_as::<_, CompareAndRequeueCandidateRow>(&sql)
+    // Only the fixed column projection is interpolated; request values are bound.
+    let row = sqlx::query_as::<_, CompareAndRequeueCandidateRow>(sqlx::AssertSqlSafe(sql))
         .bind(request.job_id)
         .bind(request.scope.organization_id())
         .fetch_optional(&mut **tx)

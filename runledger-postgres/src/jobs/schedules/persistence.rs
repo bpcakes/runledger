@@ -71,7 +71,7 @@ pub(super) async fn persist_job_schedule_tx(
         active_state_policy.conflict_set_clause(),
     );
 
-    let row = sqlx::query_as::<_, JobScheduleRow>(&sql)
+    let row = sqlx::query_as::<_, JobScheduleRow>(sqlx::AssertSqlSafe(sql))
         .bind(payload.name)
         .bind(payload.job_type.as_str())
         .bind(payload.organization_id)

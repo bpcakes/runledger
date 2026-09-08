@@ -187,7 +187,8 @@ async fn lock_eligible_replay_source_tx(
            )
          FOR NO KEY UPDATE"
     );
-    let row = sqlx::query_as::<_, ReplayCandidateRow>(&sql)
+    // Only the fixed column projection is interpolated; request values are bound.
+    let row = sqlx::query_as::<_, ReplayCandidateRow>(sqlx::AssertSqlSafe(sql))
         .bind(request.source_job_id)
         .bind(request.scope.organization_id())
         .bind(request.expected_run_number)
@@ -219,7 +220,8 @@ async fn load_replay_source_for_classification_tx(
          WHERE id = $1
            AND organization_id IS NOT DISTINCT FROM $2::uuid"
     );
-    let row = sqlx::query_as::<_, ReplayCandidateRow>(&sql)
+    // Only the fixed column projection is interpolated; request values are bound.
+    let row = sqlx::query_as::<_, ReplayCandidateRow>(sqlx::AssertSqlSafe(sql))
         .bind(request.source_job_id)
         .bind(request.scope.organization_id())
         .fetch_optional(&mut **tx)

@@ -300,7 +300,7 @@ async fn definition_catalog_sync_reports_empty_partial_all_absent_and_additive_c
 
     let restore_report = sync_catalog_job_definitions_tx(
         &mut tx,
-        &[beta.clone()],
+        std::slice::from_ref(&beta),
         JobDefinitionCatalogSyncMode::RestoreCatalogEnabledState,
     )
     .await

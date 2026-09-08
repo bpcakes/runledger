@@ -130,7 +130,7 @@ async fn fail_stage_changed_insert_for_job(pool: &DbPool, job_id: Uuid) {
          END;
          $$"
     );
-    sqlx::query(&function_sql)
+    sqlx::query(sqlx::AssertSqlSafe(function_sql))
         .execute(pool)
         .await
         .expect("create running-stage failure function");

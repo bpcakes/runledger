@@ -5,7 +5,7 @@ not an instruction file for agents maintaining this repository.
 
 This guide targets the Runledger version in the current checkout and retains
 the operational contracts from earlier supported releases. Runledger requires
-Rust 1.88 or later and PostgreSQL 18 or later. An older PostgreSQL server with
+Rust 1.94 or later and PostgreSQL 18 or later. An older PostgreSQL server with
 an extension-provided `uuidv7()` function is not a supported substitute.
 
 ## Choose The Highest-Level API

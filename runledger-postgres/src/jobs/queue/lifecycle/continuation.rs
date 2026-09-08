@@ -29,7 +29,8 @@ struct ContinuationProgressUpdate<'a> {
 }
 
 fn continuation_delay_microseconds(delay: std::time::Duration) -> Result<i64> {
-    let rounded_microseconds = delay.as_micros() + u128::from(delay.subsec_nanos() % 1_000 != 0);
+    let rounded_microseconds =
+        delay.as_micros() + u128::from(!delay.subsec_nanos().is_multiple_of(1_000));
     i64::try_from(rounded_microseconds).map_err(|_| {
         invalid_continuation_delay_error(format!(
             "continuation delay must fit in signed 64-bit microseconds, got {delay:?}"

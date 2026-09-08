@@ -99,14 +99,14 @@ runledger-postgres = "0.12.0"
 runledger-runtime = "0.12.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 
 [dev-dependencies]
 runledger-test-support = "0.12.0"
 ```
 
-The published crates require **Rust 1.88+** and **PostgreSQL 18+**. Older
+The published crates require **Rust 1.94+** and **PostgreSQL 18+**. Older
 PostgreSQL releases are not supported, even when an extension supplies an
 equivalent `uuidv7()` function. See [PostgreSQL requirements](#postgresql-requirements).
 
@@ -1753,7 +1753,12 @@ The repo uses `sqlx::query!` and friends extensively, and builds offline:
 - Each publishable crate that uses checked macros also carries its own `.sqlx/`
   so `cargo publish` can verify the packaged tarball in isolation.
 
-If you change SQL or the schema, refresh the cache before committing:
+If you change SQL or the schema, refresh the cache before committing. First
+install the matching SQLx CLI version:
+
+```bash
+cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres
+```
 
 1. Bring up a PostgreSQL 18 database with the current migrations applied.
 2. Point `DATABASE_URL` at it.

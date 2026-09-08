@@ -44,6 +44,9 @@ All notable changes to this workspace are documented here.
 
 ### Changed
 
+- Upgrade SQLx from 0.8.6 to 0.9.0 and raise the minimum Rust version to 1.94.
+  Update dynamic SQL and migration APIs while retaining bound request values
+  and the existing `_sqlx_migrations` history table.
 - Keep exact-scope payload lookups indexable under generic prepared plans.
 - Remove redundant timeout-policy statements and duplicate locking from progress
   writes while preserving locked-state validation, lease fencing, and audit
@@ -61,6 +64,12 @@ All notable changes to this workspace are documented here.
 
 ### Upgrade notes
 
+- Use Rust 1.94 or later and SQLx 0.9 in applications that share pools,
+  transactions, or SQLx types with Runledger. SQLx 0.8 types are incompatible.
+  Install `sqlx-cli` 0.9.0 before refreshing offline query metadata. This
+  dependency upgrade does not add or alter database migrations.
+  Pool shutdown waits for checked-out connections; drop idle listeners before
+  awaiting `PgPool::close`.
 - Apply `202609050001_job_summary_pagination` before starting the new runtime.
   Its two ordinary index builds block queue writes until the SQLx migration
   commits; schedule an appropriate deployment window. The migration is recorded

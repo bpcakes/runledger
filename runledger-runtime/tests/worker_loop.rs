@@ -129,7 +129,7 @@ async fn fail_stage_changed_inserts_for_job(pool: &sqlx::PgPool, job_id: uuid::U
          $$"
     );
 
-    sqlx::query(&function_sql)
+    sqlx::query(sqlx::AssertSqlSafe(function_sql))
         .execute(pool)
         .await
         .expect("create failing stage-changed trigger function");

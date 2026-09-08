@@ -22,7 +22,7 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 if ! cargo sqlx --help >/dev/null 2>&1; then
-  echo "error: cargo-sqlx is required. Install it with 'cargo install sqlx-cli --no-default-features --features rustls,postgres'." >&2
+  echo "error: cargo-sqlx is required. Install it with 'cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres'." >&2
   exit 1
 fi
 

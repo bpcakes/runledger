@@ -6,117 +6,255 @@
       {
         "ordinal": 0,
         "name": "id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "job_type",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "job_type"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "organization_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "organization_id"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "payload",
-        "type_info": "Jsonb"
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "payload"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "priority",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "priority"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "max_attempts",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "max_attempts"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "timeout_seconds",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "timeout_seconds"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "next_run_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "next_run_at"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "idempotency_key",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "idempotency_key"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "stage",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "stage"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "enqueue_request_version",
-        "type_info": "Int2"
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "enqueue_request_version"
+          }
+        }
       },
       {
         "ordinal": 11,
         "name": "execution_resource_key",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "execution_resource_key"
+          }
+        }
       },
       {
         "ordinal": 12,
         "name": "promotion_attempts",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "promotion_attempts"
+          }
+        }
       },
       {
         "ordinal": 13,
         "name": "next_promotion_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "next_promotion_at"
+          }
+        }
       },
       {
         "ordinal": 14,
         "name": "last_attempted_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "last_attempted_at"
+          }
+        }
       },
       {
         "ordinal": 15,
         "name": "status",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "status"
+          }
+        }
       },
       {
         "ordinal": 16,
         "name": "promoted_job_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "promoted_job_id"
+          }
+        }
       },
       {
         "ordinal": 17,
         "name": "promoted_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "promoted_at"
+          }
+        }
       },
       {
         "ordinal": 18,
         "name": "conflicted_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "conflicted_at"
+          }
+        }
       },
       {
         "ordinal": 19,
         "name": "last_error_code",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "last_error_code"
+          }
+        }
       },
       {
         "ordinal": 20,
         "name": "last_error_message",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "last_error_message"
+          }
+        }
       },
       {
         "ordinal": 21,
         "name": "created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "created_at"
+          }
+        }
       },
       {
         "ordinal": 22,
         "name": "updated_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "job_enqueue_intents",
+            "name": "updated_at"
+          }
+        }
       }
     ],
     "parameters": {

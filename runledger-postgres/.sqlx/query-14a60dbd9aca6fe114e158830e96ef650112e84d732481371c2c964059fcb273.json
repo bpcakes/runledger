@@ -6,57 +6,118 @@
       {
         "ordinal": 0,
         "name": "id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "workflow_run_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "workflow_run_id"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "execution_kind!",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": "Expression"
       },
       {
         "ordinal": 3,
         "name": "job_type",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "job_type"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "organization_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "organization_id"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "payload",
-        "type_info": "Jsonb"
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "payload"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "priority",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "priority"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "max_attempts",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "max_attempts"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "timeout_seconds",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "timeout_seconds"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "stage",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "stage"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "execution_resource_key",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workflow_steps",
+            "name": "execution_resource_key"
+          }
+        }
       }
     ],
     "parameters": {

@@ -84,7 +84,7 @@ async fn assert_prepared_plan(pool: &DbPool, table: &str, organization: Option<U
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING OFF) EXECUTE \"{}\" ({organization}, NULL, NULL, 20, 0{admin_argument})",
         name.replace('"', "\"\""),
     );
-    let plan: Value = sqlx::query_scalar(&statement)
+    let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
         .fetch_one(pool)
         .await
         .expect("explain actual query");
@@ -115,7 +115,7 @@ async fn selective_scopes_use_indexes_with_custom_and_generic_prepared_plans() {
         .await
         .expect("tenant");
     for mode in ["force_custom_plan", "force_generic_plan"] {
-        sqlx::raw_sql(&format!("SET plan_cache_mode = {mode}"))
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET plan_cache_mode = {mode}")))
             .execute(&pool)
             .await
             .expect("plan mode");
@@ -194,7 +194,7 @@ async fn assert_payload_plan(pool: &DbPool, predicate: &str, scope: JobScope, ke
         name.replace('"', "\"\""),
         key.replace('\'', "''"),
     );
-    let plan: Value = sqlx::query_scalar(&statement)
+    let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
         .fetch_one(pool)
         .await
         .expect("explain payload lookup");
@@ -254,7 +254,7 @@ async fn payload_scopes_use_indexes_with_custom_and_generic_prepared_plans() {
         .await
         .expect("tenant");
     for mode in ["force_custom_plan", "force_generic_plan"] {
-        sqlx::raw_sql(&format!("SET plan_cache_mode = {mode}"))
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET plan_cache_mode = {mode}")))
             .execute(&pool)
             .await
             .expect("plan mode");

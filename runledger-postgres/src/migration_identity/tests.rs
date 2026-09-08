@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use sqlx::SqlSafeStr;
+
 use super::*;
 
 fn vector_entries() -> [Migration; 2] {
@@ -8,7 +10,7 @@ fn vector_entries() -> [Migration; 2] {
             version: -7,
             description: Cow::Borrowed("alpha\0β"),
             migration_type: MigrationType::Simple,
-            sql: Cow::Borrowed(""),
+            sql: "".into_sql_str(),
             checksum: Cow::Borrowed(&[0, 255, 128]),
             no_tx: false,
         },
@@ -16,7 +18,7 @@ fn vector_entries() -> [Migration; 2] {
             version: 42,
             description: Cow::Borrowed("down"),
             migration_type: MigrationType::ReversibleDown,
-            sql: Cow::Borrowed(""),
+            sql: "".into_sql_str(),
             checksum: Cow::Borrowed(&[1, 2]),
             no_tx: true,
         },

@@ -2,7 +2,7 @@
 name = "runledger-tui"
 version.workspace = true
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 license = "MIT"
 description = "Read-only terminal UI for monitoring Runledger jobs and workflows"
 readme = "../README.md"

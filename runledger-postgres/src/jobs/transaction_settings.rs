@@ -8,7 +8,7 @@ pub(in crate::jobs) struct PostgresTimeout(Duration);
 impl PostgresTimeout {
     pub(in crate::jobs) const fn new(duration: Duration) -> Self {
         assert!(
-            duration.subsec_nanos() % 1_000_000 == 0,
+            duration.subsec_nanos().is_multiple_of(1_000_000),
             "PostgreSQL timeout duration must use whole milliseconds"
         );
         assert!(

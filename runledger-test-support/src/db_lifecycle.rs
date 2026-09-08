@@ -64,8 +64,11 @@ async fn apply_untracked_runledger_migrations(
     pool: &PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for migration_path in runledger_migration_paths()? {
+        // SQL comes from the repository-owned migration bundle.
         let sql = std::fs::read_to_string(&migration_path)?;
-        sqlx::raw_sql(&sql).execute(pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -152,8 +155,11 @@ async fn create_ephemeral_database_with_permit(
     let name = build_database_name(prefix);
     let admin_pool = connect_admin_pool(admin_url).await?;
 
+    // build_database_name restricts the identifier to ASCII letters, digits and underscores.
     let create_sql = format!("CREATE DATABASE {name}");
-    sqlx::raw_sql(&create_sql).execute(&admin_pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(create_sql))
+        .execute(&admin_pool)
+        .await?;
     admin_pool.close().await;
 
     Ok(EphemeralDatabase {
@@ -216,8 +222,11 @@ pub async fn drop_database(database_name: &str) -> Result<(), sqlx::Error> {
     .fetch_all(&admin_pool)
     .await?;
 
+    // sanitize_identifier restricts the database name to a single SQL identifier.
     let drop_sql = format!("DROP DATABASE IF EXISTS {normalized}");
-    sqlx::raw_sql(&drop_sql).execute(&admin_pool).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(drop_sql))
+        .execute(&admin_pool)
+        .await?;
     admin_pool.close().await;
 
     Ok(())

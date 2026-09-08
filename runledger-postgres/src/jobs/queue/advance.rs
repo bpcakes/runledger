@@ -114,7 +114,7 @@ pub(crate) async fn advance_locked_job_to_next_run_tx(
     // target. `fetch_one` keeps that invariant explicit instead of carrying an
     // impossible no-row branch through every admin caller.
     let sql = format!("{ADVANCE_JOB_TO_NEXT_RUN_SQL} RETURNING {JOB_QUEUE_COLUMNS_SQL}");
-    let row = bound_advance_query!(&sql, update)
+    let row = bound_advance_query!(sqlx::AssertSqlSafe(sql), update)
         .fetch_one(&mut **tx)
         .await
         .map_err(|error| Error::from_query_sqlx_with_context(error_context, error))?;
@@ -137,7 +137,7 @@ pub(crate) async fn advance_live_lease_to_next_run_tx(
     let sql = format!(
         "{ADVANCE_JOB_TO_NEXT_RUN_SQL}{LIVE_LEASE_GUARD_SQL} RETURNING {JOB_QUEUE_COLUMNS_SQL}"
     );
-    let row = bound_advance_query!(&sql, update)
+    let row = bound_advance_query!(sqlx::AssertSqlSafe(sql), update)
         .bind(guard.run_number)
         .bind(guard.attempt)
         .bind(guard.worker_id)

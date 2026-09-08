@@ -1660,7 +1660,7 @@ async fn assert_continuation_cte_down_and_up(pool: &PgPool) {
         .await
         .expect("acquire continuation metrics CTE revert connection");
     (*conn)
-        .revert(cte_down_migration)
+        .revert("_sqlx_migrations", cte_down_migration)
         .await
         .expect("restore the duplicated strict continuation metrics predicate");
     drop(conn);
@@ -1706,7 +1706,7 @@ async fn assert_continuation_validation_down_and_up(pool: &PgPool) {
         .await
         .expect("acquire continuation metrics revert connection");
     (*conn)
-        .revert(down_migration)
+        .revert("_sqlx_migrations", down_migration)
         .await
         .expect("restore the prior continuation metrics view");
     drop(conn);
@@ -1820,7 +1820,7 @@ async fn replay_metrics_down_drops_lineage_objects_but_preserves_queue_rows() {
         .await
         .expect("acquire revert connection");
     (*conn)
-        .revert(down_migration)
+        .revert("_sqlx_migrations", down_migration)
         .await
         .expect("revert replay and metrics migration");
     drop(conn);
@@ -2428,7 +2428,7 @@ async fn apply_runledger_migrations_before_cutover(pool: &PgPool) {
 async fn apply_runledger_migrations_through(pool: &PgPool, latest_version: i64) {
     let mut conn = pool.acquire().await.expect("acquire migration connection");
     (*conn)
-        .ensure_migrations_table()
+        .ensure_migrations_table("_sqlx_migrations")
         .await
         .expect("create sqlx migrations table");
 
@@ -2437,12 +2437,15 @@ async fn apply_runledger_migrations_through(pool: &PgPool, latest_version: i64) 
         .filter(|migration| migration.migration_type.is_up_migration())
         .filter(|migration| migration.version <= latest_version)
     {
-        (*conn).apply(migration).await.unwrap_or_else(|error| {
-            panic!(
-                "apply Runledger migration {} through {latest_version}: {error}",
-                migration.version
-            )
-        });
+        (*conn)
+            .apply("_sqlx_migrations", migration)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "apply Runledger migration {} through {latest_version}: {error}",
+                    migration.version
+                )
+            });
     }
 }
 
@@ -2456,7 +2459,7 @@ async fn apply_runledger_migration(pool: &PgPool, version: i64) {
         .unwrap_or_else(|| panic!("Runledger migration {version} should exist"));
 
     (*conn)
-        .apply(migration)
+        .apply("_sqlx_migrations", migration)
         .await
         .unwrap_or_else(|error| panic!("apply Runledger migration {version}: {error}"));
 }
@@ -2636,7 +2639,7 @@ async fn apply_enqueue_request_cutover_migration(pool: &PgPool) {
         .expect("enqueue request cutover migration should exist");
 
     (*conn)
-        .apply(migration)
+        .apply("_sqlx_migrations", migration)
         .await
         .expect("apply enqueue request cutover migration");
 }
@@ -2649,12 +2652,15 @@ async fn apply_runledger_migrations_after_cutover(pool: &PgPool) {
         .filter(|migration| migration.migration_type.is_up_migration())
         .filter(|migration| migration.version > ENQUEUE_REQUEST_CUTOVER_VERSION)
     {
-        (*conn).apply(migration).await.unwrap_or_else(|error| {
-            panic!(
-                "apply post-cutover Runledger migration {}: {error}",
-                migration.version
-            )
-        });
+        (*conn)
+            .apply("_sqlx_migrations", migration)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "apply post-cutover Runledger migration {}: {error}",
+                    migration.version
+                )
+            });
     }
 }
 

@@ -117,7 +117,7 @@ fn failure_outcome<'a>(
 
 fn retry_delay_milliseconds(delay: std::time::Duration) -> Result<i32> {
     let rounded_milliseconds =
-        delay.as_millis() + u128::from(delay.subsec_nanos() % 1_000_000 != 0);
+        delay.as_millis() + u128::from(!delay.subsec_nanos().is_multiple_of(1_000_000));
     let retry_delay_ms = i32::try_from(rounded_milliseconds).map_err(|_| {
         invalid_retry_timing_error(format!(
             "handler-selected retry delay must fit in a positive 32-bit millisecond value, got {delay:?}"

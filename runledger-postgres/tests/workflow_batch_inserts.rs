@@ -158,17 +158,17 @@ async fn failure_in_later_step_or_edge_chunk_rolls_back_the_owned_transaction() 
         ),
     ] {
         // Fail after earlier chunks have succeeded, exercising the actual transaction boundary.
-        sqlx::raw_sql(&format!("CREATE FUNCTION reject_late_row() RETURNS trigger LANGUAGE plpgsql AS $$
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION reject_late_row() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN IF {predicate} THEN RAISE EXCEPTION 'injected late row failure'; END IF; RETURN NEW; END $$;
-            CREATE TRIGGER reject_late BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION reject_late_row();"))
+            CREATE TRIGGER reject_late BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION reject_late_row();")))
             .execute(&pool).await.expect("install fault");
         enqueue_workflow_run(&pool, &request)
             .await
             .expect_err("late insertion fails");
         assert_eq!(counts(&pool).await, (0, 0, 0, 0, 0));
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "DROP TRIGGER reject_late ON {table}; DROP FUNCTION reject_late_row();"
-        ))
+        )))
         .execute(&pool)
         .await
         .expect("remove fault");

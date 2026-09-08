@@ -6,17 +6,30 @@
       {
         "ordinal": 0,
         "name": "workflow_run_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workflow_step_dependencies",
+            "name": "workflow_run_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "dependent_step_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workflow_step_dependencies",
+            "name": "dependent_step_id"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "release_mode!",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": "Expression"
       }
     ],
     "parameters": {

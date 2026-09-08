@@ -1,5 +1,5 @@
 [toolchain]
-# Runledger uses dependencies and language features that require Rust 1.88+.
-channel = "1.88"
+# Runledger uses dependencies and language features that require Rust 1.94+.
+channel = "1.94"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

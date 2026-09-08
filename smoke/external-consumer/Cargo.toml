@@ -41,5 +41,5 @@ runledger-postgres = { path = "../../runledger-postgres" }
 runledger-runtime = { path = "../../runledger-runtime" }
 runledger-test-support = { path = "../../runledger-test-support" }
 serde_json = "1"
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
