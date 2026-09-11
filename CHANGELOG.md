@@ -6,6 +6,9 @@ All notable changes to this workspace are documented here.
 
 ### Added
 
+- Add `ensure_schema_compatible_after_idempotency_cutover_with_connection` so
+  applications with explicit cancellation-safe connection disposition can run
+  the read-only schema verifier on a caller-owned SQLx PostgreSQL connection.
 - Add explicit `JobReadScope` selection to job, event, log, and enqueue-intent
   reads through `get_job_by_id_with_scope`, `list_jobs_with_scope`,
   `list_job_events_with_scope`, `list_job_logs_with_scope`,

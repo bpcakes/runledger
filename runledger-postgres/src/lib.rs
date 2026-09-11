@@ -336,6 +336,7 @@ pub use migration_identity::{MigrationBundle, RUNLEDGER_POSTGRES_VERSION, migrat
 pub use migrations::{
     MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
     WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
+    ensure_schema_compatible_after_idempotency_cutover_with_connection,
     migrate_after_idempotency_cutover,
 };
 #[allow(
@@ -443,6 +444,7 @@ pub mod prelude {
         DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, QueryError, QueryErrorCategory,
         QueryErrorKind, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
         WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
+        ensure_schema_compatible_after_idempotency_cutover_with_connection,
         migrate_after_idempotency_cutover,
     };
 }

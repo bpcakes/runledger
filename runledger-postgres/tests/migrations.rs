@@ -10,7 +10,9 @@ use runledger_core::jobs::{
 use runledger_postgres::jobs::{enqueue_workflow_run, list_workflow_steps};
 use runledger_postgres::{
     MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerProblem,
-    ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
+    ensure_schema_compatible_after_idempotency_cutover,
+    ensure_schema_compatible_after_idempotency_cutover_with_connection,
+    migrate_after_idempotency_cutover,
 };
 use runledger_test_support::{
     EphemeralDatabase, acquire_test_db_connection_budget, setup_unmigrated_ephemeral_pool,
@@ -64,6 +66,25 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
     JOB_SUMMARY_PAGINATION_MIGRATION_VERSION, // Additive pagination indexes.
 ];
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
+
+#[tokio::test]
+async fn caller_owned_connection_verifier_matches_pool_verifier() {
+    let harness = TestHarness::fresh("caller_owned_schema_verifier").await;
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("apply migrations");
+
+    let mut connection = harness.pool.acquire().await.expect("acquire connection");
+    ensure_schema_compatible_after_idempotency_cutover_with_connection(&mut connection)
+        .await
+        .expect("verify through caller-owned connection");
+    drop(connection);
+    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("verify through pool convenience API");
+
+    harness.teardown().await;
+}
 
 #[tokio::test]
 async fn summary_indexes_are_required_by_startup_but_not_the_custom_compatibility_fence() {
