@@ -4,6 +4,8 @@ use runledger_core::jobs::JobProgressValidationError;
 use sqlx::error::ErrorKind;
 
 mod classify;
+mod rollback;
+pub use rollback::RollbackFailure;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryErrorCategory {
@@ -19,6 +21,17 @@ pub enum QueryErrorCategory {
 /// [`QueryError::code`]. This enum is deliberately smaller: it covers errors
 /// whose handling must stay compile-checked across Runledger crates instead of
 /// depending on duplicated string literals.
+/// Owned cancellation distinguishes transaction-control failures from statement
+/// classification. Neither a kind nor its SQLSTATE authorizes replay.
+///
+/// ```
+/// use runledger_postgres::{Error, QueryErrorKind};
+/// fn commit_was_unconfirmed(error: &Error) -> bool {
+///     matches!(error, Error::QueryError(query)
+///         if query.kind() == Some(QueryErrorKind::TransactionCommitUnconfirmed))
+/// }
+/// // Retain the original failure; separate readback cannot turn it into success.
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryErrorKind {
     JobLeaseOwnerMismatch,
@@ -29,6 +42,10 @@ pub enum QueryErrorKind {
     JobWorkflowHandlerContinuationNotEnabled,
     JobWorkflowRequeueNotSupported,
     PostgresLockNotAvailable,
+    /// An owned transaction could not begin; no statement-level classification is implied.
+    TransactionBeginFailed,
+    /// Successful commit was not confirmed; inspect the source without inferring rollback or replay.
+    TransactionCommitUnconfirmed,
     WorkflowReleaseConflict,
 }
 
@@ -64,6 +81,16 @@ impl QueryErrorKind {
                 "Workflow-managed jobs cannot be requeued directly.",
             ),
             Self::PostgresLockNotAvailable => QueryErrorSpec::internal(),
+            Self::TransactionBeginFailed => QueryErrorSpec {
+                category: QueryErrorCategory::Internal,
+                code: "db.transaction_begin_failed",
+                client_message: "Database transaction could not begin.",
+            },
+            Self::TransactionCommitUnconfirmed => QueryErrorSpec {
+                category: QueryErrorCategory::Internal,
+                code: "db.transaction_commit_unconfirmed",
+                client_message: "Database transaction commit was not confirmed.",
+            },
             Self::WorkflowReleaseConflict => QueryErrorSpec::conflict(
                 "workflow.release_conflict",
                 "Workflow step release conflicted with another workflow mutation.",

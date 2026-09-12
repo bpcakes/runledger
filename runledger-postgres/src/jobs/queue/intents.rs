@@ -1093,7 +1093,10 @@ async fn rollback_intent_promotion_savepoint(tx: &mut ReadCommittedTx<'_, '_>) -
 fn classify_intent_promotion_failure(error: &Error) -> IntentPromotionFailureAction {
     let error = match error {
         Error::QueryError(error) => error,
-        Error::ConfigError(_) | Error::ConnectionError(_) | Error::MigrationError(_) => {
+        Error::ConfigError(_)
+        | Error::ConnectionError(_)
+        | Error::MigrationError(_)
+        | Error::RollbackFailure(_) => {
             return IntentPromotionFailureAction::Propagate;
         }
     };
@@ -1690,6 +1693,10 @@ mod tests {
             Error::ConfigError("test config failure".to_owned()),
             Error::ConnectionError("test connection failure".to_owned()),
             Error::MigrationError("test migration failure".to_owned()),
+            Error::RollbackFailure(Box::new(crate::RollbackFailure {
+                operation: promotion_query_error("job.not_found", "original classification"),
+                rollback: sqlx::Error::PoolClosed,
+            })),
         ] {
             assert_eq!(
                 classify_intent_promotion_failure(&error),

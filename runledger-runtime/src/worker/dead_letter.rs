@@ -12,14 +12,21 @@ pub(super) async fn notify_handler_of_dead_letter(
     context: &JobContext,
     job: &jobs::JobQueueRecord,
     dead_letter: JobDeadLetterInfo,
-) {
+    settlement: Option<crate::settlement::TaskRegistry>,
+) -> DeadLetterHookOutcome {
     let Some(handler) = registry.get(job.job_type.as_borrowed()) else {
-        return;
+        return DeadLetterHookOutcome::Completed;
     };
     let context = context.clone();
     let payload = job.payload.clone();
 
-    match invoke_dead_letter_hook(handler.on_dead_letter(context, payload, dead_letter)).await {
+    let outcome = invoke_dead_letter_hook(
+        async { handler.on_dead_letter(context, payload, dead_letter).await },
+        "worker_terminal_hook",
+        settlement,
+    )
+    .await;
+    match &outcome {
         DeadLetterHookOutcome::Completed => {}
         DeadLetterHookOutcome::Panicked(panic_message) => {
             warn!(
@@ -42,4 +49,5 @@ pub(super) async fn notify_handler_of_dead_letter(
             );
         }
     }
+    outcome
 }

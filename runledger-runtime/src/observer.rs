@@ -1,11 +1,10 @@
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use runledger_core::jobs::{JobDeadLetterReason, JobFailure, JobTypeName};
 use tracing::warn;
 use uuid::Uuid;
@@ -297,6 +296,7 @@ pub trait JobLifecycleObserver: Send + Sync {
 #[derive(Clone, Default)]
 pub struct JobLifecycleObservers {
     observers: Arc<Vec<Arc<dyn JobLifecycleObserver>>>,
+    settlement: Option<crate::settlement::TaskRegistry>,
 }
 
 impl JobLifecycleObservers {
@@ -309,6 +309,7 @@ impl JobLifecycleObservers {
     pub fn from_observer(observer: impl JobLifecycleObserver + 'static) -> Self {
         Self {
             observers: Arc::new(vec![Arc::new(observer)]),
+            settlement: None,
         }
     }
 
@@ -316,6 +317,26 @@ impl JobLifecycleObservers {
     pub fn from_arc_observers(observers: Vec<Arc<dyn JobLifecycleObserver>>) -> Self {
         Self {
             observers: Arc::new(observers),
+            settlement: None,
+        }
+    }
+
+    pub(crate) fn with_settlement(mut self, registry: crate::settlement::TaskRegistry) -> Self {
+        self.settlement = Some(registry);
+        self
+    }
+
+    pub(crate) fn settlement_registry(&self) -> Option<crate::settlement::TaskRegistry> {
+        self.settlement.clone()
+    }
+
+    pub(crate) fn record_hook(
+        &self,
+        name: &'static str,
+        outcome: &crate::dead_letter_hook::DeadLetterHookOutcome,
+    ) {
+        if let Some(registry) = &self.settlement {
+            registry.record_hook(name, outcome);
         }
     }
 
@@ -429,10 +450,21 @@ impl JobLifecycleObservers {
             let observer = Arc::clone(observer);
             let job = ObserverJobLogContext::from(job);
             let event = event.clone();
-            pending.push(notify_observer(callback_name, job, notify(observer, event)));
+            pending.push(notify_observer(
+                callback_name,
+                job,
+                notify(observer, event),
+                self.settlement.clone(),
+            ));
         }
 
-        while pending.next().await.is_some() {}
+        while let Some(failure) = pending.next().await {
+            if let Some(failure) = failure
+                && let Some(registry) = &self.settlement
+            {
+                registry.record_callback(failure);
+            }
+        }
     }
 }
 
@@ -461,12 +493,22 @@ impl From<&ObservedJob> for ObserverJobLogContext {
     }
 }
 
-async fn notify_observer<F>(callback_name: &'static str, job: ObserverJobLogContext, future: F)
+async fn notify_observer<F>(
+    callback_name: &'static str,
+    job: ObserverJobLogContext,
+    future: F,
+    settlement: Option<crate::settlement::TaskRegistry>,
+) -> Option<crate::RuntimeCallbackFailure>
 where
     F: Future<Output = ()> + Send,
 {
-    match tokio::time::timeout(OBSERVER_TIMEOUT, AssertUnwindSafe(future).catch_unwind()).await {
-        Ok(Ok(())) => {}
+    match tokio::time::timeout(
+        OBSERVER_TIMEOUT,
+        crate::callback::CallbackGuard::new(future, callback_name, settlement),
+    )
+    .await
+    {
+        Ok(Ok(())) => None,
         Ok(Err(panic_payload)) => {
             let panic_message = panic_payload_message(&*panic_payload);
             warn!(
@@ -481,6 +523,10 @@ where
                 panic = %panic_message,
                 "job lifecycle observer panicked"
             );
+            Some(crate::RuntimeCallbackFailure::Panicked {
+                callback: callback_name,
+                message: panic_message,
+            })
         }
         Err(_) => {
             warn!(
@@ -495,6 +541,9 @@ where
                 timeout_ms = OBSERVER_TIMEOUT.as_millis(),
                 "job lifecycle observer timed out"
             );
+            Some(crate::RuntimeCallbackFailure::TimedOut {
+                callback: callback_name,
+            })
         }
     }
 }

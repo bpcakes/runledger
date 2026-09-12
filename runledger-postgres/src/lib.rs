@@ -453,12 +453,16 @@ pub type DbPool = sqlx::PgPool;
 pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub use error::RollbackFailure;
+
 #[derive(Debug)]
 pub enum Error {
     ConfigError(String),
     ConnectionError(String),
     MigrationError(String),
     QueryError(QueryError),
+    /// Failed cancellation and its separately observed rollback failure.
+    RollbackFailure(Box<RollbackFailure>),
 }
 
 impl fmt::Display for Error {
@@ -468,6 +472,7 @@ impl fmt::Display for Error {
             Self::ConnectionError(message) => write!(f, "{message}"),
             Self::MigrationError(message) => write!(f, "{message}"),
             Self::QueryError(query_error) => write!(f, "{query_error}"),
+            Self::RollbackFailure(failure) => fmt::Display::fmt(failure, f),
         }
     }
 }
@@ -476,6 +481,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::QueryError(query_error) => Some(query_error),
+            Self::RollbackFailure(failure) => Some(&**failure),
             Self::ConfigError(_) | Self::ConnectionError(_) | Self::MigrationError(_) => None,
         }
     }

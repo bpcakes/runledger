@@ -17,6 +17,8 @@ use crate::config::JobsConfigValidationError;
 
 const MAX_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
+mod report;
+
 #[must_use]
 pub(crate) struct TaskGroup {
     tasks: Vec<RuntimeTask>,

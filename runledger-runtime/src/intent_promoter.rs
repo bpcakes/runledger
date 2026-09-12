@@ -49,7 +49,17 @@ pub async fn run_intent_promoter_loop_with_config(
     pool: runledger_postgres::DbPool,
     registry: JobRegistry,
     config: IntentPromoterConfig,
+    shutdown: watch::Receiver<bool>,
+) -> RuntimeLoopExit {
+    run_intent_promoter_loop_initialized(pool, registry, config, shutdown, None).await
+}
+
+pub(crate) async fn run_intent_promoter_loop_initialized(
+    pool: runledger_postgres::DbPool,
+    registry: JobRegistry,
+    config: IntentPromoterConfig,
     mut shutdown: watch::Receiver<bool>,
+    mut startup: Option<crate::startup::LoopStartup>,
 ) -> RuntimeLoopExit {
     if let Err(error) = config.validate() {
         warn!(%error, "invalid jobs config; stopping intent promoter loop");
@@ -57,6 +67,8 @@ pub async fn run_intent_promoter_loop_with_config(
     }
 
     let promotable_job_types = registry.registered_static_types();
+
+    crate::startup::acknowledge(&mut startup);
 
     loop {
         if shutdown::is_requested_or_closed(&shutdown) {

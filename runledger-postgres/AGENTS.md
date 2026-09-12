@@ -27,6 +27,10 @@ PostgreSQL persistence for durable execution: queue lifecycle, workflow DAG stat
 - Prefer direct cutovers only for internal persistence-layer refactors within one coordinated deploy. Changes to persisted queue, workflow, runtime-config, or log/event contracts require backward compatibility or an explicit staged rollout; update dependents in the same change.
 - Preserve audit/event writes when altering queue lifecycle.
 - Keep app/domain logic out of this crate.
+- Scoped cancellation preserves original SQLx begin/commit errors. Explicit
+  rollback failure retains the operation error and rollback error together;
+  neither default formatting nor automatic logging prints their contents. A
+  failed commit does not establish whether cancellation happened or permit replay.
 
 ## Common commands
 - `cargo check -p runledger-postgres`

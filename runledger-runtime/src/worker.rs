@@ -1,10 +1,10 @@
 use std::cmp::min;
 use std::sync::Arc;
 
+use crate::settlement::TaskSet;
 use runledger_core::jobs::JobType;
 use runledger_postgres::jobs;
 use tokio::sync::watch;
-use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
 mod completion;
@@ -45,20 +45,41 @@ pub async fn run_worker_loop_with_observer(
     shutdown: watch::Receiver<bool>,
     observers: JobLifecycleObservers,
 ) -> RuntimeLoopExit {
+    run_worker_loop_initialized(
+        pool,
+        registry,
+        config,
+        shutdown,
+        observers,
+        None,
+        crate::settlement::TaskRegistry::default(),
+    )
+    .await
+}
+
+pub(crate) async fn run_worker_loop_initialized(
+    pool: runledger_postgres::DbPool,
+    registry: JobRegistry,
+    config: JobsConfig,
+    shutdown: watch::Receiver<bool>,
+    observers: JobLifecycleObservers,
+    mut startup: Option<crate::startup::LoopStartup>,
+    tasks: crate::settlement::TaskRegistry,
+) -> RuntimeLoopExit {
     if let Err(error) = config.validate_worker_loop() {
         warn!(%error, "invalid jobs config; stopping worker loop");
         return RuntimeLoopExit::InvalidConfig(error);
     }
 
-    WorkerLoop::new(pool, registry, config, shutdown, observers)
-        .run()
-        .await
+    let worker = WorkerLoop::with_tasks(pool, registry, config, shutdown, observers, tasks);
+    crate::startup::acknowledge(&mut startup);
+    worker.run().await
 }
 
 struct WorkerLoop {
     // Field order mirrors the former function locals' drop order; do not reorder.
     terminal_observer_tasks: TerminalObserverTasks,
-    join_set: JoinSet<()>,
+    join_set: TaskSet<()>,
     claimable_job_types: Vec<JobType<'static>>,
     registry: Arc<JobRegistry>,
     observers: JobLifecycleObservers,
@@ -73,6 +94,7 @@ enum WorkerLoopControl {
 }
 
 impl WorkerLoop {
+    #[cfg(test)]
     fn new(
         pool: runledger_postgres::DbPool,
         registry: JobRegistry,
@@ -80,10 +102,28 @@ impl WorkerLoop {
         shutdown: watch::Receiver<bool>,
         observers: JobLifecycleObservers,
     ) -> Self {
+        Self::with_tasks(
+            pool,
+            registry,
+            config,
+            shutdown,
+            observers,
+            crate::settlement::TaskRegistry::default(),
+        )
+    }
+
+    fn with_tasks(
+        pool: runledger_postgres::DbPool,
+        registry: JobRegistry,
+        config: JobsConfig,
+        shutdown: watch::Receiver<bool>,
+        observers: JobLifecycleObservers,
+        tasks: crate::settlement::TaskRegistry,
+    ) -> Self {
         let registry = Arc::new(registry);
         let claimable_job_types = registry.registered_static_types();
-        let join_set = JoinSet::new();
-        let terminal_observer_tasks = TerminalObserverTasks::owned();
+        let join_set = TaskSet::with_registry(tasks.clone(), "worker_job");
+        let terminal_observer_tasks = TerminalObserverTasks::with_registry(tasks);
 
         Self {
             terminal_observer_tasks,
@@ -244,13 +284,13 @@ fn log_worker_completed_drain() {
     warn!("worker loop completed before shutdown; draining in-flight jobs");
 }
 
-fn log_drained_job_task_result(result: Result<(), tokio::task::JoinError>) {
+fn log_drained_job_task_result(result: Result<(), std::sync::Arc<tokio::task::JoinError>>) {
     if let Err(error) = result {
         error!(%error, "job task crashed while draining in-flight jobs");
     }
 }
 
-fn log_finished_job_task_result(result: Result<(), tokio::task::JoinError>) {
+fn log_finished_job_task_result(result: Result<(), std::sync::Arc<tokio::task::JoinError>>) {
     if let Err(error) = result {
         error!(%error, "job task crashed");
     }

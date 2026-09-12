@@ -1103,6 +1103,25 @@ compile-checked cross-crate runtime decisions. Application and protocol logic
 should normally branch on the stable string code, not broad categories or
 database text.
 
+Cancellation has an additional error boundary. `cancel_job_with_scope` and
+`cancel_job` retain begin/commit SQLx causes in `Error::QueryError`, rather than
+`ConnectionError(String)`. Begin failures use the fixed internal code
+`db.transaction_begin_failed` and `QueryErrorKind::TransactionBeginFailed`;
+commit failures use `db.transaction_commit_unconfirmed` and
+`QueryErrorKind::TransactionCommitUnconfirmed`. A deferred constraint SQLSTATE at
+COMMIT is retained as diagnostic metadata, never reclassified as a statement's
+business-rule/validation rejection. These kinds require updates to exhaustive
+`QueryErrorKind` matches. Their owned transaction explicitly uses READ COMMITTED;
+the operation does not change the session's default isolation. If explicit
+rollback also fails, `Error::RollbackFailure` retains both `operation` and
+`rollback`. Inspect the operation recursively for the original classification,
+including not-found or invalid state, while retaining the rollback failure. Update
+exhaustive Error matches. Neither Display text nor a query code establishes the
+commit/rollback outcome or authorizes replay; inspect concrete SQLx sources only
+at a trusted boundary, and keep both errors out of untrusted logs and responses.
+This dual-error behavior currently belongs to cancellation; other transaction
+APIs retain their documented error contracts.
+
 ## Catalog Rule
 
 Use `JobCatalog` as the worker startup source of truth when handlers,
@@ -1125,6 +1144,100 @@ materializes at most one stale fire, then advances the cursor to the first futur
 fire.
 
 ## Worker Runtime Rule
+
+Use `Supervisor::run_until_shutdown_report` when integrating dependency cleanup.
+Construct its `RuntimeShutdownBudget` before starting work. Graceful time and
+abort/join time share the first stop request's clock; native shutdown handles,
+the external signal and failures cannot restart it. Nested native callback timers
+cannot extend this enclosing allowance. The report retains all loop outcomes and
+independently observed descendant joins even when a loop is aborted. Unjoined or
+aborted work prevents `is_cooperatively_stopped()` from approving cleanup. Check
+`is_success()` separately: a joined configuration failure still fails the report.
+An abort request can race with normal task completion. The report retains
+`abort_requested`, but an observed successful join permits cleanup; only an
+actual failed join contributes task-interruption evidence. Independently recorded
+callback interruptions and missed shutdown budgets retain their existing meaning.
+Shutdown boundary checks also poll finished handles independently of notification
+delivery. A delayed notification alone is not evidence that a descendant remains
+unjoined. The check is bounded; it does not wait for unfinished work or a shared
+join currently being polled by another owner beyond the shutdown allowance.
+
+For a lifecycle adapter that starts work after accepting registration, pass
+`SupervisorBuilder::prepare()`'s owned `PreparedSupervisor`. Preparation validates
+configuration and holds native handles without starting loops or database work.
+Its `start()` method performs native launch. The adapter must own that transition
+and drive the resulting supervisor; application agents should not capture an
+already-running supervisor inside a supposed factory. Existing `build()` is the
+immediate-start convenience path through the same preparation/start code.
+
+An enclosing process uses `SupervisorShutdown::requested()` to observe native
+stop before settlement finishes, so peer components can drain promptly. Pass its
+already-recorded stop timestamp to `request_shutdown_since` when requesting native
+stop; callback scheduling delay must not start a fresh native allowance. The
+returned earliest timestamp lets the enclosing owner tighten its own phases.
+Earlier timestamps shorten active graceful/abort waits in the complete-report
+driver; the first native cause remains unchanged. Future timestamps clamp to now.
+Cancelling the stop observer changes no ownership or shutdown state.
+
+Best-effort observer/hook interruptions do not change durable job outcomes or
+stop ordinary processing. Their shared callback owner catches both polling and
+synchronous future-destruction panics, including destruction by timeout or task
+abortion. It retains both a poll failure and a later destruction failure when both
+occur; this does not finalize callback resources or join application children. Intentional observer abortion at admission overflow is
+counted as interrupted work without initiating supervisor shutdown. During shutdown their causes are retained individually;
+earlier interruptions are counted without accumulating unbounded failure history.
+This counter records interruption facts, not unique callbacks; one execution can
+have multiple causes. It never expires. A report with any such interruption fails
+both cleanup eligibility and overall shutdown success, regardless of later durable
+job success. Releasing resources after a guessed grace period would invent proof
+that application-created detached children stopped.
+Cancellation of a pending handler by timeout or lease maintenance, and caught
+handler panics, are recorded by the same settlement boundary, even when the
+enclosing job task returns normally. A handler that actually returns after its
+deadline still receives the durable `job.timeout_exceeded` outcome, but that
+deadline rejection does not count as interrupted execution. Likewise, a handler
+that observes lease loss and returns remains fenced from completion writes
+without adding interruption evidence. A late panic still counts as a panic.
+Normally returning handlers must settle their own application children before
+returning; the report cannot discover arbitrary detached application tasks.
+Ordinary returned business failures are durable outcomes and do not count as
+interruption. Native callback policies can stop work before the enclosing graceful allowance
+expires: in particular, the reaper immediately aborts its remaining reaped-lease
+observers when stopping. Such interruption still prevents cleanup; the enclosing
+budget is a maximum allowance, not a promise that each callback receives all of it.
+Both earlier and shutdown-time interruptions prevent claiming
+cooperative cleanup because interruption cannot establish
+that arbitrary descendants created by the callback stopped. Native runtime-owned
+jobs, running/terminal observers, reaped observers and terminal hooks have shared
+join observation; application-created detached tasks remain outside that set.
+Reports format facts without printing panic payloads. Existing native diagnostics
+and the process panic hook retain their own behavior.
+
+The consuming report future still needs an execution owner. Dropping it requests
+shutdown but cannot produce an awaited report. An adapter must retain this driver
+independently of its application waiter and registered wrapper. Runtime/process
+death and non-yielding futures cannot be made to complete by an async deadline.
+Uncaught descendant panics and unexpected cancellation initiate native stop. The
+older `Result` methods observe that stop and return a retained `DescendantJoin`
+error; they keep first-error limitations and do not supply the complete report
+required by this path. Their success means observed loop completion, not complete
+settlement of registry descendants still aborting after a loop's own drain timer.
+Use the report API for any decision to release dependencies.
+
+`run_until_shutdown` now applies its timeout to handle-requested shutdown even
+when its external signal future stays pending. This deliberately changes the old
+unbounded handle-only drain path. Budget cooperative work explicitly; `join` and
+`shutdown` remain unbounded loop waits. The complete-report API is preferred for
+composing with another lifecycle owner.
+
+`Supervisor::startup_observer()` observes local initialization of every enabled
+loop. `RuntimeStartup::Initialized` means each loop validated its configuration
+and constructed local execution state; it does not require a nonempty queue or
+a successful database operation. Disabled loops are excluded. Shutdown or loop
+exit changes the state to `Stopped`, which cannot return to initialized. Cancelling
+an observer waiter does not stop the supervisor. Apply database health and business
+readiness separately, and continue to drive and observe native shutdown. A snapshot
+can become obsolete immediately; initialization is not permanent readiness.
 
 Use `runledger_runtime::Supervisor::run_until_shutdown` for ordinary worker
 processes. The lower-level worker, intent promoter, scheduler, and reaper loops

@@ -1,10 +1,10 @@
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 
+use crate::settlement::TaskSet;
 use futures_util::FutureExt;
 use runledger_core::jobs::JobDeadLetterReason;
 use runledger_postgres::jobs::{ReapedLeaseDisposition, ReapedLeaseRecord};
-use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
 use tracing::{Instrument, info, info_span, warn};
 
@@ -20,13 +20,25 @@ const REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 const REAPED_OBSERVER_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub(super) struct ReapedObserverTasks {
-    in_flight: JoinSet<ReapedObserverTaskResult>,
+    in_flight: TaskSet<ReapedObserverTaskResult>,
     max_in_flight: usize,
 }
 
 impl ReapedObserverTasks {
+    #[cfg(test)]
     pub(super) fn owned() -> Self {
         Self::with_max_concurrency(REAPER_REAPED_OBSERVER_MAX_CONCURRENCY)
+    }
+
+    pub(super) fn with_registry(registry: crate::settlement::TaskRegistry) -> Self {
+        Self {
+            in_flight: TaskSet::with_registry(registry, "reaped_observer"),
+            max_in_flight: REAPER_REAPED_OBSERVER_MAX_CONCURRENCY,
+        }
+    }
+
+    pub(super) fn registry(&self) -> crate::settlement::TaskRegistry {
+        self.in_flight.registry()
     }
 
     #[cfg(test)]
@@ -34,9 +46,10 @@ impl ReapedObserverTasks {
         Self::with_max_concurrency(max_in_flight)
     }
 
+    #[cfg(test)]
     fn with_max_concurrency(max_in_flight: usize) -> Self {
         Self {
-            in_flight: JoinSet::new(),
+            in_flight: TaskSet::new(),
             max_in_flight,
         }
     }
@@ -81,6 +94,7 @@ impl ReapedObserverTasks {
             let observers = observers.clone();
             self.in_flight.spawn(run_reaped_observer_task(
                 observer_metadata,
+                self.registry(),
                 async move {
                     observers.job_lease_reaped(event).await;
                 }
@@ -159,14 +173,14 @@ fn reaped_lease_disposition(disposition: &ReapedLeaseDisposition) -> JobLeaseRea
 }
 
 fn drain_completed_reaped_observer_notifications(
-    in_flight: &mut JoinSet<ReapedObserverTaskResult>,
+    in_flight: &mut TaskSet<ReapedObserverTaskResult>,
 ) {
     while let Some(result) = in_flight.try_join_next() {
         handle_reaped_observer_join_result(result);
     }
 }
 
-async fn abort_reaped_observer_fanout(in_flight: &mut JoinSet<ReapedObserverTaskResult>) {
+async fn abort_reaped_observer_fanout(in_flight: &mut TaskSet<ReapedObserverTaskResult>) {
     drain_completed_reaped_observer_notifications(in_flight);
     if in_flight.is_empty() {
         return;
@@ -222,7 +236,7 @@ fn log_reaped_observer_abort_timeout(remaining_in_flight_observers: usize) {
 }
 
 async fn drain_aborted_reaped_observer_notifications(
-    in_flight: &mut JoinSet<ReapedObserverTaskResult>,
+    in_flight: &mut TaskSet<ReapedObserverTaskResult>,
 ) -> usize {
     let mut cancelled_observer_count = 0;
 
@@ -280,6 +294,7 @@ fn log_reaped_observer_join_failure(error: &tokio::task::JoinError) {
 
 async fn run_reaped_observer_task<F>(
     metadata: ReapedObserverMetadata,
+    registry: crate::settlement::TaskRegistry,
     notification: F,
 ) -> ReapedObserverTaskResult
 where
@@ -288,14 +303,19 @@ where
     let outcome = match AssertUnwindSafe(notification).catch_unwind().await {
         Ok(()) => ReapedObserverTaskOutcome::Completed,
         Err(panic_payload) => {
-            ReapedObserverTaskOutcome::Panicked(panic_payload_message(&*panic_payload))
+            let message = panic_payload_message(&*panic_payload);
+            registry.record_callback(crate::RuntimeCallbackFailure::Panicked {
+                callback: "reaped_observer",
+                message: message.clone(),
+            });
+            ReapedObserverTaskOutcome::Panicked(message)
         }
     };
 
     ReapedObserverTaskResult { metadata, outcome }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ReapedObserverMetadata {
     job_id: String,
     job_type: String,
@@ -320,20 +340,20 @@ impl From<&ObservedJob> for ReapedObserverMetadata {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ReapedObserverTaskResult {
     metadata: ReapedObserverMetadata,
     outcome: ReapedObserverTaskOutcome,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ReapedObserverTaskOutcome {
     Completed,
     Panicked(String),
 }
 
 type ReapedObserverJoinResult =
-    std::result::Result<ReapedObserverTaskResult, tokio::task::JoinError>;
+    std::result::Result<ReapedObserverTaskResult, std::sync::Arc<tokio::task::JoinError>>;
 
 #[cfg(test)]
 mod tests {
@@ -355,7 +375,12 @@ mod tests {
     async fn observer_task_returns_metadata_on_success() {
         let metadata = test_metadata();
 
-        let result = run_reaped_observer_task(metadata, async {}).await;
+        let result = run_reaped_observer_task(
+            metadata,
+            crate::settlement::TaskRegistry::default(),
+            async {},
+        )
+        .await;
 
         assert_eq!(result.metadata, test_metadata());
         assert_eq!(result.outcome, ReapedObserverTaskOutcome::Completed);
@@ -365,9 +390,13 @@ mod tests {
     async fn observer_task_normalizes_panic_and_returns_metadata() {
         let metadata = test_metadata();
 
-        let result = run_reaped_observer_task(metadata, async {
-            panic!("reaped observer task panic");
-        })
+        let result = run_reaped_observer_task(
+            metadata,
+            crate::settlement::TaskRegistry::default(),
+            async {
+                panic!("reaped observer task panic");
+            },
+        )
         .await;
 
         assert_eq!(result.metadata, test_metadata());
@@ -375,5 +404,98 @@ mod tests {
             result.outcome,
             ReapedObserverTaskOutcome::Panicked("reaped observer task panic".to_owned())
         );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn reaped_callback_destruction_panic_never_permits_cleanup() {
+        use std::{future::pending, sync::Arc};
+        struct PanickingDrop;
+        impl Drop for PanickingDrop {
+            fn drop(&mut self) {
+                panic!("reaped callback destruction failure");
+            }
+        }
+        struct Callback(Arc<tokio::sync::Notify>);
+        #[async_trait::async_trait]
+        impl crate::observer::JobLifecycleObserver for Callback {
+            async fn on_job_lease_reaped(&self, _: JobLeaseReapedEvent) {
+                let _guard = PanickingDrop;
+                self.0.notify_one();
+                pending::<()>().await;
+            }
+        }
+        for stopping in [false, true] {
+            let (shutdown, _) = crate::shutdown::ShutdownSignal::channel();
+            let registry = crate::settlement::TaskRegistry::supervised(shutdown.clone());
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let observers = JobLifecycleObservers::from_observer(Callback(entered.clone()))
+                .with_settlement(registry.clone());
+            let mut tasks = ReapedObserverTasks::with_registry(registry.clone());
+            let job = ObservedJob::new(
+                uuid::Uuid::nil(),
+                "jobs.test.reaped_destructor"
+                    .try_into()
+                    .expect("valid type"),
+                None,
+                1,
+                1,
+                1,
+                "test-worker",
+            );
+            let metadata = ReapedObserverMetadata::from(&job);
+            tasks.in_flight.spawn(run_reaped_observer_task(
+                metadata,
+                registry.clone(),
+                async move {
+                    observers
+                        .job_lease_reaped(JobLeaseReapedEvent {
+                            job,
+                            failure: runledger_core::jobs::JobFailure::terminal(
+                                "job.test.reaped",
+                                "controlled lease expiry",
+                            ),
+                            started_without_renewal_heartbeat: false,
+                            disposition: JobLeaseReapedDisposition::ReleasedToPending,
+                        })
+                        .await;
+                },
+            ));
+            entered.notified().await;
+            if stopping {
+                shutdown.request();
+            }
+            registry.wait().await;
+            let report = crate::task_group::TaskGroup::new()
+                .run_report(
+                    async {},
+                    crate::RuntimeShutdownBudget::new(
+                        Duration::from_secs(1),
+                        Duration::from_secs(1),
+                    )
+                    .expect("valid budget"),
+                    &shutdown,
+                    &registry,
+                )
+                .await;
+            tasks.drain_finished();
+            assert!(report.unjoined.is_empty());
+            assert!(report.descendants.iter().all(|task| task.error.is_none()));
+            assert!(
+                !report.is_cooperatively_stopped(),
+                "caught destructor panic authorized cleanup"
+            );
+            assert!(!report.is_success());
+            if stopping {
+                assert!(report.callback_failures.iter().any(|failure| matches!(
+                    failure,
+                    crate::RuntimeCallbackFailure::TimedOut { .. }
+                )));
+                assert!(report.callback_failures.iter().any(|failure| matches!(failure,
+                crate::RuntimeCallbackFailure::Panicked { message, .. } if message == "reaped callback destruction failure")));
+            } else {
+                // Both the timeout and its callback-destruction panic are retained.
+                assert_eq!(report.prior_callback_interruptions, 2);
+            }
+            assert!(!format!("{report:?}").contains("reaped callback destruction failure"));
+        }
     }
 }

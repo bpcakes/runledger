@@ -188,7 +188,8 @@ async fn notify_dead_letter_after_handler_failure(
     completion: CompletionContext<'_, '_>,
     dead_letter: JobDeadLetterInfo,
     checkpoint: Option<serde_json::Value>,
-) {
+    settlement: Option<crate::settlement::TaskRegistry>,
+) -> crate::dead_letter_hook::DeadLetterHookOutcome {
     warn!(
         job_id = %completion.job.id,
         job_type = %completion.job.job_type,
@@ -210,8 +211,9 @@ async fn notify_dead_letter_after_handler_failure(
         &dead_letter_context,
         completion.job,
         dead_letter,
+        settlement,
     )
-    .await;
+    .await
 }
 
 async fn handle_completion_persist_failure(
@@ -534,6 +536,8 @@ fn invalid_continuation_failure_from_error(
             | QueryErrorKind::JobUnstartedClaimReleaseNotApplicable
             | QueryErrorKind::JobWorkflowRequeueNotSupported
             | QueryErrorKind::PostgresLockNotAvailable
+            | QueryErrorKind::TransactionBeginFailed
+            | QueryErrorKind::TransactionCommitUnconfirmed
             | QueryErrorKind::WorkflowReleaseConflict,
         )
         | None => None,
@@ -762,10 +766,18 @@ async fn apply_failure_completion_outcome(
         checkpoint,
         has_unknown_disposition: _,
     } = effects;
+    let observers = observation.observers;
     notify_failure_observer(observation, observer_event).await;
 
     if let Some(dead_letter) = dead_letter {
-        notify_dead_letter_after_handler_failure(completion_context, dead_letter, checkpoint).await;
+        let outcome = notify_dead_letter_after_handler_failure(
+            completion_context,
+            dead_letter,
+            checkpoint,
+            observers.settlement_registry(),
+        )
+        .await;
+        observers.record_hook("worker_terminal_hook", &outcome);
     }
 }
 

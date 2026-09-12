@@ -5,6 +5,8 @@
 //! handlers and `runledger-postgres` storage:
 //! - [`Supervisor`] starts and joins the worker, intent promoter, scheduler,
 //!   and reaper loops for a typical worker process
+//! - [`Supervisor::run_until_shutdown_report`] retains bounded loop and descendant
+//!   settlement evidence for adapters deciding whether dependency cleanup can run
 //! - [`catalog::JobCatalog`] is the preferred startup API for handler
 //!   registration, definition sync, and catalog-validated enqueue helpers
 //! - [`registry::JobRegistry`] stores concrete handlers directly for advanced
@@ -16,11 +18,15 @@
 //! A typical service builds a shared PostgreSQL pool, registers handlers in a
 //! [`catalog::JobCatalog`], syncs definitions during startup, and starts a
 //! [`Supervisor`] with [`SupervisorBuilder::with_catalog`]. Worker processes
-//! should call [`Supervisor::run_until_shutdown`] to observe task failures while
-//! still applying a bounded shutdown deadline. Use
-//! [`Supervisor::shutdown_with_timeout`] when shutdown is signaled externally, or
-//! [`Supervisor::shutdown`] when the caller already has an external shutdown
-//! budget or knows all loops will exit promptly.
+//! that release dependencies after native work must use
+//! [`Supervisor::run_until_shutdown_report`] with [`RuntimeShutdownBudget`]. An
+//! adapter transfers [`SupervisorBuilder::prepare`]'s inert value before launch.
+//! This path retains descendant settlement and the earliest shared stop clock.
+//! Standalone workers needing only first-error loop observation can use
+//! [`Supervisor::run_until_shutdown`] or [`Supervisor::shutdown_with_timeout`];
+//! their timeouts start at driver observation and their success is not complete
+//! descendant or dependency-cleanup evidence. [`Supervisor::shutdown`] is an
+//! unbounded loop wait.
 //!
 //! The lower-level [`worker::run_worker_loop`],
 //! [`intent_promoter::run_intent_promoter_loop`],
@@ -88,6 +94,7 @@
 //! bounded shutdown deadline. Use the lower-level loop functions only for custom
 //! process orchestration.
 
+mod callback;
 pub mod catalog;
 pub mod config;
 mod dead_letter_hook;
@@ -98,7 +105,9 @@ mod panic_payload;
 pub mod reaper;
 pub mod registry;
 pub mod scheduler;
+mod settlement;
 mod shutdown;
+mod startup;
 pub mod supervisor;
 mod task_group;
 pub mod worker;
@@ -110,7 +119,12 @@ pub use observer::{
     JobLeaseReapedEvent, JobLifecycleObserver, JobLifecycleObservers, JobRunningEvent,
     JobSucceededEvent, ObservedJob,
 };
-pub use supervisor::{Supervisor, SupervisorBuilder, SupervisorShutdown};
+pub use settlement::{
+    RuntimeCallbackFailure, RuntimeLoopRecord, RuntimeShutdownBudget, RuntimeShutdownCause,
+    RuntimeShutdownReport, RuntimeTaskRecord, UnsettledRuntimeTask,
+};
+pub use startup::{RuntimeStartup, RuntimeStartupObserver, RuntimeStartupStopped};
+pub use supervisor::{PreparedSupervisor, Supervisor, SupervisorBuilder, SupervisorShutdown};
 
 /// Common `runledger-runtime` imports for worker-process integration.
 ///
@@ -132,7 +146,11 @@ pub mod prelude {
         JobSucceededEvent, ObservedJob,
     };
     pub use crate::registry::JobRegistry;
-    pub use crate::{RuntimeLoopExit, Supervisor, SupervisorBuilder, SupervisorShutdown};
+    pub use crate::{
+        PreparedSupervisor, RuntimeLoopExit, RuntimeStartup, RuntimeStartupObserver,
+        RuntimeStartupStopped, Supervisor, SupervisorBuilder, SupervisorShutdown,
+    };
+    pub use crate::{RuntimeShutdownBudget, RuntimeShutdownCause, RuntimeShutdownReport};
 }
 
 /// Reason a low-level runtime loop exited.

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::future::Future;
 
+use crate::settlement::TaskSet;
 use runledger_core::jobs::{JobContext, JobDeadLetterInfo, JobDeadLetterReason};
 use runledger_postgres::jobs::{ReapedLeaseDisposition, ReapedLeaseRecord};
 use tokio::sync::watch;
-use tokio::task::{Id, JoinSet};
+use tokio::task::Id;
 use tokio::time::{Duration, timeout};
 use tracing::{Instrument, info, info_span, warn};
 
@@ -25,12 +26,29 @@ const TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 #[cfg(not(test))]
 const TERMINAL_HOOK_ABORT_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
+#[cfg(test)]
 pub(super) async fn notify_handlers_of_terminal_lease_expirations(
     registry: &JobRegistry,
     jobs: &[ReapedLeaseRecord],
     shutdown: &mut watch::Receiver<bool>,
 ) -> TerminalHookFanoutResult {
-    notify_handlers_of_terminal_lease_expirations_inner(registry, jobs, shutdown, || {}).await
+    notify_handlers_with_registry(
+        registry,
+        jobs,
+        shutdown,
+        crate::settlement::TaskRegistry::default(),
+    )
+    .await
+}
+
+pub(super) async fn notify_handlers_with_registry(
+    registry: &JobRegistry,
+    jobs: &[ReapedLeaseRecord],
+    shutdown: &mut watch::Receiver<bool>,
+    tasks: crate::settlement::TaskRegistry,
+) -> TerminalHookFanoutResult {
+    notify_handlers_of_terminal_lease_expirations_inner(registry, jobs, shutdown, || {}, tasks)
+        .await
 }
 
 #[cfg(test)]
@@ -50,6 +68,7 @@ where
         jobs,
         shutdown,
         before_first_hook_admission,
+        crate::settlement::TaskRegistry::default(),
     )
     .await
 }
@@ -59,11 +78,12 @@ async fn notify_handlers_of_terminal_lease_expirations_inner<F>(
     jobs: &[ReapedLeaseRecord],
     shutdown: &mut watch::Receiver<bool>,
     before_first_hook_admission: F,
+    tasks: crate::settlement::TaskRegistry,
 ) -> TerminalHookFanoutResult
 where
     F: FnOnce(),
 {
-    let mut fanout = TerminalHookFanout::new(shutdown);
+    let mut fanout = TerminalHookFanout::with_registry(shutdown, tasks);
     let mut before_first_hook_admission = Some(before_first_hook_admission);
 
     for job in jobs {
@@ -114,8 +134,16 @@ where
             attempt = job.attempt,
         );
 
+        let tasks = fanout.in_flight.registry();
         let hook = async move {
-            invoke_dead_letter_hook(handler.on_dead_letter(context, payload, dead_letter)).await
+            let outcome = invoke_dead_letter_hook(
+                async { handler.on_dead_letter(context, payload, dead_letter).await },
+                "reaper_terminal_hook",
+                Some(tasks.clone()),
+            )
+            .await;
+            tasks.record_hook("reaper_terminal_hook", &outcome);
+            outcome
         }
         .instrument(hook_span);
         fanout.spawn_hook(hook, hook_meta);
@@ -151,7 +179,7 @@ struct HookMetadata {
 }
 
 struct TerminalHookFanout {
-    in_flight: JoinSet<DeadLetterHookOutcome>,
+    in_flight: TaskSet<DeadLetterHookOutcome>,
     metadata: HashMap<Id, HookMetadata>,
     started_hook_count: usize,
     skipped_hook_count: usize,
@@ -160,7 +188,10 @@ struct TerminalHookFanout {
 }
 
 impl TerminalHookFanout {
-    fn new(shutdown: &watch::Receiver<bool>) -> Self {
+    fn with_registry(
+        shutdown: &watch::Receiver<bool>,
+        tasks: crate::settlement::TaskRegistry,
+    ) -> Self {
         let shutdown_observed = shutdown::is_requested_or_closed(shutdown);
         let post_shutdown_admission_budget = if shutdown_observed {
             // If shutdown was already requested after the reaper committed a
@@ -172,7 +203,7 @@ impl TerminalHookFanout {
         };
 
         Self {
-            in_flight: JoinSet::new(),
+            in_flight: TaskSet::with_registry(tasks, "reaper_terminal_hook"),
             metadata: HashMap::new(),
             started_hook_count: 0,
             skipped_hook_count: 0,
@@ -532,7 +563,8 @@ fn warn_join_failed_missing_metadata(error: &tokio::task::JoinError) {
     );
 }
 
-type HookJoinResult = std::result::Result<(Id, DeadLetterHookOutcome), tokio::task::JoinError>;
+type HookJoinResult =
+    std::result::Result<(Id, DeadLetterHookOutcome), std::sync::Arc<tokio::task::JoinError>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HookWaitOutcome {

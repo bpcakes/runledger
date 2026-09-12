@@ -190,6 +190,15 @@ pub enum RuntimeError {
         #[source]
         source: tokio::task::JoinError,
     },
+    /// A native-owned descendant escaped with a panic or unexpected cancellation.
+    /// The join source is shared with native settlement observation. Best-effort
+    /// observer aborts do not produce this error.
+    #[error("failed joining jobs runtime descendant `{task}`")]
+    DescendantJoin {
+        task: &'static str,
+        #[source]
+        source: std::sync::Arc<tokio::task::JoinError>,
+    },
     /// The supervisor did not complete shutdown within the requested timeout.
     /// Some tasks may not have received or responded to the shutdown signal.
     /// Consider increasing the timeout or investigating why tasks are shutting
@@ -200,6 +209,13 @@ pub enum RuntimeError {
     /// Use a smaller timeout value.
     #[error("jobs runtime shutdown timeout {timeout:?} is too large to represent")]
     ShutdownTimeoutTooLarge { timeout: std::time::Duration },
+    /// The graceful and abort allowances cannot be added as a Duration.
+    /// Both inputs are retained because no representable total exists.
+    #[error("jobs runtime shutdown budget overflows: graceful {graceful:?}, abort {abort:?}")]
+    ShutdownBudgetOverflow {
+        graceful: std::time::Duration,
+        abort: std::time::Duration,
+    },
     /// A supervised task failed (panicked or exited unexpectedly) and the
     /// remaining tasks could not be shut down within the timeout. The original
     /// task failure is available through the source error.

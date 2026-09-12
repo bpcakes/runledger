@@ -7,7 +7,6 @@ mod observers;
 mod terminal_hooks;
 
 use self::observers::ReapedObserverTasks;
-use self::terminal_hooks::notify_handlers_of_terminal_lease_expirations;
 use crate::ReaperError;
 use crate::RuntimeLoopExit;
 use crate::config::JobsConfig;
@@ -35,8 +34,29 @@ pub async fn run_reaper_loop_with_observer(
     pool: runledger_postgres::DbPool,
     registry: JobRegistry,
     config: JobsConfig,
+    shutdown: watch::Receiver<bool>,
+    observers: JobLifecycleObservers,
+) -> RuntimeLoopExit {
+    run_reaper_loop_initialized(
+        pool,
+        registry,
+        config,
+        shutdown,
+        observers,
+        None,
+        crate::settlement::TaskRegistry::default(),
+    )
+    .await
+}
+
+pub(crate) async fn run_reaper_loop_initialized(
+    pool: runledger_postgres::DbPool,
+    registry: JobRegistry,
+    config: JobsConfig,
     mut shutdown: watch::Receiver<bool>,
     observers: JobLifecycleObservers,
+    mut startup: Option<crate::startup::LoopStartup>,
+    tasks: crate::settlement::TaskRegistry,
 ) -> RuntimeLoopExit {
     if let Err(error) = config.validate_reaper_loop() {
         warn!(%error, "invalid jobs config; stopping reaper loop");
@@ -44,7 +64,9 @@ pub async fn run_reaper_loop_with_observer(
     }
 
     let registry = Arc::new(registry);
-    let mut reaped_observer_tasks = ReapedObserverTasks::owned();
+    let mut reaped_observer_tasks = ReapedObserverTasks::with_registry(tasks);
+
+    crate::startup::acknowledge(&mut startup);
 
     loop {
         reaped_observer_tasks.drain_finished();
@@ -136,8 +158,13 @@ async fn notify_reaped_lease_side_effects(
     reaped_leases: &[ReapedLeaseRecord],
     shutdown: &mut watch::Receiver<bool>,
 ) -> ReaperNotificationFanoutResult {
-    let terminal_hook_result =
-        notify_handlers_of_terminal_lease_expirations(registry, reaped_leases, shutdown).await;
+    let terminal_hook_result = terminal_hooks::notify_handlers_with_registry(
+        registry,
+        reaped_leases,
+        shutdown,
+        reaped_observer_tasks.registry(),
+    )
+    .await;
 
     if terminal_hook_result.interrupted_by_shutdown() || shutdown::is_requested_or_closed(shutdown)
     {

@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use crate::settlement::{SharedJoin, TaskSet};
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
 use tracing::{Instrument, error, info, warn};
 use uuid::Uuid;
@@ -30,12 +30,13 @@ pub(super) enum TerminalObserverTasks {
     Detached,
     Owned {
         tasks: Arc<AsyncMutex<ObserverTaskSets>>,
+        registry: crate::settlement::TaskRegistry,
     },
 }
 
 pub(super) struct ObserverTaskSets {
-    terminal: JoinSet<()>,
-    running: JoinSet<()>,
+    terminal: TaskSet<()>,
+    running: TaskSet<()>,
     terminal_max_in_flight: usize,
     running_max_in_flight: usize,
 }
@@ -53,8 +54,8 @@ impl ObserverTaskSets {
 
     fn new_with_limits(terminal_max_in_flight: usize, running_max_in_flight: usize) -> Self {
         Self {
-            terminal: JoinSet::new(),
-            running: JoinSet::new(),
+            terminal: TaskSet::new(),
+            running: TaskSet::new(),
             terminal_max_in_flight,
             running_max_in_flight,
         }
@@ -132,8 +133,21 @@ impl TerminalObserverTasks {
         Self::Detached
     }
 
-    pub(super) fn owned() -> Self {
-        Self::owned_with_task_sets(ObserverTaskSets::default())
+    pub(super) fn with_registry(registry: crate::settlement::TaskRegistry) -> Self {
+        let sets = ObserverTaskSets {
+            terminal: TaskSet::with_registry(registry.clone(), "terminal_observer"),
+            running: TaskSet::with_registry(registry, "running_observer_drain"),
+            ..ObserverTaskSets::default()
+        };
+        Self::owned_with_task_sets(sets)
+    }
+
+    pub(super) fn registry(&self) -> crate::settlement::TaskRegistry {
+        match self {
+            #[cfg(test)]
+            Self::Detached => crate::settlement::TaskRegistry::default(),
+            Self::Owned { registry, .. } => registry.clone(),
+        }
     }
 
     #[cfg(test)]
@@ -143,6 +157,7 @@ impl TerminalObserverTasks {
 
     fn owned_with_task_sets(task_sets: ObserverTaskSets) -> Self {
         Self::Owned {
+            registry: task_sets.terminal.registry(),
             tasks: Arc::new(AsyncMutex::new(task_sets)),
         }
     }
@@ -170,7 +185,7 @@ impl TerminalObserverTasks {
                 drop(tokio::spawn(future()));
                 true
             }
-            Self::Owned { tasks } => {
+            Self::Owned { tasks, .. } => {
                 let mut tasks = tasks.lock().await;
                 if tasks.try_admit(ObserverTaskKind::Terminal, job) {
                     let _ = tasks.terminal.spawn(future());
@@ -195,7 +210,7 @@ impl TerminalObserverTasks {
                     running_handle.drain().instrument(span).await;
                 }));
             }
-            Self::Owned { tasks } => {
+            Self::Owned { tasks, .. } => {
                 let mut tasks = tasks.lock().await;
                 if tasks.try_admit(ObserverTaskKind::RunningDrain, &running_handle.job) {
                     let _ = tasks
@@ -210,7 +225,7 @@ impl TerminalObserverTasks {
         match self {
             #[cfg(test)]
             Self::Detached => {}
-            Self::Owned { tasks } => {
+            Self::Owned { tasks, .. } => {
                 tasks.lock().await.drain_finished();
             }
         }
@@ -220,7 +235,7 @@ impl TerminalObserverTasks {
     pub(super) async fn in_flight_count(&self) -> usize {
         match self {
             Self::Detached => 0,
-            Self::Owned { tasks } => tasks.lock().await.in_flight_count(),
+            Self::Owned { tasks, .. } => tasks.lock().await.in_flight_count(),
         }
     }
 
@@ -228,7 +243,7 @@ impl TerminalObserverTasks {
         let tasks = match self {
             #[cfg(test)]
             Self::Detached => return,
-            Self::Owned { tasks } => tasks,
+            Self::Owned { tasks, .. } => tasks,
         };
         let mut tasks = {
             let mut guard = tasks.lock().await;
@@ -244,7 +259,7 @@ impl TerminalObserverTasks {
     }
 }
 
-fn drain_finished_terminal_observer_tasks(tasks: &mut JoinSet<()>) {
+fn drain_finished_terminal_observer_tasks(tasks: &mut TaskSet<()>) {
     while let Some(result) = tasks.try_join_next() {
         if let Err(error) = result {
             error!(%error, "terminal observer task crashed");
@@ -252,7 +267,7 @@ fn drain_finished_terminal_observer_tasks(tasks: &mut JoinSet<()>) {
     }
 }
 
-fn drain_finished_running_observer_tasks(tasks: &mut JoinSet<()>) {
+fn drain_finished_running_observer_tasks(tasks: &mut TaskSet<()>) {
     while let Some(result) = tasks.try_join_next() {
         if let Err(error) = result {
             error!(%error, "running observer drain task crashed");
@@ -260,7 +275,7 @@ fn drain_finished_running_observer_tasks(tasks: &mut JoinSet<()>) {
     }
 }
 
-async fn drain_terminal_observers_for_shutdown(tasks: &mut JoinSet<()>) {
+async fn drain_terminal_observers_for_shutdown(tasks: &mut TaskSet<()>) {
     if tasks.is_empty() {
         return;
     }
@@ -278,7 +293,7 @@ async fn drain_terminal_observers_for_shutdown(tasks: &mut JoinSet<()>) {
     }
 }
 
-async fn abort_remaining_terminal_observers_after_drain_timeout(tasks: &mut JoinSet<()>) {
+async fn abort_remaining_terminal_observers_after_drain_timeout(tasks: &mut TaskSet<()>) {
     log_terminal_observer_shutdown_drain_timeout(tasks.len());
     tasks.abort_all();
     log_terminal_observer_abort_drain(
@@ -334,7 +349,7 @@ fn log_terminal_observer_abort_timeout(remaining_terminal_observer_tasks: usize)
     );
 }
 
-async fn drain_terminal_observer_tasks(tasks: &mut JoinSet<()>) {
+async fn drain_terminal_observer_tasks(tasks: &mut TaskSet<()>) {
     while let Some(result) = tasks.join_next().await {
         if let Err(error) = result {
             error!(%error, "terminal observer task crashed while draining worker shutdown");
@@ -342,7 +357,7 @@ async fn drain_terminal_observer_tasks(tasks: &mut JoinSet<()>) {
     }
 }
 
-async fn drain_aborted_terminal_observer_tasks(tasks: &mut JoinSet<()>) -> usize {
+async fn drain_aborted_terminal_observer_tasks(tasks: &mut TaskSet<()>) -> usize {
     let mut cancelled_count = 0;
     while let Some(result) = tasks.join_next().await {
         match result {
@@ -358,7 +373,7 @@ async fn drain_aborted_terminal_observer_tasks(tasks: &mut JoinSet<()>) -> usize
     cancelled_count
 }
 
-async fn abort_running_observers_for_shutdown(tasks: &mut JoinSet<()>) {
+async fn abort_running_observers_for_shutdown(tasks: &mut TaskSet<()>) {
     if tasks.is_empty() {
         return;
     }
@@ -410,7 +425,7 @@ fn log_running_observer_abort_timeout(remaining_running_observer_tasks: usize) {
     );
 }
 
-async fn drain_aborted_running_observer_tasks(tasks: &mut JoinSet<()>) -> usize {
+async fn drain_aborted_running_observer_tasks(tasks: &mut TaskSet<()>) -> usize {
     let mut cancelled_count = 0;
     while let Some(result) = tasks.join_next().await {
         match result {
@@ -479,19 +494,29 @@ impl JobObserverLogContext {
 
 pub(super) struct JobRunningNotification {
     #[cfg(test)]
-    pub(super) handle: Option<JoinHandle<()>>,
+    pub(super) handle: Option<SharedJoin<()>>,
     #[cfg(not(test))]
-    handle: Option<JoinHandle<()>>,
+    handle: Option<SharedJoin<()>>,
 }
 
 impl JobRunningNotification {
+    #[cfg(test)]
     pub(super) fn spawn(observers: JobLifecycleObservers, job: ObservedJob) -> Self {
+        Self::spawn_in(observers, job, &crate::settlement::TaskRegistry::default())
+    }
+
+    pub(super) fn spawn_in(
+        observers: JobLifecycleObservers,
+        job: ObservedJob,
+        registry: &crate::settlement::TaskRegistry,
+    ) -> Self {
         if observers.is_empty() {
             return Self { handle: None };
         }
 
         let span = tracing::Span::current();
-        let handle = tokio::spawn(
+        let handle = registry.spawn(
+            "running_observer",
             async move {
                 observers.job_running(JobRunningEvent { job }).await;
             }
@@ -546,14 +571,14 @@ impl Drop for JobRunningNotification {
 }
 
 pub(super) struct RunningObserverHandle {
-    handle: Option<JoinHandle<()>>,
+    handle: Option<SharedJoin<()>>,
     pub(super) job: JobObserverLogContext,
 }
 
 impl RunningObserverHandle {
-    pub(super) fn new(handle: JoinHandle<()>, job: JobObserverLogContext) -> Self {
+    pub(super) fn new(handle: impl Into<SharedJoin<()>>, job: JobObserverLogContext) -> Self {
         Self {
-            handle: Some(handle),
+            handle: Some(handle.into()),
             job,
         }
     }
@@ -588,13 +613,13 @@ impl Drop for RunningObserverHandle {
 }
 
 struct RunningObserverJoinGuard {
-    handle: JoinHandle<()>,
+    handle: SharedJoin<()>,
     job: JobObserverLogContext,
     completed: bool,
 }
 
 impl RunningObserverJoinGuard {
-    fn new(handle: JoinHandle<()>, job: JobObserverLogContext) -> Self {
+    fn new(handle: SharedJoin<()>, job: JobObserverLogContext) -> Self {
         Self {
             handle,
             job,
@@ -620,7 +645,10 @@ impl Drop for RunningObserverJoinGuard {
     }
 }
 
-fn log_running_notification_join_error(job: &JobObserverLogContext, error: tokio::task::JoinError) {
+fn log_running_notification_join_error(
+    job: &JobObserverLogContext,
+    error: std::sync::Arc<tokio::task::JoinError>,
+) {
     if error.is_panic() {
         log_running_notification_panic(job, &error);
     } else if error.is_cancelled() {

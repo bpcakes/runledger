@@ -126,3 +126,9 @@ async fn supervisor_processes_job_and_shuts_down() {
 
     teardown_ephemeral_pool(pool, database).await;
 }
+
+#[path = "supervisor_loop/settlement.rs"]
+mod settlement;
+
+#[path = "supervisor_loop/completed_handlers.rs"]
+mod completed_handlers;

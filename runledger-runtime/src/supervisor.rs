@@ -8,17 +8,28 @@ use tracing::warn;
 
 use crate::catalog::JobCatalog;
 use crate::config::{IntentPromoterConfig, JobsConfig};
-use crate::observer::{JobLifecycleObserver, JobLifecycleObservers};
+use crate::observer::JobLifecycleObserver;
 use crate::registry::JobRegistry;
-use crate::scheduler::run_scheduler_loop;
 use crate::shutdown::{ShutdownHandle, ShutdownSignal};
 use crate::task_group::TaskGroup;
-use crate::{Result, RuntimeError};
+use crate::{Error, Result, RuntimeError};
+
+#[path = "supervisor/preparation.rs"]
+mod preparation;
+pub use preparation::PreparedSupervisor;
 
 const WORKER_TASK: &str = "worker";
 const INTENT_PROMOTER_TASK: &str = "intent_promoter";
 const SCHEDULER_TASK: &str = "scheduler";
 const REAPER_TASK: &str = "reaper";
+
+#[cfg(test)]
+#[path = "supervisor/settlement_live.rs"]
+mod settlement_live;
+
+#[cfg(test)]
+#[path = "supervisor/preparation_tests.rs"]
+mod preparation_tests;
 
 /// Supervises the Runledger runtime loops spawned for a worker process.
 ///
@@ -34,6 +45,8 @@ const REAPER_TASK: &str = "reaper";
 pub struct Supervisor {
     shutdown: ShutdownSignal,
     tasks: TaskGroup,
+    initialization: crate::startup::Initialization,
+    descendants: crate::settlement::TaskRegistry,
 }
 
 /// Builds a [`Supervisor`] with configurable runtime loops.
@@ -133,6 +146,22 @@ impl Supervisor {
         })
     }
 
+    /// Observe local initialization without taking ownership of runtime tasks.
+    ///
+    /// ```rust,no_run
+    /// # async fn example(supervisor: runledger_runtime::Supervisor) {
+    /// let startup = supervisor.startup_observer();
+    /// match startup.wait_initialized().await {
+    ///     Ok(()) => { /* apply application policy */ }
+    ///     Err(_) => { /* startup stopped; observe the native shutdown result */ }
+    /// }
+    /// supervisor.shutdown().await.expect("observe shutdown");
+    /// # }
+    /// ```
+    pub fn startup_observer(&self) -> crate::RuntimeStartupObserver {
+        self.initialization.observer()
+    }
+
     /// Returns a cloneable shutdown handle that can request shutdown without
     /// owning the supervisor task joins.
     #[must_use]
@@ -158,6 +187,10 @@ impl Supervisor {
     ///
     /// With the default long-running loops, this method waits until shutdown is
     /// requested through a [`SupervisorShutdown`] handle or until a task exits.
+    /// This Result path observes loop exits and descendant failures available at
+    /// completion; it does not await complete descendant settlement or authorize
+    /// dependency cleanup. Use [`Self::run_until_shutdown_report`] for that contract.
+    ///
     /// If a loop exits before shutdown was requested, the remaining loops are
     /// asked to shut down and the first observed error is returned. Additional
     /// task failures observed while draining are logged. This method does not
@@ -165,7 +198,12 @@ impl Supervisor {
     /// owns shutdown and needs a bounded wait.
     pub async fn join(mut self) -> Result<()> {
         let shutdown = self.shutdown.clone();
-        self.tasks.join(&shutdown).await
+        let mut result = self
+            .descendants
+            .observe_while(self.tasks.join(&shutdown))
+            .await;
+        self.retain_descendant_failure(&mut result);
+        result
     }
 
     /// Requests graceful shutdown and waits for all supervised loops to exit.
@@ -173,18 +211,26 @@ impl Supervisor {
     /// If a loop exits before shutdown was requested, the remaining loops are
     /// asked to shut down and the pre-existing task exit is reported, even when
     /// that exit is only observed after shutdown begins. This method does not
-    /// impose a deadline. Use [`Self::shutdown_with_timeout`] when the owning
+    /// impose a deadline. It has the same descendant-settlement limits as
+    /// [`Self::join`]. Use [`Self::shutdown_with_timeout`] when the owning
     /// process needs a shutdown budget; externally timing out this consuming
     /// future can detach still-running task handles.
     pub async fn shutdown(mut self) -> Result<()> {
         let shutdown = self.shutdown.clone();
-        self.tasks.shutdown(&shutdown).await
+        let mut result = self
+            .descendants
+            .observe_while(self.tasks.shutdown(&shutdown))
+            .await;
+        self.retain_descendant_failure(&mut result);
+        result
     }
 
     /// Waits until `shutdown` resolves or a supervised task fails, then exits.
     ///
-    /// If `shutdown` resolves first, graceful shutdown is requested and the
-    /// supervisor waits up to `timeout` for all loops to exit. If a loop panics
+    /// If `shutdown` resolves or a [`SupervisorShutdown`] handle requests stop,
+    /// graceful shutdown begins and the supervisor waits up to `timeout` for all
+    /// loops to exit. A handle request applies this budget even if `shutdown`
+    /// remains pending. If a loop panics
     /// or exits unexpectedly before `shutdown` resolves, shutdown is requested
     /// for the remaining loops and the original task error is returned after
     /// those loops drain or a timeout is reported. If shutdown is requested
@@ -209,13 +255,55 @@ impl Supervisor {
         F: Future<Output = ()>,
     {
         let shutdown_signal = self.shutdown.clone();
+        let external_or_native_stop = async {
+            tokio::select! {
+                biased;
+                () = shutdown_signal.requested() => {}
+                () = shutdown => {}
+            }
+        };
+        let mut result = self
+            .descendants
+            .observe_while(self.tasks.run_until_shutdown(
+                external_or_native_stop,
+                timeout,
+                &shutdown_signal,
+            ))
+            .await;
+        self.retain_descendant_failure(&mut result);
+        result
+    }
+
+    /// Drive native loops and retain complete bounded settlement, including owned
+    /// callback descendants. Both the external future and shutdown handles start
+    /// the same non-resetting stop budget. Cancelling this consuming future still
+    /// requests shutdown through Drop; an integration owner must retain the driver.
+    ///
+    /// ```rust,no_run
+    /// # async fn example(supervisor: runledger_runtime::Supervisor) -> Result<(), runledger_runtime::RuntimeError> {
+    /// use runledger_runtime::RuntimeShutdownBudget;
+    /// use std::time::Duration;
+    /// let budget = RuntimeShutdownBudget::new(Duration::from_secs(20), Duration::from_secs(1))?;
+    /// let report = supervisor.run_until_shutdown_report(async {}, budget).await;
+    /// assert!(report.is_success());
+    /// # Ok(()) }
+    /// ```
+    pub async fn run_until_shutdown_report<F>(
+        mut self,
+        shutdown: F,
+        budget: crate::RuntimeShutdownBudget,
+    ) -> crate::RuntimeShutdownReport
+    where
+        F: Future<Output = ()>,
+    {
         self.tasks
-            .run_until_shutdown(shutdown, timeout, &shutdown_signal)
+            .run_report(shutdown, budget, &self.shutdown, &self.descendants)
             .await
     }
 
     /// Requests graceful shutdown and waits up to `timeout` for all supervised
-    /// loops to exit.
+    /// loops to exit. This Result path has the descendant-settlement limits of
+    /// [`Self::join`]; use [`Self::run_until_shutdown_report`] for dependency cleanup.
     ///
     /// If a loop had already exited before this method begins shutdown, that
     /// failure is returned after the remaining loops have had the same shutdown
@@ -232,7 +320,30 @@ impl Supervisor {
     /// or drained.
     pub async fn shutdown_with_timeout(mut self, timeout: Duration) -> Result<()> {
         let shutdown = self.shutdown.clone();
-        self.tasks.shutdown_with_timeout(timeout, &shutdown).await
+        let mut result = self
+            .descendants
+            .observe_while(self.tasks.shutdown_with_timeout(timeout, &shutdown))
+            .await;
+        self.retain_descendant_failure(&mut result);
+        result
+    }
+
+    fn retain_descendant_failure(&self, result: &mut Result<()>) {
+        let Some(failure) = self.descendants.first_unexpected_failure() else {
+            return;
+        };
+        match result {
+            Ok(()) => *result = Err(Error::Runtime(failure)),
+            Err(Error::Runtime(RuntimeError::ShutdownTimeout { timeout })) => {
+                *result = Err(Error::Runtime(
+                    RuntimeError::ShutdownTimeoutAfterTaskError {
+                        timeout: *timeout,
+                        source: Box::new(failure),
+                    },
+                ));
+            }
+            Err(_) => {}
+        }
     }
 }
 
@@ -346,113 +457,52 @@ impl<'a> SupervisorBuilder<'a> {
     /// Returns an error when worker or reaper loops are enabled without a job
     /// registry.
     pub fn build(self) -> std::result::Result<Supervisor, RuntimeError> {
-        let Self {
-            pool,
-            runtime,
-            registry_selection,
-            config,
-            observers,
-            worker_enabled,
-            intent_promoter_enabled,
-            intent_promoter_config,
-            scheduler_enabled,
-            reaper_enabled,
-        } = self;
+        Ok(self.prepare()?.start())
+    }
 
-        config
+    /// Validate and own the native configuration without starting tasks or database work.
+    /// The returned value can be transferred to a lifecycle adapter before launch.
+    /// Dropping it releases only configuration and cloned handles.
+    ///
+    /// Returns the same configuration and registry errors as [`Self::build`].
+    pub fn prepare(mut self) -> std::result::Result<PreparedSupervisor, RuntimeError> {
+        self.config
             .validate()
             .map_err(|source| RuntimeError::InvalidJobsConfig { source })?;
-        let intent_promoter_config = intent_promoter_config
-            .unwrap_or_else(|| IntentPromoterConfig::from_jobs_config(&config));
-        if intent_promoter_enabled {
+        let intent_promoter_config = self
+            .intent_promoter_config
+            .take()
+            .unwrap_or_else(|| IntentPromoterConfig::from_jobs_config(&self.config));
+        if self.intent_promoter_enabled {
             intent_promoter_config
                 .validate()
                 .map_err(|source| RuntimeError::InvalidJobsConfig { source })?;
         }
-
-        let registry = match registry_selection {
+        let registry = match self.registry_selection.take() {
             Some(RegistrySelection::Direct(registry) | RegistrySelection::Catalog(registry)) => {
                 registry
             }
             Some(RegistrySelection::Mixed) => return Err(RuntimeError::MixedRegistrySources),
-            None if worker_enabled || reaper_enabled => {
+            None if self.worker_enabled || self.reaper_enabled => {
                 return Err(RuntimeError::MissingRegistry {
-                    worker_enabled,
-                    reaper_enabled,
+                    worker_enabled: self.worker_enabled,
+                    reaper_enabled: self.reaper_enabled,
                 });
             }
             None => JobRegistry::new(),
         };
-
-        let (shutdown, shutdown_rx) = ShutdownSignal::channel();
-        let mut tasks = TaskGroup::new();
-        let observers = JobLifecycleObservers::from_arc_observers(observers);
-
-        if intent_promoter_enabled {
-            tasks.spawn_on(&runtime, INTENT_PROMOTER_TASK, {
-                let pool = pool.clone();
-                let registry = registry.clone();
-                let shutdown_rx = shutdown_rx.clone();
-                async move {
-                    crate::intent_promoter::run_intent_promoter_loop_with_config(
-                        pool,
-                        registry,
-                        intent_promoter_config,
-                        shutdown_rx,
-                    )
-                    .await
-                }
-            });
-        }
-
-        if worker_enabled {
-            tasks.spawn_on(&runtime, WORKER_TASK, {
-                let pool = pool.clone();
-                let registry = registry.clone();
-                let config = config.clone();
-                let shutdown_rx = shutdown_rx.clone();
-                let observers = observers.clone();
-                async move {
-                    crate::worker::run_worker_loop_with_observer(
-                        pool,
-                        registry,
-                        config,
-                        shutdown_rx,
-                        observers,
-                    )
-                    .await
-                }
-            });
-        }
-
-        if scheduler_enabled {
-            tasks.spawn_on(&runtime, SCHEDULER_TASK, {
-                let pool = pool.clone();
-                let config = config.clone();
-                let shutdown_rx = shutdown_rx.clone();
-                async move { run_scheduler_loop(pool, config, shutdown_rx).await }
-            });
-        }
-
-        if reaper_enabled {
-            let pool = pool.clone();
-            let registry = registry.clone();
-            let config = config.clone();
-            let shutdown_rx = shutdown_rx.clone();
-            let observers = observers.clone();
-            tasks.spawn_on(&runtime, REAPER_TASK, async move {
-                crate::reaper::run_reaper_loop_with_observer(
-                    pool,
-                    registry,
-                    config,
-                    shutdown_rx,
-                    observers,
-                )
-                .await
-            });
-        }
-
-        Ok(Supervisor { shutdown, tasks })
+        Ok(PreparedSupervisor {
+            pool: self.pool.clone(),
+            runtime: self.runtime,
+            config: self.config,
+            registry,
+            observers: self.observers,
+            worker_enabled: self.worker_enabled,
+            intent_promoter_enabled: self.intent_promoter_enabled,
+            intent_promoter_config,
+            scheduler_enabled: self.scheduler_enabled,
+            reaper_enabled: self.reaper_enabled,
+        })
     }
 }
 
@@ -460,6 +510,35 @@ impl SupervisorShutdown {
     /// Requests graceful shutdown of all loops watched by the supervisor.
     pub fn request_shutdown(&self) {
         self.handle.request();
+    }
+
+    /// Request shutdown using an enclosing owner's already-started stop clock.
+    /// Returns the earliest known native/enclosing timestamp so the enclosing
+    /// owner can tighten its own deadline after a previously recorded native stop.
+    /// The first native cause remains authoritative. Earlier enclosing timestamps
+    /// tighten active phase deadlines in [`Supervisor::run_until_shutdown_report`];
+    /// repeated later requests cannot restart that allowance. The legacy Result
+    /// methods retain their separate timeout measured from driver observation;
+    /// an enclosing deadline owner must use the complete-report driver.
+    /// Future timestamps are clamped to the current time.
+    /// This lets an adapter include scheduling delay in one parent allowance.
+    ///
+    /// ```no_run
+    /// # async fn stop(handle: runledger_runtime::SupervisorShutdown) {
+    /// let started = tokio::time::Instant::now();
+    /// handle.request_shutdown_since(started);
+    /// handle.requested().await;
+    /// # }
+    /// ```
+    pub fn request_shutdown_since(&self, started: tokio::time::Instant) -> tokio::time::Instant {
+        self.handle.request_since(started)
+    }
+
+    /// Observe the first native stop request independently of full settlement.
+    /// Cancelling this borrowed waiter does not request or cancel shutdown.
+    /// Adapters use it to drain peers promptly after a native loop failure.
+    pub async fn requested(&self) {
+        self.handle.requested().await;
     }
 
     /// Returns whether shutdown has been requested.
@@ -508,7 +587,7 @@ mod tests {
             .expect("construct lazy pool")
     }
 
-    fn test_config() -> JobsConfig {
+    pub(super) fn test_config() -> JobsConfig {
         JobsConfig {
             worker_id: "supervisor-test-worker".to_string(),
             poll_interval: Duration::from_millis(25),
@@ -1016,5 +1095,179 @@ mod tests {
         run.await
             .expect("run-until-shutdown task should join")
             .expect("all-disabled supervisor should complete after signal");
+    }
+    #[tokio::test]
+    async fn legacy_methods_never_report_a_descendant_panic_as_success() {
+        for method in 0..4 {
+            let supervisor = Supervisor::builder(&lazy_pool(), test_config())
+                .expect("validated supervisor construction")
+                .disable_worker()
+                .disable_scheduler()
+                .disable_reaper()
+                .build()
+                .expect("validated supervisor construction");
+            let failed = supervisor.descendants.spawn("escaped_job", async {
+                panic!("escaped panic");
+            });
+            let original = failed.await.expect_err("actual descendant panic");
+            let result = tokio::time::timeout(Duration::from_secs(1), async move {
+                match method {
+                    0 => supervisor.join().await,
+                    1 => supervisor.shutdown().await,
+                    2 => {
+                        supervisor
+                            .shutdown_with_timeout(Duration::from_secs(1))
+                            .await
+                    }
+                    _ => {
+                        supervisor
+                            .run_until_shutdown(std::future::pending(), Duration::from_secs(1))
+                            .await
+                    }
+                }
+            })
+            .await
+            .expect("native internal stop must wake the driver");
+            let error = result.expect_err("legacy result lost descendant failure");
+            let mut cause: &dyn std::error::Error = &error;
+            loop {
+                if let Some(shared) = cause.downcast_ref::<std::sync::Arc<tokio::task::JoinError>>()
+                {
+                    assert!(std::sync::Arc::ptr_eq(shared, &original));
+                    break;
+                }
+                if let Some(join) = cause.downcast_ref::<tokio::task::JoinError>() {
+                    assert!(std::ptr::eq(join, &*original));
+                    break;
+                }
+                cause = cause
+                    .source()
+                    .expect("original descendant join must survive");
+            }
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn internal_descendant_failure_starts_legacy_drain_budget() {
+        let mut supervisor = Supervisor::builder(&lazy_pool(), test_config())
+            .expect("runtime exists")
+            .disable_worker()
+            .disable_scheduler()
+            .disable_reaper()
+            .build()
+            .expect("valid supervisor");
+        supervisor.tasks.spawn_on(
+            &Handle::current(),
+            "unresponsive_loop",
+            std::future::pending(),
+        );
+        let original = supervisor
+            .descendants
+            .spawn("escaped_job", async {
+                panic!("escaped panic");
+            })
+            .await
+            .expect_err("actual descendant panic");
+        let result = timeout(
+            Duration::from_secs(2),
+            supervisor.run_until_shutdown(std::future::pending(), Duration::from_millis(10)),
+        )
+        .await
+        .expect("internal failure must begin bounded shutdown");
+        let Err(Error::Runtime(RuntimeError::ShutdownTimeoutAfterTaskError { source, .. })) =
+            result
+        else {
+            panic!("timeout must preserve the triggering descendant failure");
+        };
+        let RuntimeError::DescendantJoin { source, .. } = *source else {
+            panic!("original native descendant failure is retained");
+        };
+        assert!(Arc::ptr_eq(&source, &original));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn legacy_driver_observes_failure_without_a_descendant_waiter() {
+        use futures_util::FutureExt;
+        for join_only in [true, false] {
+            let mut supervisor = Supervisor::builder(&lazy_pool(), test_config())
+                .expect("runtime exists")
+                .disable_worker()
+                .disable_scheduler()
+                .disable_reaper()
+                .build()
+                .expect("valid supervisor");
+            let shutdown = supervisor.shutdown.clone();
+            let loop_stop = shutdown.clone();
+            supervisor
+                .tasks
+                .spawn_on(&Handle::current(), "waiting_loop", async move {
+                    loop_stop.requested().await;
+                    crate::RuntimeLoopExit::Shutdown
+                });
+            let (release, released) = tokio::sync::oneshot::channel();
+            let escaped = supervisor.descendants.spawn("escaped_job", async move {
+                released.await.expect("fixture releases descendant");
+                panic!("unobserved descendant panic");
+            });
+            let driver = async move {
+                if join_only {
+                    supervisor.join().await
+                } else {
+                    supervisor
+                        .run_until_shutdown(std::future::pending(), Duration::from_millis(10))
+                        .await
+                }
+            };
+            tokio::pin!(driver);
+            assert!(driver.as_mut().now_or_never().is_none());
+            release.send(()).expect("descendant starts after driver");
+            let observed = timeout(Duration::from_millis(100), driver.as_mut()).await;
+            // Only after the observation boundary may the fixture harvest this join.
+            let original = escaped.await.expect_err("actual descendant panic");
+            let (autonomous, result) = match observed {
+                Ok(result) => (true, result),
+                Err(_) => (false, driver.await),
+            };
+            assert!(
+                autonomous,
+                "driver depended on external descendant observation"
+            );
+            let Err(Error::Runtime(RuntimeError::DescendantJoin { source, .. })) = result else {
+                panic!("observed failure must survive legacy completion");
+            };
+            assert!(Arc::ptr_eq(&source, &original));
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn handle_request_applies_the_legacy_driver_shutdown_budget() {
+        use futures_util::FutureExt;
+        let mut supervisor = Supervisor::builder(&lazy_pool(), test_config())
+            .expect("runtime exists")
+            .disable_worker()
+            .disable_scheduler()
+            .disable_reaper()
+            .build()
+            .expect("valid supervisor");
+        let stop = supervisor.shutdown.clone();
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        supervisor
+            .tasks
+            .spawn_on(&Handle::current(), "slow_loop", async move {
+                entered.send(()).expect("fixture observes loop entry");
+                stop.requested().await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                crate::RuntimeLoopExit::Shutdown
+            });
+        entry.await.expect("loop started");
+        let handle = supervisor.shutdown_handle();
+        let driver = supervisor.run_until_shutdown(std::future::pending(), Duration::from_secs(1));
+        tokio::pin!(driver);
+        assert!(driver.as_mut().now_or_never().is_none());
+        handle.request_shutdown();
+        let result = timeout(Duration::from_secs(3), driver)
+            .await
+            .expect("handle starts bounded stop");
+        assert!(matches!(
+            result,
+            Err(Error::Runtime(RuntimeError::ShutdownTimeout { .. }))
+        ));
     }
 }

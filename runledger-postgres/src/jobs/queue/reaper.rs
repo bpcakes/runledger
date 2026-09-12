@@ -460,6 +460,12 @@ fn failure_transition_for(row: &ReapExpiredLeaseRow) -> ExpiredLeaseTransition<'
 
 fn log_sanitized_deferred_row_error(row: &ReapExpiredLeaseRow, error: &Error) {
     match error {
+        Error::RollbackFailure(_) => log_sanitized_deferred_row_non_query_error(
+            row,
+            "RollbackFailure",
+            "db.rollback_failed",
+            "reaper row operation and rollback both failed",
+        ),
         Error::QueryError(query_error) => {
             let diagnostics = query_error.sanitized_diagnostics();
             tracing::warn!(
@@ -513,6 +519,11 @@ fn log_sanitized_deferred_row_non_query_error(
 
 fn sanitized_deferred_row_error(error: &Error) -> (String, String, Option<String>) {
     match error {
+        Error::RollbackFailure(_) => (
+            "db.rollback_failed".to_owned(),
+            "Database operation and rollback failed.".to_owned(),
+            None,
+        ),
         Error::QueryError(query_error) => (
             query_error.code().to_owned(),
             query_error.client_message().to_owned(),

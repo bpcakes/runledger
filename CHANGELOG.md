@@ -6,6 +6,39 @@ All notable changes to this workspace are documented here.
 
 ### Added
 
+- Add `RuntimeError::ShutdownBudgetOverflow` with both graceful and abort
+  allowances when their sum cannot fit in a duration. Representable totals that
+  cannot form a deadline still use `ShutdownTimeoutTooLarge` with the total.
+- Separate handler execution evidence from durable outcome classification.
+  A completed handler rejected by deadline or lease fencing no longer records
+  a callback interruption or permanently disqualifies cooperative cleanup.
+  Strict deadline precedence, lease fencing, pending-handler cancellation,
+  and panic evidence remain enforced.
+- Retain concrete SQLx begin/commit causes from scoped job cancellation and both
+  operation and explicit rollback failures in `Error::RollbackFailure`. Its
+  formatting is redacted; cancellation scope and durable event writes stay native.
+- Keep descendant join notifications independent of the task registry's lifetime.
+  Dropping the last runtime owner before an unjoined callback completes no longer
+  drops the registry recursively under a shared-join notifier lock.
+- Add owned `PreparedSupervisor` from `SupervisorBuilder::prepare` for lifecycle
+  registration before native launch. Preparation validates the existing native
+  configuration without starting loops; `build` retains its immediate-start
+  behavior through the same preparation and launch implementation.
+- Add `SupervisorShutdown::requested` for observing native stop independently of
+  full settlement, and `request_shutdown_since` for propagating an enclosing
+  owner's original stop clock without restarting native shutdown allowances.
+- Add `Supervisor::run_until_shutdown_report` with a validated
+  `RuntimeShutdownBudget`. The report retains all loop outcomes, descendant join
+  failures, abort requests and unjoined tasks. Shared descendant joins survive
+  worker/reaper destruction, including running/terminal observers and terminal
+  hooks. Every stop path uses the original request time. Callback interruptions
+  during shutdown retain their causes; earlier interruptions remain a bounded
+  count and prevent claiming cooperative dependency cleanup.
+- Add `Supervisor::startup_observer`, `RuntimeStartupObserver::wait_initialized`
+  and typed startup snapshots. Every enabled runtime loop acknowledges after local
+  initialization, independently of database success or queue activity. Shutdown
+  and loop destruction prevent later acknowledgement from reviving startup;
+  cancelled observer waiters do not change supervisor ownership.
 - Add `ensure_schema_compatible_after_idempotency_cutover_with_connection` so
   applications with explicit cancellation-safe connection disposition can run
   the read-only schema verifier on a caller-owned SQLx PostgreSQL connection.
@@ -47,6 +80,50 @@ All notable changes to this workspace are documented here.
 
 ### Changed
 
+- Keep abort-request evidence without rejecting cooperative cleanup when the
+  task's observed join succeeds. Abort requests that lose to normal completion
+  no longer count as historical callback interruptions.
+
+- Breaking: owned cancellation begin/commit failures have fixed internal query
+  codes `db.transaction_begin_failed` and `db.transaction_commit_unconfirmed`.
+  The added `QueryErrorKind::TransactionBeginFailed` and
+  `TransactionCommitUnconfirmed` variants require exhaustive-match updates.
+  SQLx source/SQLSTATE remain available, without turning deferred COMMIT failures
+  into business-rule classifications. Neither code authorizes replay.
+- Clarify that enclosing stop-clock propagation and dependency settlement require
+  `run_until_shutdown_report`; legacy Result methods retain their own observation
+  timeout and first-error loop contract.
+
+- Best-effort observers and dead-letter hooks share a callback owner that catches
+  future-destruction panics as well as polling panics. Timeout or intentional
+  abortion no longer turns an observer's destruction failure into a fatal native
+  descendant exit. Interruption evidence remains retained and forbids cooperative
+  cleanup; unexpected main job-task failures remain fatal.
+
+- Breaking: `run_until_shutdown` applies its shutdown timeout when a cloned
+  shutdown handle requests stop, even while its external signal future remains
+  pending. Previously that handle-only path could drain without a deadline.
+  Provision the timeout for cooperative work or use the complete-report API with
+  its explicit graceful and abort budgets.
+- Supervision actively observes descendant joins while native loops are blocked.
+  Caught reaped-observer destructor panics remain settlement failures. Registry
+  notifications poll only the affected joins; nonblocking harvests observe ready
+  tasks even after Tokio's cooperative poll budget is exhausted.
+- Shutdown-boundary harvests also inspect finished descendant handles once, so
+  delayed notifications or concurrent collection cannot hide completed joins in
+  the final report. Normal task observation remains notification-driven.
+
+- Breaking: cancellation begin/commit errors now use `Error::QueryError` with
+  concrete SQLx sources instead of `ConnectionError(String)`. The added public
+  `Error::RollbackFailure` variant requires downstream exhaustive matches to add
+  an arm. Failed rollback wraps the original operation, including not-found or
+  invalid-state classification, without replacing it.
+- Owned cancellation explicitly uses READ COMMITTED, independently of session
+  defaults, for mutation and missing-job classification in the same transaction.
+- Uncaught native descendant panics and unexpected cancellations stop the
+  supervisor. The older Result methods return their retained join failure;
+  intentional best-effort observer cancellation does not stop processing.
+
 - Upgrade SQLx from 0.8.6 to 0.9.0 and raise the minimum Rust version to 1.94.
   Update dynamic SQL and migration APIs while retaining bound request values
   and the existing `_sqlx_migrations` history table.
@@ -66,6 +143,17 @@ All notable changes to this workspace are documented here.
   for handler continuation delays.
 
 ### Upgrade notes
+
+- Update exhaustive `runledger_postgres::Error` matches for `RollbackFailure`.
+  Inspect `pair.operation` for the original query classification and retain
+  `pair.rollback` separately. A wrapped not-found result is not a clean rollback.
+  Cancellation begin/commit failures no longer match `ConnectionError`; inspect
+  the retained SQLx source for outage diagnostics. Query classification alone
+  does not authorize retry, and a commit error does not prove cancellation failed.
+- Native Result entrypoints remain first-error interfaces, not complete cleanup
+  evidence. Handle `RuntimeError::DescendantJoin` when a native-owned descendant
+  escapes with a panic or unexpected cancellation; use the complete report API
+  for all later errors, interrupted callbacks and dependency-cleanup eligibility.
 
 - Use Rust 1.94 or later and SQLx 0.9 in applications that share pools,
   transactions, or SQLx types with Runledger. SQLx 0.8 types are incompatible.

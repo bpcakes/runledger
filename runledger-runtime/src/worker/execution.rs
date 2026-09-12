@@ -100,8 +100,11 @@ impl ClaimedJobExecution {
             if !self.mark_job_running_or_abort().await {
                 return;
             }
-            let mut running_notification =
-                JobRunningNotification::spawn(self.observers.clone(), observed_job.clone());
+            let mut running_notification = JobRunningNotification::spawn_in(
+                self.observers.clone(),
+                observed_job.clone(),
+                &self.terminal_observer_tasks.registry(),
+            );
 
             match self.execute_job_handler_with_heartbeats(&context).await {
                 Ok(completion) => {
@@ -287,6 +290,7 @@ impl ClaimedJobExecution {
         context: &JobContext,
     ) -> Result<JobCompletion, JobExecutionFailure> {
         let registry = Arc::clone(&self.registry);
+        let settlement = self.terminal_observer_tasks.registry();
         let timeout_deadline =
             Instant::now() + Duration::from_secs(self.job.timeout_seconds.max(1) as u64);
         let services =
@@ -310,22 +314,37 @@ impl ClaimedJobExecution {
         loop {
             tokio::select! {
                 result = &mut execution => {
+                    // Record execution evidence before applying durable outcome
+                    // policy. A returned result can be late or lease-fenced
+                    // without its handler having been interrupted.
+                    if let Err(payload) = &result {
+                        settlement.record_callback(crate::RuntimeCallbackFailure::Panicked {
+                            callback: "job_handler",
+                            message: panic_payload_message(&**payload),
+                        });
+                    }
+                    let result = map_handler_join(result, timeout_deadline);
                     if services.lease_was_lost() {
                         return Err(JobExecutionFailure::LeaseMaintenance(lease_owner_mismatch_failure()));
                     }
-                    return map_handler_join(result, timeout_deadline);
+                    return result;
                 }
                 _ = services.wait_for_lease_loss() => {
+                    settlement.record_callback(crate::RuntimeCallbackFailure::LeaseMaintenance { callback: "job_handler" });
                     return Err(JobExecutionFailure::LeaseMaintenance(lease_owner_mismatch_failure()));
                 }
                 _ = &mut timeout => {
+                    settlement.record_callback(crate::RuntimeCallbackFailure::TimedOut { callback: "job_handler" });
                     return Err(JobExecutionFailure::Handler(JobFailure::timeout(
                         "job.timeout_exceeded",
                         "Job exceeded the configured timeout.",
                     )));
                 }
                 Some(result) = pending_heartbeats.next(), if !pending_heartbeats.is_empty() => {
-                    self.heartbeat_join_to_failure(result, heartbeat_budget)?;
+                    if let Err(failure) = self.heartbeat_join_to_failure(result, heartbeat_budget) {
+                        settlement.record_callback(crate::RuntimeCallbackFailure::LeaseMaintenance { callback: "job_handler" });
+                        return Err(failure);
+                    }
                 }
                 _ = ticker.tick(), if pending_heartbeats.is_empty() => {
                     // Keep the heartbeat future in the select set instead of
@@ -391,6 +410,8 @@ impl ClaimedJobExecution {
     }
 }
 
+// Classify durable outcomes only. This function deliberately has no settlement
+// registry: deadline rejection cannot establish that execution was interrupted.
 fn map_handler_join(
     result: Result<Result<JobCompletion, JobFailure>, Box<dyn Any + Send>>,
     timeout_deadline: Instant,

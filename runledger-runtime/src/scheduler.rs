@@ -44,12 +44,23 @@ const RELEASE_MATERIALIZE_DUE_SCHEDULE_SAVEPOINT_SQL: &str =
 pub async fn run_scheduler_loop(
     pool: runledger_postgres::DbPool,
     config: JobsConfig,
+    shutdown: watch::Receiver<bool>,
+) -> RuntimeLoopExit {
+    run_scheduler_loop_initialized(pool, config, shutdown, None).await
+}
+
+pub(crate) async fn run_scheduler_loop_initialized(
+    pool: runledger_postgres::DbPool,
+    config: JobsConfig,
     mut shutdown: watch::Receiver<bool>,
+    mut startup: Option<crate::startup::LoopStartup>,
 ) -> RuntimeLoopExit {
     if let Err(error) = config.validate_scheduler_loop() {
         warn!(%error, "invalid jobs config; stopping scheduler loop");
         return RuntimeLoopExit::InvalidConfig(error);
     }
+
+    crate::startup::acknowledge(&mut startup);
 
     loop {
         if shutdown::is_requested_or_closed(&shutdown) {

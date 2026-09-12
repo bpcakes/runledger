@@ -3,7 +3,7 @@ use std::future::Future;
 use runledger_core::jobs::WorkflowStepStatus;
 use sqlx::types::Uuid;
 
-use crate::{DbPool, DbTx, Error, Result};
+use crate::{DbPool, DbTx, Error, QueryError, QueryErrorKind, Result};
 
 use super::super::errors::{
     invalid_job_state_error, job_not_found_error, workflow_requeue_not_supported_error,
@@ -24,19 +24,21 @@ use super::super::types::{
 };
 use super::super::workflows::on_terminal;
 
-async fn rollback_missing_job_mutation(tx: DbTx<'_>) {
-    if let Err(error) = tx.rollback().await {
-        tracing::warn!(error = %error, "failed to rollback missing job mutation transaction");
+async fn rollback_cancellation(tx: DbTx<'_>, operation: Error) -> Error {
+    match tx.rollback().await {
+        Ok(()) => operation,
+        Err(rollback) => Error::RollbackFailure(Box::new(crate::RollbackFailure {
+            operation,
+            rollback,
+        })),
     }
 }
 
-async fn rollback_and_classify_missing_job_cancellation(
-    tx: DbTx<'_>,
-    pool: &DbPool,
+async fn classify_missing_job_cancellation(
+    tx: &mut DbTx<'_>,
     scope: JobCancellationScope,
     job_id: Uuid,
 ) -> Result<Error> {
-    rollback_missing_job_mutation(tx).await;
     let (is_admin, organization_id) = cancellation_scope_predicate(scope);
     let exists = sqlx::query_scalar!(
         "SELECT EXISTS (
@@ -49,7 +51,7 @@ async fn rollback_and_classify_missing_job_cancellation(
         is_admin,
         organization_id,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|error| {
         Error::from_query_sqlx_with_context("classify missing job cancellation", error)
@@ -70,6 +72,12 @@ const fn cancellation_scope_predicate(scope: JobCancellationScope) -> (bool, Opt
 }
 
 /// Cancels a pending or leased job within an explicit authorization scope.
+/// Owns a READ COMMITTED transaction independently of the session default.
+/// Begin/commit failures retain their SQLx sources and fixed internal
+/// [`QueryErrorKind::TransactionBeginFailed`] / [`QueryErrorKind::TransactionCommitUnconfirmed`]
+/// classifications, never statement-level business/validation codes. A failed operation is rolled
+/// back explicitly; if rollback also fails, [`crate::Error::RollbackFailure`]
+/// retains both causes. A commit error does not prove rollback or authorize replay.
 pub async fn cancel_job_with_scope(
     pool: &DbPool,
     scope: JobCancellationScope,
@@ -77,16 +85,33 @@ pub async fn cancel_job_with_scope(
     reason: Option<&str>,
 ) -> Result<JobQueueRecord> {
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
-    let Some(record) = cancel_job_with_scope_tx(&mut tx, scope, job_id, reason).await? else {
-        return Err(rollback_and_classify_missing_job_cancellation(tx, pool, scope, job_id).await?);
+        .map_err(|error| {
+            Error::QueryError(QueryError::from_sqlx_with_kind(
+                QueryErrorKind::TransactionBeginFailed,
+                "begin job cancellation",
+                error,
+            ))
+        })?;
+    let record = match cancel_job_with_scope_tx(&mut tx, scope, job_id, reason).await {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let error = classify_missing_job_cancellation(&mut tx, scope, job_id)
+                .await
+                .unwrap_or_else(|error| error);
+            return Err(rollback_cancellation(tx, error).await);
+        }
+        Err(error) => return Err(rollback_cancellation(tx, error).await),
     };
 
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::QueryError(QueryError::from_sqlx_with_kind(
+            QueryErrorKind::TransactionCommitUnconfirmed,
+            "commit job cancellation",
+            error,
+        ))
+    })?;
 
     Ok(record)
 }
@@ -534,6 +559,45 @@ mod tests {
         JobFailureUpdate, JobRequeueStatePolicy, JobScope, RequeueableJobStatus, claim_jobs,
         complete_job_failure, enqueue_job, upsert_job_definition_tx,
     };
+
+    #[tokio::test]
+    async fn rollback_failure_keeps_successful_missing_job_classification() {
+        let (pool, database) = setup_ephemeral_pool("cancellation_missing_rollback", 2).await;
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin cancellation classification");
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("identify exact transaction backend");
+        let operation = super::classify_missing_job_cancellation(
+            &mut tx,
+            crate::jobs::JobCancellationScope::Global,
+            sqlx::types::Uuid::nil(),
+        )
+        .await
+        .expect("missing-job classification succeeds");
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1, 5000)")
+            .bind(pid)
+            .fetch_one(&pool)
+            .await
+            .expect("terminate exact classified transaction");
+        let error = super::rollback_cancellation(tx, operation).await;
+        teardown_ephemeral_pool(pool, database).await;
+        assert!(terminated);
+        let crate::Error::RollbackFailure(pair) = error else {
+            panic!("failed rollback must retain the classified operation");
+        };
+        let crate::Error::QueryError(operation) = pair.operation else {
+            panic!("original missing-job classification must remain concrete");
+        };
+        assert_eq!(operation.code(), "job.not_found");
+        assert!(matches!(
+            pair.rollback,
+            sqlx::Error::Io(_) | sqlx::Error::Protocol(_) | sqlx::Error::Database(_)
+        ));
+    }
 
     async fn upsert_snapshot_race_job_definition(pool: &crate::DbPool, job_type: &str) {
         let mut definition_tx = pool.begin().await.expect("begin definition transaction");

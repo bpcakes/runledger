@@ -869,3 +869,230 @@ async fn run_worker_loop_shutdown_delivers_terminal_after_hanging_running_observ
 
     teardown_ephemeral_pool(pool, database).await;
 }
+
+#[tokio::test]
+async fn supervised_terminal_overflow_preserves_processing_and_cleanup_uncertainty() {
+    let (shutdown, _) = crate::shutdown::ShutdownSignal::channel();
+    let registry = crate::settlement::TaskRegistry::supervised(shutdown.clone());
+    let tasks = TerminalObserverTasks::with_registry(registry.clone());
+    let cap_job = observer_task_test_job();
+    let (release, released) = watch::channel(false);
+    for _ in 0..64 {
+        let mut released = released.clone();
+        assert!(
+            tasks
+                .spawn_terminal(
+                    async move {
+                        while !*released.borrow() {
+                            released
+                                .changed()
+                                .await
+                                .expect("observer overflow fixture remains owned");
+                        }
+                    },
+                    &cap_job
+                )
+                .await
+        );
+    }
+    let entered = Arc::new(Notify::new());
+    let drops = Arc::new(AtomicUsize::new(0));
+    let observers = JobLifecycleObservers::from_observer(HangingDropRunningObserver {
+        started: entered.clone(),
+        drops: drops.clone(),
+    });
+    let job = observer_task_observed_job();
+    let mut running = JobRunningNotification::spawn_in(observers.clone(), job.clone(), &registry);
+    timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("observer overflow fixture remains owned");
+    running
+        .spawn_terminal_observer(
+            &tasks,
+            observers,
+            TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
+                job,
+                duration: Duration::ZERO,
+                progress_done: None,
+                progress_total: None,
+            }),
+        )
+        .await;
+    assert!(
+        running.handle.is_some(),
+        "full terminal set rejects admission"
+    );
+    drop(running);
+    assert!(wait_for_counter_at_least(&drops, 1, Duration::from_secs(1)).await);
+    registry.collect_ready();
+    let prematurely_stopped = shutdown.is_requested();
+    release
+        .send(true)
+        .expect("observer overflow fixture remains owned");
+    tasks.drain_for_shutdown().await;
+    registry.wait().await;
+    let report = crate::task_group::TaskGroup::new()
+        .run_report(
+            async {},
+            crate::RuntimeShutdownBudget::new(Duration::from_secs(1), Duration::from_secs(1))
+                .expect("observer overflow fixture remains owned"),
+            &shutdown,
+            &registry,
+        )
+        .await;
+    assert!(
+        !prematurely_stopped,
+        "best-effort observer overflow stopped healthy processing"
+    );
+    assert_eq!(report.prior_callback_interruptions, 1);
+    assert!(
+        report.descendants.is_empty(),
+        "ordinary interruption history is bounded"
+    );
+    assert!(!report.is_cooperatively_stopped());
+}
+
+struct DestructionPanicObserver(Arc<tokio::sync::Notify>);
+
+async fn hold_observer_with_panicking_destructor(entered: &tokio::sync::Notify) {
+    struct PanickingDrop;
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            panic!("best-effort observer destruction failure");
+        }
+    }
+    let _guard = PanickingDrop;
+    entered.notify_one();
+    std::future::pending::<()>().await;
+}
+
+#[async_trait::async_trait]
+impl JobLifecycleObserver for DestructionPanicObserver {
+    async fn on_job_running(&self, _: JobRunningEvent) {
+        hold_observer_with_panicking_destructor(&self.0).await;
+    }
+    async fn on_job_succeeded(&self, _: JobSucceededEvent) {
+        hold_observer_with_panicking_destructor(&self.0).await;
+    }
+}
+
+async fn start_destruction_observer(
+    registry: &crate::settlement::TaskRegistry,
+    observers: JobLifecycleObservers,
+    terminal: bool,
+) -> (TerminalObserverTasks, JobRunningNotification) {
+    let owner = TerminalObserverTasks::with_registry(registry.clone());
+    let running = if terminal {
+        let mut notification = JobRunningNotification { handle: None };
+        notification
+            .spawn_terminal_observer(
+                &owner,
+                observers,
+                TerminalJobObserverEvent::Succeeded(JobSucceededEvent {
+                    job: observer_task_observed_job(),
+                    duration: Duration::ZERO,
+                    progress_done: None,
+                    progress_total: None,
+                }),
+            )
+            .await;
+        notification
+    } else {
+        JobRunningNotification::spawn_in(observers, observer_task_observed_job(), registry)
+    };
+    (owner, running)
+}
+
+async fn observer_destruction_case(abort: bool, stopping: bool, terminal: bool) {
+    let (shutdown, _) = crate::shutdown::ShutdownSignal::channel();
+    let registry = crate::settlement::TaskRegistry::supervised(shutdown.clone());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let observers = JobLifecycleObservers::from_observer(DestructionPanicObserver(entered.clone()))
+        .with_settlement(registry.clone());
+    let (_owner, mut running) = start_destruction_observer(&registry, observers, terminal).await;
+    entered.notified().await;
+    if stopping {
+        shutdown.request();
+    }
+    if abort {
+        if let Some(handle) = &running.handle {
+            handle.abort();
+        } else {
+            registry.abort_all();
+        }
+    }
+    registry.wait().await;
+    let unexpected_stop = !stopping && shutdown.is_requested();
+    let join = match running.handle.take() {
+        Some(handle) => Some(handle.await),
+        None => None,
+    };
+    let report = crate::task_group::TaskGroup::new()
+        .run_report(
+            async {},
+            crate::RuntimeShutdownBudget::new(Duration::from_secs(1), Duration::from_secs(1))
+                .expect("valid budget"),
+            &shutdown,
+            &registry,
+        )
+        .await;
+    assert!(
+        !unexpected_stop,
+        "best-effort callback destructor stopped the supervisor"
+    );
+    if let Some(join) = join {
+        if abort {
+            assert!(join.expect_err("intentional abort").is_cancelled());
+        } else {
+            join.expect("timeout remains a best-effort normal task exit");
+        }
+    }
+    assert!(
+        report
+            .descendants
+            .iter()
+            .all(|task| task.error.as_ref().is_none_or(|error| !error.is_panic()))
+    );
+    assert!(!report.is_cooperatively_stopped());
+    assert!(report.unjoined.is_empty());
+    if stopping {
+        assert!(report.callback_failures.iter().any(|failure| matches!(failure,
+            crate::RuntimeCallbackFailure::Panicked { message, .. } if message == "best-effort observer destruction failure")));
+    } else {
+        assert!(report.prior_callback_interruptions > 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn best_effort_observer_timeout_destructor_does_not_stop_supervisor() {
+    observer_destruction_case(false, false, false).await;
+}
+#[tokio::test(start_paused = true)]
+async fn best_effort_observer_abort_destructor_does_not_stop_supervisor() {
+    observer_destruction_case(true, false, false).await;
+}
+#[tokio::test(start_paused = true)]
+async fn best_effort_observer_timeout_destructor_retained_during_stop() {
+    observer_destruction_case(false, true, false).await;
+}
+#[tokio::test(start_paused = true)]
+async fn best_effort_observer_abort_destructor_retained_during_stop() {
+    observer_destruction_case(true, true, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn best_effort_terminal_timeout_destructor_does_not_stop_supervisor() {
+    observer_destruction_case(false, false, true).await;
+}
+#[tokio::test(start_paused = true)]
+async fn best_effort_terminal_abort_destructor_does_not_stop_supervisor() {
+    observer_destruction_case(true, false, true).await;
+}
+#[tokio::test(start_paused = true)]
+async fn best_effort_terminal_timeout_destructor_retained_during_stop() {
+    observer_destruction_case(false, true, true).await;
+}
+#[tokio::test(start_paused = true)]
+async fn best_effort_terminal_abort_destructor_retained_during_stop() {
+    observer_destruction_case(true, true, true).await;
+}
