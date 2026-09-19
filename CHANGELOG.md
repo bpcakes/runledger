@@ -10,6 +10,12 @@ All notable changes to this workspace are documented here.
   adapters can compose application writes and Runledger enqueueing in one
   caller-owned transaction without exposing a replaceable SQLx connection or
   transaction. Existing `DbTx` entry points remain compatibility wrappers.
+- Add `RuntimeShutdownReport::cleanup_decision()` with
+  `RuntimeShutdownCleanupDecision::{Allowed(RuntimeShutdownCleanupPermit), Denied}`.
+  The permit is report-derived and externally non-constructible, making the
+  cleanup authority explicit at consumer boundaries. Keep
+  `is_cooperatively_stopped()` as its source-compatible boolean projection;
+  neither shutdown success nor `failure()` authorizes cleanup.
 - Add `RuntimeError::ShutdownBudgetOverflow` with both graceful and abort
   allowances when their sum cannot fit in a duration. Representable totals that
   cannot form a deadline still use `ShutdownTimeoutTooLarge` with the total.
@@ -31,6 +37,35 @@ All notable changes to this workspace are documented here.
 - Add `SupervisorShutdown::requested` for observing native stop independently of
   full settlement, and `request_shutdown_since` for propagating an enclosing
   owner's original stop clock without restarting native shutdown allowances.
+- Add `Supervisor::shutdown_report` for callers that already know it is time to
+  stop and have no external signal to wait on. It carries the identical report
+  contract as `run_until_shutdown_report`.
+- Add `RuntimeShutdownDriver` as the independently owned terminal waiter.
+  Dropping either terminal waiter requests shutdown on the original stop clock
+  while its independent owner continues settlement. Dropping a queued,
+  unobserved report emits exactly one redacted diagnostic.
+- Add `RuntimeShutdownSettlement::Interrupted` and
+  `RuntimeShutdownFailure::SettlementInterrupted` for owner loss. Retained
+  observations survive cancellation; incomplete evidence never permits cleanup,
+  even with no known unjoined tasks. Update exhaustive matches for these states.
+- Add `RuntimeShutdownReport::failure` returning a classified
+  `RuntimeShutdownFailure` for logs, alerts and process exit codes. It is `None`
+  exactly when `is_success()` is true and never authorizes dependency cleanup on
+  its own; `cleanup_decision()` is the canonical authority boundary and
+  `is_cooperatively_stopped()` remains its compatible predicate projection. A
+  triggering loop or descendant failure is reported ahead of anything observed
+  while draining, and a cancellation caused by an abort the supervisor itself
+  issued never outranks the failure that provoked it. `RuntimeLoopRecord` and
+  `RuntimeTaskRecord` expose the same classification through `failure` and
+  `cancelled_by_abort`, and `RuntimeCallbackFailure::callback` names the
+  interrupted callback whatever its cause.
+- Make `RuntimeShutdownReport` opaque and expose its retained evidence through
+  read-only accessors. `RuntimeShutdownSettlement` represents settled,
+  graceful-timeout, abort-timeout and interrupted outcomes as mutually exclusive states;
+  abort-timeout structurally carries nonempty final unjoined evidence and its
+  classification exposes a nonzero task count. A
+  descendant-triggered cause retains the exact task identity used to select its
+  primary failure.
 - Add `Supervisor::run_until_shutdown_report` with a validated
   `RuntimeShutdownBudget`. The report retains all loop outcomes, descendant join
   failures, abort requests and unjoined tasks. Shared descendant joins survive
@@ -84,6 +119,81 @@ All notable changes to this workspace are documented here.
 
 ### Changed
 
+- Breaking: remove the `Supervisor` terminal methods `join`, `shutdown`,
+  `shutdown_with_timeout` and `run_until_shutdown`. Their `Ok(())` meant observed
+  loop completion, not settlement of registry descendants still aborting after a
+  loop's own drain timer, and nothing in the type stopped a caller from releasing
+  dependencies on it. A supervisor now has exactly two terminal methods,
+  `run_until_shutdown_report` and `shutdown_report`, and both return a
+  `RuntimeShutdownDriver` synchronously. Awaiting the driver yields a
+  `RuntimeShutdownReport`.
+- Breaking: `run_until_shutdown_report` accepts an opaque
+  `RuntimeShutdownSignal`, constructed with `ctrl_c()`, `fallible(future)`,
+  `infallible(future)`, or `pending()`. Custom futures must be
+  `Send + 'static` and cancellation-safe: dropping them must not leave detached
+  application children. The tracked `shutdown_signal` descendant is polled and
+  destroyed on the runtime captured during preparation, and its join is settled.
+  On Unix, custom Tokio runtimes used with `ctrl_c()` must enable I/O or all
+  drivers; otherwise the missing signal driver is retained as signal-panic and
+  descendant-join evidence.
+- Breaking: add `RuntimeShutdownCause::SignalFailed` and
+  `RuntimeShutdownFailure::Signal { source }` for returned signal errors.
+  `RuntimeShutdownReport::signal_error()` retains the typed
+  `RuntimeShutdownSignalError`, whose `Error::source()` exposes the original
+  error while Debug and Display redact it. Every observed returned error is
+  retained and denies success while native settlement continues, but a normally
+  destroyed and joined signal does not by itself deny cleanup. First-cause
+  arbitration alone controls cause and failure priority. Signal-triggered
+  stop is published when signal output or a polling panic is observed, before
+  guarded destruction. Both use one arbitration transition so a blocking
+  destructor cannot postpone the stop request or its budget clock. Destruction
+  and join remain tracked; the registry structurally
+  identifies the exact first-cause signal so it is not aborted by its own stop.
+  When another cause starts shutdown, cancellation of a library-authored Ctrl-C
+  or pending listener requested by its registry owner is accounted after its join
+  proves guarded destruction. A force-aborted custom listener retains its
+  cancellation failure; panic and unjoined signal work also deny cleanup. Public
+  task records expose accounted built-in cancellation through
+  `cancelled_by_owner()` without exposing a misleading join failure.
+  `RuntimeTaskRecord` is now construction-closed:
+  its private lifecycle disposition intentionally prevents downstream struct
+  literals from inventing inconsistent cancellation evidence. Consume records
+  from `RuntimeShutdownReport::descendants()` and inspect their public fields,
+  `failure()`, `cancelled_by_abort()`, and `cancelled_by_owner()` instead.
+  Signal-failure Debug output preserves the redacted
+  `RuntimeShutdownSignalError` type marker.
+  Signal polling and destruction panics remain `DescendantJoin` failures,
+  deny cleanup, and no longer interrupt the settlement owner.
+- Breaking: add `RuntimeShutdownFailure::SignalPanicked` as the defensive
+  classification when a report retains signal-panic evidence without its
+  correlated descendant join failure. Normal supervised signal panics remain
+  `DescendantJoin` failures. If the polling panic won first cause but its join
+  is still unavailable, `SignalPanicked` takes precedence over later native
+  failures or owner-issued cancellations. The retained panic directly denies
+  cleanup and
+  success regardless of Tokio join classification; add the new arm to exhaustive
+  matches and use `RuntimeShutdownReport::signal_panic()` for phase evidence.
+- Guard shutdown signals from construction through destruction. Catch polling
+  before separately destroying the future so combined poll/Drop panics cannot
+  abort the process at that boundary. Unsubmitted destruction panics are
+  contained with redacted diagnostics. Add `RuntimeShutdownSignalPanic` and
+  `RuntimeShutdownReport::signal_panic()` to retain polling, destruction, or both
+  observations with redacted Debug output. The primary normalized panic remains
+  fatal through the tracked signal join; non-string payload allocations are
+  retained rather than invoking unknown destructors.
+- Breaking: `RuntimeShutdownCause::DescendantFailure` is now a struct variant
+  carrying `{ task, id }`, and `RuntimeShutdownCause` no longer has
+  `#[non_exhaustive]`. Exhaustive matching is intentionally supported for
+  `RuntimeShutdownCause`, `RuntimeShutdownSettlement`,
+  `RuntimeShutdownFailure`, `RuntimeShutdownSignalPanic`, and
+  `RuntimeCallbackFailure`; adding variants requires a breaking release.
+- Breaking: remove the `RuntimeError` variants `TaskExitedUnexpectedly`,
+  `TaskJoin`, `DescendantJoin`, `ShutdownTimeout` and
+  `ShutdownTimeoutAfterTaskError`, which existed only to carry the removed
+  methods' first error. `RuntimeShutdownFailure` classifies the same outcomes
+  from a report without discarding the rest of the evidence. `RuntimeError`
+  retains configuration, registry, runtime-context and budget-representability
+  errors.
 - Keep abort-request evidence without rejecting cooperative cleanup when the
   task's observed join succeeds. Abort requests that lose to normal completion
   no longer count as historical callback interruptions.
@@ -94,9 +204,9 @@ All notable changes to this workspace are documented here.
   `TransactionCommitUnconfirmed` variants require exhaustive-match updates.
   SQLx source/SQLSTATE remain available, without turning deferred COMMIT failures
   into business-rule classifications. Neither code authorizes replay.
-- Clarify that enclosing stop-clock propagation and dependency settlement require
-  `run_until_shutdown_report`; legacy Result methods retain their own observation
-  timeout and first-error loop contract.
+- Clarify that enclosing stop-clock propagation and dependency settlement use
+  the same first-request clock and complete report contract through both terminal
+  methods.
 
 - Best-effort observers and dead-letter hooks share a callback owner that catches
   future-destruction panics as well as polling panics. Timeout or intentional
@@ -104,11 +214,6 @@ All notable changes to this workspace are documented here.
   descendant exit. Interruption evidence remains retained and forbids cooperative
   cleanup; unexpected main job-task failures remain fatal.
 
-- Breaking: `run_until_shutdown` applies its shutdown timeout when a cloned
-  shutdown handle requests stop, even while its external signal future remains
-  pending. Previously that handle-only path could drain without a deadline.
-  Provision the timeout for cooperative work or use the complete-report API with
-  its explicit graceful and abort budgets.
 - Supervision actively observes descendant joins while native loops are blocked.
   Caught reaped-observer destructor panics remain settlement failures. Registry
   notifications poll only the affected joins; nonblocking harvests observe ready
@@ -125,8 +230,8 @@ All notable changes to this workspace are documented here.
 - Owned cancellation explicitly uses READ COMMITTED, independently of session
   defaults, for mutation and missing-job classification in the same transaction.
 - Uncaught native descendant panics and unexpected cancellations stop the
-  supervisor. The older Result methods return their retained join failure;
-  intentional best-effort observer cancellation does not stop processing.
+  supervisor and remain the report's primary failure. Intentional best-effort
+  observer cancellation does not stop processing.
 
 - Upgrade SQLx from 0.8.6 to 0.9.0 and raise the minimum Rust version to 1.94.
   Update dynamic SQL and migration APIs while retaining bound request values
@@ -154,10 +259,41 @@ All notable changes to this workspace are documented here.
   Cancellation begin/commit failures no longer match `ConnectionError`; inspect
   the retained SQLx source for outage diagnostics. Query classification alone
   does not authorize retry, and a commit error does not prove cancellation failed.
-- Native Result entrypoints remain first-error interfaces, not complete cleanup
-  evidence. Handle `RuntimeError::DescendantJoin` when a native-owned descendant
-  escapes with a panic or unexpected cancellation; use the complete report API
-  for all later errors, interrupted callbacks and dependency-cleanup eligibility.
+- Migrate off the removed `Supervisor` terminal methods. `shutdown()` and
+  `shutdown_with_timeout(timeout)` become `shutdown_report(budget)`;
+  `run_until_shutdown(signal, timeout)` becomes
+  `run_until_shutdown_report(signal, budget)`; `join()` becomes
+  `run_until_shutdown_report(RuntimeShutdownSignal::pending(), budget)`. Build the budget
+  with `RuntimeShutdownBudget::new(graceful, abort)`, splitting the old single
+  timeout into cooperative drain time and abort/join time. The unbounded waits of
+  `join` and `shutdown` have no replacement on purpose: every stop now states a
+  budget. Await the returned `RuntimeShutdownDriver` to obtain the report.
+- Replace Ctrl-C wrappers with `RuntimeShutdownSignal::ctrl_c()`. Wrap custom
+  signals with `fallible(future)` for `Result<(), E>` or `infallible(future)`
+  for `()`; fallible errors require `Error + Send + Sync + 'static`.
+  Migrate borrowed shutdown signals to owned `async move` captures that satisfy
+  `Send + 'static`, ensure cancellation safety, and keep the captured runtime
+  alive and driven until settlement finishes. On Unix, enable I/O or all drivers
+  on a custom captured Tokio runtime before using `ctrl_c()`.
+- Replace unit patterns for `RuntimeShutdownCause::DescendantFailure` with
+  `RuntimeShutdownCause::DescendantFailure { task, id }`, or
+  `RuntimeShutdownCause::DescendantFailure { .. }` when identity is not needed.
+  Add arms for `RuntimeShutdownSettlement::Interrupted { .. }`,
+  `RuntimeShutdownFailure::SettlementInterrupted`,
+  `RuntimeShutdownCause::SignalFailed`, and
+  `RuntimeShutdownFailure::Signal { .. }` and `SignalPanicked` in exhaustive
+  matches. Exhaustive matches must also cover
+  `RuntimeShutdownSignalPanic::{Poll, Destruction, PollAndDestruction}` and
+  `RuntimeCallbackFailure::{TimedOut, Panicked, LeaseMaintenance}`.
+- Replace `result?` after a terminal method with report inspection, and move any
+  dependency cleanup behind `report.cleanup_decision()`'s `Allowed(permit)` branch.
+  Code that closed
+  a pool before checking a shutdown `Result` was releasing a dependency the loops
+  might still have been using; that is the failure mode this change removes. Use
+  `report.is_success()` for whether shutdown succeeded and `report.failure()` for
+  something to log or exit on. Success implies cooperative settlement, but the
+  converse is false; `failure().is_none()` is exactly `is_success()`. Neither
+  success answer substitutes for the cleanup decision.
 
 - Use Rust 1.94 or later and SQLx 0.9 in applications that share pools,
   transactions, or SQLx types with Runledger. SQLx 0.8 types are incompatible.

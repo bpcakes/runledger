@@ -1,9 +1,12 @@
 use super::*;
-use runledger_runtime::{RuntimeShutdownBudget, RuntimeShutdownReport};
+use runledger_runtime::{RuntimeShutdownBudget, RuntimeShutdownReport, RuntimeShutdownSignal};
 use std::{future::pending, sync::Mutex};
 use tokio::sync::{Notify, oneshot};
 
 const JOB: &str = "jobs.test.handler_settlement";
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
+const SHUTDOWN_ABORT: Duration = Duration::from_secs(5);
+const REPORT_DEADLOCK_GUARD: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 enum Exit {
@@ -127,13 +130,12 @@ async fn exercise(exit: Exit, during_shutdown: bool) {
         .build()
         .expect("build supervisor");
     let shutdown = supervisor.shutdown_handle();
-    let driver = tokio::spawn(
-        supervisor.run_until_shutdown_report(
-            pending(),
-            RuntimeShutdownBudget::new(Duration::from_secs(5), Duration::from_secs(1))
-                .expect("validated budget"),
-        ),
-    );
+    let driver = tokio::spawn(supervisor.run_until_shutdown_report(
+        RuntimeShutdownSignal::pending(),
+        // Fixture gates establish the interruption mode. The runtime budget
+        // is only a deadlock guard and must not race loaded database work.
+        RuntimeShutdownBudget::new(SHUTDOWN_GRACE, SHUTDOWN_ABORT).expect("validated budget"),
+    ));
     tokio::time::timeout(Duration::from_secs(5), entered.notified())
         .await
         .expect("handler entered");
@@ -161,7 +163,7 @@ async fn exercise(exit: Exit, during_shutdown: bool) {
         .await
         .expect("handler future destroyed");
     shutdown.request_shutdown();
-    let report = tokio::time::timeout(Duration::from_secs(8), driver)
+    let report = tokio::time::timeout(REPORT_DEADLOCK_GUARD, driver)
         .await
         .expect("report within deadline")
         .expect("report driver joined");
@@ -179,11 +181,11 @@ async fn exercise(exit: Exit, during_shutdown: bool) {
 }
 
 fn assert_report(report: RuntimeShutdownReport, exit: Exit, during: bool, child_alive: bool) {
-    assert!(report.unjoined.is_empty());
-    assert!(report.loops.iter().all(|record| record.result.is_ok()));
+    assert!(report.unjoined().is_empty());
+    assert!(report.loops().iter().all(|record| record.result.is_ok()));
     assert!(
         report
-            .descendants
+            .descendants()
             .iter()
             .all(|record| record.error.is_none())
     );
@@ -201,9 +203,9 @@ fn assert_report(report: RuntimeShutdownReport, exit: Exit, during: bool, child_
         );
         assert!(!report.is_success());
         if during {
-            assert!(!report.callback_failures.is_empty());
+            assert!(!report.callback_failures().is_empty());
         } else {
-            assert!(report.prior_callback_interruptions > 0);
+            assert!(report.prior_callback_interruptions() > 0);
         }
     }
 }
@@ -256,7 +258,11 @@ impl JobHandler for DestructorPanicHandler {
     }
 }
 
-async fn escaped_worker_failure(join_only: bool) {
+// The panic happens while the worker is running a claimed job, so the driver has
+// to be the one that waits: `shutdown_report` would stop the loops before the job
+// was ever claimed. Its own coverage lives in the supervisor unit tests.
+#[tokio::test]
+async fn an_escaped_worker_destructor_panic_fails_the_shutdown_report() {
     let (pool, database) = setup_ephemeral_pool("runtime_escaped_worker_panic", 6).await;
     enqueue_case(&pool, Exit::Timeout).await;
     let mut registry = JobRegistry::new();
@@ -268,34 +274,26 @@ async fn escaped_worker_failure(join_only: bool) {
         .disable_reaper()
         .build()
         .expect("valid supervisor");
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
-        if join_only {
-            supervisor.join().await
-        } else {
-            supervisor
-                .run_until_shutdown(pending(), Duration::from_secs(2))
-                .await
-        }
-    })
-    .await;
+    let budget = RuntimeShutdownBudget::new(Duration::from_secs(2), Duration::from_secs(1))
+        .expect("valid shutdown budget");
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        supervisor.run_until_shutdown_report(RuntimeShutdownSignal::pending(), budget),
+    )
+    .await
+    .expect("worker panic initiates native stop");
     teardown_ephemeral_pool(pool, database).await;
-    let Err(runledger_runtime::Error::Runtime(runledger_runtime::RuntimeError::DescendantJoin {
-        task,
-        source,
-    })) = result.expect("worker panic initiates native stop")
+
+    assert!(!report.is_success());
+    assert!(
+        !report.is_cooperatively_stopped(),
+        "an escaped worker panic cannot authorize dependency cleanup"
+    );
+    let Some(runledger_runtime::RuntimeShutdownFailure::DescendantJoin { task, source }) =
+        report.failure()
     else {
-        panic!("escaped worker panic must fail the legacy driver");
+        panic!("escaped worker panic must be retained by the report");
     };
     assert_eq!(task, "worker_job");
     assert!(source.is_panic());
-}
-
-#[tokio::test]
-async fn supervised_worker_destructor_panic_fails_join() {
-    escaped_worker_failure(true).await;
-}
-
-#[tokio::test]
-async fn supervised_worker_destructor_panic_fails_run_until_shutdown() {
-    escaped_worker_failure(false).await;
 }

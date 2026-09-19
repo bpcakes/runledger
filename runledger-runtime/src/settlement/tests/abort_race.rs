@@ -1,5 +1,8 @@
 use super::*;
-use crate::{RuntimeLoopExit, RuntimeLoopRecord, RuntimeShutdownCause, RuntimeShutdownReport};
+use crate::{
+    RuntimeLoopExit, RuntimeLoopRecord, RuntimeShutdownCause, RuntimeShutdownReport,
+    RuntimeShutdownSettlement,
+};
 
 // Hold a real task inside its last poll so every abort entry point observes it
 // unfinished. It then returns Ready despite the request, as Tokio permits.
@@ -58,17 +61,16 @@ async fn completed_abort_race(mode: u8, stopping: bool) {
         );
         assert!(descendants[0].error.is_none());
     }
-    let report = RuntimeShutdownReport {
-        cause: RuntimeShutdownCause::Requested,
-        loops: Vec::new(),
+    assert!(unjoined.is_empty());
+    let report = RuntimeShutdownReport::new(
+        RuntimeShutdownCause::Requested,
+        Vec::new(),
         descendants,
-        unjoined,
-        graceful_timed_out: false,
-        abort_timed_out: false,
-        deadline_error: None,
+        RuntimeShutdownSettlement::Settled,
+        crate::settlement::RuntimeShutdownObservations::default(),
         callback_failures,
         prior_callback_interruptions,
-    };
+    );
     assert!(
         report.is_cooperatively_stopped(),
         "mode {mode}: completed callback permits cleanup"
@@ -92,27 +94,38 @@ async fn abort_race_during_shutdown_retains_request_and_permits_cleanup() {
 
 #[test]
 fn completed_loop_with_abort_request_permits_cleanup() {
-    let mut report = RuntimeShutdownReport {
-        cause: RuntimeShutdownCause::Requested,
-        loops: vec![RuntimeLoopRecord {
+    let report = RuntimeShutdownReport::new(
+        RuntimeShutdownCause::Requested,
+        vec![RuntimeLoopRecord {
             task: "worker",
             result: Ok(RuntimeLoopExit::Shutdown),
             abort_requested: true,
         }],
-        descendants: Vec::new(),
-        unjoined: Vec::new(),
-        graceful_timed_out: false,
-        abort_timed_out: false,
-        deadline_error: None,
-        callback_failures: Vec::new(),
-        prior_callback_interruptions: 0,
-    };
+        Vec::new(),
+        RuntimeShutdownSettlement::Settled,
+        crate::settlement::RuntimeShutdownObservations::default(),
+        Vec::new(),
+        0,
+    );
     assert!(report.is_cooperatively_stopped());
     assert!(report.is_success());
-    report.graceful_timed_out = true;
-    assert!(report.is_cooperatively_stopped());
+
+    let timed_out = RuntimeShutdownReport::new(
+        RuntimeShutdownCause::Requested,
+        vec![RuntimeLoopRecord {
+            task: "worker",
+            result: Ok(RuntimeLoopExit::Shutdown),
+            abort_requested: true,
+        }],
+        Vec::new(),
+        RuntimeShutdownSettlement::GracefulTimeout,
+        crate::settlement::RuntimeShutdownObservations::default(),
+        Vec::new(),
+        0,
+    );
+    assert!(timed_out.is_cooperatively_stopped());
     assert!(
-        !report.is_success(),
+        !timed_out.is_success(),
         "a missed graceful budget still fails overall shutdown"
     );
 }

@@ -105,8 +105,9 @@ async fn native_report_retains_terminal_callback_after_aborted_worker() {
     let shutdown = supervisor.shutdown_handle();
     let budget = RuntimeShutdownBudget::new(Duration::from_millis(20), Duration::from_millis(20))
         .expect("valid stop budget");
-    let mut driver =
-        tokio::spawn(supervisor.run_until_shutdown_report(std::future::pending(), budget));
+    let mut driver = tokio::spawn(
+        supervisor.run_until_shutdown_report(crate::RuntimeShutdownSignal::pending(), budget),
+    );
     let entry = tokio::time::timeout(Duration::from_secs(5), entered.notified()).await;
     shutdown.request_shutdown();
     let result = tokio::time::timeout(Duration::from_secs(2), &mut driver).await;
@@ -123,7 +124,7 @@ async fn native_report_retains_terminal_callback_after_aborted_worker() {
     assert!(!report.is_cooperatively_stopped());
     assert!(
         report
-            .unjoined
+            .unjoined()
             .iter()
             .any(|task| task.task == "terminal_observer" && task.abort_requested)
     );

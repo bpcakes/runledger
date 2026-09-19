@@ -27,6 +27,11 @@ fn config() -> JobsConfig {
     }
 }
 
+fn test_budget() -> crate::RuntimeShutdownBudget {
+    crate::RuntimeShutdownBudget::new(Duration::from_secs(1), Duration::from_secs(1))
+        .expect("valid test budget")
+}
+
 #[tokio::test]
 async fn initialization_does_not_require_database_success_or_queue_activity() {
     let pool = closed_pool().await;
@@ -52,10 +57,10 @@ async fn initialization_does_not_require_database_success_or_queue_activity() {
             .expect("initialization bounded"),
         Ok(())
     );
-    supervisor
-        .shutdown_with_timeout(Duration::from_secs(1))
-        .await
-        .expect("loops stop");
+    assert!(
+        supervisor.shutdown_report(test_budget()).await.is_success(),
+        "loops stop"
+    );
     assert_eq!(
         observer.wait_initialized().await,
         Err(RuntimeStartupStopped)
@@ -76,10 +81,10 @@ async fn stop_before_first_poll_cannot_be_revived_by_loop_initialization() {
         observer.wait_initialized().await,
         Err(RuntimeStartupStopped)
     );
-    supervisor
-        .shutdown_with_timeout(Duration::from_secs(1))
-        .await
-        .expect("loops stop");
+    assert!(
+        supervisor.shutdown_report(test_budget()).await.is_success(),
+        "loops stop"
+    );
     assert_eq!(
         observer.wait_initialized().await,
         Err(RuntimeStartupStopped)
@@ -110,10 +115,10 @@ async fn disabled_loops_do_not_block_initialization() {
             .expect("initialization bounded"),
         Ok(())
     );
-    supervisor
-        .shutdown_with_timeout(Duration::from_secs(1))
-        .await
-        .expect("loop stops");
+    assert!(
+        supervisor.shutdown_report(test_budget()).await.is_success(),
+        "loop stops"
+    );
 }
 
 #[tokio::test]
@@ -165,9 +170,9 @@ async fn native_handle_drives_the_report_without_an_external_signal() {
     let budget = crate::RuntimeShutdownBudget::new(Duration::from_secs(1), Duration::from_secs(1))
         .expect("valid budget");
     let report = supervisor
-        .run_until_shutdown_report(std::future::pending(), budget)
+        .run_until_shutdown_report(crate::RuntimeShutdownSignal::pending(), budget)
         .await;
     assert!(report.is_success(), "{report:?}");
-    assert_eq!(report.loops.len(), 2);
+    assert_eq!(report.loops().len(), 2);
     assert_eq!(startup.snapshot(), RuntimeStartup::Stopped);
 }

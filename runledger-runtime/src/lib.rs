@@ -3,10 +3,12 @@
 //!
 //! Use this crate to wire the operational pieces around `runledger-core`
 //! handlers and `runledger-postgres` storage:
-//! - [`Supervisor`] starts and joins the worker, intent promoter, scheduler,
-//!   and reaper loops for a typical worker process
-//! - [`Supervisor::run_until_shutdown_report`] retains bounded loop and descendant
-//!   settlement evidence for adapters deciding whether dependency cleanup can run
+//! - [`Supervisor`] starts, runs and settles the worker, intent promoter,
+//!   scheduler, and reaper loops for a typical worker process
+//! - [`Supervisor::run_until_shutdown_report`] and [`Supervisor::shutdown_report`]
+//!   are its only terminal methods; both return a [`RuntimeShutdownDriver`] that
+//!   awaits to a [`RuntimeShutdownReport`] carrying the evidence needed before
+//!   deciding whether dependency cleanup can run
 //! - [`catalog::JobCatalog`] is the preferred startup API for handler
 //!   registration, definition sync, and catalog-validated enqueue helpers
 //! - [`registry::JobRegistry`] stores concrete handlers directly for advanced
@@ -17,16 +19,24 @@
 //!
 //! A typical service builds a shared PostgreSQL pool, registers handlers in a
 //! [`catalog::JobCatalog`], syncs definitions during startup, and starts a
-//! [`Supervisor`] with [`SupervisorBuilder::with_catalog`]. Worker processes
-//! that release dependencies after native work must use
-//! [`Supervisor::run_until_shutdown_report`] with [`RuntimeShutdownBudget`]. An
-//! adapter transfers [`SupervisorBuilder::prepare`]'s inert value before launch.
-//! This path retains descendant settlement and the earliest shared stop clock.
-//! Standalone workers needing only first-error loop observation can use
-//! [`Supervisor::run_until_shutdown`] or [`Supervisor::shutdown_with_timeout`];
-//! their timeouts start at driver observation and their success is not complete
-//! descendant or dependency-cleanup evidence. [`Supervisor::shutdown`] is an
-//! unbounded loop wait.
+//! [`Supervisor`] with [`SupervisorBuilder::with_catalog`]. It then ends that
+//! supervisor with [`Supervisor::run_until_shutdown_report`] (wait for an
+//! external signal) or [`Supervisor::shutdown_report`] (stop now), both taking a
+//! [`RuntimeShutdownBudget`] and returning an independently owned
+//! [`RuntimeShutdownDriver`] that awaits to a [`RuntimeShutdownReport`].
+//! There is no third option, and no terminal method whose success value can be
+//! mistaken for proof that everything settled: match
+//! [`RuntimeShutdownReport::cleanup_decision`] before releasing a pool or any
+//! other shared dependency, [`RuntimeShutdownReport::is_success`] for whether
+//! shutdown itself succeeded, and [`RuntimeShutdownReport::failure`] for a
+//! classified [`RuntimeShutdownFailure`] to log or exit on. An adapter transfers
+//! [`SupervisorBuilder::prepare`]'s inert value before launch.
+//! Dropping the driver requests stop without cancelling its independent owner.
+//! Keep the captured Tokio runtime alive and driven; owner destruction yields
+//! [`RuntimeShutdownSettlement::Interrupted`], which never permits cleanup.
+//! A [`RuntimeShutdownSignal`] runs as a tracked descendant on that captured
+//! runtime. Returned errors and panic joins remain explicit failures without
+//! unwinding native settlement. Every unobserved report emits one redacted diagnostic.
 //!
 //! The lower-level [`worker::run_worker_loop`],
 //! [`intent_promoter::run_intent_promoter_loop`],
@@ -78,21 +88,37 @@
 //!
 //! let catalog = JobCatalog::new().handler(MyHandler);
 //! catalog.sync_definitions(&pool).await?;
+//! async fn close_accounted_pool(
+//!     _permit: RuntimeShutdownCleanupPermit,
+//!     pool: &runledger_postgres::DbPool,
+//! ) {
+//!     pool.close().await;
+//! }
+//!
 //! let supervisor = Supervisor::builder_from_env(&pool)?
 //!     .with_catalog(&catalog)
 //!     .build()?;
 //!
-//! supervisor
-//!     .run_until_shutdown(std::future::pending::<()>(), Duration::from_secs(30))
-//!     .await?;
+//! let budget = RuntimeShutdownBudget::new(Duration::from_secs(30), Duration::from_secs(5))?;
+//! let report = supervisor
+//!     .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
+//!     .await;
+//!
+//! // The adapter cannot release the pool without the report-derived permit.
+//! if let RuntimeShutdownCleanupDecision::Allowed(permit) = report.cleanup_decision() {
+//!     close_accounted_pool(permit, &pool).await;
+//! }
+//! if let Some(failure) = report.failure() {
+//!     return Err(failure.into());
+//! }
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! Use [`Supervisor::run_until_shutdown`] for ordinary worker binaries so the
-//! process observes internal runtime task failures while still applying a
-//! bounded shutdown deadline. Use the lower-level loop functions only for custom
-//! process orchestration.
+//! The budget's graceful and abort allowances share one stop clock that starts at
+//! the first stop request, whether that came from the signal, a
+//! [`SupervisorShutdown`] handle, a failing loop or a failing descendant. Use the
+//! lower-level loop functions only for custom process orchestration.
 
 mod callback;
 pub mod catalog;
@@ -107,6 +133,7 @@ pub mod registry;
 pub mod scheduler;
 mod settlement;
 mod shutdown;
+mod shutdown_signal;
 mod startup;
 pub mod supervisor;
 mod task_group;
@@ -121,10 +148,17 @@ pub use observer::{
 };
 pub use settlement::{
     RuntimeCallbackFailure, RuntimeLoopRecord, RuntimeShutdownBudget, RuntimeShutdownCause,
-    RuntimeShutdownReport, RuntimeTaskRecord, UnsettledRuntimeTask,
+    RuntimeShutdownCleanupDecision, RuntimeShutdownCleanupPermit, RuntimeShutdownFailure,
+    RuntimeShutdownReport, RuntimeShutdownSettlement, RuntimeTaskRecord, UnjoinedRuntimeTasks,
+    UnsettledRuntimeTask,
+};
+pub use shutdown_signal::{
+    RuntimeShutdownSignal, RuntimeShutdownSignalError, RuntimeShutdownSignalPanic,
 };
 pub use startup::{RuntimeStartup, RuntimeStartupObserver, RuntimeStartupStopped};
-pub use supervisor::{PreparedSupervisor, Supervisor, SupervisorBuilder, SupervisorShutdown};
+pub use supervisor::{
+    PreparedSupervisor, RuntimeShutdownDriver, Supervisor, SupervisorBuilder, SupervisorShutdown,
+};
 
 /// Common `runledger-runtime` imports for worker-process integration.
 ///
@@ -147,10 +181,16 @@ pub mod prelude {
     };
     pub use crate::registry::JobRegistry;
     pub use crate::{
-        PreparedSupervisor, RuntimeLoopExit, RuntimeStartup, RuntimeStartupObserver,
-        RuntimeStartupStopped, Supervisor, SupervisorBuilder, SupervisorShutdown,
+        PreparedSupervisor, RuntimeLoopExit, RuntimeShutdownDriver, RuntimeStartup,
+        RuntimeStartupObserver, RuntimeStartupStopped, Supervisor, SupervisorBuilder,
+        SupervisorShutdown,
     };
-    pub use crate::{RuntimeShutdownBudget, RuntimeShutdownCause, RuntimeShutdownReport};
+    pub use crate::{
+        RuntimeShutdownBudget, RuntimeShutdownCause, RuntimeShutdownCleanupDecision,
+        RuntimeShutdownCleanupPermit, RuntimeShutdownFailure, RuntimeShutdownReport,
+        RuntimeShutdownSettlement, RuntimeShutdownSignal, RuntimeShutdownSignalError,
+        RuntimeShutdownSignalPanic,
+    };
 }
 
 /// Reason a low-level runtime loop exited.

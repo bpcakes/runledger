@@ -4,12 +4,19 @@ use std::time::Duration;
 
 use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobType};
 use runledger_core::prelude::async_trait;
-use runledger_runtime::{Supervisor, catalog::JobCatalog, registry::JobHandler};
+use runledger_runtime::{
+    RuntimeShutdownBudget, RuntimeShutdownCleanupDecision, RuntimeShutdownCleanupPermit,
+    RuntimeShutdownSignal, Supervisor, catalog::JobCatalog, registry::JobHandler,
+};
 use serde_json::Value;
 use shared::{GREETING_JOB, Greeting};
 use sqlx::postgres::PgPoolOptions;
 
 struct PrintGreeting;
+
+async fn close_accounted_pool(_permit: RuntimeShutdownCleanupPermit, pool: &sqlx::PgPool) {
+    pool.close().await;
+}
 
 #[async_trait]
 impl JobHandler for PrintGreeting {
@@ -45,18 +52,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::builder_from_env(&pool)?
         .with_catalog(&catalog)
         .build()?;
-    let shutdown_result = supervisor
-        .run_until_shutdown(
-            async {
-                if let Err(error) = tokio::signal::ctrl_c().await {
-                    eprintln!("failed to listen for shutdown signal: {error}");
-                }
-            },
-            Duration::from_secs(30),
-        )
+    let budget = RuntimeShutdownBudget::new(Duration::from_secs(30), Duration::from_secs(5))?;
+    let report = supervisor
+        .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
         .await;
-    pool.close().await;
-    shutdown_result?;
+    // The adapter cannot release the pool without the report-derived permit.
+    if let RuntimeShutdownCleanupDecision::Allowed(permit) = report.cleanup_decision() {
+        close_accounted_pool(permit, &pool).await;
+    }
+    if let Some(failure) = report.failure() {
+        return Err(failure.into());
+    }
     Ok(())
 }
 

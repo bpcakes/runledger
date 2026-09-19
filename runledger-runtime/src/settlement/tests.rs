@@ -1,9 +1,53 @@
-use super::{TaskRegistry, TaskSet};
+use super::{CancellationPolicy, RuntimeTaskDisposition, TaskRegistry, TaskSet};
 
 mod abort_race;
 
 fn registry() -> TaskRegistry {
     TaskRegistry::supervised(crate::shutdown::ShutdownSignal::channel().0)
+}
+
+#[tokio::test]
+async fn cancellation_policy_classifies_each_failed_join_once() {
+    let cancelled = tokio::spawn(std::future::pending::<()>());
+    cancelled.abort();
+    let cancelled = Err(Arc::new(
+        cancelled
+            .await
+            .expect_err("aborted task produces cancellation evidence"),
+    ));
+
+    let owner_cancelled = CancellationPolicy::WithOwner.classify(true, &cancelled);
+    assert_eq!(
+        owner_cancelled.disposition,
+        RuntimeTaskDisposition::OwnerCancelled
+    );
+    assert!(!owner_cancelled.requests_shutdown);
+
+    let unexpected_owner_loss = CancellationPolicy::WithOwner.classify(false, &cancelled);
+    assert_eq!(
+        unexpected_owner_loss.disposition,
+        RuntimeTaskDisposition::Observed
+    );
+    assert!(!unexpected_owner_loss.requests_shutdown);
+
+    let requested_ordinary_abort = CancellationPolicy::Unexpected.classify(true, &cancelled);
+    assert_eq!(
+        requested_ordinary_abort.disposition,
+        RuntimeTaskDisposition::Observed
+    );
+    assert!(!requested_ordinary_abort.requests_shutdown);
+
+    let panicked = Err(Arc::new(
+        tokio::spawn(async { panic!("private classification panic") })
+            .await
+            .expect_err("panicking task produces panic evidence"),
+    ));
+    let panicked_after_abort = CancellationPolicy::WithOwner.classify(true, &panicked);
+    assert_eq!(
+        panicked_after_abort.disposition,
+        RuntimeTaskDisposition::Observed
+    );
+    assert!(panicked_after_abort.requests_shutdown);
 }
 
 #[tokio::test]

@@ -932,7 +932,7 @@ async fn supervised_terminal_overflow_preserves_processing_and_cleanup_uncertain
     tasks.drain_for_shutdown().await;
     registry.wait().await;
     let report = crate::task_group::TaskGroup::new()
-        .run_report(
+        .run_report_with_signal(
             async {},
             crate::RuntimeShutdownBudget::new(Duration::from_secs(1), Duration::from_secs(1))
                 .expect("observer overflow fixture remains owned"),
@@ -944,9 +944,9 @@ async fn supervised_terminal_overflow_preserves_processing_and_cleanup_uncertain
         !prematurely_stopped,
         "best-effort observer overflow stopped healthy processing"
     );
-    assert_eq!(report.prior_callback_interruptions, 1);
+    assert_eq!(report.prior_callback_interruptions(), 1);
     assert!(
-        report.descendants.is_empty(),
+        report.descendants().is_empty(),
         "ordinary interruption history is bounded"
     );
     assert!(!report.is_cooperatively_stopped());
@@ -1028,7 +1028,7 @@ async fn observer_destruction_case(abort: bool, stopping: bool, terminal: bool) 
         None => None,
     };
     let report = crate::task_group::TaskGroup::new()
-        .run_report(
+        .run_report_with_signal(
             async {},
             crate::RuntimeShutdownBudget::new(Duration::from_secs(1), Duration::from_secs(1))
                 .expect("valid budget"),
@@ -1049,17 +1049,17 @@ async fn observer_destruction_case(abort: bool, stopping: bool, terminal: bool) 
     }
     assert!(
         report
-            .descendants
+            .descendants()
             .iter()
             .all(|task| task.error.as_ref().is_none_or(|error| !error.is_panic()))
     );
     assert!(!report.is_cooperatively_stopped());
-    assert!(report.unjoined.is_empty());
+    assert!(report.unjoined().is_empty());
     if stopping {
-        assert!(report.callback_failures.iter().any(|failure| matches!(failure,
+        assert!(report.callback_failures().iter().any(|failure| matches!(failure,
             crate::RuntimeCallbackFailure::Panicked { message, .. } if message == "best-effort observer destruction failure")));
     } else {
-        assert!(report.prior_callback_interruptions > 0);
+        assert!(report.prior_callback_interruptions() > 0);
     }
 }
 

@@ -110,8 +110,12 @@ async fn all_preludes_can_be_glob_imported_together() {
     .build()
     .expect("disabled supervisor should build without acquiring pool");
 
-    supervisor
-        .shutdown()
-        .await
-        .expect("shutdown should succeed");
+    let budget = RuntimeShutdownBudget::new(Duration::from_secs(1), Duration::from_secs(1))
+        .expect("valid shutdown budget");
+    let report = supervisor.shutdown_report(budget).await;
+    assert!(
+        matches!(report.settlement(), RuntimeShutdownSettlement::Settled),
+        "disabled supervisor should settle without escalation"
+    );
+    assert!(report.is_success(), "shutdown should succeed");
 }

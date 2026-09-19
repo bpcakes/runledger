@@ -8,7 +8,14 @@ use tokio::time::sleep;
 pub(crate) struct ShutdownSignal {
     shutdown_tx: watch::Sender<bool>,
     startup: Option<crate::startup::Initialization>,
-    requested_at: Arc<Mutex<Option<(tokio::time::Instant, crate::RuntimeShutdownCause)>>>,
+    state: Arc<Mutex<ShutdownState>>,
+}
+
+#[derive(Default)]
+struct ShutdownState {
+    request: Option<(tokio::time::Instant, crate::RuntimeShutdownCause)>,
+    signal_error: Option<crate::RuntimeShutdownSignalError>,
+    signal_panic: Option<crate::RuntimeShutdownSignalPanic>,
 }
 
 #[derive(Clone)]
@@ -23,7 +30,7 @@ impl ShutdownSignal {
             Self {
                 shutdown_tx,
                 startup: None,
-                requested_at: Arc::new(Mutex::new(None)),
+                state: Arc::new(Mutex::new(ShutdownState::default())),
             },
             shutdown_rx,
         )
@@ -43,6 +50,75 @@ impl ShutdownSignal {
         self.request_with(crate::RuntimeShutdownCause::Requested);
     }
 
+    /// Commit one terminal signal poll as one arbitration event.
+    ///
+    /// Error/panic evidence, first cause, and initiating-task identity are published
+    /// under the same lock. There is deliberately no separate error-recording
+    /// operation that could expose a half-committed signal trigger.
+    pub(crate) fn request_after_signal_trigger(
+        &self,
+        task_state: &crate::shutdown_signal::ShutdownSignalTaskState,
+        trigger: crate::shutdown_signal::SignalTrigger,
+    ) {
+        use crate::shutdown_signal::SignalTrigger;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let cause = match trigger {
+            SignalTrigger::Output(None) => crate::RuntimeShutdownCause::Requested,
+            SignalTrigger::Output(Some(error)) => {
+                debug_assert!(
+                    state.signal_error.is_none(),
+                    "one signal produces one output"
+                );
+                state.signal_error.get_or_insert(error);
+                crate::RuntimeShutdownCause::SignalFailed
+            }
+            SignalTrigger::PollPanicked { id, message } => {
+                state.signal_panic = Some(crate::RuntimeShutdownSignalPanic::Poll { message });
+                crate::RuntimeShutdownCause::DescendantFailure {
+                    task: crate::shutdown_signal::TASK_NAME,
+                    id,
+                }
+            }
+        };
+        if state.request.is_none() {
+            task_state.mark_initiating();
+            state.request = Some((tokio::time::Instant::now(), cause));
+        }
+        drop(state);
+        self.publish_request();
+    }
+
+    pub(crate) fn signal_error(&self) -> Option<crate::RuntimeShutdownSignalError> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .signal_error
+            .clone()
+    }
+
+    pub(crate) fn signal_destruction_panicked(&self, message: String) {
+        use crate::RuntimeShutdownSignalPanic;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.signal_panic = Some(match state.signal_panic.take() {
+            Some(RuntimeShutdownSignalPanic::Poll {
+                message: poll_message,
+            }) => RuntimeShutdownSignalPanic::PollAndDestruction {
+                poll_message,
+                destruction_message: message,
+            },
+            None => RuntimeShutdownSignalPanic::Destruction { message },
+            Some(observed) => observed,
+        });
+    }
+
+    pub(crate) fn signal_panic(&self) -> Option<crate::RuntimeShutdownSignalPanic> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .signal_panic
+            .clone()
+    }
+
     pub(crate) fn request_with(&self, cause: crate::RuntimeShutdownCause) {
         self.request_since(tokio::time::Instant::now(), cause);
     }
@@ -54,15 +130,18 @@ impl ShutdownSignal {
     ) {
         let started = started.min(tokio::time::Instant::now());
         {
-            let mut recorded = self
-                .requested_at
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            match &mut *recorded {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            match &mut state.request {
                 Some((earliest, _)) => *earliest = (*earliest).min(started),
-                None => *recorded = Some((started, cause)),
+                None => {
+                    state.request = Some((started, cause));
+                }
             }
         }
+        self.publish_request();
+    }
+
+    fn publish_request(&self) {
         if let Some(startup) = &self.startup {
             startup.stop();
         }
@@ -74,17 +153,19 @@ impl ShutdownSignal {
     }
 
     pub(crate) fn requested_at(&self) -> Option<tokio::time::Instant> {
-        self.requested_at
+        self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+            .request
             .as_ref()
             .map(|(instant, _)| *instant)
     }
 
     pub(crate) fn cause(&self) -> crate::RuntimeShutdownCause {
-        self.requested_at
+        self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+            .request
             .as_ref()
             .map_or(crate::RuntimeShutdownCause::Requested, |(_, cause)| {
                 cause.clone()
@@ -162,12 +243,58 @@ pub(crate) async fn wait_for_request_or_timeout(
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::sync::Arc;
     use std::time::Duration;
 
     use tokio::sync::{Barrier, watch};
 
     use super::*;
+
+    fn test_task_id() -> tokio::task::Id {
+        let handle = tokio::spawn(async {});
+        let id = handle.id();
+        handle.abort();
+        id
+    }
+
+    #[test]
+    fn signal_error_trigger_commits_one_legal_winning_state() {
+        let (signal, _) = ShutdownSignal::channel();
+        let task_state = crate::shutdown_signal::ShutdownSignalTaskState::pending_for_tests();
+
+        signal.request_after_signal_trigger(
+            &task_state,
+            crate::shutdown_signal::SignalTrigger::Output(Some(
+                crate::RuntimeShutdownSignalError::new(io::Error::other("signal failed")),
+            )),
+        );
+
+        assert_eq!(signal.cause(), crate::RuntimeShutdownCause::SignalFailed);
+        assert!(signal.signal_error().is_some());
+        assert!(task_state.is_initiating());
+    }
+
+    #[test]
+    fn signal_error_trigger_commits_one_legal_losing_state() {
+        let (signal, _) = ShutdownSignal::channel();
+        let task_state = crate::shutdown_signal::ShutdownSignalTaskState::pending_for_tests();
+        signal.request_with(crate::RuntimeShutdownCause::LoopFailure("first"));
+
+        signal.request_after_signal_trigger(
+            &task_state,
+            crate::shutdown_signal::SignalTrigger::Output(Some(
+                crate::RuntimeShutdownSignalError::new(io::Error::other("later signal failure")),
+            )),
+        );
+
+        assert_eq!(
+            signal.cause(),
+            crate::RuntimeShutdownCause::LoopFailure("first")
+        );
+        assert!(signal.signal_error().is_some());
+        assert!(!task_state.is_initiating());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn tightening_wakes_a_phase_that_is_already_awaiting_its_old_timer() {
@@ -220,7 +347,10 @@ mod tests {
         tokio::pin!(phase);
         assert!(phase.as_mut().now_or_never().is_none());
         tokio::time::advance(Duration::from_secs(1)).await;
-        signal.request_with(crate::RuntimeShutdownCause::DescendantFailure);
+        signal.request_with(crate::RuntimeShutdownCause::DescendantFailure {
+            task: "later",
+            id: test_task_id(),
+        });
         assert!(phase.as_mut().now_or_never().is_none());
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(phase.as_mut().now_or_never().is_some());
@@ -247,12 +377,13 @@ mod tests {
         signal.handle().request_since(now + Duration::from_secs(30));
         assert_eq!(signal.requested_at(), Some(now));
         let (native, _) = ShutdownSignal::channel();
-        native.request_with(crate::RuntimeShutdownCause::DescendantFailure);
+        let descendant = crate::RuntimeShutdownCause::DescendantFailure {
+            task: "native",
+            id: test_task_id(),
+        };
+        native.request_with(descendant.clone());
         native.handle().request_since(now);
-        assert_eq!(
-            native.cause(),
-            crate::RuntimeShutdownCause::DescendantFailure
-        );
+        assert_eq!(native.cause(), descendant);
     }
 
     #[tokio::test(start_paused = true)]

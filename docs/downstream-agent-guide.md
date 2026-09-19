@@ -40,7 +40,7 @@ together.
 | Recover a canceled or dead-lettered direct job | `compare_and_requeue_job` |
 | Repeat a successful direct job | `compare_and_replay_succeeded_job` |
 | Recover a terminal workflow | `recover_workflow_run` |
-| Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown` |
+| Worker process lifecycle | `runledger_runtime::Supervisor::run_until_shutdown_report` |
 | Custom worker lifecycle persistence | `JobLeaseIdentity` and the `_for_lease` lifecycle APIs introduced in 0.9.0 |
 | Admin/status views | `runledger_postgres::jobs` read/list/count APIs |
 
@@ -1150,14 +1150,34 @@ fire.
 
 ## Worker Runtime Rule
 
-Use `Supervisor::run_until_shutdown_report` when integrating dependency cleanup.
-Construct its `RuntimeShutdownBudget` before starting work. Graceful time and
+A `Supervisor` has exactly two terminal methods. Both synchronously transfer
+bounded settlement to an independent `RuntimeShutdownDriver`, whose normal
+`.await` yields a `RuntimeShutdownReport`: `run_until_shutdown_report(signal,
+budget)` waits for an external signal, and `shutdown_report(budget)` stops immediately. There is no
+terminal method returning a bare `Result<()>`, because its `Ok` could not
+distinguish "the loops returned" from "everything this runtime owned settled, so
+its dependencies may be released". Construct the `RuntimeShutdownBudget` before
+starting work. Graceful time and
 abort/join time share the first stop request's clock; native shutdown handles,
 the external signal and failures cannot restart it. Nested native callback timers
 cannot extend this enclosing allowance. The report retains all loop outcomes and
-independently observed descendant joins even when a loop is aborted. Unjoined or
-aborted work prevents `is_cooperatively_stopped()` from approving cleanup. Check
-`is_success()` separately: a joined configuration failure still fails the report.
+independently observed descendant joins even when a loop is aborted. Unjoined
+work and failed joins produce `RuntimeShutdownCleanupDecision::Denied` and do
+not authorize cleanup. `is_cooperatively_stopped()` remains the compatible
+boolean projection. An abort request is retained as evidence, but does not prevent cleanup
+when normal completion wins the race and the join succeeds. Check `is_success()`
+separately: a joined configuration failure still fails the report.
+Success always implies cooperative settlement, but the converse is false, so
+never substitute the success predicate for the cleanup predicate.
+At a new cleanup boundary, match `report.cleanup_decision()` and require its
+`Allowed(permit)` branch rather than inferring authority from any boolean or
+failure classification.
+`report.failure()` classifies the primary retained reason as a
+`RuntimeShutdownFailure` for logs, alerts and exit codes; it is `None` exactly
+when `is_success()` is true and never authorizes cleanup by itself. When stopping
+began because a loop or descendant failed, that triggering failure is reported
+ahead of anything observed while draining, and a cancellation caused by an abort
+the supervisor itself issued never outranks the failure that provoked it.
 An abort request can race with normal task completion. The report retains
 `abort_requested`, but an observed successful join permits cleanup; only an
 actual failed join contributes task-interruption evidence. Independently recorded
@@ -1218,22 +1238,118 @@ join observation; application-created detached tasks remain outside that set.
 Reports format facts without printing panic payloads. Existing native diagnostics
 and the process panic hook retain their own behavior.
 
-The consuming report future still needs an execution owner. Dropping it requests
-shutdown but cannot produce an awaited report. An adapter must retain this driver
-independently of its application waiter and registered wrapper. Runtime/process
+Calling either terminal method creates the independent settlement owner before
+returning its `RuntimeShutdownDriver`. Dropping or cancelling that waiter requests
+stop on the original clock without cancelling the owner. Bounded graceful/abort
+settlement continues. A report owns its delivery obligation: consuming it
+acknowledges observation; dropping it anywhere in delivery emits one redacted
+diagnostic, including when the report was queued before its waiter was dropped.
+Cleanup still requires an observed report and
+`RuntimeShutdownCleanupDecision::Allowed`; the diagnostic does not authorize it. Runtime/process
 death and non-yielding futures cannot be made to complete by an async deadline.
-Uncaught descendant panics and unexpected cancellation initiate native stop. The
-older `Result` methods observe that stop and return a retained `DescendantJoin`
-error; they keep first-error limitations and do not supply the complete report
-required by this path. Their success means observed loop completion, not complete
-settlement of registry descendants still aborting after a loop's own drain timer.
-Use the report API for any decision to release dependencies.
+The captured Tokio runtime must remain alive and driven. Awaiting the driver on
+another runtime does not drive a suspended current-thread owner. If the owner
+is destroyed before completing observation, the report has
+`RuntimeShutdownSettlement::Interrupted`. Its records retain available evidence;
+an empty task list is not a complete join observation and never permits cleanup.
+This state is distinct from a timeout: neither timeout predicate is inferred
+from owner loss.
+`failure()` still follows first-cause precedence in this state. A signal, loop,
+or descendant failure remains primary only if it won first-cause arbitration.
+When `Requested` won, `SettlementInterrupted` is primary even if later signal,
+loop, or descendant failures remain retained. Inspect both values; the failure
+summary does not replace incomplete-settlement evidence or authorize cleanup.
+Uncaught descendant panics and unexpected cancellation initiate native stop and
+are retained in the report as `DescendantJoin` failures.
 
-`run_until_shutdown` now applies its timeout to handle-requested shutdown even
-when its external signal future stays pending. This deliberately changes the old
-unbounded handle-only drain path. Budget cooperative work explicitly; `join` and
-`shutdown` remain unbounded loop waits. The complete-report API is preferred for
-composing with another lifecycle owner.
+The `Result`-returning terminal methods `join`, `shutdown`, `shutdown_with_timeout`
+and `run_until_shutdown` have been removed. Their `Ok(())` meant observed
+loop completion, not settlement of registry descendants still aborting after a
+loop's own drain timer, and nothing in the type stopped an agent from releasing
+dependencies on it. `shutdown` and `shutdown_with_timeout` become
+`shutdown_report(budget)`; `run_until_shutdown(signal, timeout)` becomes
+`run_until_shutdown_report(signal, budget)`; `join()` becomes
+`run_until_shutdown_report(RuntimeShutdownSignal::pending(), budget)`. The unbounded waits
+of `join` and `shutdown` have no replacement on purpose: every stop now states a
+budget.
+
+The signal argument is now the opaque `RuntimeShutdownSignal`. Replace Ctrl-C
+wrappers with `RuntimeShutdownSignal::ctrl_c()`; use `fallible(future)` for
+`Future<Output = Result<(), E>>` where
+`E: std::error::Error + Send + Sync + 'static`, `infallible(future)` for
+`Future<Output = ()>`, and `pending()` for handle-only shutdown.
+Custom futures must be `Send + 'static`; move owned captures into `async move`.
+They must also be cancellation-safe: dropping the signal future must not leave
+detached application children. The runtime can settle the signal future itself,
+but cannot account for application tasks it detaches.
+
+The signal is polled and destroyed as the tracked `shutdown_signal` descendant
+on the runtime captured at preparation. Its join participates in native
+settlement. Keep that runtime and any runtime providing resources awaited by
+the signal alive and driven. On Unix, a custom Tokio runtime used with
+`RuntimeShutdownSignal::ctrl_c()` must enable I/O with `enable_io()` or
+`enable_all()` so the captured runtime has a signal driver. Without it, Tokio's
+registration panic is contained and retained as signal-panic and descendant-join
+evidence. A signal publishes stop when its output or a caught polling panic is
+observed, before guarded destruction. Both use the same first-cause arbitration,
+so destruction cannot delay the stop request or budget clock; an earlier cause
+and clock remain unchanged. A winning polling panic has cause
+`RuntimeShutdownCause::DescendantFailure { task: "shutdown_signal", .. }`.
+Destruction and join remain tracked settlement obligations.
+The registry marks the exact first-cause signal so graceful
+escalation cannot make it abort itself. Every observed signal error remains
+available through `report.signal_error()` while native settlement continues and
+denies shutdown success. Its original typed source is available through
+`Error::source()`; automatic Debug and Display formatting redact source details.
+First-cause arbitration separately controls the primary summary. When the signal
+error wins, the cause is `RuntimeShutdownCause::SignalFailed` and the failure is
+`RuntimeShutdownFailure::Signal { source }`; when another source won first, its
+cause and failure keep priority while the later signal error remains inspectable.
+A normally destroyed and joined signal error does not deny dependency cleanup when
+all other owned work settled. If another cause starts shutdown and the budget
+cancels a library-authored Ctrl-C or pending listener, its completed cancellation
+join is accounted because it proves guarded destruction completed. A
+force-aborted custom listener retains its cancelled join and denies cleanup, as
+does a panic or unjoined signal. A non-triggering listener must retire within the
+graceful allowance; zero grace immediately escalates it. The initiating signal
+may instead use the remaining total allowance, and if still unjoined at the
+final boundary it denies cleanup without fabricated abort evidence. Add both
+variants to exhaustive matches.
+
+A signal polling or destruction panic instead remains an explicit
+`DescendantJoin` failure, and also denies cleanup. Native settlement continues;
+the panic does not destroy the settlement owner or turn the report into
+`Interrupted`. Owner runtime teardown still produces `Interrupted`, including
+when a terminal method is first called after that runtime has already stopped.
+
+`report.signal_panic()` retains `RuntimeShutdownSignalPanic::Poll`,
+`Destruction`, or `PollAndDestruction`. Inspect the explicit message fields
+when needed; Debug redacts their contents. The private future owner catches a
+polling unwind before separately destroying the future, so a panicking
+destructor cannot turn that caught polling failure into a process abort.
+The primary normalized panic still reaches the tracked task's join.
+Containment starts at signal construction: dropping an unsubmitted signal
+contains destruction panic and emits only a redacted diagnostic, since no
+supervisor report exists yet.
+
+This requires an unwind to reach the library boundary. It cannot recover from
+`panic = "abort"`, aborting panic hooks, an internal double panic before a
+custom poll/destructor unwinds, or blocking code that never yields.
+Non-string panic payloads are normalized to "non-string panic payload"; their
+opaque allocations are intentionally retained rather than executing a possibly
+panicking payload destructor. `catch_unwind` does not suppress the process-global
+panic hook; configuring that hook is the embedding process's responsibility.
+Runledger's own formatting and diagnostics remain redacted.
+
+Shutdown timing and failure classification are separate contracts. Immediate
+shutdown records its stop time synchronously, so scheduling delay consumes the
+graceful allowance; rescheduling must not extend it. A duration budget may be
+constructed long before stop, so deadline representability is checked again at
+the actual stop instant. For a requested stop, `failure()` prioritizes settlement
+failure (including timeout) over a panic observed while draining; the panic
+remains in `loops()` or `descendants()`. For a failure-triggered stop, the original
+trigger remains primary. Treat this one classification as a summary for process
+health, and inspect the retained records for all incident causes.
 
 `Supervisor::startup_observer()` observes local initialization of every enabled
 loop. `RuntimeStartup::Initialized` means each loop validated its configuration
@@ -1244,7 +1360,7 @@ an observer waiter does not stop the supervisor. Apply database health and busin
 readiness separately, and continue to drive and observe native shutdown. A snapshot
 can become obsolete immediately; initialization is not permanent readiness.
 
-Use `runledger_runtime::Supervisor::run_until_shutdown` for ordinary worker
+Use `runledger_runtime::Supervisor::run_until_shutdown_report` for ordinary worker
 processes. The lower-level worker, intent promoter, scheduler, and reaper loops
 are escape hatches for custom process orchestration. A custom process that uses
 durable enqueue intents must run both `run_worker_loop` and

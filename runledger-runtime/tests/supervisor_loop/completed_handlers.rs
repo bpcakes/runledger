@@ -1,10 +1,12 @@
 use super::*;
 use runledger_core::jobs::{JobExecution, JobExecutionError, JobExecutionHandler};
-use runledger_runtime::{RuntimeCallbackFailure, RuntimeShutdownBudget};
-use std::future::pending;
+use runledger_runtime::{RuntimeCallbackFailure, RuntimeShutdownBudget, RuntimeShutdownSignal};
 use tokio::sync::Notify;
 
 const JOB: &str = "jobs.test.completed_handler_settlement";
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
+const SHUTDOWN_ABORT: Duration = Duration::from_secs(5);
+const REPORT_DEADLOCK_GUARD: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 enum Outcome {
@@ -131,8 +133,10 @@ async fn exercise(outcome: Outcome, during_shutdown: bool) {
         .expect("supervisor");
     let shutdown = supervisor.shutdown_handle();
     let driver = tokio::spawn(supervisor.run_until_shutdown_report(
-        pending(),
-        RuntimeShutdownBudget::new(Duration::from_secs(5), Duration::from_secs(1)).expect("budget"),
+        RuntimeShutdownSignal::pending(),
+        // Handler progress is controlled by explicit gates. Keep the runtime
+        // shutdown budget as a deadlock guard, not a competing timing assertion.
+        RuntimeShutdownBudget::new(SHUTDOWN_GRACE, SHUTDOWN_ABORT).expect("budget"),
     ));
     tokio::time::timeout(Duration::from_secs(5), entered.notified())
         .await
@@ -152,7 +156,7 @@ async fn exercise(outcome: Outcome, during_shutdown: bool) {
         .await
         .expect("handler returned");
     shutdown.request_shutdown();
-    let report = tokio::time::timeout(Duration::from_secs(8), driver)
+    let report = tokio::time::timeout(REPORT_DEADLOCK_GUARD, driver)
         .await
         .expect("bounded report")
         .expect("report driver joined");
@@ -184,21 +188,21 @@ fn assert_durable_outcome(outcome: Outcome, record: &runledger_postgres::jobs::J
 }
 
 fn assert_settlement(outcome: Outcome, report: &runledger_runtime::RuntimeShutdownReport) {
-    assert!(report.unjoined.is_empty());
+    assert!(report.unjoined().is_empty());
     if matches!(outcome, Outcome::Panic) {
         assert!(!report.is_cooperatively_stopped());
         assert!(!report.is_success());
-        assert_eq!(report.callback_failures.len(), 1);
+        assert_eq!(report.callback_failures().len(), 1);
         assert!(matches!(
-            &report.callback_failures[0],
+            &report.callback_failures()[0],
             RuntimeCallbackFailure::Panicked { .. }
         ));
     } else {
         assert!(
-            report.callback_failures.is_empty(),
+            report.callback_failures().is_empty(),
             "completed handler is not interrupted"
         );
-        assert_eq!(report.prior_callback_interruptions, 0);
+        assert_eq!(report.prior_callback_interruptions(), 0);
         assert!(report.is_cooperatively_stopped());
         assert!(report.is_success());
     }

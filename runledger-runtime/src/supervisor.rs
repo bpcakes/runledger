@@ -1,22 +1,23 @@
 use std::borrow::Borrow;
-use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::runtime::Handle;
 use tracing::warn;
 
+use crate::RuntimeError;
 use crate::catalog::JobCatalog;
 use crate::config::{IntentPromoterConfig, JobsConfig};
 use crate::observer::JobLifecycleObserver;
 use crate::registry::JobRegistry;
 use crate::shutdown::{ShutdownHandle, ShutdownSignal};
 use crate::task_group::TaskGroup;
-use crate::{Error, Result, RuntimeError};
 
 #[path = "supervisor/preparation.rs"]
 mod preparation;
 pub use preparation::PreparedSupervisor;
+
+mod driver;
+pub use driver::RuntimeShutdownDriver;
 
 const WORKER_TASK: &str = "worker";
 const INTENT_PROMOTER_TASK: &str = "intent_promoter";
@@ -34,15 +35,22 @@ mod preparation_tests;
 /// Supervises the Runledger runtime loops spawned for a worker process.
 ///
 /// A supervisor owns the worker, intent promoter, scheduler, and reaper task
-/// handles selected by [`SupervisorBuilder`]. Use
-/// [`Self::run_until_shutdown`] for a typical worker process that should exit on
-/// either an external shutdown signal or an internal runtime task failure.
+/// handles selected by [`SupervisorBuilder`]. It has exactly two terminal
+/// methods, and both return an independently owned [`RuntimeShutdownDriver`]
+/// that awaits to a [`RuntimeShutdownReport`] rather than a bare success:
+/// [`Self::run_until_shutdown_report`] waits for an external signal, and
+/// [`Self::shutdown_report`] stops immediately. There is deliberately no terminal
+/// method whose success value can be mistaken for proof that everything settled.
 ///
-/// Dropping a supervisor requests shutdown and detaches the task handles. Call
-/// [`Self::shutdown`] or [`Self::join`] when the owning process needs to observe
-/// panics or unexpected task exits.
+/// Dropping a supervisor requests shutdown and detaches the task handles, which
+/// produces no report at all. A process that needs to observe panics, unexpected
+/// task exits or descendant settlement must drive one of the two terminal
+/// methods to completion.
+///
+/// [`RuntimeShutdownReport`]: crate::RuntimeShutdownReport
 #[must_use]
 pub struct Supervisor {
+    runtime: Handle,
     shutdown: ShutdownSignal,
     tasks: TaskGroup,
     initialization: crate::startup::Initialization,
@@ -150,12 +158,20 @@ impl Supervisor {
     ///
     /// ```rust,no_run
     /// # async fn example(supervisor: runledger_runtime::Supervisor) {
+    /// use runledger_runtime::RuntimeShutdownBudget;
+    /// use std::time::Duration;
     /// let startup = supervisor.startup_observer();
     /// match startup.wait_initialized().await {
     ///     Ok(()) => { /* apply application policy */ }
-    ///     Err(_) => { /* startup stopped; observe the native shutdown result */ }
+    ///     Err(_) => { /* startup stopped; observe the native shutdown report */ }
     /// }
-    /// supervisor.shutdown().await.expect("observe shutdown");
+    /// let budget = RuntimeShutdownBudget::new(Duration::from_secs(5), Duration::from_secs(1))
+    ///     .expect("representable budget");
+    /// let report = supervisor.shutdown_report(budget).await;
+    /// assert!(matches!(
+    ///     report.cleanup_decision(),
+    ///     runledger_runtime::RuntimeShutdownCleanupDecision::Allowed(_)
+    /// ));
     /// # }
     /// ```
     pub fn startup_observer(&self) -> crate::RuntimeStartupObserver {
@@ -183,167 +199,135 @@ impl Supervisor {
         self.shutdown.is_requested()
     }
 
-    /// Waits for all supervised loops to exit.
+    /// Runs the supervised loops until stopped, then settles them within `budget`
+    /// and reports what was actually observed.
     ///
-    /// With the default long-running loops, this method waits until shutdown is
-    /// requested through a [`SupervisorShutdown`] handle or until a task exits.
-    /// This Result path observes loop exits and descendant failures available at
-    /// completion; it does not await complete descendant settlement or authorize
-    /// dependency cleanup. Use [`Self::run_until_shutdown_report`] for that contract.
+    /// This and [`Self::shutdown_report`] are the only two ways to end a
+    /// supervisor, and both hand back a report rather than a bare success,
+    /// because only a report can answer the question every caller actually has:
+    /// did everything this runtime owned finish, and may its dependencies now be
+    /// released? Match [`RuntimeShutdownReport::cleanup_decision`] before
+    /// releasing a pool, a connection or any other shared dependency, and
+    /// [`RuntimeShutdownReport::is_success`] for whether shutdown itself
+    /// succeeded. The two differ: a joined configuration failure permits cleanup
+    /// but fails the shutdown.
     ///
-    /// If a loop exits before shutdown was requested, the remaining loops are
-    /// asked to shut down and the first observed error is returned. Additional
-    /// task failures observed while draining are logged. This method does not
-    /// impose a deadline; use [`Self::shutdown_with_timeout`] when the caller
-    /// owns shutdown and needs a bounded wait.
-    pub async fn join(mut self) -> Result<()> {
-        let shutdown = self.shutdown.clone();
-        let mut result = self
-            .descendants
-            .observe_while(self.tasks.join(&shutdown))
-            .await;
-        self.retain_descendant_failure(&mut result);
-        result
+    /// Stopping begins at whichever comes first: `shutdown` resolving, a
+    /// [`SupervisorShutdown`] handle requesting it, a supervised loop failing, or
+    /// a native descendant failing, or the returned waiter being dropped.
+    /// All start the same non-resetting stop
+    /// clock, and `budget` is measured from it — a later request cannot extend
+    /// an allowance that is already running. Use
+    /// [`Self::shutdown_report`] when the caller owns stop timing and has no
+    /// external signal to wait on.
+    ///
+    /// Calling this method synchronously transfers settlement to an independent
+    /// task on the Tokio runtime captured when this supervisor was prepared.
+    /// The caller does not need to be inside a Tokio runtime. Cancelling or
+    /// dropping the returned waiter requests stop without cancelling the owner.
+    /// Await the waiter to make the cleanup decision; if it is dropped, bounded
+    /// settlement continues and its unobserved report emits a redacted diagnostic.
+    /// The captured runtime must remain alive and driven (including a
+    /// current-thread runtime). A Tokio handle does not keep it alive. If the
+    /// owner is destroyed before finishing, the report is explicitly interrupted
+    /// and cannot authorize cleanup.
+    ///
+    /// Use [`crate::RuntimeShutdownSignal::ctrl_c`] or an explicit fallible or
+    /// infallible custom signal. Its owned `Send + 'static` future runs as the
+    /// tracked `shutdown_signal` descendant on the captured runtime. Returned
+    /// errors are retained by [`crate::RuntimeShutdownReport::signal_error`].
+    /// On Unix, a custom captured runtime used with `ctrl_c` must enable I/O or
+    /// all drivers so Tokio's signal driver is available. Missing driver support
+    /// is retained as signal-panic and descendant-join evidence.
+    /// poll/drop panics appear as descendant join failures. Neither interrupts
+    /// native settlement. A normally joined error denies success but permits
+    /// cleanup. If another cause starts shutdown and the budget cancels a
+    /// library-authored Ctrl-C or pending listener, its completed cancellation
+    /// join is accounted because it proves guarded destruction finished. A
+    /// force-aborted custom listener retains its cancellation failure and denies
+    /// cleanup, as does a panic or unjoined signal. A non-triggering listener must
+    /// retire within the graceful allowance; zero grace immediately escalates it.
+    /// The exact initiating signal is not aborted by its own request and may use
+    /// the remaining total allowance to finish destruction and join. Keep any other runtime whose
+    /// I/O the signal awaits alive, and make custom signals cancellation-safe.
+    ///
+    /// ```rust,no_run
+    /// # async fn example(supervisor: runledger_runtime::Supervisor) -> Result<(), runledger_runtime::RuntimeError> {
+    /// use runledger_runtime::{RuntimeShutdownBudget, RuntimeShutdownSignal};
+    /// use std::time::Duration;
+    /// async fn release_dependencies(
+    ///     _permit: runledger_runtime::RuntimeShutdownCleanupPermit,
+    /// ) {
+    ///     // Close pools and other shared dependencies here.
+    /// }
+    ///
+    /// let budget = RuntimeShutdownBudget::new(Duration::from_secs(20), Duration::from_secs(1))?;
+    /// let report = supervisor
+    ///     .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
+    ///     .await;
+    /// if let runledger_runtime::RuntimeShutdownCleanupDecision::Allowed(permit) =
+    ///     report.cleanup_decision()
+    /// {
+    ///     release_dependencies(permit).await;
+    /// }
+    /// if let Some(failure) = report.failure() {
+    ///     tracing::error!(%failure, "jobs runtime shutdown did not succeed");
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// [`RuntimeShutdownReport::cleanup_decision`]: crate::RuntimeShutdownReport::cleanup_decision
+    /// [`RuntimeShutdownReport::is_success`]: crate::RuntimeShutdownReport::is_success
+    pub fn run_until_shutdown_report(
+        self,
+        shutdown: crate::RuntimeShutdownSignal,
+        budget: crate::RuntimeShutdownBudget,
+    ) -> RuntimeShutdownDriver {
+        RuntimeShutdownDriver::start(self, Some(shutdown), budget)
     }
 
-    /// Requests graceful shutdown and waits for all supervised loops to exit.
+    /// Requests shutdown immediately, then settles within `budget` and reports
+    /// what was actually observed.
     ///
-    /// If a loop exits before shutdown was requested, the remaining loops are
-    /// asked to shut down and the pre-existing task exit is reported, even when
-    /// that exit is only observed after shutdown begins. This method does not
-    /// impose a deadline. It has the same descendant-settlement limits as
-    /// [`Self::join`]. Use [`Self::shutdown_with_timeout`] when the owning
-    /// process needs a shutdown budget; externally timing out this consuming
-    /// future can detach still-running task handles.
-    pub async fn shutdown(mut self) -> Result<()> {
-        let shutdown = self.shutdown.clone();
-        let mut result = self
-            .descendants
-            .observe_while(self.tasks.shutdown(&shutdown))
-            .await;
-        self.retain_descendant_failure(&mut result);
-        result
-    }
-
-    /// Waits until `shutdown` resolves or a supervised task fails, then exits.
+    /// This is [`Self::run_until_shutdown_report`] for callers that already know
+    /// it is time to stop and have no external signal to wait on. It carries the
+    /// identical report contract, including that
+    /// [`RuntimeShutdownReport::cleanup_decision`] — not the absence of a failure
+    /// — is what authorizes releasing dependencies.
     ///
-    /// If `shutdown` resolves or a [`SupervisorShutdown`] handle requests stop,
-    /// graceful shutdown begins and the supervisor waits up to `timeout` for all
-    /// loops to exit. A handle request applies this budget even if `shutdown`
-    /// remains pending. If a loop panics
-    /// or exits unexpectedly before `shutdown` resolves, shutdown is requested
-    /// for the remaining loops and the original task error is returned after
-    /// those loops drain or a timeout is reported. If shutdown is requested
-    /// through a [`SupervisorShutdown`] handle and every loop exits cleanly before
-    /// `shutdown` resolves, this returns successfully.
-    ///
-    /// This is the preferred method for worker binaries because it observes
-    /// internal task failures during normal operation while still applying a
-    /// bounded shutdown budget to cooperative process termination.
-    ///
-    /// If `timeout` is too large to represent as a runtime deadline, this returns
-    /// [`RuntimeError::ShutdownTimeoutTooLarge`] immediately. A zero timeout
-    /// requests shutdown, aborts tasks without waiting for cooperative exits, and
-    /// reports [`RuntimeError::ShutdownTimeout`].
-    ///
-    /// If the initial timeout validation fails before `shutdown` resolves, the
-    /// supervisor is still dropped, so shutdown is requested, but task handles
-    /// are not aborted or drained. If a deadline overflow is detected after
-    /// shutdown begins, remaining tasks are aborted and drained before returning.
-    pub async fn run_until_shutdown<F>(mut self, shutdown: F, timeout: Duration) -> Result<()>
-    where
-        F: Future<Output = ()>,
-    {
-        let shutdown_signal = self.shutdown.clone();
-        let external_or_native_stop = async {
-            tokio::select! {
-                biased;
-                () = shutdown_signal.requested() => {}
-                () = shutdown => {}
-            }
-        };
-        let mut result = self
-            .descendants
-            .observe_while(self.tasks.run_until_shutdown(
-                external_or_native_stop,
-                timeout,
-                &shutdown_signal,
-            ))
-            .await;
-        self.retain_descendant_failure(&mut result);
-        result
-    }
-
-    /// Drive native loops and retain complete bounded settlement, including owned
-    /// callback descendants. Both the external future and shutdown handles start
-    /// the same non-resetting stop budget. Cancelling this consuming future still
-    /// requests shutdown through Drop; an integration owner must retain the driver.
+    /// A loop or descendant that had already failed still sets the shutdown
+    /// cause and is retained in the report. The stop clock starts before this
+    /// method returns, so scheduling delay consumes the same graceful allowance.
     ///
     /// ```rust,no_run
     /// # async fn example(supervisor: runledger_runtime::Supervisor) -> Result<(), runledger_runtime::RuntimeError> {
     /// use runledger_runtime::RuntimeShutdownBudget;
     /// use std::time::Duration;
-    /// let budget = RuntimeShutdownBudget::new(Duration::from_secs(20), Duration::from_secs(1))?;
-    /// let report = supervisor.run_until_shutdown_report(async {}, budget).await;
-    /// assert!(report.is_success());
+    /// async fn release_dependencies(
+    ///     _permit: runledger_runtime::RuntimeShutdownCleanupPermit,
+    /// ) {
+    ///     // Close pools and other shared dependencies here.
+    /// }
+    ///
+    /// let budget = RuntimeShutdownBudget::new(Duration::from_secs(5), Duration::from_secs(1))?;
+    /// let report = supervisor.shutdown_report(budget).await;
+    /// if let runledger_runtime::RuntimeShutdownCleanupDecision::Allowed(permit) =
+    ///     report.cleanup_decision()
+    /// {
+    ///     release_dependencies(permit).await;
+    /// }
+    /// assert!(report.is_success()); // a separate process-health decision
     /// # Ok(()) }
     /// ```
-    pub async fn run_until_shutdown_report<F>(
+    ///
+    /// [`RuntimeShutdownReport::cleanup_decision`]: crate::RuntimeShutdownReport::cleanup_decision
+    pub fn shutdown_report(
         mut self,
-        shutdown: F,
         budget: crate::RuntimeShutdownBudget,
-    ) -> crate::RuntimeShutdownReport
-    where
-        F: Future<Output = ()>,
-    {
+    ) -> RuntimeShutdownDriver {
         self.tasks
-            .run_report(shutdown, budget, &self.shutdown, &self.descendants)
-            .await
-    }
-
-    /// Requests graceful shutdown and waits up to `timeout` for all supervised
-    /// loops to exit. This Result path has the descendant-settlement limits of
-    /// [`Self::join`]; use [`Self::run_until_shutdown_report`] for dependency cleanup.
-    ///
-    /// If a loop had already exited before this method begins shutdown, that
-    /// failure is returned after the remaining loops have had the same shutdown
-    /// budget to exit cooperatively. If the timeout expires, remaining tasks are
-    /// aborted and drained with a bounded cleanup attempt before a timeout error
-    /// is returned. Abort cleanup can make total wall-clock time exceed `timeout`
-    /// by up to one second, or `timeout`, whichever is smaller. A zero timeout
-    /// requests shutdown, immediately aborts tasks that did not already finish,
-    /// and reports [`RuntimeError::ShutdownTimeout`].
-    ///
-    /// If `timeout` is too large to represent as a runtime deadline, this returns
-    /// [`RuntimeError::ShutdownTimeoutTooLarge`] immediately. The supervisor is
-    /// still dropped, so shutdown is requested, but task handles are not aborted
-    /// or drained.
-    pub async fn shutdown_with_timeout(mut self, timeout: Duration) -> Result<()> {
-        let shutdown = self.shutdown.clone();
-        let mut result = self
-            .descendants
-            .observe_while(self.tasks.shutdown_with_timeout(timeout, &shutdown))
-            .await;
-        self.retain_descendant_failure(&mut result);
-        result
-    }
-
-    fn retain_descendant_failure(&self, result: &mut Result<()>) {
-        let Some(failure) = self.descendants.first_unexpected_failure() else {
-            return;
-        };
-        match result {
-            Ok(()) => *result = Err(Error::Runtime(failure)),
-            Err(Error::Runtime(RuntimeError::ShutdownTimeout { timeout })) => {
-                *result = Err(Error::Runtime(
-                    RuntimeError::ShutdownTimeoutAfterTaskError {
-                        timeout: *timeout,
-                        source: Box::new(failure),
-                    },
-                ));
-            }
-            Err(_) => {}
-        }
+            .begin_immediate_shutdown(&self.shutdown, &self.descendants);
+        RuntimeShutdownDriver::start(self, None, budget)
     }
 }
 
@@ -517,9 +501,7 @@ impl SupervisorShutdown {
     /// owner can tighten its own deadline after a previously recorded native stop.
     /// The first native cause remains authoritative. Earlier enclosing timestamps
     /// tighten active phase deadlines in [`Supervisor::run_until_shutdown_report`];
-    /// repeated later requests cannot restart that allowance. The legacy Result
-    /// methods retain their separate timeout measured from driver observation;
-    /// an enclosing deadline owner must use the complete-report driver.
+    /// repeated later requests cannot restart that allowance.
     /// Future timestamps are clamped to the current time.
     /// This lets an adapter include scheduling delay in one parent allowance.
     ///
@@ -1020,19 +1002,12 @@ mod tests {
         abort_supervisor_tasks(all_enabled).await;
     }
 
-    #[tokio::test]
-    async fn all_disabled_supervisor_join_and_shutdown_succeed() {
-        Supervisor::builder(&lazy_pool(), test_config())
-            .expect("supervisor builder has runtime")
-            .disable_worker()
-            .disable_scheduler()
-            .disable_reaper()
-            .build()
-            .expect("all-disabled supervisor should build")
-            .join()
-            .await
-            .expect("all-disabled supervisor should join");
+    pub(super) fn test_budget() -> crate::RuntimeShutdownBudget {
+        crate::RuntimeShutdownBudget::new(Duration::from_secs(1), Duration::from_secs(1))
+            .expect("valid test budget")
+    }
 
+    pub(super) fn disabled_supervisor() -> Supervisor {
         Supervisor::builder(&lazy_pool(), test_config())
             .expect("supervisor builder has runtime")
             .disable_worker()
@@ -1040,20 +1015,161 @@ mod tests {
             .disable_reaper()
             .build()
             .expect("all-disabled supervisor should build")
-            .shutdown()
-            .await
-            .expect("all-disabled supervisor should shut down");
+    }
+
+    struct NotifyOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            if let Some(notify) = self.0.take() {
+                let _ = notify.send(());
+            }
+        }
+    }
+
+    pub(super) fn cancellation_budget() -> crate::RuntimeShutdownBudget {
+        crate::RuntimeShutdownBudget::new(Duration::from_millis(25), Duration::from_millis(250))
+            .expect("valid cancellation test budget")
     }
 
     #[tokio::test]
-    async fn repeated_shutdown_handle_requests_are_observable_before_join() {
-        let supervisor = Supervisor::builder(&lazy_pool(), test_config())
-            .expect("supervisor builder has runtime")
-            .disable_worker()
-            .disable_scheduler()
-            .disable_reaper()
-            .build()
-            .expect("all-disabled supervisor should build");
+    async fn dropping_terminal_waiter_before_poll_does_not_abandon_settlement() {
+        let mut supervisor = disabled_supervisor();
+        let (dropped, observe_drop) = tokio::sync::oneshot::channel();
+        supervisor
+            .tasks
+            .spawn_on(&Handle::current(), "drop_probe", async move {
+                let _notify = NotifyOnDrop(Some(dropped));
+                std::future::pending::<crate::RuntimeLoopExit>().await
+            });
+
+        let waiter = supervisor.shutdown_report(cancellation_budget());
+        drop(waiter);
+
+        timeout(Duration::from_secs(1), observe_drop)
+            .await
+            .expect("independent settlement remains bounded")
+            .expect("aborting the native task drops its future");
+    }
+
+    #[tokio::test]
+    async fn cancelling_terminal_waiter_during_settlement_does_not_abandon_it() {
+        let mut supervisor = disabled_supervisor();
+        let shutdown = supervisor.shutdown.clone();
+        let (settling, observe_settling) = tokio::sync::oneshot::channel();
+        let (dropped, observe_drop) = tokio::sync::oneshot::channel();
+        supervisor
+            .tasks
+            .spawn_on(&Handle::current(), "drop_probe", async move {
+                let _notify = NotifyOnDrop(Some(dropped));
+                shutdown.requested().await;
+                settling
+                    .send(())
+                    .expect("test observes graceful settlement");
+                std::future::pending::<crate::RuntimeLoopExit>().await
+            });
+
+        let waiter = tokio::spawn(supervisor.shutdown_report(cancellation_budget()));
+        observe_settling
+            .await
+            .expect("native task observes the stop request");
+        waiter.abort();
+        let join = waiter.await.expect_err("waiter cancellation is observed");
+        assert!(join.is_cancelled());
+
+        timeout(Duration::from_secs(1), observe_drop)
+            .await
+            .expect("settlement continues after waiter cancellation")
+            .expect("abort escalation drops the native task future");
+    }
+
+    #[tokio::test]
+    async fn an_all_disabled_supervisor_settles_through_both_terminal_methods() {
+        let report = disabled_supervisor().shutdown_report(test_budget()).await;
+        assert!(report.is_success());
+        assert!(report.failure().is_none());
+
+        let report = disabled_supervisor()
+            .run_until_shutdown_report(
+                crate::RuntimeShutdownSignal::infallible(async {}),
+                test_budget(),
+            )
+            .await;
+        assert!(report.is_success());
+    }
+
+    #[tokio::test]
+    async fn shutdown_report_requests_shutdown_before_returning_its_driver() {
+        let supervisor = disabled_supervisor();
+        let shutdown = supervisor.shutdown_handle();
+
+        let driver = supervisor.shutdown_report(test_budget());
+
+        assert!(shutdown.is_shutdown_requested());
+        assert!(driver.await.is_success());
+    }
+
+    #[tokio::test]
+    async fn shutdown_report_preserves_an_already_failed_loop_cause() {
+        let mut supervisor = disabled_supervisor();
+        supervisor
+            .tasks
+            .spawn_on(&Handle::current(), "already_failed", async {
+                crate::RuntimeLoopExit::Completed
+            });
+        supervisor.tasks.wait_until_finished_for_tests().await;
+        let shutdown = supervisor.shutdown.clone();
+
+        let driver = supervisor.shutdown_report(test_budget());
+        assert_eq!(
+            shutdown.cause(),
+            crate::RuntimeShutdownCause::LoopFailure("already_failed")
+        );
+        let report = driver.await;
+        assert_eq!(
+            report.cause(),
+            crate::RuntimeShutdownCause::LoopFailure("already_failed")
+        );
+        assert!(matches!(
+            report.failure(),
+            Some(crate::RuntimeShutdownFailure::LoopExitedUnexpectedly {
+                task: "already_failed"
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_report_preserves_an_unobserved_finished_descendant_cause() {
+        let supervisor = disabled_supervisor();
+        let failed = supervisor.descendants.spawn("already_failed", async {
+            panic!("descendant failed before explicit shutdown");
+        });
+        while !failed.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let shutdown = supervisor.shutdown.clone();
+
+        let driver = supervisor.shutdown_report(test_budget());
+
+        assert!(matches!(
+            shutdown.cause(),
+            crate::RuntimeShutdownCause::DescendantFailure {
+                task: "already_failed",
+                ..
+            }
+        ));
+        let report = driver.await;
+        let original = failed.await.expect_err("actual descendant panic");
+        let Some(crate::RuntimeShutdownFailure::DescendantJoin { source, .. }) = report.failure()
+        else {
+            panic!("the already-finished descendant remains the primary failure");
+        };
+        assert!(Arc::ptr_eq(&source, &original));
+    }
+
+    #[tokio::test]
+    async fn repeated_shutdown_handle_requests_are_observable_before_settlement() {
+        let supervisor = disabled_supervisor();
         let shutdown = supervisor.shutdown_handle();
         let cloned_shutdown = shutdown.clone();
 
@@ -1063,27 +1179,21 @@ mod tests {
 
         assert!(shutdown.is_shutdown_requested());
         assert!(supervisor.is_shutdown_requested());
-        supervisor
-            .join()
-            .await
-            .expect("supervisor should join after shutdown handle request");
+        let report = supervisor
+            .run_until_shutdown_report(crate::RuntimeShutdownSignal::pending(), test_budget())
+            .await;
+        assert!(report.is_success());
     }
 
     #[tokio::test]
-    async fn run_until_shutdown_with_no_tasks_waits_for_signal() {
-        let supervisor = Supervisor::builder(&lazy_pool(), test_config())
-            .expect("supervisor builder has runtime")
-            .disable_worker()
-            .disable_scheduler()
-            .disable_reaper()
-            .build()
-            .expect("all-disabled supervisor should build");
+    async fn a_supervisor_with_no_tasks_still_waits_for_its_signal() {
+        let supervisor = disabled_supervisor();
         let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
-        let mut run = tokio::spawn(supervisor.run_until_shutdown(
-            async move {
+        let mut run = tokio::spawn(supervisor.run_until_shutdown_report(
+            crate::RuntimeShutdownSignal::infallible(async move {
                 signal_rx.await.expect("shutdown signal should be sent");
-            },
-            Duration::from_secs(1),
+            }),
+            test_budget(),
         ));
 
         assert!(
@@ -1092,69 +1202,47 @@ mod tests {
         );
 
         signal_tx.send(()).expect("signal receiver should be alive");
-        run.await
-            .expect("run-until-shutdown task should join")
-            .expect("all-disabled supervisor should complete after signal");
+        let report = run.await.expect("report driver should join");
+        assert!(report.is_success());
     }
+
     #[tokio::test]
-    async fn legacy_methods_never_report_a_descendant_panic_as_success() {
-        for method in 0..4 {
-            let supervisor = Supervisor::builder(&lazy_pool(), test_config())
-                .expect("validated supervisor construction")
-                .disable_worker()
-                .disable_scheduler()
-                .disable_reaper()
-                .build()
-                .expect("validated supervisor construction");
+    async fn neither_terminal_method_reports_a_descendant_panic_as_success() {
+        for stop_now in [true, false] {
+            let supervisor = disabled_supervisor();
             let failed = supervisor.descendants.spawn("escaped_job", async {
                 panic!("escaped panic");
             });
             let original = failed.await.expect_err("actual descendant panic");
-            let result = tokio::time::timeout(Duration::from_secs(1), async move {
-                match method {
-                    0 => supervisor.join().await,
-                    1 => supervisor.shutdown().await,
-                    2 => {
-                        supervisor
-                            .shutdown_with_timeout(Duration::from_secs(1))
-                            .await
-                    }
-                    _ => {
-                        supervisor
-                            .run_until_shutdown(std::future::pending(), Duration::from_secs(1))
-                            .await
-                    }
+            let report = timeout(Duration::from_secs(1), async move {
+                if stop_now {
+                    supervisor.shutdown_report(test_budget()).await
+                } else {
+                    supervisor
+                        .run_until_shutdown_report(
+                            crate::RuntimeShutdownSignal::pending(),
+                            test_budget(),
+                        )
+                        .await
                 }
             })
             .await
             .expect("native internal stop must wake the driver");
-            let error = result.expect_err("legacy result lost descendant failure");
-            let mut cause: &dyn std::error::Error = &error;
-            loop {
-                if let Some(shared) = cause.downcast_ref::<std::sync::Arc<tokio::task::JoinError>>()
-                {
-                    assert!(std::sync::Arc::ptr_eq(shared, &original));
-                    break;
-                }
-                if let Some(join) = cause.downcast_ref::<tokio::task::JoinError>() {
-                    assert!(std::ptr::eq(join, &*original));
-                    break;
-                }
-                cause = cause
-                    .source()
-                    .expect("original descendant join must survive");
-            }
+
+            assert!(!report.is_success());
+            assert!(!report.is_cooperatively_stopped());
+            let Some(crate::RuntimeShutdownFailure::DescendantJoin { source, .. }) =
+                report.failure()
+            else {
+                panic!("the descendant panic must survive settlement");
+            };
+            assert!(Arc::ptr_eq(&source, &original));
         }
     }
+
     #[tokio::test(start_paused = true)]
-    async fn internal_descendant_failure_starts_legacy_drain_budget() {
-        let mut supervisor = Supervisor::builder(&lazy_pool(), test_config())
-            .expect("runtime exists")
-            .disable_worker()
-            .disable_scheduler()
-            .disable_reaper()
-            .build()
-            .expect("valid supervisor");
+    async fn an_internal_descendant_failure_starts_the_shutdown_budget() {
+        let mut supervisor = disabled_supervisor();
         supervisor.tasks.spawn_on(
             &Handle::current(),
             "unresponsive_loop",
@@ -1167,85 +1255,76 @@ mod tests {
             })
             .await
             .expect_err("actual descendant panic");
-        let result = timeout(
+        let budget =
+            crate::RuntimeShutdownBudget::new(Duration::from_millis(10), Duration::from_millis(10))
+                .expect("valid budget");
+        let report = timeout(
             Duration::from_secs(2),
-            supervisor.run_until_shutdown(std::future::pending(), Duration::from_millis(10)),
+            supervisor.run_until_shutdown_report(crate::RuntimeShutdownSignal::pending(), budget),
         )
         .await
         .expect("internal failure must begin bounded shutdown");
-        let Err(Error::Runtime(RuntimeError::ShutdownTimeoutAfterTaskError { source, .. })) =
-            result
+
+        assert!(matches!(
+            report.cause(),
+            crate::RuntimeShutdownCause::DescendantFailure {
+                task: "escaped_job",
+                ..
+            }
+        ));
+        assert!(report.graceful_timed_out());
+        // The triggering descendant failure outranks the abort it caused.
+        let Some(crate::RuntimeShutdownFailure::DescendantJoin { source, .. }) = report.failure()
         else {
-            panic!("timeout must preserve the triggering descendant failure");
-        };
-        let RuntimeError::DescendantJoin { source, .. } = *source else {
-            panic!("original native descendant failure is retained");
+            panic!("the triggering descendant failure is retained");
         };
         assert!(Arc::ptr_eq(&source, &original));
     }
+
     #[tokio::test(start_paused = true)]
-    async fn legacy_driver_observes_failure_without_a_descendant_waiter() {
+    async fn the_driver_observes_a_descendant_failure_without_an_external_waiter() {
         use futures_util::FutureExt;
-        for join_only in [true, false] {
-            let mut supervisor = Supervisor::builder(&lazy_pool(), test_config())
-                .expect("runtime exists")
-                .disable_worker()
-                .disable_scheduler()
-                .disable_reaper()
-                .build()
-                .expect("valid supervisor");
-            let shutdown = supervisor.shutdown.clone();
-            let loop_stop = shutdown.clone();
-            supervisor
-                .tasks
-                .spawn_on(&Handle::current(), "waiting_loop", async move {
-                    loop_stop.requested().await;
-                    crate::RuntimeLoopExit::Shutdown
-                });
-            let (release, released) = tokio::sync::oneshot::channel();
-            let escaped = supervisor.descendants.spawn("escaped_job", async move {
-                released.await.expect("fixture releases descendant");
-                panic!("unobserved descendant panic");
+        let mut supervisor = disabled_supervisor();
+        let shutdown = supervisor.shutdown.clone();
+        let loop_stop = shutdown.clone();
+        supervisor
+            .tasks
+            .spawn_on(&Handle::current(), "waiting_loop", async move {
+                loop_stop.requested().await;
+                crate::RuntimeLoopExit::Shutdown
             });
-            let driver = async move {
-                if join_only {
-                    supervisor.join().await
-                } else {
-                    supervisor
-                        .run_until_shutdown(std::future::pending(), Duration::from_millis(10))
-                        .await
-                }
-            };
-            tokio::pin!(driver);
-            assert!(driver.as_mut().now_or_never().is_none());
-            release.send(()).expect("descendant starts after driver");
-            let observed = timeout(Duration::from_millis(100), driver.as_mut()).await;
-            // Only after the observation boundary may the fixture harvest this join.
-            let original = escaped.await.expect_err("actual descendant panic");
-            let (autonomous, result) = match observed {
-                Ok(result) => (true, result),
-                Err(_) => (false, driver.await),
-            };
-            assert!(
-                autonomous,
-                "driver depended on external descendant observation"
-            );
-            let Err(Error::Runtime(RuntimeError::DescendantJoin { source, .. })) = result else {
-                panic!("observed failure must survive legacy completion");
-            };
-            assert!(Arc::ptr_eq(&source, &original));
-        }
+        let (release, released) = tokio::sync::oneshot::channel();
+        let escaped = supervisor.descendants.spawn("escaped_job", async move {
+            released.await.expect("fixture releases descendant");
+            panic!("unobserved descendant panic");
+        });
+        let driver = supervisor
+            .run_until_shutdown_report(crate::RuntimeShutdownSignal::pending(), test_budget());
+        tokio::pin!(driver);
+        assert!(driver.as_mut().now_or_never().is_none());
+        release.send(()).expect("descendant starts after driver");
+        let observed = timeout(Duration::from_millis(100), driver.as_mut()).await;
+        // Only after the observation boundary may the fixture harvest this join.
+        let original = escaped.await.expect_err("actual descendant panic");
+        let (autonomous, report) = match observed {
+            Ok(report) => (true, report),
+            Err(_) => (false, driver.await),
+        };
+        assert!(
+            autonomous,
+            "driver depended on external descendant observation"
+        );
+        let Some(crate::RuntimeShutdownFailure::DescendantJoin { source, .. }) = report.failure()
+        else {
+            panic!("observed failure must survive settlement");
+        };
+        assert!(Arc::ptr_eq(&source, &original));
     }
+
     #[tokio::test(start_paused = true)]
-    async fn handle_request_applies_the_legacy_driver_shutdown_budget() {
+    async fn a_handle_request_applies_the_shutdown_budget() {
         use futures_util::FutureExt;
-        let mut supervisor = Supervisor::builder(&lazy_pool(), test_config())
-            .expect("runtime exists")
-            .disable_worker()
-            .disable_scheduler()
-            .disable_reaper()
-            .build()
-            .expect("valid supervisor");
+        let mut supervisor = disabled_supervisor();
         let stop = supervisor.shutdown.clone();
         let (entered, entry) = tokio::sync::oneshot::channel();
         supervisor
@@ -1258,16 +1337,15 @@ mod tests {
             });
         entry.await.expect("loop started");
         let handle = supervisor.shutdown_handle();
-        let driver = supervisor.run_until_shutdown(std::future::pending(), Duration::from_secs(1));
+        let driver = supervisor
+            .run_until_shutdown_report(crate::RuntimeShutdownSignal::pending(), test_budget());
         tokio::pin!(driver);
         assert!(driver.as_mut().now_or_never().is_none());
         handle.request_shutdown();
-        let result = timeout(Duration::from_secs(3), driver)
+        let report = timeout(Duration::from_secs(5), driver)
             .await
             .expect("handle starts bounded stop");
-        assert!(matches!(
-            result,
-            Err(Error::Runtime(RuntimeError::ShutdownTimeout { .. }))
-        ));
+        assert!(report.graceful_timed_out());
+        assert!(!report.is_cooperatively_stopped());
     }
 }
