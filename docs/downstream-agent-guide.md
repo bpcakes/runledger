@@ -1084,7 +1084,12 @@ for compile-checked inserted, idempotent, stale, exact-scope, transactional, and
 workflow-rejection cases.
 
 When a transactional keyed enqueue needs to branch on the durable job state,
-use `enqueue_job_with_outcome_tx`. Its `JobEnqueueOutcome` contains the job ID,
+use `enqueue_job_with_outcome_in_transaction` when a hosting adapter keeps its
+transaction opaque, or `enqueue_job_with_outcome_tx` for a native SQLx
+transaction. Implement `PgTransactionExecutor` only for a type whose
+construction establishes one live explicit PostgreSQL transaction; its
+`executor` method exposes SQL execution without exposing a replaceable
+connection. Both functions return a `JobEnqueueOutcome` containing the job ID,
 status, run number, and `Inserted`/`Existing` disposition under the enqueue
 transaction's mutation-ready row lock; do not query `job_queue` directly.
 

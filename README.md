@@ -1599,12 +1599,16 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   derived from the claimed row and worker ID so lifecycle lease fences cannot
   be mixed across jobs. The older stage-bearing
   `update_job_progress_for_lease` remains a deprecated compatibility wrapper.
-- **Transactional enqueue state.** Use `enqueue_job_with_outcome_tx` when the
-  caller needs the job ID together with its locked `status`, `run_number`, and
-  `Inserted`/`Existing` disposition. That API takes a mutation-ready lock on an
-  existing keyed row. `enqueue_job_tx` remains the UUID-only compatibility API
-  and retains key-share concurrency between identical keyed enqueues while
-  composing safely with same-transaction compare-and-requeue.
+- **Transactional enqueue state.** Use
+  `enqueue_job_with_outcome_in_transaction` with a `PgTransactionExecutor` when
+  an adapter must keep the underlying SQLx transaction and connection opaque.
+  It returns the job ID together with its locked `status`, `run_number`, and
+  `Inserted`/`Existing` disposition and takes a mutation-ready lock on an
+  existing keyed row. Native SQLx consumers can keep using
+  `enqueue_job_with_outcome_tx`; it delegates to the same capability path.
+  `enqueue_job_tx` remains the UUID-only native compatibility API and retains
+  key-share concurrency between identical keyed enqueues while composing safely
+  with same-transaction compare-and-requeue.
 - **Compare-and-requeue.** Use pool-owning `compare_and_requeue_job` for a
   standalone recovery or `compare_and_requeue_job_tx` when recovery must compose
   atomically with application writes. Build an exact request from an observed

@@ -1,4 +1,4 @@
-use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
+use crate::{DbPool, DbTx, Error, PgTransactionExecutor, QueryError, QueryErrorCategory, Result};
 
 /// A transaction whose effective isolation was checked as `READ COMMITTED`.
 ///
@@ -103,6 +103,19 @@ pub(crate) async fn ensure_read_committed_tx<'tx, 'db>(
     code: &'static str,
     client_message: &'static str,
 ) -> Result<ReadCommittedTx<'tx, 'db>> {
+    require_read_committed(tx, operation, code, client_message).await?;
+    Ok(ReadCommittedTx { tx })
+}
+
+pub(crate) async fn require_read_committed<T>(
+    tx: &mut T,
+    operation: &'static str,
+    code: &'static str,
+    client_message: &'static str,
+) -> Result<()>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     // SHOW reports the effective isolation for the current transaction, so a
     // caller's SET TRANSACTION change is visible here. PostgreSQL treats READ
     // UNCOMMITTED as READ COMMITTED.
@@ -111,7 +124,7 @@ pub(crate) async fn ensure_read_committed_tx<'tx, 'db>(
     // is not meant to defend against callers changing isolation again later in
     // the same transaction.
     let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
-        .fetch_one(&mut **tx)
+        .fetch_one(tx.executor())
         .await
         .map_err(|error| {
             Error::from_query_sqlx_with_context("inspect transaction isolation", error)
@@ -119,7 +132,7 @@ pub(crate) async fn ensure_read_committed_tx<'tx, 'db>(
 
     let normalized = isolation.to_ascii_lowercase();
     if matches!(normalized.as_str(), "read committed" | "read uncommitted") {
-        return Ok(ReadCommittedTx { tx });
+        return Ok(());
     }
 
     Err(Error::QueryError(QueryError::from_classified(
