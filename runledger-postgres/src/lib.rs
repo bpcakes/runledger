@@ -105,6 +105,13 @@
 //! # }
 //! ```
 //!
+//! A hosting adapter that keeps its SQLx transaction opaque can implement
+//! [`PgTransactionExecutor`] and call
+//! [`jobs::enqueue_job_with_outcome_in_transaction`]. Runledger receives only
+//! SQL execution access; the adapter does not need to expose a replaceable
+//! connection or transaction to application code. Native SQLx callers can keep
+//! using [`jobs::enqueue_job_with_outcome_tx`].
+//!
 //! # Record A Durable Transactional Handoff
 //!
 //! Use an enqueue intent when application state and a future job request must
@@ -326,6 +333,7 @@ mod error;
 pub mod jobs;
 mod migration_identity;
 mod migrations;
+mod transaction_executor;
 
 pub use error::{
     FrameworkConstraintSpec, QueryError, QueryErrorCategory, QueryErrorKind,
@@ -401,9 +409,11 @@ pub mod prelude {
         count_workflow_step_dependencies, count_workflow_step_dependencies_with_scope,
         count_workflow_steps, count_workflow_steps_with_scope,
         delete_promoted_job_enqueue_intents_before,
-        delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, enqueue_job_tx,
-        enqueue_job_with_execution_resource, enqueue_job_with_execution_resource_tx,
-        enqueue_job_with_outcome, enqueue_job_with_outcome_tx, enqueue_or_get_active_workflow,
+        delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, enqueue_job_in_transaction,
+        enqueue_job_tx, enqueue_job_with_execution_resource,
+        enqueue_job_with_execution_resource_in_transaction, enqueue_job_with_execution_resource_tx,
+        enqueue_job_with_outcome, enqueue_job_with_outcome_in_transaction,
+        enqueue_job_with_outcome_tx, enqueue_or_get_active_workflow,
         enqueue_or_get_active_workflow_tx, enqueue_workflow_run, enqueue_workflow_run_handle,
         enqueue_workflow_run_tx, get_job_by_id, get_job_by_id_with_scope,
         get_job_continuation_metrics, get_job_continuation_metrics_with_scope,
@@ -441,9 +451,10 @@ pub mod prelude {
         deactivate_schedules_absent_from_names_tx,
     };
     pub use crate::{
-        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, QueryError, QueryErrorCategory,
-        QueryErrorKind, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
-        WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
+        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgTransactionExecutor, QueryError,
+        QueryErrorCategory, QueryErrorKind, SchemaCompatibilityError,
+        WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
+        ensure_schema_compatible_after_idempotency_cutover,
         ensure_schema_compatible_after_idempotency_cutover_with_connection,
         migrate_after_idempotency_cutover,
     };
@@ -454,6 +465,7 @@ pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub use error::RollbackFailure;
+pub use transaction_executor::PgTransactionExecutor;
 
 #[derive(Debug)]
 pub enum Error {

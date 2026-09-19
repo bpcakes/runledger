@@ -6,6 +6,10 @@ All notable changes to this workspace are documented here.
 
 ### Added
 
+- Add `PgTransactionExecutor` and capability-based direct-enqueue functions so
+  adapters can compose application writes and Runledger enqueueing in one
+  caller-owned transaction without exposing a replaceable SQLx connection or
+  transaction. Existing `DbTx` entry points remain compatibility wrappers.
 - Add `RuntimeError::ShutdownBudgetOverflow` with both graceful and abort
   allowances when their sum cannot fit in a duration. Representable totals that
   cannot form a deadline still use `ShutdownTimeoutTooLarge` with the total.

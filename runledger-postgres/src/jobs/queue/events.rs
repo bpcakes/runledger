@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use runledger_core::jobs::JobType;
 use sqlx::types::Uuid;
 
-use crate::{DbTx, Error, Result};
+use crate::{DbTx, Error, PgTransactionExecutor, Result};
 
 pub(crate) use super::super::types::HANDLER_CONTINUATION_REASON;
 use super::super::types::{
@@ -27,10 +27,13 @@ pub(crate) struct EnqueuedJobEvent<'a> {
     pub(crate) payload: EnqueuedEventPayload<'a>,
 }
 
-pub(crate) async fn insert_enqueued_event_tx(
-    tx: &mut DbTx<'_>,
+pub(crate) async fn insert_enqueued_event_tx<T>(
+    tx: &mut T,
     event: EnqueuedJobEvent<'_>,
-) -> Result<()> {
+) -> Result<()>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     let (replayed_from_job_id, replayed_from_run_number, replay_request_key, replay_reason) =
         match event.payload {
             EnqueuedEventPayload::Ordinary => (None, None, None, None),
@@ -77,7 +80,7 @@ pub(crate) async fn insert_enqueued_event_tx(
         replay_request_key,
         replay_reason,
     )
-    .execute(&mut **tx)
+    .execute(tx.executor())
     .await
     .map_err(|error| Error::from_query_sqlx_with_context("enqueue job event", error))?;
 

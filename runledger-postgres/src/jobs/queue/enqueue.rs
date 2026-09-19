@@ -4,10 +4,10 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
-use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
+use crate::{DbPool, DbTx, Error, PgTransactionExecutor, QueryError, QueryErrorCategory, Result};
 
 use super::super::row_decode::parse_job_status;
-use super::super::transaction_isolation::{ReadCommittedTx, ensure_read_committed_tx};
+use super::super::transaction_isolation::{ReadCommittedTx, require_read_committed};
 use super::super::types::{JobEnqueue, JobEnqueueDisposition, JobEnqueueOutcome};
 use super::events::{EnqueuedEventPayload, EnqueuedJobEvent, insert_enqueued_event_tx};
 
@@ -136,6 +136,23 @@ pub async fn enqueue_job_with_outcome_tx(
     tx: &mut DbTx<'_>,
     payload: &JobEnqueue<'_>,
 ) -> Result<JobEnqueueOutcome> {
+    enqueue_job_with_outcome_in_transaction(tx, payload).await
+}
+
+/// Enqueues a job through an opaque caller-owned transaction capability.
+///
+/// This is the protected integration path for adapters that must compose
+/// application writes and Runledger enqueueing atomically without exposing a
+/// replaceable SQLx connection or transaction. The executor capability must
+/// represent one live explicit transaction for the complete call; see
+/// [`PgTransactionExecutor`].
+pub async fn enqueue_job_with_outcome_in_transaction<T>(
+    tx: &mut T,
+    payload: &JobEnqueue<'_>,
+) -> Result<JobEnqueueOutcome>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     enqueue_job_with_existing_lock_tx(
         tx,
         payload,
@@ -163,6 +180,23 @@ pub async fn enqueue_job_with_execution_resource_tx(
     payload: &JobEnqueue<'_>,
     execution_resource_key: &str,
 ) -> Result<JobEnqueueOutcome> {
+    enqueue_job_with_execution_resource_in_transaction(tx, payload, execution_resource_key).await
+}
+
+/// Enqueues a resource-constrained job through an opaque caller-owned
+/// transaction capability.
+///
+/// This has the same resource and idempotency contract as
+/// [`enqueue_job_with_execution_resource_tx`] while allowing the transaction
+/// owner to hide its native SQLx representation.
+pub async fn enqueue_job_with_execution_resource_in_transaction<T>(
+    tx: &mut T,
+    payload: &JobEnqueue<'_>,
+    execution_resource_key: &str,
+) -> Result<JobEnqueueOutcome>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     enqueue_job_with_existing_lock_tx(
         tx,
         payload,
@@ -233,13 +267,16 @@ pub(super) async fn enqueue_job_from_intent_tx(
     }
 }
 
-async fn enqueue_job_with_existing_lock_tx(
-    tx: &mut DbTx<'_>,
+async fn enqueue_job_with_existing_lock_tx<T>(
+    tx: &mut T,
     payload: &JobEnqueue<'_>,
     execution_resource_key: Option<&str>,
     existing_job_lock: ExistingJobLock,
     event_payload: EnqueuedEventPayload<'_>,
-) -> Result<JobEnqueueOutcome> {
+) -> Result<JobEnqueueOutcome>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     let stage = payload
         .stage
         .unwrap_or(runledger_core::jobs::JobStage::Queued)
@@ -249,7 +286,7 @@ async fn enqueue_job_with_existing_lock_tx(
     }
     match PreparedEnqueue::new(payload, stage, execution_resource_key)? {
         PreparedEnqueue::Keyed(prepared) => {
-            let mut read_committed_tx = ensure_read_committed_tx(
+            require_read_committed(
                 tx,
                 "job idempotent enqueue",
                 "job.enqueue_idempotency_unsupported_isolation",
@@ -257,10 +294,10 @@ async fn enqueue_job_with_existing_lock_tx(
             )
             .await?;
 
-            enqueue_idempotent_job_with_existing_lock_read_committed_tx(
-                &mut read_committed_tx,
+            enqueue_job_with_existing_lock_tx_inner(
+                tx,
                 payload,
-                prepared,
+                PreparedEnqueue::Keyed(prepared),
                 execution_resource_key,
                 existing_job_lock,
                 event_payload,
@@ -304,15 +341,18 @@ async fn enqueue_idempotent_job_with_existing_lock_read_committed_tx(
     .await
 }
 
-async fn enqueue_job_with_existing_lock_tx_inner(
-    tx: &mut DbTx<'_>,
+async fn enqueue_job_with_existing_lock_tx_inner<T>(
+    tx: &mut T,
     payload: &JobEnqueue<'_>,
     prepared: PreparedEnqueue<'_>,
     execution_resource_key: Option<&str>,
     existing_job_lock: ExistingJobLock,
     event_payload: EnqueuedEventPayload<'_>,
     stage: &'static str,
-) -> Result<JobEnqueueOutcome> {
+) -> Result<JobEnqueueOutcome>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     // The conflict clause is selected from static literals only; all request
     // data remains bound below. This dynamic SQL is not SQLx macro-checked, so
     // keep the returned columns and bind order aligned with EnqueuedJobRow and
@@ -370,7 +410,7 @@ async fn enqueue_job_with_existing_lock_tx_inner(
         .bind(stage)
         .bind(prepared.enqueue_request())
         .bind(execution_resource_key)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.executor())
         .await
         .map_err(|error| Error::from_query_sqlx_with_context("enqueue job", error))?;
 
@@ -414,6 +454,15 @@ async fn enqueue_job_with_existing_lock_tx_inner(
 
 /// Enqueues a job while preserving the original UUID-only API.
 pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Result<Uuid> {
+    enqueue_job_in_transaction(tx, payload).await
+}
+
+/// Enqueues a job through an opaque caller-owned transaction capability while
+/// preserving the UUID-only result contract.
+pub async fn enqueue_job_in_transaction<T>(tx: &mut T, payload: &JobEnqueue<'_>) -> Result<Uuid>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     enqueue_job_with_existing_lock_tx(
         tx,
         payload,
@@ -429,13 +478,16 @@ pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Resu
 // stored snapshot preserves requested initial fields such as stage and
 // next_run_at, while staying independent from later stage transitions and retry
 // scheduling.
-async fn resolve_existing_idempotent_job_tx(
-    tx: &mut DbTx<'_>,
+async fn resolve_existing_idempotent_job_tx<T>(
+    tx: &mut T,
     payload: &JobEnqueue<'_>,
     idempotency_key: &str,
     enqueue_request: &Value,
     existing_job_lock: ExistingJobLock,
-) -> Result<JobEnqueueOutcome> {
+) -> Result<JobEnqueueOutcome>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     let Some(existing) = load_existing_idempotent_job_tx(
         tx,
         payload,
@@ -471,7 +523,10 @@ fn job_definition_unavailable_error() -> Error {
     ))
 }
 
-async fn job_definition_available_tx(tx: &mut DbTx<'_>, job_type: &str) -> Result<bool> {
+async fn job_definition_available_tx<T>(tx: &mut T, job_type: &str) -> Result<bool>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
@@ -481,20 +536,23 @@ async fn job_definition_available_tx(tx: &mut DbTx<'_>, job_type: &str) -> Resul
          )",
     )
     .bind(job_type)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.executor())
     .await
     .map_err(|error| {
         Error::from_query_sqlx_with_context("check job definition availability", error)
     })
 }
 
-async fn load_existing_idempotent_job_tx(
-    tx: &mut DbTx<'_>,
+async fn load_existing_idempotent_job_tx<T>(
+    tx: &mut T,
     payload: &JobEnqueue<'_>,
     idempotency_key: &str,
     enqueue_request: &Value,
     existing_job_lock: ExistingJobLock,
-) -> Result<Option<ExistingIdempotentJobRow>> {
+) -> Result<Option<ExistingIdempotentJobRow>>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     // The outcome API gives callers a mutation-ready lock. The legacy UUID-only
     // API uses KEY SHARE so identical keyed enqueues remain concurrent while a
     // later compare-and-requeue can acquire NO KEY UPDATE without a lock upgrade
@@ -522,7 +580,7 @@ async fn load_existing_idempotent_job_tx(
                 idempotency_key,
                 enqueue_request,
             )
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.executor())
             .await
         }
         (None, ExistingJobLock::MutationReady) => {
@@ -543,7 +601,7 @@ async fn load_existing_idempotent_job_tx(
                 idempotency_key,
                 enqueue_request,
             )
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.executor())
             .await
         }
         (Some(organization_id), ExistingJobLock::KeyShare) => {
@@ -565,7 +623,7 @@ async fn load_existing_idempotent_job_tx(
                 idempotency_key,
                 enqueue_request,
             )
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.executor())
             .await
         }
         (None, ExistingJobLock::KeyShare) => {
@@ -586,7 +644,7 @@ async fn load_existing_idempotent_job_tx(
                 idempotency_key,
                 enqueue_request,
             )
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.executor())
             .await
         }
     };

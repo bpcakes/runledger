@@ -15,12 +15,12 @@ use runledger_postgres::jobs::{
     JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentStatus, JobListFilter, JobQueueRecord,
     JobRequeueStatePolicy, JobScope, cancel_job_with_scope, compare_and_replay_succeeded_job,
     compare_and_replay_succeeded_job_tx, compare_and_requeue_job, compare_and_requeue_job_tx,
-    enqueue_job_with_outcome_tx, get_job_by_id, get_job_continuation_metrics,
+    enqueue_job_with_outcome_in_transaction, get_job_by_id, get_job_continuation_metrics,
     get_job_enqueue_intent_by_id, record_job_enqueue_intent_tx, upsert_job_definition_tx,
 };
 use runledger_postgres::prelude::{
     DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord,
-    enqueue_job_with_outcome, list_job_events,
+    PgTransactionExecutor, enqueue_job_with_outcome, list_job_events,
 };
 use runledger_runtime::Supervisor;
 use runledger_runtime::catalog::JobCatalog;
@@ -60,6 +60,30 @@ struct SmokeRuntime {
 struct RecoveryJobs {
     keyed: Uuid,
     transactional: Uuid,
+}
+
+struct OpaqueConsumerTransaction<'a> {
+    inner: sqlx::Transaction<'a, sqlx::Postgres>,
+}
+
+impl<'a> OpaqueConsumerTransaction<'a> {
+    fn new(inner: sqlx::Transaction<'a, sqlx::Postgres>) -> Self {
+        Self { inner }
+    }
+
+    async fn commit(self) -> Result<(), sqlx::Error> {
+        self.inner.commit().await
+    }
+
+    async fn rollback(self) -> Result<(), sqlx::Error> {
+        self.inner.rollback().await
+    }
+}
+
+impl PgTransactionExecutor for OpaqueConsumerTransaction<'_> {
+    fn executor(&mut self) -> impl sqlx::Executor<'_, Database = sqlx::Postgres> {
+        &mut *self.inner
+    }
 }
 
 struct SmokeJobs {
@@ -228,21 +252,37 @@ async fn assert_keyed_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid 
     .await
     .expect("cancel recovery job");
 
-    let mut existing_enqueue_tx = pool.begin().await.expect("begin existing enqueue");
+    let existing_enqueue_tx = pool.begin().await.expect("begin existing enqueue");
+    let mut existing_enqueue_tx = OpaqueConsumerTransaction::new(existing_enqueue_tx);
     let existing_recovery =
-        enqueue_job_with_outcome_tx(&mut existing_enqueue_tx, &recovery_request)
+        enqueue_job_with_outcome_in_transaction(&mut existing_enqueue_tx, &recovery_request)
             .await
-            .expect("resolve existing recovery job");
+            .expect("resolve existing recovery job through opaque transaction");
     assert_eq!(existing_recovery.job_id, inserted_recovery.job_id);
     assert_eq!(existing_recovery.status, JobStatus::Canceled);
     assert_eq!(
         existing_recovery.disposition,
         JobEnqueueDisposition::Existing
     );
+    record_consumer_audit_tx(
+        &mut existing_enqueue_tx,
+        "opaque-transactional-enqueue",
+        inserted_recovery.job_id,
+        existing_recovery.job_id,
+    )
+    .await
+    .expect("record consumer audit through the same opaque transaction");
     existing_enqueue_tx
         .commit()
         .await
         .expect("commit existing enqueue");
+    assert_consumer_audit(
+        pool,
+        "opaque-transactional-enqueue",
+        inserted_recovery.job_id,
+        existing_recovery.job_id,
+    )
+    .await;
 
     let observed_recovery = get_job_by_id(pool, None, inserted_recovery.job_id)
         .await
@@ -262,6 +302,114 @@ async fn assert_keyed_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid 
         CompareAndRequeueJobOutcome::Requeued { .. }
     ));
     inserted_recovery.job_id
+}
+
+async fn assert_opaque_transaction_atomicity(pool: &DbPool) {
+    assert_opaque_transaction_rollback(pool).await;
+    assert_opaque_transaction_commit(pool).await;
+}
+
+async fn assert_opaque_transaction_rollback(pool: &DbPool) {
+    let rollback_payload = json!({"kind": "success", "source": "opaque-rollback"});
+    let rollback_request = JobEnqueue {
+        job_type: JobType::new(SMOKE_JOB_TYPE),
+        organization_id: None,
+        payload: &rollback_payload,
+        priority: None,
+        max_attempts: None,
+        timeout_seconds: None,
+        next_run_at: None,
+        idempotency_key: Some("external-smoke-opaque-rollback"),
+        stage: None,
+    };
+    let rollback_tx = pool
+        .begin()
+        .await
+        .expect("begin opaque rollback transaction");
+    let mut rollback_tx = OpaqueConsumerTransaction::new(rollback_tx);
+    let rolled_back = enqueue_job_with_outcome_in_transaction(&mut rollback_tx, &rollback_request)
+        .await
+        .expect("enqueue through opaque rollback transaction");
+    assert_eq!(rolled_back.disposition, JobEnqueueDisposition::Inserted);
+    record_consumer_audit_tx(
+        &mut rollback_tx,
+        "opaque-transactional-enqueue-rollback",
+        rolled_back.job_id,
+        rolled_back.job_id,
+    )
+    .await
+    .expect("record audit through opaque rollback transaction");
+    rollback_tx
+        .rollback()
+        .await
+        .expect("roll back opaque enqueue and audit together");
+
+    assert!(
+        get_job_by_id(pool, None, rolled_back.job_id)
+            .await
+            .expect("check rolled-back opaque enqueue")
+            .is_none(),
+        "rolling back the opaque transaction must remove the queued job"
+    );
+    assert!(
+        list_job_events(pool, None, rolled_back.job_id, 100, None)
+            .await
+            .expect("check rolled-back opaque enqueue event")
+            .is_empty(),
+        "rolling back the opaque transaction must remove its enqueue event"
+    );
+    assert_consumer_audit_absent(pool, "opaque-transactional-enqueue-rollback").await;
+}
+
+async fn assert_opaque_transaction_commit(pool: &DbPool) {
+    let commit_payload = json!({"kind": "success", "source": "opaque-commit"});
+    let commit_request = JobEnqueue {
+        job_type: JobType::new(SMOKE_JOB_TYPE),
+        organization_id: None,
+        payload: &commit_payload,
+        priority: None,
+        max_attempts: None,
+        timeout_seconds: None,
+        next_run_at: None,
+        idempotency_key: Some("external-smoke-opaque-commit"),
+        stage: None,
+    };
+    let commit_tx = pool.begin().await.expect("begin opaque commit transaction");
+    let mut commit_tx = OpaqueConsumerTransaction::new(commit_tx);
+    let committed = enqueue_job_with_outcome_in_transaction(&mut commit_tx, &commit_request)
+        .await
+        .expect("enqueue through opaque commit transaction");
+    assert_eq!(committed.disposition, JobEnqueueDisposition::Inserted);
+    record_consumer_audit_tx(
+        &mut commit_tx,
+        "opaque-transactional-enqueue-commit",
+        committed.job_id,
+        committed.job_id,
+    )
+    .await
+    .expect("record audit through opaque commit transaction");
+    commit_tx
+        .commit()
+        .await
+        .expect("commit opaque enqueue and audit together");
+
+    let committed_job = get_job_by_id(pool, None, committed.job_id)
+        .await
+        .expect("load committed opaque enqueue")
+        .expect("opaque enqueue must persist with its audit row");
+    assert_eq!(committed_job.status, JobStatus::Pending);
+    let committed_events = list_job_events(pool, None, committed.job_id, 100, None)
+        .await
+        .expect("load committed opaque enqueue event");
+    assert_eq!(committed_events.len(), 1);
+    assert_eq!(committed_events[0].event_type, JobEventType::Enqueued);
+    assert_consumer_audit(
+        pool,
+        "opaque-transactional-enqueue-commit",
+        committed.job_id,
+        committed.job_id,
+    )
+    .await;
 }
 
 async fn assert_transactional_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid {
@@ -560,6 +708,7 @@ async fn packaged_crates_support_external_consumer_embedding() {
             .await;
     let (intent_id, intent_payload) = setup_consumer_schema_and_intent(&pool).await;
     register_smoke_job_definition(&pool).await;
+    assert_opaque_transaction_atomicity(&pool).await;
     let recovery_jobs = assert_recovery_apis(&pool).await;
     let runtime = start_smoke_runtime(&pool).await;
     let jobs = enqueue_smoke_jobs(&pool, intent_id, &intent_payload).await;
@@ -828,12 +977,15 @@ async fn create_consumer_audit_table(pool: &DbPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn record_consumer_audit_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+async fn record_consumer_audit_tx<T>(
+    tx: &mut T,
     operation_key: &str,
     source_job_id: sqlx::types::Uuid,
     result_job_id: sqlx::types::Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), sqlx::Error>
+where
+    T: PgTransactionExecutor + ?Sized,
+{
     sqlx::query(
         "INSERT INTO external_consumer_operation_audit (
             operation_key,
@@ -845,7 +997,7 @@ async fn record_consumer_audit_tx(
     .bind(operation_key)
     .bind(source_job_id)
     .bind(result_job_id)
-    .execute(&mut **tx)
+    .execute(tx.executor())
     .await?;
     Ok(())
 }
@@ -868,6 +1020,21 @@ async fn assert_consumer_audit(
         .expect("load consumer-owned audit row");
     assert_eq!(source_job_id, expected_source_job_id);
     assert_eq!(result_job_id, expected_result_job_id);
+}
+
+async fn assert_consumer_audit_absent(pool: &DbPool, operation_key: &str) {
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM external_consumer_operation_audit
+            WHERE operation_key = $1
+         )",
+    )
+    .bind(operation_key)
+    .fetch_one(pool)
+    .await
+    .expect("check consumer audit absence");
+    assert!(!exists, "rolled-back consumer audit must not persist");
 }
 
 fn assert_successful_replay_event(
