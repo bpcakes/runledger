@@ -470,6 +470,12 @@ branch on stable codes. Release 0.12 adds the exhaustive
 `QueryErrorKind::PostgresLockNotAvailable` variant; downstream exhaustive
 matches must handle it when upgrading.
 
+`Error::CommitUnconfirmed` is not a failure: a function that owns its
+transaction returns it when `COMMIT` was not acknowledged, and the write may be
+durable. Give it its own match arm. Never route it into a generic retry; read
+the durable state back, or repeat only operations that are idempotent by key.
+Report `CommitUnconfirmed::CODE` and `CommitUnconfirmed::CLIENT_MESSAGE`.
+
 ## More Complete Examples
 
 - `runledger-postgres/examples/enqueue_job.rs`

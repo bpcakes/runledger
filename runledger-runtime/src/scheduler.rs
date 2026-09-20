@@ -100,7 +100,10 @@ async fn materialize_due_schedules(
     tx.commit()
         .await
         .map_err(|error| SchedulerError::CommitTransaction {
-            source: runledger_postgres::Error::ConnectionError(error.to_string()),
+            source: runledger_postgres::Error::commit_unconfirmed(
+                "commit scheduler transaction",
+                error,
+            ),
         })?;
     Ok(())
 }

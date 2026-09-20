@@ -31,6 +31,10 @@ PostgreSQL persistence for durable execution: queue lifecycle, workflow DAG stat
   rollback failure retains the operation error and rollback error together;
   neither default formatting nor automatic logging prints their contents. A
   failed commit does not establish whether cancellation happened or permit replay.
+- Map every owned `tx.commit()` error with `Error::commit_unconfirmed(operation, error)`.
+  Never use `ConnectionError` or `from_query_sqlx*` there: an unconfirmed commit is
+  an unknown outcome, and SQLSTATE classification must not absorb it. `operation`
+  is fixed text with no request data.
 
 ## Common commands
 - `cargo check -p runledger-postgres`

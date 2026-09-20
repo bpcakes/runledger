@@ -83,21 +83,16 @@ async fn commit_failure_retains_source_and_does_not_claim_cancellation() {
     assert_eq!(status, "PENDING");
     assert_eq!(events, 0);
     teardown_ephemeral_pool(pool, database).await;
-    let Error::QueryError(query) = &error else {
-        panic!("query boundary required")
+    // An unknown outcome is its own top-level variant: a `QueryError` match,
+    // and any SQLSTATE classification behind it, can never absorb it.
+    let Error::CommitUnconfirmed(unconfirmed) = &error else {
+        panic!("unconfirmed commit must not be a query classification")
     };
+    assert_eq!(unconfirmed.operation(), "commit job cancellation");
+    assert_eq!(unconfirmed.sqlstate().as_deref(), Some("23514"));
     assert_eq!(
-        query.kind(),
-        Some(runledger_postgres::QueryErrorKind::TransactionCommitUnconfirmed)
-    );
-    assert_eq!(query.code(), "db.transaction_commit_unconfirmed");
-    assert_eq!(
-        query.category(),
-        runledger_postgres::QueryErrorCategory::Internal
-    );
-    assert_eq!(
-        query.client_message(),
-        "Database transaction commit was not confirmed."
+        runledger_postgres::CommitUnconfirmed::CODE,
+        "db.transaction_commit_unconfirmed"
     );
 }
 

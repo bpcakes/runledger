@@ -278,6 +278,7 @@ pub async fn recover_workflow_run(
     request: &WorkflowRecoveryRequest<'_>,
 ) -> Result<WorkflowRecoveryOutcome> {
     const OPERATION: &str = "workflow recovery";
+    const COMMIT_OPERATION: &str = "commit workflow recovery transaction";
 
     validate_recovery_request(request)?;
     let mut tx = begin_owned_read_committed_tx(pool, OPERATION).await?;
@@ -285,7 +286,7 @@ pub async fn recover_workflow_run(
         let mut read_committed_tx = tx.as_read_committed_tx();
         recover_workflow_run_read_committed_tx(&mut read_committed_tx, request).await
     };
-    finish_owned_transaction(tx, OPERATION, result).await
+    finish_owned_transaction(tx, OPERATION, COMMIT_OPERATION, result).await
 }
 
 /// Transactional counterpart to [`recover_workflow_run`].

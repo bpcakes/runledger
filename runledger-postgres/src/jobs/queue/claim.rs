@@ -140,7 +140,7 @@ async fn claim_jobs_inner(pool: &DbPool, request: ClaimRequest<'_>) -> Result<Ve
     if claimed.is_empty() {
         tx.commit()
             .await
-            .map_err(|error| Error::ConnectionError(error.to_string()))?;
+            .map_err(|error| Error::commit_unconfirmed("commit job claim", error))?;
         return Ok(claimed);
     }
 
@@ -148,7 +148,7 @@ async fn claim_jobs_inner(pool: &DbPool, request: ClaimRequest<'_>) -> Result<Ve
 
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit job claim", error))?;
 
     Ok(claimed)
 }

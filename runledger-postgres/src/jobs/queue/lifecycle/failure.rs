@@ -332,9 +332,9 @@ pub async fn complete_job_failure_with_outcome_for_lease(
         }
     };
 
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed("commit complete job failure with outcome for lease", error)
+    })?;
 
     Ok(JobFailureCompletionOutcome {
         job_id: identity.job_id,

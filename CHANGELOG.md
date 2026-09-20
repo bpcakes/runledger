@@ -202,12 +202,21 @@ All notable changes to this workspace are documented here.
   task's observed join succeeds. Abort requests that lose to normal completion
   no longer count as historical callback interruptions.
 
-- Breaking: owned cancellation begin/commit failures have fixed internal query
-  codes `db.transaction_begin_failed` and `db.transaction_commit_unconfirmed`.
-  The added `QueryErrorKind::TransactionBeginFailed` and
-  `TransactionCommitUnconfirmed` variants require exhaustive-match updates.
-  SQLx source/SQLSTATE remain available, without turning deferred COMMIT failures
-  into business-rule classifications. Neither code authorizes replay.
+- Breaking: an owned transaction whose `COMMIT` does not confirm success returns
+  the top-level `Error::CommitUnconfirmed`, never a `QueryError` kind or
+  `ConnectionError(String)`. The outcome is unknown rather than failed, so an
+  exhaustive `Error` match must decide what to do and SQLSTATE classification
+  cannot turn a deferred COMMIT failure into a business-rule rejection. This
+  applies to every Runledger function that commits its own transaction (enqueue,
+  claim, lifecycle completion, schedules, workflows, reaper, admin mutations,
+  cancellation) and to the sources retained by `SchedulerError::CommitTransaction`
+  and the catalog commit failures. `CommitUnconfirmed` retains the SQLx source,
+  SQLSTATE and fixed operation text, exposes `CODE`
+  (`db.transaction_commit_unconfirmed`) and `CLIENT_MESSAGE`, and redacts the
+  source when formatted. It does not authorize replay.
+- Breaking: an owned cancellation begin failure has the fixed internal query code
+  `db.transaction_begin_failed`. The added `QueryErrorKind::TransactionBeginFailed`
+  variant requires exhaustive-match updates.
 - Clarify that enclosing stop-clock propagation and dependency settlement use
   the same first-request clock and complete report contract through both terminal
   methods.
@@ -226,8 +235,8 @@ All notable changes to this workspace are documented here.
   delayed notifications or concurrent collection cannot hide completed joins in
   the final report. Normal task observation remains notification-driven.
 
-- Breaking: cancellation begin/commit errors now use `Error::QueryError` with
-  concrete SQLx sources instead of `ConnectionError(String)`. The added public
+- Breaking: cancellation begin errors now use `Error::QueryError` with a
+  concrete SQLx source instead of `ConnectionError(String)`. The added public
   `Error::RollbackFailure` variant requires downstream exhaustive matches to add
   an arm. Failed rollback wraps the original operation, including not-found or
   invalid-state classification, without replacing it.
@@ -260,9 +269,15 @@ All notable changes to this workspace are documented here.
 - Update exhaustive `runledger_postgres::Error` matches for `RollbackFailure`.
   Inspect `pair.operation` for the original query classification and retain
   `pair.rollback` separately. A wrapped not-found result is not a clean rollback.
-  Cancellation begin/commit failures no longer match `ConnectionError`; inspect
-  the retained SQLx source for outage diagnostics. Query classification alone
-  does not authorize retry, and a commit error does not prove cancellation failed.
+  Cancellation begin failures no longer match `ConnectionError`; inspect the
+  retained SQLx source for outage diagnostics. Query classification alone does
+  not authorize retry.
+- Add an `Error::CommitUnconfirmed` arm to exhaustive `runledger_postgres::Error`
+  matches, and stop treating commit failures as `ConnectionError`. Do not route
+  this arm into a generic retry: the transaction may have committed. Read the
+  durable state back, or repeat only operations that are idempotent by key.
+  Report `CommitUnconfirmed::CODE`/`CLIENT_MESSAGE` to clients instead of a
+  failure that claims nothing happened.
 - Migrate off the removed `Supervisor` terminal methods. `shutdown()` and
   `shutdown_with_timeout(timeout)` become `shutdown_report(budget)`;
   `run_until_shutdown(signal, timeout)` becomes

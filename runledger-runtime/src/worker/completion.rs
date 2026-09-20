@@ -464,14 +464,25 @@ pub(super) async fn complete_job_failure_after_handler(
 }
 
 pub(super) fn completion_persist_error_diagnostic(error: &runledger_postgres::Error) -> String {
-    let runledger_postgres::Error::QueryError(query_error) = error else {
-        return "client_message=\"Database operation failed.\"; code=db.operation_failed"
-            .to_owned();
+    let (client_message, code) = match error {
+        runledger_postgres::Error::QueryError(query_error) => {
+            (query_error.client_message(), query_error.code())
+        }
+        runledger_postgres::Error::CommitUnconfirmed(_) => (
+            runledger_postgres::CommitUnconfirmed::CLIENT_MESSAGE,
+            runledger_postgres::CommitUnconfirmed::CODE,
+        ),
+        runledger_postgres::Error::ConfigError(_)
+        | runledger_postgres::Error::ConnectionError(_)
+        | runledger_postgres::Error::MigrationError(_)
+        | runledger_postgres::Error::RollbackFailure(_) => {
+            ("Database operation failed.", "db.operation_failed")
+        }
     };
 
     [
-        format!("client_message={:?}", query_error.client_message()),
-        format!("code={}", query_error.code()),
+        format!("client_message={client_message:?}"),
+        format!("code={code}"),
     ]
     .join("; ")
 }
@@ -537,7 +548,6 @@ fn invalid_continuation_failure_from_error(
             | QueryErrorKind::JobWorkflowRequeueNotSupported
             | QueryErrorKind::PostgresLockNotAvailable
             | QueryErrorKind::TransactionBeginFailed
-            | QueryErrorKind::TransactionCommitUnconfirmed
             | QueryErrorKind::WorkflowReleaseConflict,
         )
         | None => None,

@@ -99,7 +99,7 @@ pub async fn heartbeat_job_for_lease(
 
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit heartbeat job for lease", error))?;
 
     Ok(())
 }

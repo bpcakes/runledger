@@ -130,6 +130,64 @@ async fn records_without_definition_and_enforces_strict_transactional_idempotenc
 }
 
 #[tokio::test]
+async fn owned_record_reports_deferred_commit_failure_as_unconfirmed() {
+    const IDEMPOTENCY_KEY: &str = "deferred-commit-failure";
+    const PRIVATE_FAILURE: &str = "private deferred enqueue-intent failure";
+
+    let (pool, database) =
+        setup_ephemeral_pool("postgres_enqueue_intent_commit_unconfirmed", 2).await;
+    record_postgres_server_version(&pool, "enqueue-intent commit-unconfirmed regression").await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_enqueue_intent_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'private deferred enqueue-intent failure' USING ERRCODE = '23514';
+         END $$;
+         CREATE CONSTRAINT TRIGGER reject_enqueue_intent_commit
+         AFTER INSERT ON job_enqueue_intents
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW EXECUTE FUNCTION reject_enqueue_intent_commit();",
+    )
+    .execute(&pool)
+    .await
+    .expect("install deferred commit failure");
+
+    let payload = json!({"event": "deferred-commit"});
+    let intent = JobEnqueueIntent::new(JobType::new(JOB_TYPE), &payload, IDEMPOTENCY_KEY);
+    let error = record_job_enqueue_intent(&pool, &intent)
+        .await
+        .expect_err("deferred constraint rejects commit");
+
+    let runledger_postgres::Error::CommitUnconfirmed(unconfirmed) = &error else {
+        panic!("shared owned-transaction helper must preserve the unknown commit outcome")
+    };
+    assert_eq!(
+        unconfirmed.operation(),
+        "commit record job enqueue intent transaction"
+    );
+    assert_eq!(unconfirmed.sqlstate().as_deref(), Some("23514"));
+    let source = unconfirmed
+        .sqlx_error()
+        .as_database_error()
+        .expect("database commit source");
+    assert_eq!(source.message(), PRIVATE_FAILURE);
+    assert!(!format!("{error:?} {error}").contains(PRIVATE_FAILURE));
+
+    let durable_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM job_enqueue_intents
+         WHERE job_type = $1 AND idempotency_key = $2",
+    )
+    .bind(JOB_TYPE)
+    .bind(IDEMPOTENCY_KEY)
+    .fetch_one(&pool)
+    .await
+    .expect("independent durable readback");
+    assert_eq!(durable_rows, 0);
+
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
 async fn jsonb_numeric_normalization_preserves_idempotency_and_promotion() {
     let (pool, database) = setup_ephemeral_pool("postgres_enqueue_intent_jsonb_numeric", 4).await;
     let exponent_payload = json!({"value": 1.7e18});

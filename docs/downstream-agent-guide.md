@@ -1108,15 +1108,23 @@ compile-checked cross-crate runtime decisions. Application and protocol logic
 should normally branch on the stable string code, not broad categories or
 database text.
 
+Every function that commits its own transaction reports an unconfirmed `COMMIT`
+as the top-level `Error::CommitUnconfirmed`, never as `QueryError` or
+`ConnectionError`. The outcome is unknown, not failed: the server may have
+committed before the acknowledgement was lost. Match it explicitly and do not
+send it down a generic retry path. Read the durable state back, or repeat only
+operations that are idempotent by key. `CommitUnconfirmed` exposes `operation()`,
+`sqlx_error()`, `sqlstate()`, and the stable `CODE`
+(`db.transaction_commit_unconfirmed`) and `CLIENT_MESSAGE` for adapters. A
+deferred constraint SQLSTATE at COMMIT is diagnostic metadata, never a
+statement's business-rule/validation rejection.
+
 Cancellation has an additional error boundary. `cancel_job_with_scope` and
-`cancel_job` retain begin/commit SQLx causes in `Error::QueryError`, rather than
-`ConnectionError(String)`. Begin failures use the fixed internal code
-`db.transaction_begin_failed` and `QueryErrorKind::TransactionBeginFailed`;
-commit failures use `db.transaction_commit_unconfirmed` and
-`QueryErrorKind::TransactionCommitUnconfirmed`. A deferred constraint SQLSTATE at
-COMMIT is retained as diagnostic metadata, never reclassified as a statement's
-business-rule/validation rejection. These kinds require updates to exhaustive
-`QueryErrorKind` matches. Their owned transaction explicitly uses READ COMMITTED;
+`cancel_job` retain the begin SQLx cause in `Error::QueryError`, rather than
+`ConnectionError(String)`, with the fixed internal code
+`db.transaction_begin_failed` and `QueryErrorKind::TransactionBeginFailed`. This
+kind requires updates to exhaustive `QueryErrorKind` matches. The commit failure
+is `Error::CommitUnconfirmed` as above. Their owned transaction explicitly uses READ COMMITTED;
 the operation does not change the session's default isolation. If explicit
 rollback also fails, `Error::RollbackFailure` retains both `operation` and
 `rollback`. Inspect the operation recursively for the original classification,
@@ -1124,8 +1132,8 @@ including not-found or invalid state, while retaining the rollback failure. Upda
 exhaustive Error matches. Neither Display text nor a query code establishes the
 commit/rollback outcome or authorizes replay; inspect concrete SQLx sources only
 at a trusted boundary, and keep both errors out of untrusted logs and responses.
-This dual-error behavior currently belongs to cancellation; other transaction
-APIs retain their documented error contracts.
+This dual-error rollback behavior currently belongs to cancellation; other
+transaction APIs retain their documented rollback contracts.
 
 ## Catalog Rule
 

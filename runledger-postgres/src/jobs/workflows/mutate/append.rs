@@ -68,7 +68,7 @@ pub async fn append_workflow_steps(
     let result = append_workflow_steps_tx(&mut tx, input).await?;
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit append workflow steps", error))?;
     Ok(result)
 }
 

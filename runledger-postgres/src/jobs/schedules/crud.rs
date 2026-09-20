@@ -35,7 +35,7 @@ pub async fn upsert_job_schedule(
     let schedule = upsert_job_schedule_tx(&mut tx, payload).await?;
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit upsert job schedule", error))?;
     Ok(schedule)
 }
 
@@ -133,7 +133,7 @@ pub async fn set_job_schedule_active(pool: &DbPool, name: &str, is_active: bool)
     let updated = set_job_schedule_active_tx(&mut tx, name, is_active).await?;
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit set job schedule active", error))?;
     Ok(updated)
 }
 
@@ -205,9 +205,9 @@ pub async fn set_job_schedule_next_fire_at(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     let updated = set_job_schedule_next_fire_at_tx(&mut tx, name, next_fire_at).await?;
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed("commit set job schedule next fire at", error)
+    })?;
     Ok(updated)
 }
 

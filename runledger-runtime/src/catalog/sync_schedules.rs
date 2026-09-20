@@ -229,7 +229,7 @@ impl JobCatalog {
 
         tx.commit().await.map_err(|error| {
             CatalogError::ScheduleSyncCommitFailure(Box::new(
-                runledger_postgres::Error::from_query_sqlx_with_context(
+                runledger_postgres::Error::commit_unconfirmed(
                     "commit job catalog schedule sync",
                     error,
                 ),

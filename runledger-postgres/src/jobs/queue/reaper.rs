@@ -137,7 +137,7 @@ async fn reap_expired_lease_batch(
 
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit reap expired lease batch", error))?;
 
     Ok(outcome)
 }
@@ -224,9 +224,9 @@ async fn cleanup_quiesced_workflow_active_claims(pool: &DbPool, limit: i64) -> R
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     let released = release_quiesced_workflow_active_claims_tx(&mut tx, limit).await?;
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed("commit cleanup quiesced workflow active claims", error)
+    })?;
     Ok(released)
 }
 
@@ -236,9 +236,9 @@ async fn cleanup_expired_execution_resource_claims(pool: &DbPool, limit: i64) ->
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     let released = release_expired_execution_resource_claims_tx(&mut tx, limit).await?;
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed("commit cleanup expired execution resource claims", error)
+    })?;
     Ok(released)
 }
 
@@ -466,6 +466,12 @@ fn log_sanitized_deferred_row_error(row: &ReapExpiredLeaseRow, error: &Error) {
             "db.rollback_failed",
             "reaper row operation and rollback both failed",
         ),
+        Error::CommitUnconfirmed(_) => log_sanitized_deferred_row_non_query_error(
+            row,
+            "CommitUnconfirmed",
+            crate::CommitUnconfirmed::CODE,
+            "reaper row processing observed an unconfirmed transaction commit",
+        ),
         Error::QueryError(query_error) => {
             let diagnostics = query_error.sanitized_diagnostics();
             tracing::warn!(
@@ -523,6 +529,11 @@ fn sanitized_deferred_row_error(error: &Error) -> (String, String, Option<String
             "db.rollback_failed".to_owned(),
             "Database operation and rollback failed.".to_owned(),
             None,
+        ),
+        Error::CommitUnconfirmed(unconfirmed) => (
+            crate::CommitUnconfirmed::CODE.to_owned(),
+            crate::CommitUnconfirmed::CLIENT_MESSAGE.to_owned(),
+            unconfirmed.sqlstate(),
         ),
         Error::QueryError(query_error) => (
             query_error.code().to_owned(),

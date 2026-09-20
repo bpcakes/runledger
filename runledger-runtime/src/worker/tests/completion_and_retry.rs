@@ -20,6 +20,24 @@ fn completion_persist_error_diagnostic_omits_internal_query_details() {
     assert!(!diagnostic.contains("trusted diagnostic detail"));
 }
 
+#[test]
+fn completion_persist_error_diagnostic_preserves_unconfirmed_commit_contract() {
+    let error = runledger_postgres::Error::commit_unconfirmed(
+        "commit test completion",
+        sqlx::Error::Protocol("private commit detail".into()),
+    );
+
+    let diagnostic = completion_persist_error_diagnostic(&error);
+
+    assert_eq!(
+        diagnostic,
+        "client_message=\"Database transaction commit was not confirmed.\"; \
+         code=db.transaction_commit_unconfirmed"
+    );
+    assert!(!diagnostic.contains("private commit detail"));
+    assert!(!diagnostic.contains("commit test completion"));
+}
+
 #[tokio::test]
 async fn process_claimed_job_observer_reports_success_after_commit() {
     let (pool, database) = setup_ephemeral_pool("jobs_worker_observer_success", 8).await;

@@ -46,7 +46,7 @@ pub async fn upsert_job_runtime_config(
     upsert_job_runtime_config_tx(&mut tx, payload).await?;
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit upsert job runtime config", error))?;
     Ok(())
 }
 
@@ -59,9 +59,9 @@ pub async fn insert_job_runtime_config_if_missing(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     insert_job_runtime_config_if_missing_tx(&mut tx, payload).await?;
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed("commit insert job runtime config if missing", error)
+    })?;
     Ok(())
 }
 
