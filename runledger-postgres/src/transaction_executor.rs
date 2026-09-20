@@ -43,3 +43,21 @@ impl PgTransactionExecutor for DbTx<'_> {
         &mut **self
     }
 }
+
+/// Borrow-scoped SQL execution on one caller-owned PostgreSQL session.
+///
+/// Unlike [`PgTransactionExecutor`], this does not assert an explicit transaction.
+/// It is sufficient for read-only schema compatibility checks. Every executor
+/// view must refer to the same session for the complete operation; ownership,
+/// cancellation and disposition stay with its caller. No native connection is
+/// extracted by this capability.
+pub trait PgSessionExecutor: Send {
+    /// Borrow the session for one query without transferring its identity.
+    fn executor(&mut self) -> impl Executor<'_, Database = Postgres>;
+}
+
+impl PgSessionExecutor for sqlx::PgConnection {
+    fn executor(&mut self) -> impl Executor<'_, Database = Postgres> {
+        self
+    }
+}

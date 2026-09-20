@@ -4,6 +4,14 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+- Extend opaque transaction capabilities to durable enqueue intents with
+  `record_job_enqueue_intent_in_transaction`. Native transaction entry points
+  delegate to the same READ COMMITTED guard and idempotency implementation.
+- Add `PgSessionExecutor` and
+  `ensure_schema_compatible_after_idempotency_cutover_with_executor` so schema
+  verification can run without extracting or replacing a caller-owned connection.
+
+
 ### Added
 
 - Add `PgTransactionExecutor` and capability-based direct-enqueue functions so

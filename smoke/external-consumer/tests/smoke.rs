@@ -43,6 +43,9 @@ use tokio::time::{Instant, sleep, timeout};
 #[path = "support/migration_identity.rs"]
 mod migration_identity;
 
+#[path = "support/opaque_intents.rs"]
+mod opaque_intents;
+
 #[path = "support/shutdown_signal.rs"]
 mod shutdown_signal;
 
@@ -1599,5 +1602,14 @@ async fn packaged_prelude_exports_explicit_metric_and_payload_scopes() {
             None
         );
     }
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn opaque_capabilities_preserve_durable_handoff() {
+    let (pool, database) =
+        runledger_test_support::setup_ephemeral_pool("opaque_intent_consumer", 2).await;
+    opaque_intents::verify_schema(&pool).await;
+    opaque_intents::atomicity_and_replay(&pool).await;
     teardown_ephemeral_pool(pool, database).await;
 }

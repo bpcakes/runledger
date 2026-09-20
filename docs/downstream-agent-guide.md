@@ -1417,3 +1417,22 @@ Other compile-checked examples and integration references:
 - [`runledger-postgres/tests/workflow_active_claims.rs`](../runledger-postgres/tests/workflow_active_claims.rs)
 - [`runledger-postgres/tests/job_execution_resources.rs`](../runledger-postgres/tests/job_execution_resources.rs)
 - [`runledger-postgres/tests/workflow_recovery.rs`](../runledger-postgres/tests/workflow_recovery.rs)
+
+
+### Opaque durable-intent and schema capabilities
+
+Adapters that keep SQLx identity private can record a durable handoff through
+`record_job_enqueue_intent_in_transaction(&mut transaction, &intent)`, using the
+same `PgTransactionExecutor` as direct enqueue. This preserves native intent
+idempotency, conflict and READ COMMITTED validation, and composes application
+writes with the intent in one caller-owned commit or rollback. Record intents
+before operations that lock job rows, as required by the native lock order.
+Existing `record_job_enqueue_intent_tx` callers retain the same behavior.
+
+Read-only schema verification also accepts an opaque session through
+`ensure_schema_compatible_after_idempotency_cutover_with_executor` and
+`PgSessionExecutor`. That capability does not assert a transaction or transfer
+connection ownership. Implementers must return executor views of the same session
+throughout the check; their owning adapter remains responsible for interruption
+and disposition. Neither capability exposes a raw connection, commits a caller's
+transaction, or proves remote effects after an unconfirmed commit.
