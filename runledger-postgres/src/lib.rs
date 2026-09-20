@@ -105,8 +105,8 @@
 //! # }
 //! ```
 //!
-//! A hosting adapter that keeps its SQLx transaction opaque can implement
-//! [`PgTransactionExecutor`] and call
+//! A hosting adapter that keeps its SQLx transaction opaque constructs
+//! [`PgTransactionView`] from its private native transaction and calls
 //! [`jobs::enqueue_job_with_outcome_in_transaction`]. Runledger receives only
 //! SQL execution access; the adapter does not need to expose a replaceable
 //! connection or transaction to application code. Native SQLx callers can keep
@@ -345,7 +345,7 @@ pub use migrations::{
     MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
     WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
     ensure_schema_compatible_after_idempotency_cutover_with_connection,
-    ensure_schema_compatible_after_idempotency_cutover_with_executor,
+    ensure_schema_compatible_after_idempotency_cutover_with_session,
     migrate_after_idempotency_cutover,
 };
 #[allow(
@@ -453,12 +453,12 @@ pub mod prelude {
         deactivate_schedules_absent_from_names_tx,
     };
     pub use crate::{
-        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgSessionExecutor, PgTransactionExecutor,
-        QueryError, QueryErrorCategory, QueryErrorKind, SchemaCompatibilityError,
-        WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
+        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgSessionView, PgTransactionExecutor,
+        PgTransactionView, QueryError, QueryErrorCategory, QueryErrorKind,
+        SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
         ensure_schema_compatible_after_idempotency_cutover,
         ensure_schema_compatible_after_idempotency_cutover_with_connection,
-        ensure_schema_compatible_after_idempotency_cutover_with_executor,
+        ensure_schema_compatible_after_idempotency_cutover_with_session,
         migrate_after_idempotency_cutover,
     };
 }
@@ -468,7 +468,7 @@ pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub use error::{CommitUnconfirmed, RollbackFailure};
-pub use transaction_executor::{PgSessionExecutor, PgTransactionExecutor};
+pub use transaction_executor::{PgSessionView, PgTransactionExecutor, PgTransactionView};
 
 #[derive(Debug)]
 pub enum Error {

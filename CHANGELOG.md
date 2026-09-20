@@ -7,14 +7,17 @@ All notable changes to this workspace are documented here.
 - Extend opaque transaction capabilities to durable enqueue intents with
   `record_job_enqueue_intent_in_transaction`. Native transaction entry points
   delegate to the same READ COMMITTED guard and idempotency implementation.
-- Add `PgSessionExecutor` and
-  `ensure_schema_compatible_after_idempotency_cutover_with_executor` so schema
-  verification can run without extracting or replacing a caller-owned connection.
+- Add concrete `PgSessionView` and
+  `ensure_schema_compatible_after_idempotency_cutover_with_session` so schema
+  verification retains one native connection throughout the operation.
+- Seal `PgTransactionExecutor` to native SQLx transactions and the new
+  `PgTransactionView`; arbitrary executor implementations cannot mint transaction
+  evidence. Adapters construct views from private native resources.
 
 
 ### Added
 
-- Add `PgTransactionExecutor` and capability-based direct-enqueue functions so
+- Add sealed `PgTransactionExecutor` and capability-based direct-enqueue functions so
   adapters can compose application writes and Runledger enqueueing in one
   caller-owned transaction without exposing a replaceable SQLx connection or
   transaction. Existing `DbTx` entry points remain compatibility wrappers.

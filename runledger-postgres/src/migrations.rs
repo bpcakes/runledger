@@ -3,7 +3,7 @@ use std::fmt;
 
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migrator};
 
-use crate::{DbPool, PgSessionExecutor};
+use crate::{DbPool, PgSessionView};
 
 /// Raw SQLx migrator for inspecting the migrations bundled with this crate
 /// version.
@@ -313,8 +313,8 @@ pub async fn migrate_after_idempotency_cutover(
             // The DDL migration lock is no longer needed here: the NOT VALID
             // cutover constraints already block new violating rows, and
             // validation is idempotent if another startup validates first.
-            reject_legacy_idempotency_rows(&mut *conn).await?;
-            validate_idempotency_cutover_constraints(&mut *conn).await
+            reject_legacy_idempotency_rows(&mut conn).await?;
+            validate_idempotency_cutover_constraints(&mut conn).await
         }
     }
 }
@@ -366,6 +366,18 @@ pub async fn ensure_schema_compatible_after_idempotency_cutover(
     ensure_schema_compatible_after_idempotency_cutover_with_connection(&mut conn).await
 }
 
+/// Validate the schema on one retained native session without exposing its identity.
+///
+/// The owning adapter constructs the view from its private connection and keeps
+/// this future inside its cancellation/retirement boundary. All checks delegate
+/// to the native implementation on that exact borrowed connection.
+pub async fn ensure_schema_compatible_after_idempotency_cutover_with_session(
+    session: PgSessionView<'_>,
+) -> Result<(), SchemaCompatibilityError> {
+    ensure_schema_compatible_after_idempotency_cutover_with_connection(session.into_connection())
+        .await
+}
+
 /// Validate schema compatibility on a caller-owned PostgreSQL connection.
 ///
 /// This has the same read-only checks as
@@ -386,17 +398,6 @@ pub async fn ensure_schema_compatible_after_idempotency_cutover(
 /// ```
 pub async fn ensure_schema_compatible_after_idempotency_cutover_with_connection(
     conn: &mut sqlx::PgConnection,
-) -> Result<(), SchemaCompatibilityError> {
-    ensure_schema_compatible_after_idempotency_cutover_with_executor(conn).await
-}
-
-/// Validate the native schema using an opaque caller-owned session capability.
-///
-/// This performs exactly the native read-only compatibility checks without
-/// extracting a connection, acquiring a pool slot, or deciding its disposition.
-/// The owner must keep this future inside its cancellation/retirement boundary.
-pub async fn ensure_schema_compatible_after_idempotency_cutover_with_executor(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
 ) -> Result<(), SchemaCompatibilityError> {
     if !has_migrations_table(conn).await? {
         return Err(SchemaCompatibilityError::MissingMigrationHistory {
@@ -479,48 +480,46 @@ pub async fn ensure_schema_compatible(pool: &DbPool) -> Result<(), SchemaCompati
     ensure_schema_compatible_after_idempotency_cutover(pool).await
 }
 
-async fn has_migrations_table(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
-) -> Result<bool, sqlx::Error> {
+async fn has_migrations_table(conn: &mut sqlx::PgConnection) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar::<_, bool>("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
-        .fetch_one(conn.executor())
+        .fetch_one(&mut *conn)
         .await
 }
 
 async fn has_runledger_migration_history_table(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
+    conn: &mut sqlx::PgConnection,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar::<_, bool>("SELECT to_regclass('runledger_migration_history') IS NOT NULL")
-        .fetch_one(conn.executor())
+        .fetch_one(&mut *conn)
         .await
 }
 
 async fn list_migration_history(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
+    conn: &mut sqlx::PgConnection,
 ) -> Result<Vec<MigrationHistoryRow>, sqlx::Error> {
     sqlx::query_as::<_, MigrationHistoryRow>(
         "SELECT version, checksum, success
          FROM _sqlx_migrations
          ORDER BY version",
     )
-    .fetch_all(conn.executor())
+    .fetch_all(&mut *conn)
     .await
 }
 
 async fn list_recorded_runledger_migrations(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
+    conn: &mut sqlx::PgConnection,
 ) -> Result<Vec<i64>, sqlx::Error> {
     sqlx::query_scalar::<_, i64>(
         "SELECT version
          FROM runledger_migration_history
          ORDER BY version",
     )
-    .fetch_all(conn.executor())
+    .fetch_all(&mut *conn)
     .await
 }
 
 async fn reject_legacy_idempotency_rows(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
+    conn: &mut sqlx::PgConnection,
 ) -> Result<(), SchemaCompatibilityError> {
     if idempotency_cutover_constraints_valid(conn).await? {
         return Ok(());
@@ -541,7 +540,7 @@ async fn reject_legacy_idempotency_rows(
                   AND enqueue_request IS NULL
             ) AS "workflow_count!""#,
     )
-    .fetch_one(conn.executor())
+    .fetch_one(&mut *conn)
     .await?;
 
     if row.job_count == 0 && row.workflow_count == 0 {
@@ -557,7 +556,7 @@ async fn reject_legacy_idempotency_rows(
 }
 
 async fn validate_workflow_job_link_expand_schema(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
+    conn: &mut sqlx::PgConnection,
 ) -> Result<(), SchemaCompatibilityError> {
     let deprecated_column_exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
@@ -568,7 +567,7 @@ async fn validate_workflow_job_link_expand_schema(
               AND column_name = 'workflow_step_id'
          )",
     )
-    .fetch_one(conn.executor())
+    .fetch_one(&mut *conn)
     .await?;
     if !deprecated_column_exists {
         return Ok(());
@@ -602,7 +601,7 @@ async fn validate_workflow_job_link_expand_schema(
               )
          ) inconsistencies",
     )
-    .fetch_one(conn.executor())
+    .fetch_one(&mut *conn)
     .await?;
 
     if !trigger_diagnostics.is_empty() {
@@ -645,7 +644,7 @@ struct WorkflowJobLinkTriggerCatalogRow {
 }
 
 async fn workflow_job_link_trigger_catalog(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
+    conn: &mut sqlx::PgConnection,
 ) -> Result<Vec<WorkflowJobLinkTriggerCatalogRow>, sqlx::Error> {
     sqlx::query_as(
         "SELECT
@@ -699,7 +698,7 @@ async fn workflow_job_link_trigger_catalog(
                 )
            )",
     )
-    .fetch_all(conn.executor())
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -782,7 +781,7 @@ fn workflow_job_link_trigger_problems(
 }
 
 async fn validate_idempotency_cutover_constraints(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
+    conn: &mut sqlx::PgConnection,
 ) -> Result<(), SchemaCompatibilityError> {
     if idempotency_cutover_constraints_valid(conn).await? {
         return Ok(());
@@ -795,7 +794,7 @@ async fn validate_idempotency_cutover_constraints(
         "ALTER TABLE job_queue
          VALIDATE CONSTRAINT ck_job_queue_idempotency_enqueue_request",
     )
-    .execute(conn.executor())
+    .execute(&mut *conn)
     .await
     .map_err(|error| {
         tracing::warn!(
@@ -809,7 +808,7 @@ async fn validate_idempotency_cutover_constraints(
         "ALTER TABLE workflow_runs
          VALIDATE CONSTRAINT ck_workflow_runs_idempotency_enqueue_request",
     )
-    .execute(conn.executor())
+    .execute(&mut *conn)
     .await
     .map_err(|error| {
         tracing::warn!(
@@ -823,7 +822,7 @@ async fn validate_idempotency_cutover_constraints(
 }
 
 async fn idempotency_cutover_constraints_valid(
-    conn: &mut (impl PgSessionExecutor + ?Sized),
+    conn: &mut sqlx::PgConnection,
 ) -> Result<bool, sqlx::Error> {
     // A validated cutover constraint is the durable proof that legacy keyed rows
     // without enqueue_request snapshots cannot exist for that table. If future
@@ -838,7 +837,7 @@ async fn idempotency_cutover_constraints_valid(
              ('workflow_runs', 'ck_workflow_runs_idempotency_enqueue_request')
          )",
     )
-    .fetch_one(conn.executor())
+    .fetch_one(&mut *conn)
     .await
 }
 
