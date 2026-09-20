@@ -3,7 +3,7 @@ use std::fmt;
 
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migrator};
 
-use crate::DbPool;
+use crate::{DbPool, PgSessionView};
 
 /// Raw SQLx migrator for inspecting the migrations bundled with this crate
 /// version.
@@ -364,6 +364,18 @@ pub async fn ensure_schema_compatible_after_idempotency_cutover(
 ) -> Result<(), SchemaCompatibilityError> {
     let mut conn = pool.acquire().await?;
     ensure_schema_compatible_after_idempotency_cutover_with_connection(&mut conn).await
+}
+
+/// Validate the schema on one retained native session without exposing its identity.
+///
+/// The owning adapter constructs the view from its private connection and keeps
+/// this future inside its cancellation/retirement boundary. All checks delegate
+/// to the native implementation on that exact borrowed connection.
+pub async fn ensure_schema_compatible_after_idempotency_cutover_with_session(
+    session: PgSessionView<'_>,
+) -> Result<(), SchemaCompatibilityError> {
+    ensure_schema_compatible_after_idempotency_cutover_with_connection(session.into_connection())
+        .await
 }
 
 /// Validate schema compatibility on a caller-owned PostgreSQL connection.

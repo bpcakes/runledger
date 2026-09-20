@@ -6,7 +6,7 @@ use serde_json::Value;
 use sqlx::types::Uuid;
 
 use crate::error::SanitizedQueryErrorDiagnostics;
-use crate::{DbPool, DbTx, Error, QueryError, QueryErrorCategory, Result};
+use crate::{DbPool, DbTx, Error, PgTransactionExecutor, QueryError, QueryErrorCategory, Result};
 
 use super::super::errors::{validate_page_limit, validate_pagination};
 use super::super::row_decode::{parse_job_stage, parse_job_type_name};
@@ -14,8 +14,8 @@ use super::super::rows::{
     JobEnqueueIntentOutcomeRow, JobEnqueueIntentRecordRow, SupportedJobEnqueueIntentPromotionRow,
 };
 use super::super::transaction_isolation::{
-    ReadCommittedTx, begin_owned_read_committed_tx, ensure_read_committed_tx,
-    finish_owned_transaction,
+    ReadCommittedExecutor, ReadCommittedTx, begin_owned_read_committed_tx,
+    ensure_read_committed_executor, ensure_read_committed_tx, finish_owned_transaction,
 };
 use super::super::transaction_settings::{
     PostgresTimeout, cap_local_lock_timeout_duration_tx, cap_local_statement_timeout_duration_tx,
@@ -247,8 +247,19 @@ pub async fn record_job_enqueue_intent_tx(
     tx: &mut DbTx<'_>,
     intent: &JobEnqueueIntent<'_>,
 ) -> Result<JobEnqueueIntentOutcome> {
+    record_job_enqueue_intent_in_transaction(tx, intent).await
+}
+
+/// Record a durable intent atomically with application writes through an opaque
+/// transaction. This has the same idempotency and lock-order contract as
+/// [`record_job_enqueue_intent_tx`], and validates READ COMMITTED before writing.
+/// The caller retains commit/rollback ownership; no native transaction escapes.
+pub async fn record_job_enqueue_intent_in_transaction<T: PgTransactionExecutor + ?Sized>(
+    tx: &mut T,
+    intent: &JobEnqueueIntent<'_>,
+) -> Result<JobEnqueueIntentOutcome> {
     let prepared = prepare_intent(intent)?;
-    let mut tx = ensure_read_committed_tx(
+    let mut tx = ensure_read_committed_executor(
         tx,
         RECORD_OPERATION,
         "job.intent_idempotency_unsupported_isolation",
@@ -281,8 +292,8 @@ pub async fn record_job_enqueue_intent(
     .await
 }
 
-async fn record_job_enqueue_intent_read_committed_tx(
-    tx: &mut ReadCommittedTx<'_, '_>,
+async fn record_job_enqueue_intent_read_committed_tx<T: PgTransactionExecutor + ?Sized>(
+    tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
 ) -> Result<JobEnqueueIntentOutcome> {
     let enqueue = &prepared.enqueue;
@@ -307,8 +318,8 @@ async fn record_job_enqueue_intent_read_committed_tx(
     ))
 }
 
-async fn insert_intent_if_absent(
-    tx: &mut ReadCommittedTx<'_, '_>,
+async fn insert_intent_if_absent<T: PgTransactionExecutor + ?Sized>(
+    tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
     idempotency_key: &str,
 ) -> Result<Option<JobEnqueueIntentOutcomeRow>> {
@@ -320,8 +331,8 @@ async fn insert_intent_if_absent(
     }
 }
 
-async fn insert_org_scoped_intent(
-    tx: &mut ReadCommittedTx<'_, '_>,
+async fn insert_org_scoped_intent<T: PgTransactionExecutor + ?Sized>(
+    tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
     organization_id: Uuid,
     idempotency_key: &str,
@@ -365,13 +376,13 @@ async fn insert_org_scoped_intent(
         &prepared.enqueue_request,
         prepared.execution_resource_key,
     )
-    .fetch_optional(&mut **tx.as_tx())
+    .fetch_optional(tx.as_tx().executor())
     .await
     .map_err(|error| Error::from_query_sqlx_with_context(RECORD_OPERATION, error))
 }
 
-async fn insert_unscoped_intent(
-    tx: &mut ReadCommittedTx<'_, '_>,
+async fn insert_unscoped_intent<T: PgTransactionExecutor + ?Sized>(
+    tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
     idempotency_key: &str,
 ) -> Result<Option<JobEnqueueIntentOutcomeRow>> {
@@ -413,13 +424,13 @@ async fn insert_unscoped_intent(
         &prepared.enqueue_request,
         prepared.execution_resource_key,
     )
-    .fetch_optional(&mut **tx.as_tx())
+    .fetch_optional(tx.as_tx().executor())
     .await
     .map_err(|error| Error::from_query_sqlx_with_context(RECORD_OPERATION, error))
 }
 
-async fn load_conflicting_intent_outcome(
-    tx: &mut ReadCommittedTx<'_, '_>,
+async fn load_conflicting_intent_outcome<T: PgTransactionExecutor + ?Sized>(
+    tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
     resolution_attempt: i32,
 ) -> Result<Option<JobEnqueueIntentOutcome>> {
@@ -441,8 +452,8 @@ async fn load_conflicting_intent_outcome(
     intent_outcome(&existing, JobEnqueueIntentDisposition::Existing).map(Some)
 }
 
-async fn load_existing_intent_with_key_share(
-    tx: &mut ReadCommittedTx<'_, '_>,
+async fn load_existing_intent_with_key_share<T: PgTransactionExecutor + ?Sized>(
+    tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
 ) -> Result<Option<JobEnqueueIntentOutcomeRow>> {
     let enqueue = &prepared.enqueue;
@@ -469,7 +480,7 @@ async fn load_existing_intent_with_key_share(
             idempotency_key,
             &prepared.enqueue_request,
         )
-        .fetch_optional(&mut **tx.as_tx())
+        .fetch_optional(tx.as_tx().executor())
         .await
     } else {
         sqlx::query_as!(
@@ -489,7 +500,7 @@ async fn load_existing_intent_with_key_share(
             idempotency_key,
             &prepared.enqueue_request,
         )
-        .fetch_optional(&mut **tx.as_tx())
+        .fetch_optional(tx.as_tx().executor())
         .await
     };
 

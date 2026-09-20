@@ -43,6 +43,9 @@ use tokio::time::{Instant, sleep, timeout};
 #[path = "support/migration_identity.rs"]
 mod migration_identity;
 
+#[path = "support/opaque_intents.rs"]
+mod opaque_intents;
+
 #[path = "support/shutdown_signal.rs"]
 mod shutdown_signal;
 
@@ -91,7 +94,11 @@ impl<'a> OpaqueConsumerTransaction<'a> {
     }
 }
 
-impl PgTransactionExecutor for OpaqueConsumerTransaction<'_> {
+impl<'a> OpaqueConsumerTransaction<'a> {
+    fn view(&mut self) -> runledger_postgres::PgTransactionView<'_, 'a> {
+        runledger_postgres::PgTransactionView::new(&mut self.inner)
+    }
+
     fn executor(&mut self) -> impl sqlx::Executor<'_, Database = sqlx::Postgres> {
         &mut *self.inner
     }
@@ -395,7 +402,7 @@ async fn assert_keyed_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid 
     let existing_enqueue_tx = pool.begin().await.expect("begin existing enqueue");
     let mut existing_enqueue_tx = OpaqueConsumerTransaction::new(existing_enqueue_tx);
     let existing_recovery =
-        enqueue_job_with_outcome_in_transaction(&mut existing_enqueue_tx, &recovery_request)
+        enqueue_job_with_outcome_in_transaction(&mut existing_enqueue_tx.view(), &recovery_request)
             .await
             .expect("resolve existing recovery job through opaque transaction");
     assert_eq!(existing_recovery.job_id, inserted_recovery.job_id);
@@ -405,7 +412,7 @@ async fn assert_keyed_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid 
         JobEnqueueDisposition::Existing
     );
     record_consumer_audit_tx(
-        &mut existing_enqueue_tx,
+        &mut existing_enqueue_tx.view(),
         "opaque-transactional-enqueue",
         inserted_recovery.job_id,
         existing_recovery.job_id,
@@ -467,12 +474,13 @@ async fn assert_opaque_transaction_rollback(pool: &DbPool) {
         .await
         .expect("begin opaque rollback transaction");
     let mut rollback_tx = OpaqueConsumerTransaction::new(rollback_tx);
-    let rolled_back = enqueue_job_with_outcome_in_transaction(&mut rollback_tx, &rollback_request)
-        .await
-        .expect("enqueue through opaque rollback transaction");
+    let rolled_back =
+        enqueue_job_with_outcome_in_transaction(&mut rollback_tx.view(), &rollback_request)
+            .await
+            .expect("enqueue through opaque rollback transaction");
     assert_eq!(rolled_back.disposition, JobEnqueueDisposition::Inserted);
     record_consumer_audit_tx(
-        &mut rollback_tx,
+        &mut rollback_tx.view(),
         "opaque-transactional-enqueue-rollback",
         rolled_back.job_id,
         rolled_back.job_id,
@@ -516,12 +524,12 @@ async fn assert_opaque_transaction_commit(pool: &DbPool) {
     };
     let commit_tx = pool.begin().await.expect("begin opaque commit transaction");
     let mut commit_tx = OpaqueConsumerTransaction::new(commit_tx);
-    let committed = enqueue_job_with_outcome_in_transaction(&mut commit_tx, &commit_request)
+    let committed = enqueue_job_with_outcome_in_transaction(&mut commit_tx.view(), &commit_request)
         .await
         .expect("enqueue through opaque commit transaction");
     assert_eq!(committed.disposition, JobEnqueueDisposition::Inserted);
     record_consumer_audit_tx(
-        &mut commit_tx,
+        &mut commit_tx.view(),
         "opaque-transactional-enqueue-commit",
         committed.job_id,
         committed.job_id,
@@ -1599,5 +1607,14 @@ async fn packaged_prelude_exports_explicit_metric_and_payload_scopes() {
             None
         );
     }
+    teardown_ephemeral_pool(pool, database).await;
+}
+
+#[tokio::test]
+async fn opaque_capabilities_preserve_durable_handoff() {
+    let (pool, database) =
+        runledger_test_support::setup_ephemeral_pool("opaque_intent_consumer", 2).await;
+    opaque_intents::verify_schema(&pool).await;
+    opaque_intents::atomicity_and_replay(&pool).await;
     teardown_ephemeral_pool(pool, database).await;
 }

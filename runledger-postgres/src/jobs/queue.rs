@@ -31,7 +31,8 @@ pub use self::intents::{
     get_job_enqueue_intent_by_id, get_job_enqueue_intent_by_id_with_scope,
     get_job_enqueue_intent_metrics, get_job_enqueue_intent_metrics_with_scope,
     list_job_enqueue_intents, list_job_enqueue_intents_with_scope,
-    promote_job_enqueue_intents_for_types, record_job_enqueue_intent, record_job_enqueue_intent_tx,
+    promote_job_enqueue_intents_for_types, record_job_enqueue_intent,
+    record_job_enqueue_intent_in_transaction, record_job_enqueue_intent_tx,
 };
 #[allow(
     deprecated,

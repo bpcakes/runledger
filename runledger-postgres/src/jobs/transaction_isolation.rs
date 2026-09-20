@@ -5,12 +5,14 @@ use crate::{DbPool, DbTx, Error, PgTransactionExecutor, QueryError, QueryErrorCa
 /// This is deliberately not dereferenceable: code that needs to execute a
 /// query must opt in through [`Self::as_tx`], while private operation bodies
 /// can require this value in their signature.
-pub(crate) struct ReadCommittedTx<'tx, 'db> {
-    tx: &'tx mut DbTx<'db>,
+pub(crate) struct ReadCommittedExecutor<'tx, T: PgTransactionExecutor + ?Sized> {
+    tx: &'tx mut T,
 }
 
-impl<'tx, 'db> ReadCommittedTx<'tx, 'db> {
-    pub(crate) fn as_tx(&mut self) -> &mut DbTx<'db> {
+pub(crate) type ReadCommittedTx<'tx, 'db> = ReadCommittedExecutor<'tx, DbTx<'db>>;
+
+impl<T: PgTransactionExecutor + ?Sized> ReadCommittedExecutor<'_, T> {
+    pub(crate) fn as_tx(&mut self) -> &mut T {
         self.tx
     }
 }
@@ -107,8 +109,17 @@ pub(crate) async fn ensure_read_committed_tx<'tx, 'db>(
     code: &'static str,
     client_message: &'static str,
 ) -> Result<ReadCommittedTx<'tx, 'db>> {
+    ensure_read_committed_executor(tx, operation, code, client_message).await
+}
+
+pub(crate) async fn ensure_read_committed_executor<'tx, T: PgTransactionExecutor + ?Sized>(
+    tx: &'tx mut T,
+    operation: &'static str,
+    code: &'static str,
+    client_message: &'static str,
+) -> Result<ReadCommittedExecutor<'tx, T>> {
     require_read_committed(tx, operation, code, client_message).await?;
-    Ok(ReadCommittedTx { tx })
+    Ok(ReadCommittedExecutor { tx })
 }
 
 pub(crate) async fn require_read_committed<T>(

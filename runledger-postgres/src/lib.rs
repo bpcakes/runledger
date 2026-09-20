@@ -105,8 +105,8 @@
 //! # }
 //! ```
 //!
-//! A hosting adapter that keeps its SQLx transaction opaque can implement
-//! [`PgTransactionExecutor`] and call
+//! A hosting adapter that keeps its SQLx transaction opaque constructs
+//! [`PgTransactionView`] from its private native transaction and calls
 //! [`jobs::enqueue_job_with_outcome_in_transaction`]. Runledger receives only
 //! SQL execution access; the adapter does not need to expose a replaceable
 //! connection or transaction to application code. Native SQLx callers can keep
@@ -345,6 +345,7 @@ pub use migrations::{
     MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
     WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
     ensure_schema_compatible_after_idempotency_cutover_with_connection,
+    ensure_schema_compatible_after_idempotency_cutover_with_session,
     migrate_after_idempotency_cutover,
 };
 #[allow(
@@ -437,10 +438,11 @@ pub mod prelude {
         list_workflow_steps_page_with_scope, list_workflow_steps_with_scope,
         mark_job_running_for_lease, prepare_schedule_exact_sync_critical_section_tx,
         promote_job_enqueue_intents_for_types, reap_expired_leases_with_diagnostics,
-        record_job_enqueue_intent, record_job_enqueue_intent_tx, recover_workflow_run,
-        recover_workflow_run_tx, retrieve_workflow_run_handle, set_job_schedule_active,
-        set_job_schedule_active_tx, set_job_schedule_next_fire_at,
-        set_job_schedule_next_fire_at_tx, sync_catalog_job_schedules_tx, update_job_definition,
+        record_job_enqueue_intent, record_job_enqueue_intent_in_transaction,
+        record_job_enqueue_intent_tx, recover_workflow_run, recover_workflow_run_tx,
+        retrieve_workflow_run_handle, set_job_schedule_active, set_job_schedule_active_tx,
+        set_job_schedule_next_fire_at, set_job_schedule_next_fire_at_tx,
+        sync_catalog_job_schedules_tx, update_job_definition,
         update_job_ordinary_progress_for_lease, update_job_payload_uuid_array_field,
         update_job_progress_for_lease, update_workflow_step_and_pending_job_payload_tx,
         upsert_job_definition_tx, upsert_job_runtime_config, upsert_job_runtime_config_tx,
@@ -451,11 +453,12 @@ pub mod prelude {
         deactivate_schedules_absent_from_names_tx,
     };
     pub use crate::{
-        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgTransactionExecutor, QueryError,
-        QueryErrorCategory, QueryErrorKind, SchemaCompatibilityError,
-        WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
+        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgSessionView, PgTransactionExecutor,
+        PgTransactionView, QueryError, QueryErrorCategory, QueryErrorKind,
+        SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
         ensure_schema_compatible_after_idempotency_cutover,
         ensure_schema_compatible_after_idempotency_cutover_with_connection,
+        ensure_schema_compatible_after_idempotency_cutover_with_session,
         migrate_after_idempotency_cutover,
     };
 }
@@ -465,7 +468,7 @@ pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub use error::{CommitUnconfirmed, RollbackFailure};
-pub use transaction_executor::PgTransactionExecutor;
+pub use transaction_executor::{PgSessionView, PgTransactionExecutor, PgTransactionView};
 
 #[derive(Debug)]
 pub enum Error {

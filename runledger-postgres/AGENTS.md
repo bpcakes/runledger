@@ -36,6 +36,17 @@ PostgreSQL persistence for durable execution: queue lifecycle, workflow DAG stat
   an unknown outcome, and SQLSTATE classification must not absorb it. `operation`
   is fixed text with no request data.
 
+- Opaque durable-intent recording and native transaction callers share the same
+  READ COMMITTED witness and SQL implementation. Do not add a second intent
+  implementation or expose raw SQLx identity through the capability path.
+- `PgTransactionExecutor` is sealed to native SQLx transactions and
+  `PgTransactionView`. Never accept downstream executor providers as transaction
+  evidence. Views must borrow actual native resources with private fields;
+  READ COMMITTED validation stays tied to that retained transaction.
+- `PgSessionView` consumes one connection borrow for the complete native schema
+  check. Do not restore routing executors or per-query provider selection.
+  Ownership and cancellation disposition stay with the caller's adapter.
+
 ## Common commands
 - `cargo check -p runledger-postgres`
 - `cargo test -p runledger-postgres`
