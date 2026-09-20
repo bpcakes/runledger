@@ -1403,11 +1403,7 @@ async fn raw_version_missing_strands_session_lock_until_pool_close_but_safe_path
     contender_pool.close().await;
 
     raw_pool.close().await;
-    assert_eq!(
-        advisory_lock_count_for_backend(&harness.pool, raw_backend_pid).await,
-        0,
-        "closing the disposable raw pool must release the stranded session lock"
-    );
+    wait_for_advisory_lock_release(&harness.pool, raw_backend_pid).await;
 
     let safe_pool = PgPoolOptions::new()
         .max_connections(1)
@@ -2308,6 +2304,21 @@ async fn advisory_lock_count_for_backend(pool: &PgPool, backend_pid: i32) -> i64
     .fetch_one(pool)
     .await
     .expect("count backend advisory locks")
+}
+
+async fn wait_for_advisory_lock_release(pool: &PgPool, backend_pid: i32) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if advisory_lock_count_for_backend(pool, backend_pid).await == 0 {
+                break;
+            }
+            // Pool shutdown closes the client connection before PostgreSQL's
+            // backend cleanup is necessarily visible through `pg_locks`.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("closing the disposable raw pool must release the stranded session lock");
 }
 
 async fn advisory_lock_count_for_database(pool: &PgPool) -> i64 {

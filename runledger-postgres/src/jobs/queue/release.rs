@@ -238,7 +238,7 @@ pub async fn release_unstarted_job_claim(
 
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit release unstarted job claim", error))?;
 
     Ok(())
 }

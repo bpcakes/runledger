@@ -54,7 +54,7 @@ pub async fn enqueue_workflow_run(
     let workflow_run = workflow_run_from_classified_outcome(outcome)?;
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit enqueue workflow run", error))?;
     Ok(workflow_run)
 }
 
@@ -120,9 +120,9 @@ pub async fn enqueue_or_get_active_workflow(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     let outcome = enqueue_workflow_run_classified_tx(&mut tx, payload).await?;
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed("commit enqueue or get active workflow", error)
+    })?;
     Ok(outcome)
 }
 

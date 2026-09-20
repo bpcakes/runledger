@@ -32,4 +32,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 runledger-test-support = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }

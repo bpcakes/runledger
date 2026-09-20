@@ -229,9 +229,9 @@ async fn persist_progress_mutation_for_lease(
         .await?;
     }
 
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed("commit persist progress mutation for lease", error)
+    })?;
 
     Ok(())
 }

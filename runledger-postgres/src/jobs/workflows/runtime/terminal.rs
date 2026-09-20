@@ -249,9 +249,9 @@ pub async fn complete_external_workflow_step(
         .await
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     let step = complete_external_workflow_step_tx(&mut tx, input).await?;
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed("commit complete external workflow step", error)
+    })?;
     Ok(step)
 }
 

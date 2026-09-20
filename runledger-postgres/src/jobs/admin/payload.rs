@@ -68,20 +68,14 @@ pub async fn update_job_payload_uuid_array_field(
 
     let Some(row) = row else {
         tx.commit().await.map_err(|error| {
-            Error::from_query_sqlx_with_context(
-                "commit job payload uuid array update transaction",
-                error,
-            )
+            Error::commit_unconfirmed("commit job payload uuid array update transaction", error)
         })?;
         return Ok(JobPayloadUuidArrayFieldUpdate::NotFound);
     };
 
     if let Some(reason) = job_payload_uuid_array_field_update_rejection(&row) {
         tx.commit().await.map_err(|error| {
-            Error::from_query_sqlx_with_context(
-                "commit job payload uuid array update transaction",
-                error,
-            )
+            Error::commit_unconfirmed("commit job payload uuid array update transaction", error)
         })?;
         return Ok(JobPayloadUuidArrayFieldUpdate::Rejected { reason });
     }
@@ -112,10 +106,7 @@ pub async fn update_job_payload_uuid_array_field(
     })?;
 
     tx.commit().await.map_err(|error| {
-        Error::from_query_sqlx_with_context(
-            "commit job payload uuid array update transaction",
-            error,
-        )
+        Error::commit_unconfirmed("commit job payload uuid array update transaction", error)
     })?;
     Ok(JobPayloadUuidArrayFieldUpdate::Updated)
 }

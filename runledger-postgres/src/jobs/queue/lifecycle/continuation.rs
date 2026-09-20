@@ -183,9 +183,12 @@ pub async fn complete_job_continuation_with_outcome_for_lease(
     .await?;
     let job_type = parse_job_type_name(lookup.job_type)?;
 
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed(
+            "commit complete job continuation with outcome for lease",
+            error,
+        )
+    })?;
 
     Ok(JobContinuationOutcome {
         job_id: identity.job_id,

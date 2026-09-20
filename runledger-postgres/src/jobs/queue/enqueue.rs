@@ -780,7 +780,7 @@ pub async fn enqueue_job(pool: &DbPool, payload: &JobEnqueue<'_>) -> Result<Uuid
     let id = enqueue_job_tx(&mut tx, payload).await?;
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit enqueue job", error))?;
     Ok(id)
 }
 
@@ -798,7 +798,7 @@ pub async fn enqueue_job_with_outcome(
     let outcome = enqueue_job_with_outcome_tx(&mut tx, payload).await?;
     tx.commit()
         .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+        .map_err(|error| Error::commit_unconfirmed("commit enqueue job with outcome", error))?;
     Ok(outcome)
 }
 
@@ -817,9 +817,9 @@ pub async fn enqueue_job_with_execution_resource(
         .map_err(|error| Error::ConnectionError(error.to_string()))?;
     let outcome =
         enqueue_job_with_execution_resource_tx(&mut tx, payload, execution_resource_key).await?;
-    tx.commit()
-        .await
-        .map_err(|error| Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        Error::commit_unconfirmed("commit enqueue job with execution resource", error)
+    })?;
     Ok(outcome)
 }
 

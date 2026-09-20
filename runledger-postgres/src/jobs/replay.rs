@@ -371,6 +371,7 @@ pub async fn compare_and_replay_succeeded_job(
     request: CompareAndReplaySucceededJob<'_>,
 ) -> Result<CompareAndReplaySucceededJobOutcome> {
     const OPERATION: &str = "successful job replay";
+    const COMMIT_OPERATION: &str = "commit successful job replay transaction";
 
     validate_job_replay_request(request.replay_request_key, request.reason)?;
     let mut tx = begin_owned_read_committed_tx(pool, OPERATION).await?;
@@ -378,5 +379,5 @@ pub async fn compare_and_replay_succeeded_job(
         let mut read_committed_tx = tx.as_read_committed_tx();
         compare_and_replay_succeeded_job_read_committed_tx(&mut read_committed_tx, request).await
     };
-    finish_owned_transaction(tx, OPERATION, result).await
+    finish_owned_transaction(tx, OPERATION, COMMIT_OPERATION, result).await
 }

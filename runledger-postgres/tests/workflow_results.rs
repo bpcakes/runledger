@@ -1321,6 +1321,7 @@ fn query_error_code(error: &runledger_postgres::Error) -> Option<&'static str> {
         runledger_postgres::Error::ConfigError(_)
         | runledger_postgres::Error::ConnectionError(_)
         | runledger_postgres::Error::MigrationError(_)
+        | runledger_postgres::Error::CommitUnconfirmed(_)
         | runledger_postgres::Error::RollbackFailure(_) => None,
     }
 }

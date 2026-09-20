@@ -289,7 +289,7 @@ pub async fn update_job_definition(
 
     let record = apply_job_definition_update_tx(&mut tx, job_type, payload).await?;
     tx.commit().await.map_err(|error| {
-        Error::from_query_sqlx_with_context("commit job definition update transaction", error)
+        Error::commit_unconfirmed("commit job definition update transaction", error)
     })?;
 
     Ok(record)

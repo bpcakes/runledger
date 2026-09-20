@@ -36,6 +36,8 @@ use super::enqueue::{
 
 const RECORD_OPERATION: &str = "record job enqueue intent";
 const PROMOTE_OPERATION: &str = "promote job enqueue intents";
+const RECORD_COMMIT_OPERATION: &str = "commit record job enqueue intent transaction";
+const PROMOTE_COMMIT_OPERATION: &str = "commit promote job enqueue intents transaction";
 // The two-int advisory key space is distinct from the bigint key space used by
 // workflow release locks. Advisory locks remain database-global, so a rare key
 // collision with embedding-application locks only over-serializes work.
@@ -270,7 +272,13 @@ pub async fn record_job_enqueue_intent(
         let mut read_committed_tx = tx.as_read_committed_tx();
         record_job_enqueue_intent_read_committed_tx(&mut read_committed_tx, &prepared).await
     };
-    finish_owned_transaction(tx, RECORD_OPERATION, operation_result).await
+    finish_owned_transaction(
+        tx,
+        RECORD_OPERATION,
+        RECORD_COMMIT_OPERATION,
+        operation_result,
+    )
+    .await
 }
 
 async fn record_job_enqueue_intent_read_committed_tx(
@@ -807,7 +815,13 @@ pub async fn promote_job_enqueue_intents_for_types(
         )
         .await
     };
-    finish_owned_transaction(tx, PROMOTE_OPERATION, operation_result).await
+    finish_owned_transaction(
+        tx,
+        PROMOTE_OPERATION,
+        PROMOTE_COMMIT_OPERATION,
+        operation_result,
+    )
+    .await
 }
 
 async fn has_eligible_job_enqueue_intents(
@@ -1096,6 +1110,7 @@ fn classify_intent_promotion_failure(error: &Error) -> IntentPromotionFailureAct
         Error::ConfigError(_)
         | Error::ConnectionError(_)
         | Error::MigrationError(_)
+        | Error::CommitUnconfirmed(_)
         | Error::RollbackFailure(_) => {
             return IntentPromotionFailureAction::Propagate;
         }
@@ -1693,6 +1708,7 @@ mod tests {
             Error::ConfigError("test config failure".to_owned()),
             Error::ConnectionError("test connection failure".to_owned()),
             Error::MigrationError("test migration failure".to_owned()),
+            Error::commit_unconfirmed("test commit", sqlx::Error::PoolClosed),
             Error::RollbackFailure(Box::new(crate::RollbackFailure {
                 operation: promotion_query_error("job.not_found", "original classification"),
                 rollback: sqlx::Error::PoolClosed,

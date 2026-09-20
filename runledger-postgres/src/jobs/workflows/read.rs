@@ -674,9 +674,12 @@ pub async fn get_workflow_run_by_type_and_idempotency_key(
         idempotency_key,
     )
     .await?;
-    tx.commit()
-        .await
-        .map_err(|error| crate::Error::ConnectionError(error.to_string()))?;
+    tx.commit().await.map_err(|error| {
+        crate::Error::commit_unconfirmed(
+            "commit get workflow run by type and idempotency key",
+            error,
+        )
+    })?;
     Ok(run)
 }
 

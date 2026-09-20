@@ -31,11 +31,15 @@ impl<'db> OwnedReadCommittedTx<'db> {
     }
 }
 
-fn transaction_error_context(action: &str, operation: &str) -> String {
+fn transaction_error_context(action: &str, operation: &'static str) -> String {
     format!("{action} {operation} transaction")
 }
 
-async fn rollback_owned_transaction(tx: DbTx<'_>, operation: &str, operation_error: &Error) {
+async fn rollback_owned_transaction(
+    tx: DbTx<'_>,
+    operation: &'static str,
+    operation_error: &Error,
+) {
     if let Err(rollback_error) = tx.rollback().await {
         tracing::warn!(
             operation,
@@ -54,7 +58,7 @@ async fn rollback_owned_transaction(tx: DbTx<'_>, operation: &str, operation_err
 /// [`ensure_read_committed_tx`] because they did not establish the isolation.
 pub(crate) async fn begin_owned_read_committed_tx<'a>(
     pool: &'a DbPool,
-    operation: &str,
+    operation: &'static str,
 ) -> Result<OwnedReadCommittedTx<'a>> {
     let begin_context = transaction_error_context("begin", operation);
     let mut tx = pool
@@ -78,16 +82,16 @@ pub(crate) async fn begin_owned_read_committed_tx<'a>(
 /// Commits a successful internally owned operation or rolls back its error.
 pub(crate) async fn finish_owned_transaction<T>(
     tx: OwnedReadCommittedTx<'_>,
-    operation: &str,
+    operation: &'static str,
+    commit_operation: &'static str,
     operation_result: Result<T>,
 ) -> Result<T> {
     let tx = tx.into_inner();
     match operation_result {
         Ok(value) => {
-            let commit_context = transaction_error_context("commit", operation);
             tx.commit()
                 .await
-                .map_err(|error| Error::from_query_sqlx_with_context(&commit_context, error))?;
+                .map_err(|error| Error::commit_unconfirmed(commit_operation, error))?;
             Ok(value)
         }
         Err(error) => {
@@ -185,9 +189,14 @@ mod tests {
                 .await
                 .expect("insert committed sentinel");
         }
-        finish_owned_transaction(commit_tx, "test commit", Ok(()))
-            .await
-            .expect("commit successful owned operation");
+        finish_owned_transaction(
+            commit_tx,
+            "test commit",
+            "commit test commit transaction",
+            Ok(()),
+        )
+        .await
+        .expect("commit successful owned operation");
 
         let mut rollback_tx = begin_owned_read_committed_tx(&pool, "test rollback")
             .await
@@ -202,9 +211,14 @@ mod tests {
         let operation_result: Result<()> = Err(Error::ConfigError(
             "intentional operation failure".to_owned(),
         ));
-        let error = finish_owned_transaction(rollback_tx, "test rollback", operation_result)
-            .await
-            .expect_err("operation error should be returned after rollback");
+        let error = finish_owned_transaction(
+            rollback_tx,
+            "test rollback",
+            "commit test rollback transaction",
+            operation_result,
+        )
+        .await
+        .expect_err("operation error should be returned after rollback");
         assert!(
             matches!(error, Error::ConfigError(ref message) if message == "intentional operation failure")
         );

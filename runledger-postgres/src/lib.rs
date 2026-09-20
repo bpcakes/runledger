@@ -464,7 +464,7 @@ pub type DbPool = sqlx::PgPool;
 pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub use error::RollbackFailure;
+pub use error::{CommitUnconfirmed, RollbackFailure};
 pub use transaction_executor::PgTransactionExecutor;
 
 #[derive(Debug)]
@@ -473,6 +473,9 @@ pub enum Error {
     ConnectionError(String),
     MigrationError(String),
     QueryError(QueryError),
+    /// An owned transaction's `COMMIT` did not confirm success. The outcome is
+    /// unknown rather than failed; see [`CommitUnconfirmed`] before retrying.
+    CommitUnconfirmed(CommitUnconfirmed),
     /// Failed cancellation and its separately observed rollback failure.
     RollbackFailure(Box<RollbackFailure>),
 }
@@ -484,6 +487,7 @@ impl fmt::Display for Error {
             Self::ConnectionError(message) => write!(f, "{message}"),
             Self::MigrationError(message) => write!(f, "{message}"),
             Self::QueryError(query_error) => write!(f, "{query_error}"),
+            Self::CommitUnconfirmed(unconfirmed) => fmt::Display::fmt(unconfirmed, f),
             Self::RollbackFailure(failure) => fmt::Display::fmt(failure, f),
         }
     }
@@ -493,6 +497,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::QueryError(query_error) => Some(query_error),
+            Self::CommitUnconfirmed(unconfirmed) => Some(unconfirmed),
             Self::RollbackFailure(failure) => Some(&**failure),
             Self::ConfigError(_) | Self::ConnectionError(_) | Self::MigrationError(_) => None,
         }
@@ -508,5 +513,14 @@ impl Error {
     #[must_use]
     pub fn from_query_sqlx_with_context(context: &str, error: sqlx::Error) -> Self {
         Self::QueryError(QueryError::from_sqlx(error, Some(context)))
+    }
+
+    /// Wrap the error returned by an owned transaction's `COMMIT`. Use this for
+    /// every commit so an unknown outcome is never reported as a connection or
+    /// statement failure. The static lifetime enforces the fixed-text operation
+    /// label required at this public boundary; never include request data.
+    #[must_use]
+    pub fn commit_unconfirmed(operation: &'static str, error: sqlx::Error) -> Self {
+        Self::CommitUnconfirmed(CommitUnconfirmed::new(operation, error))
     }
 }

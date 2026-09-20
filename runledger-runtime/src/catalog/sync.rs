@@ -49,12 +49,10 @@ impl JobCatalog {
             .map_err(CatalogError::from_definition_catalog_sync_error)?;
 
         tx.commit().await.map_err(|error| {
-            CatalogError::CommitFailure(Box::new(
-                runledger_postgres::Error::from_query_sqlx_with_context(
-                    "commit job catalog definition sync",
-                    error,
-                ),
-            ))
+            CatalogError::CommitFailure(Box::new(runledger_postgres::Error::commit_unconfirmed(
+                "commit job catalog definition sync",
+                error,
+            )))
         })?;
 
         Ok(JobCatalogSyncReport {
@@ -105,12 +103,10 @@ impl JobCatalog {
             .map_err(CatalogError::from_definition_catalog_sync_error)?;
 
         tx.commit().await.map_err(|error| {
-            CatalogError::CommitFailure(Box::new(
-                runledger_postgres::Error::from_query_sqlx_with_context(
-                    "commit exact job catalog definition sync",
-                    error,
-                ),
-            ))
+            CatalogError::CommitFailure(Box::new(runledger_postgres::Error::commit_unconfirmed(
+                "commit exact job catalog definition sync",
+                error,
+            )))
         })?;
 
         Ok(JobCatalogExactSyncReport {

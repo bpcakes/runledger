@@ -73,11 +73,12 @@ const fn cancellation_scope_predicate(scope: JobCancellationScope) -> (bool, Opt
 
 /// Cancels a pending or leased job within an explicit authorization scope.
 /// Owns a READ COMMITTED transaction independently of the session default.
-/// Begin/commit failures retain their SQLx sources and fixed internal
-/// [`QueryErrorKind::TransactionBeginFailed`] / [`QueryErrorKind::TransactionCommitUnconfirmed`]
-/// classifications, never statement-level business/validation codes. A failed operation is rolled
-/// back explicitly; if rollback also fails, [`crate::Error::RollbackFailure`]
-/// retains both causes. A commit error does not prove rollback or authorize replay.
+/// A begin failure retains its SQLx source under the fixed internal
+/// [`QueryErrorKind::TransactionBeginFailed`] classification, never a statement-level
+/// business/validation code. A failed operation is rolled back explicitly; if rollback
+/// also fails, [`crate::Error::RollbackFailure`] retains both causes. A commit error is
+/// the separate [`crate::Error::CommitUnconfirmed`] outcome: it does not prove that
+/// cancellation failed, that it rolled back, or that replay is safe.
 pub async fn cancel_job_with_scope(
     pool: &DbPool,
     scope: JobCancellationScope,
@@ -105,13 +106,9 @@ pub async fn cancel_job_with_scope(
         Err(error) => return Err(rollback_cancellation(tx, error).await),
     };
 
-    tx.commit().await.map_err(|error| {
-        Error::QueryError(QueryError::from_sqlx_with_kind(
-            QueryErrorKind::TransactionCommitUnconfirmed,
-            "commit job cancellation",
-            error,
-        ))
-    })?;
+    tx.commit()
+        .await
+        .map_err(|error| Error::commit_unconfirmed("commit job cancellation", error))?;
 
     Ok(record)
 }
@@ -421,13 +418,14 @@ pub async fn compare_and_requeue_job(
     request: CompareAndRequeueJob<'_>,
 ) -> Result<CompareAndRequeueJobOutcome> {
     const OPERATION: &str = "compare-and-requeue";
+    const COMMIT_OPERATION: &str = "commit compare-and-requeue transaction";
 
     let mut tx = begin_owned_read_committed_tx(pool, OPERATION).await?;
     let result = {
         let mut read_committed_tx = tx.as_read_committed_tx();
         compare_and_requeue_job_read_committed_tx(&mut read_committed_tx, request).await
     };
-    finish_owned_transaction(tx, OPERATION, result).await
+    finish_owned_transaction(tx, OPERATION, COMMIT_OPERATION, result).await
 }
 
 /// Atomically requeues an exactly scoped canceled or dead-lettered job only if
