@@ -80,7 +80,10 @@ async fn shared_contract_transaction_and_worker_round_trip() {
     .await;
     stop_tx.send(()).expect("request shutdown");
     let report = task.await.expect("supervisor task");
-    assert!(report.is_success(), "graceful shutdown");
+    assert!(
+        matches!(report.classify(), RuntimeSettlement::Clean(_)),
+        "graceful shutdown"
+    );
     let job = completed.expect("job completes");
     assert_eq!(job.payload, payload);
     assert_eq!(job.progress_done, Some(1));

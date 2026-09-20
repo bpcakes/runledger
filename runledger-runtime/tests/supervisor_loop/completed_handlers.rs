@@ -167,7 +167,7 @@ async fn exercise(outcome: Outcome, during_shutdown: bool) {
     teardown_ephemeral_pool(pool, database).await;
 
     assert_durable_outcome(outcome, &record);
-    assert_settlement(outcome, &report);
+    assert_settlement(outcome, report);
 }
 
 fn assert_durable_outcome(outcome: Outcome, record: &runledger_postgres::jobs::JobQueueRecord) {
@@ -187,15 +187,17 @@ fn assert_durable_outcome(outcome: Outcome, record: &runledger_postgres::jobs::J
     }
 }
 
-fn assert_settlement(outcome: Outcome, report: &runledger_runtime::RuntimeShutdownReport) {
+fn assert_settlement(outcome: Outcome, report: runledger_runtime::RuntimeShutdownReport) {
     assert!(report.unjoined().is_empty());
     if matches!(outcome, Outcome::Panic) {
-        assert!(!report.is_cooperatively_stopped());
-        assert!(!report.is_success());
         assert_eq!(report.callback_failures().len(), 1);
         assert!(matches!(
             &report.callback_failures()[0],
             RuntimeCallbackFailure::Panicked { .. }
+        ));
+        assert!(matches!(
+            report.classify(),
+            runledger_runtime::RuntimeSettlement::Unsettled(_)
         ));
     } else {
         assert!(
@@ -203,8 +205,10 @@ fn assert_settlement(outcome: Outcome, report: &runledger_runtime::RuntimeShutdo
             "completed handler is not interrupted"
         );
         assert_eq!(report.prior_callback_interruptions(), 0);
-        assert!(report.is_cooperatively_stopped());
-        assert!(report.is_success());
+        assert!(matches!(
+            report.classify(),
+            runledger_runtime::RuntimeSettlement::Clean(_)
+        ));
     }
 }
 

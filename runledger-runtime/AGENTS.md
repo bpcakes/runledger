@@ -48,9 +48,11 @@ Generic runtime for durable execution: worker loop, scheduler loop, lease reaper
   both return an independently owned `RuntimeShutdownDriver`; awaiting the
   driver yields a `RuntimeShutdownReport`. Do not add a terminal method whose
   success value could be read as proof that everything settled; dependency
-  cleanup is gated on `cleanup_decision()` and its unforgeable permit.
-  `is_cooperatively_stopped()` is retained only as a compatible boolean
-  projection of that report-derived authority.
+  cleanup is gated on consuming `classify()` and its unforgeable permit.
+  `RuntimeSettlement` has distinct opaque `Clean`, `StoppedWithFailures`, and
+  `Unsettled` payloads. Only the first two can yield one owned cleanup permit.
+  Retained reports are borrowed for diagnostics and cannot be recovered for
+  reclassification. Boolean projections are crate-private diagnostics only.
 - The terminal owner must produce either final or explicitly interrupted
   evidence even if never polled. Keep collected evidence on that owner across
   cancellation. Waiter destruction requests stop without cancelling settlement;

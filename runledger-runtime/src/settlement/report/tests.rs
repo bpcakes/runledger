@@ -71,7 +71,7 @@ fn report_with(
 }
 
 #[tokio::test]
-async fn cleanup_decision_exactly_tracks_cooperative_stop_across_report_states() {
+async fn classification_tracks_cleanup_and_process_failure_across_report_states() {
     let unjoined = tokio::spawn(std::future::pending::<()>());
     let descendant = tokio::spawn(async { panic!("private descendant panic") });
     let descendant_id = descendant.id();
@@ -138,6 +138,28 @@ async fn cleanup_decision_exactly_tracks_cooperative_stop_across_report_states()
             false,
         ),
         (
+            "earlier callback interruption after all joins",
+            report_with(RuntimeShutdownSettlement::Settled, None, Vec::new(), 1),
+            false,
+        ),
+        (
+            "joined unexpected loop exit",
+            RuntimeShutdownReport::new(
+                RuntimeShutdownCause::LoopFailure("worker"),
+                vec![RuntimeLoopRecord {
+                    task: "worker",
+                    result: Ok(RuntimeLoopExit::Completed),
+                    abort_requested: false,
+                }],
+                Vec::new(),
+                RuntimeShutdownSettlement::Settled,
+                RuntimeShutdownObservations::default(),
+                Vec::new(),
+                0,
+            ),
+            true,
+        ),
+        (
             "joined signal error",
             RuntimeShutdownReport::new(
                 RuntimeShutdownCause::SignalFailed,
@@ -157,12 +179,7 @@ async fn cleanup_decision_exactly_tracks_cooperative_stop_across_report_states()
                 Vec::new(),
                 Vec::new(),
                 RuntimeShutdownSettlement::Settled,
-                RuntimeShutdownObservations {
-                    signal_panic: Some(crate::RuntimeShutdownSignalPanic::Poll {
-                        message: "private signal panic".to_owned(),
-                    }),
-                    ..RuntimeShutdownObservations::default()
-                },
+                signal_panic_observations(),
                 Vec::new(),
                 0,
             ),
@@ -193,19 +210,7 @@ async fn cleanup_decision_exactly_tracks_cooperative_stop_across_report_states()
     ];
 
     for (state, report, expected_allowed) in reports {
-        assert_eq!(
-            matches!(
-                report.cleanup_decision(),
-                RuntimeShutdownCleanupDecision::Allowed(_)
-            ),
-            expected_allowed,
-            "{state} cleanup decision"
-        );
-        assert_eq!(
-            report.is_cooperatively_stopped(),
-            expected_allowed,
-            "{state} compatibility predicate"
-        );
+        assert_classification(state, report, expected_allowed);
     }
 
     unjoined.abort();
@@ -215,6 +220,51 @@ async fn cleanup_decision_exactly_tracks_cooperative_stop_across_report_states()
             .expect_err("pending task is cancelled")
             .is_cancelled()
     );
+}
+
+fn assert_classification(state: &str, report: RuntimeShutdownReport, expected_allowed: bool) {
+    let outcome = report.classify();
+    assert_eq!(
+        matches!(
+            outcome,
+            RuntimeSettlement::Clean(_) | RuntimeSettlement::StoppedWithFailures(_)
+        ),
+        expected_allowed,
+        "{state} cleanup decision"
+    );
+    assert_eq!(
+        matches!(outcome, RuntimeSettlement::Clean(_)),
+        state == "settled",
+        "{state} process classification"
+    );
+    match outcome {
+        RuntimeSettlement::Clean(clean) => {
+            assert!(clean.report().failure().is_none());
+            let _permit = clean.into_cleanup_permit();
+        }
+        RuntimeSettlement::StoppedWithFailures(stopped) => {
+            assert_eq!(
+                stopped.failure().to_string(),
+                stopped
+                    .report()
+                    .failure()
+                    .expect("retained failure")
+                    .to_string()
+            );
+            let (_permit, _failure) = stopped.into_parts();
+        }
+        RuntimeSettlement::Unsettled(unsettled) => {
+            assert_eq!(
+                unsettled.failure().to_string(),
+                unsettled
+                    .report()
+                    .failure()
+                    .expect("retained failure")
+                    .to_string()
+            );
+            let _failure = unsettled.into_failure();
+        }
+    }
 }
 
 #[test]

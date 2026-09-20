@@ -141,10 +141,9 @@ async fn poll_panic_starts_settlement_before_blocking_destruction() {
             assert!(report.abort_timed_out());
             assert!(!report.is_success());
             assert!(!report.is_cooperatively_stopped());
-            assert!(!matches!(
-                report.cleanup_decision(),
-                crate::RuntimeShutdownCleanupDecision::Allowed(_)
-            ));
+            let outcome = report.classify();
+            assert!(matches!(outcome, crate::RuntimeSettlement::Unsettled(_)));
+            let report = outcome.report();
             assert!(
                 report
                     .loops()

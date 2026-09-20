@@ -1162,19 +1162,32 @@ abort/join time share the first stop request's clock; native shutdown handles,
 the external signal and failures cannot restart it. Nested native callback timers
 cannot extend this enclosing allowance. The report retains all loop outcomes and
 independently observed descendant joins even when a loop is aborted. Unjoined
-work and failed joins produce `RuntimeShutdownCleanupDecision::Denied` and do
-not authorize cleanup. `is_cooperatively_stopped()` remains the compatible
-boolean projection. An abort request is retained as evidence, but does not prevent cleanup
-when normal completion wins the race and the join succeeds. Check `is_success()`
-separately: a joined configuration failure still fails the report.
-Success always implies cooperative settlement, but the converse is false, so
-never substitute the success predicate for the cleanup predicate.
-At a new cleanup boundary, match `report.cleanup_decision()` and require its
-`Allowed(permit)` branch rather than inferring authority from any boolean or
-failure classification.
+work and failed joins classify as `RuntimeSettlement::Unsettled` and cannot
+authorize cleanup. An abort request is retained as evidence, but does not prevent
+cleanup when normal completion wins the race and the join succeeds.
+Consume `report.classify()` once and exhaustively match `RuntimeSettlement`:
+
+- `Clean(clean)`: pass `clean.into_cleanup_permit()` to your cleanup adapter;
+  successful process exit is appropriate.
+- `StoppedWithFailures(stopped)`: use `stopped.into_parts()` to obtain
+  `(permit, failure)`, perform permitted cleanup, and propagate the process failure.
+- `Unsettled(unsettled)`: inspect its evidence and propagate
+  `unsettled.into_failure()`; no cleanup capability exists.
+
+These are three distinct opaque payload types. Their borrowed `report()`
+accessors preserve diagnostic access without permitting another classification.
+Payloads cannot be constructed, relabeled, cloned, or converted back into an
+owned report. Earlier callback interruptions remain `Unsettled`, including after
+later successful callbacks and all tracked joins: untracked children cannot be
+proven stopped. This is uncertainty about cleanup, not necessarily a live native task.
+Require `RuntimeShutdownCleanupPermit` in the actual application cleanup adapter.
+The permit proves only its originating runtime's settlement, does not identify a
+pool or prove other runtimes stopped, and cannot prevent direct external pool calls.
+The public `is_success()`, `is_cooperatively_stopped()`, and `cleanup_decision()`
+methods have been removed; update consumers together with this breaking API change.
 `report.failure()` classifies the primary retained reason as a
 `RuntimeShutdownFailure` for logs, alerts and exit codes; it is `None` exactly
-when `is_success()` is true and never authorizes cleanup by itself. When stopping
+when classification would produce `Clean` and never authorizes cleanup by itself. When stopping
 began because a loop or descendant failed, that triggering failure is reported
 ahead of anything observed while draining, and a cancellation caused by an abort
 the supervisor itself issued never outranks the failure that provoked it.
@@ -1244,8 +1257,8 @@ stop on the original clock without cancelling the owner. Bounded graceful/abort
 settlement continues. A report owns its delivery obligation: consuming it
 acknowledges observation; dropping it anywhere in delivery emits one redacted
 diagnostic, including when the report was queued before its waiter was dropped.
-Cleanup still requires an observed report and
-`RuntimeShutdownCleanupDecision::Allowed`; the diagnostic does not authorize it. Runtime/process
+Cleanup still requires consuming an observed report and obtaining a permit from
+`Clean` or `StoppedWithFailures`; the diagnostic does not authorize it. Runtime/process
 death and non-yielding futures cannot be made to complete by an async deadline.
 The captured Tokio runtime must remain alive and driven. Awaiting the driver on
 another runtime does not drive a suspended current-thread owner. If the owner

@@ -1506,7 +1506,10 @@ async fn supervisor_with_catalog_processes_enqueued_job_after_sync() {
     )
     .expect("valid shutdown budget");
     assert!(
-        supervisor.shutdown_report(budget).await.is_success(),
+        matches!(
+            supervisor.shutdown_report(budget).await.classify(),
+            runledger_runtime::RuntimeSettlement::Clean(_)
+        ),
         "supervisor shutdown"
     );
 

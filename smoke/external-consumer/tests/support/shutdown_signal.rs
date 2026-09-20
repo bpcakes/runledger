@@ -69,16 +69,6 @@ async fn signal_error_retains_source_fails_shutdown_and_authorizes_accounted_cle
             .iter()
             .any(|record| { record.task == "shutdown_signal" && record.error.is_none() })
     );
-    assert!(!report.is_success());
-    assert!(report.is_cooperatively_stopped());
-    match report.cleanup_decision() {
-        RuntimeShutdownCleanupDecision::Allowed(permit) => {
-            close_accounted_pool(permit, &pool).await;
-        }
-        RuntimeShutdownCleanupDecision::Denied => {
-            panic!("joined signal error still permits accounted cleanup");
-        }
-    }
     assert!(report.signal_panic().is_none());
     let signal_error: &RuntimeShutdownSignalError =
         report.signal_error().expect("retain typed signal error");
@@ -100,6 +90,12 @@ async fn signal_error_retains_source_fails_shutdown_and_authorizes_accounted_cle
     ] {
         assert!(!formatted.contains("private signal listener detail"));
     }
+    let RuntimeSettlement::StoppedWithFailures(stopped) = report.classify() else {
+        panic!("joined signal error must fail the process and permit cleanup");
+    };
+    let (permit, failure) = stopped.into_parts();
+    assert!(matches!(failure, RuntimeShutdownFailure::Signal { .. }));
+    close_accounted_pool(permit, &pool).await;
 }
 
 #[tokio::test]
@@ -146,12 +142,7 @@ async fn signal_panic_evidence_is_public_and_redacted() {
     assert!(matches!(report.failure(),
         Some(RuntimeShutdownFailure::DescendantJoin { task: "shutdown_signal", source })
             if source.is_panic()));
-    assert!(!report.is_success());
-    assert!(!report.is_cooperatively_stopped());
-    assert!(matches!(
-        report.cleanup_decision(),
-        RuntimeShutdownCleanupDecision::Denied
-    ));
     assert!(!format!("{panic:?}").contains("private"));
     assert!(!format!("{report:?}").contains("private"));
+    assert!(matches!(report.classify(), RuntimeSettlement::Unsettled(_)));
 }

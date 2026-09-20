@@ -117,5 +117,8 @@ async fn all_preludes_can_be_glob_imported_together() {
         matches!(report.settlement(), RuntimeShutdownSettlement::Settled),
         "disabled supervisor should settle without escalation"
     );
-    assert!(report.is_success(), "shutdown should succeed");
+    assert!(
+        matches!(report.classify(), RuntimeSettlement::Clean(_)),
+        "shutdown should succeed"
+    );
 }
