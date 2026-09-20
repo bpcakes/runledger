@@ -29,6 +29,8 @@ for crate in "${PUBLISHABLE_CRATES[@]}"; do
       --allow-dirty \
       --list \
       -p "$crate" \
+      --config "patch.crates-io.batter-core.path=\"${ROOT_DIR}/../batter/crates/batter-core\"" \
+      --config "patch.crates-io.batter-sqlx.path=\"${ROOT_DIR}/../batter/crates/batter-sqlx\"" \
       --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
       --config "patch.crates-io.runledger-test-support.path=\"${ROOT_DIR}/runledger-test-support\"" \
       --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \

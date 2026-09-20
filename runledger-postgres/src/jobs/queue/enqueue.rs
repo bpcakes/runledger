@@ -146,7 +146,7 @@ pub async fn enqueue_job_with_outcome_tx(
 /// replaceable SQLx connection or transaction. The executor capability must
 /// represent one live explicit transaction for the complete call; see
 /// [`PgTransactionExecutor`].
-pub async fn enqueue_job_with_outcome_in_transaction<T>(
+pub(crate) async fn enqueue_job_with_outcome_in_transaction<T>(
     tx: &mut T,
     payload: &JobEnqueue<'_>,
 ) -> Result<JobEnqueueOutcome>
@@ -189,7 +189,7 @@ pub async fn enqueue_job_with_execution_resource_tx(
 /// This has the same resource and idempotency contract as
 /// [`enqueue_job_with_execution_resource_tx`] while allowing the transaction
 /// owner to hide its native SQLx representation.
-pub async fn enqueue_job_with_execution_resource_in_transaction<T>(
+pub(crate) async fn enqueue_job_with_execution_resource_in_transaction<T>(
     tx: &mut T,
     payload: &JobEnqueue<'_>,
     execution_resource_key: &str,
@@ -459,7 +459,10 @@ pub async fn enqueue_job_tx(tx: &mut DbTx<'_>, payload: &JobEnqueue<'_>) -> Resu
 
 /// Enqueues a job through an opaque caller-owned transaction capability while
 /// preserving the UUID-only result contract.
-pub async fn enqueue_job_in_transaction<T>(tx: &mut T, payload: &JobEnqueue<'_>) -> Result<Uuid>
+pub(crate) async fn enqueue_job_in_transaction<T>(
+    tx: &mut T,
+    payload: &JobEnqueue<'_>,
+) -> Result<Uuid>
 where
     T: PgTransactionExecutor + ?Sized,
 {

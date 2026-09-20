@@ -1,6 +1,6 @@
 pub mod shared;
 
-use runledger_postgres::jobs::enqueue_job_tx;
+use runledger_postgres::PgAtomicTransaction;
 use shared::{Greeting, request};
 use sqlx::postgres::PgPoolOptions;
 
@@ -16,11 +16,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
 
     let payload = serde_json::to_value(Greeting { name })?;
-    let mut tx = pool.begin().await?;
-    // Persist application changes with this same transaction when needed.
-    let job_id = enqueue_job_tx(&mut tx, &request(&payload, &key)).await?;
-    tx.commit().await?;
-    println!("enqueued {job_id}");
+    let tx = PgAtomicTransaction::begin(&pool).await?;
+    // Persist application changes through tx.application(...) when needed.
+    let (tx, outcome) = tx.enqueue_job(&request(&payload, &key)).await?;
+    let _confirmed = tx.commit().await?;
+    println!("enqueued {}", outcome.job_id);
     pool.close().await;
     Ok(())
 }

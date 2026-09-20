@@ -1083,14 +1083,12 @@ See the PostgreSQL 18
 for compile-checked inserted, idempotent, stale, exact-scope, transactional, and
 workflow-rejection cases.
 
-When a transactional keyed enqueue needs to branch on the durable job state,
-use `enqueue_job_with_outcome_in_transaction` when a hosting adapter keeps its
-transaction opaque, or `enqueue_job_with_outcome_tx` for a native SQLx
-transaction. Construct `PgTransactionView` from the adapter's private native
-transaction. Its sealed execution trait excludes arbitrary executor providers
-and the view retains the transaction borrow without exposing replaceable identity. Both functions return a `JobEnqueueOutcome` containing the job ID,
-status, run number, and `Inserted`/`Existing` disposition under the enqueue
-transaction's mutation-ready row lock; do not query `job_queue` directly.
+When a transactional keyed enqueue needs to branch on durable job state, use
+`PgAtomicTransaction::enqueue_job`. It returns a fresh owner and a
+`JobEnqueueOutcome` under the enqueue transaction's mutation-ready row lock.
+Run application SQL through consuming `application` or recoverable `operation`
+scopes; do not construct borrowed transaction views or public executor capabilities.
+Commit consumes the owner and reports explicit confirmation or uncertainty.
 
 Use `update_job_payload_uuid_array_field` only for direct pending jobs whose
 payload can be safely mutated. Inspect `JobPayloadUuidArrayFieldUpdate`; rejected
@@ -1418,24 +1416,13 @@ Other compile-checked examples and integration references:
 - [`runledger-postgres/tests/workflow_recovery.rs`](../runledger-postgres/tests/workflow_recovery.rs)
 
 
-### Opaque durable-intent and schema capabilities
+### Owned durable-intent and schema scopes
 
-Adapters construct `PgTransactionView::new(&mut native_transaction)` inside
-their private implementation and pass a mutable view to
-`record_job_enqueue_intent_in_transaction` or the direct-enqueue APIs.
-`PgTransactionExecutor` is sealed to native SQLx transactions and this view;
-arbitrary downstream executor implementations are rejected. The operation
-retains an exclusive borrow of the actual transaction through READ COMMITTED
-validation and every write. Native intent idempotency, conflicts, lock ordering
-and commit/rollback behavior are unchanged. Record intents before operations
-that lock job rows. Existing `record_job_enqueue_intent_tx` callers retain the
-same behavior.
+Use `PgAtomicTransaction::begin(&pool)` and consuming `application`,
+`record_job_enqueue_intent`, and `enqueue_job` methods. Cancellation and lost
+continuity retire the transaction; commit returns confirmation or uncertainty.
+There is no borrowed view compatibility bridge. Record intents before job locks.
 
-Schema verification consumes `PgSessionView::new(&mut native_connection)` through
-`ensure_schema_compatible_after_idempotency_cutover_with_session`. The view holds
-one connection for the complete native check; it cannot be constructed from a
-pool or routing executor. Owners retain cancellation and disposition policy.
-Neither view exposes replaceable identity or transaction completion methods.
-Native SQL execution remains a low-level boundary: arbitrary application SQL can
-issue transaction-control statements, and no local type proves remote effects
-after an unconfirmed commit.
+Schema verification takes a pool, acquires and owns one qualified read-only
+repeatable-read snapshot, and returns `SchemaCompatibilitySnapshot` only after
+rollback acknowledgement. This is evidence of an observation, not future validity.

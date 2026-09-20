@@ -254,7 +254,7 @@ pub async fn record_job_enqueue_intent_tx(
 /// transaction. This has the same idempotency and lock-order contract as
 /// [`record_job_enqueue_intent_tx`], and validates READ COMMITTED before writing.
 /// The caller retains commit/rollback ownership; no native transaction escapes.
-pub async fn record_job_enqueue_intent_in_transaction<T: PgTransactionExecutor + ?Sized>(
+pub(crate) async fn record_job_enqueue_intent_in_transaction<T: PgTransactionExecutor + ?Sized>(
     tx: &mut T,
     intent: &JobEnqueueIntent<'_>,
 ) -> Result<JobEnqueueIntentOutcome> {

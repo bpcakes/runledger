@@ -22,6 +22,8 @@ package_crate() {
     --allow-dirty \
     --no-verify \
     -p "$crate" \
+    --config "patch.crates-io.batter-core.path=\"${ROOT_DIR}/../batter/crates/batter-core\"" \
+    --config "patch.crates-io.batter-sqlx.path=\"${ROOT_DIR}/../batter/crates/batter-sqlx\"" \
     --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
     --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
     --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
@@ -73,6 +75,10 @@ perl -0pi -e '
 
 {
   printf '[patch.crates-io]\n'
+  # The coordinated foundation is unpublished; verify packaged Runledger against
+  # its actual sibling sources, not an unrelated crates.io name/version.
+  printf 'batter-core = { path = "%s/../batter/crates/batter-core" }\n' "$ROOT_DIR"
+  printf 'batter-sqlx = { path = "%s/../batter/crates/batter-sqlx" }\n' "$ROOT_DIR"
   printf 'runledger-core = { path = "%s/runledger-core-%s" }\n' "$VENDOR_DIR" "$CORE_VERSION"
   printf 'runledger-test-support = { path = "%s/runledger-test-support-%s" }\n' "$VENDOR_DIR" "$TEST_SUPPORT_VERSION"
   printf 'runledger-postgres = { path = "%s/runledger-postgres-%s" }\n' "$VENDOR_DIR" "$POSTGRES_VERSION"

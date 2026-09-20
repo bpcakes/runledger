@@ -242,7 +242,7 @@ Producer (`src/bin/producer.rs`):
 ```rust
 pub mod shared;
 
-use runledger_postgres::jobs::enqueue_job_tx;
+use runledger_postgres::PgAtomicTransaction;
 use shared::{Greeting, request};
 use sqlx::postgres::PgPoolOptions;
 
@@ -258,11 +258,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
 
     let payload = serde_json::to_value(Greeting { name })?;
-    let mut tx = pool.begin().await?;
-    // Persist application changes with this same transaction when needed.
-    let job_id = enqueue_job_tx(&mut tx, &request(&payload, &key)).await?;
-    tx.commit().await?;
-    println!("enqueued {job_id}");
+    let tx = PgAtomicTransaction::begin(&pool).await?;
+    // Persist application changes through tx.application(...) when needed.
+    let (tx, outcome) = tx.enqueue_job(&request(&payload, &key)).await?;
+    let _confirmed = tx.commit().await?;
+    println!("enqueued {}", outcome.job_id);
     pool.close().await;
     Ok(())
 }
@@ -1676,13 +1676,9 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   derived from the claimed row and worker ID so lifecycle lease fences cannot
   be mixed across jobs. The older stage-bearing
   `update_job_progress_for_lease` remains a deprecated compatibility wrapper.
-- **Transactional enqueue state.** Use
-  `enqueue_job_with_outcome_in_transaction` with a `PgTransactionView` when
-  an adapter must keep the underlying SQLx transaction and connection opaque.
-  It returns the job ID together with its locked `status`, `run_number`, and
-  `Inserted`/`Existing` disposition and takes a mutation-ready lock on an
-  existing keyed row. Native SQLx consumers can keep using
-  `enqueue_job_with_outcome_tx`; it delegates to the same capability path.
+- **Transactional enqueue state.** Use `PgAtomicTransaction::enqueue_job`.
+  It returns a fresh owner and the locked job status, run number and
+  inserted/existing disposition.
   `enqueue_job_tx` remains the UUID-only native compatibility API and retains
   key-share concurrency between identical keyed enqueues while composing safely
   with same-transaction compare-and-requeue.
@@ -1947,24 +1943,23 @@ The crates are published under the **MIT** license, as declared in each crate's
 `Cargo.toml`. See [`LICENSE`](LICENSE) for the repository license text.
 
 
-### Opaque durable-intent and schema capabilities
+### Owned transaction and schema scopes
 
-Adapters construct `PgTransactionView::new(&mut native_transaction)` inside
-their private implementation and pass a mutable view to
-`record_job_enqueue_intent_in_transaction` or the direct-enqueue APIs.
-`PgTransactionExecutor` is sealed to native SQLx transactions and this view;
-arbitrary downstream executor implementations are rejected. The operation
-retains an exclusive borrow of the actual transaction through READ COMMITTED
-validation and every write. Native intent idempotency, conflicts, lock ordering
-and commit/rollback behavior are unchanged. Record intents before operations
-that lock job rows. Existing `record_job_enqueue_intent_tx` callers retain the
-same behavior.
+This coordinated feature branch requires a sibling `../batter` checkout at
+`34bdd640256a1b502bf19420d8b8aa7ad1cac859` or the matching owned-scope branch.
+CI pins that foundation revision. The foundation crates are not published yet;
+packaged-crate smoke tests explicitly patch them to the same sibling sources.
+Publishing Runledger with this dependency requires publishing the foundation first.
 
-Schema verification consumes `PgSessionView::new(&mut native_connection)` through
-`ensure_schema_compatible_after_idempotency_cutover_with_session`. The view holds
-one connection for the complete native check; it cannot be constructed from a
-pool or routing executor. Owners retain cancellation and disposition policy.
-Neither view exposes replaceable identity or transaction completion methods.
-Native SQL execution remains a low-level boundary: arbitrary application SQL can
-issue transaction-control statements, and no local type proves remote effects
-after an unconfirmed commit.
+Use `PgAtomicTransaction::begin(&pool)`, then consuming `application`,
+`enqueue_job` or `record_job_enqueue_intent` methods. Each returned owner has
+revalidated transaction continuity; cancellation and boundary loss retire it.
+Commit returns explicit acknowledgement or an unconfirmed outcome, never a
+reusable transaction. Record intents before operations that lock job rows.
+
+`ensure_schema_compatible_after_idempotency_cutover(&pool)` owns a read-only
+repeatable-read transaction and returns `SchemaCompatibilitySnapshot` with the
+existing migration bundle identity. It ignores caller transactions, temporary
+shadows and search paths. The snapshot is evidence of one observation, not a
+promise against future migrations. Borrowed transaction/session views have been
+removed; there is no view compatibility bridge.

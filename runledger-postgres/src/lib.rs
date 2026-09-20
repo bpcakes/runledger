@@ -105,12 +105,9 @@
 //! # }
 //! ```
 //!
-//! A hosting adapter that keeps its SQLx transaction opaque constructs
-//! [`PgTransactionView`] from its private native transaction and calls
-//! [`jobs::enqueue_job_with_outcome_in_transaction`]. Runledger receives only
-//! SQL execution access; the adapter does not need to expose a replaceable
-//! connection or transaction to application code. Native SQLx callers can keep
-//! using [`jobs::enqueue_job_with_outcome_tx`].
+//! Use [`PgAtomicTransaction`] for atomic application writes and Runledger
+//! enqueue operations. Its consuming scopes validate transaction continuity and
+//! retire the connection on cancellation or terminal failure.
 //!
 //! # Record A Durable Transactional Handoff
 //!
@@ -132,9 +129,9 @@
 //!     "invoice:invoice_123:capture",
 //! );
 //!
-//! let mut tx = pool.begin().await?;
-//! // Persist the application's business/audit mutation with this same `tx`.
-//! let outcome = record_job_enqueue_intent_tx(&mut tx, &intent).await?;
+//! let tx = PgAtomicTransaction::begin(&pool).await?;
+//! // Persist application writes through tx.application(...).
+//! let (tx, outcome) = tx.record_job_enqueue_intent(&intent).await?;
 //! if outcome.status() == JobEnqueueIntentStatus::Conflicted {
 //!     return Err("the existing durable handoff is conflicted".into());
 //! }
@@ -153,7 +150,7 @@
 //! idempotency_key)` may wait for the transaction that first claimed that unique
 //! key. Include that wait in the caller-owned transaction's lock ordering and
 //! timeout budget.
-//! Call [`jobs::record_job_enqueue_intent_tx`] before any operation in the same
+//! Call [`PgAtomicTransaction::record_job_enqueue_intent`] before any operation in the same
 //! transaction that can lock a `job_queue` row. A job-first recorder can create
 //! an inverse lock cycle with retention's canonical intent-before-job order.
 //!
@@ -344,8 +341,6 @@ pub use migration_identity::{MigrationBundle, RUNLEDGER_POSTGRES_VERSION, migrat
 pub use migrations::{
     MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
     WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
-    ensure_schema_compatible_after_idempotency_cutover_with_connection,
-    ensure_schema_compatible_after_idempotency_cutover_with_session,
     migrate_after_idempotency_cutover,
 };
 #[allow(
@@ -410,36 +405,33 @@ pub mod prelude {
         count_workflow_step_dependencies, count_workflow_step_dependencies_with_scope,
         count_workflow_steps, count_workflow_steps_with_scope,
         delete_promoted_job_enqueue_intents_before,
-        delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job, enqueue_job_in_transaction,
-        enqueue_job_tx, enqueue_job_with_execution_resource,
-        enqueue_job_with_execution_resource_in_transaction, enqueue_job_with_execution_resource_tx,
-        enqueue_job_with_outcome, enqueue_job_with_outcome_in_transaction,
-        enqueue_job_with_outcome_tx, enqueue_or_get_active_workflow,
-        enqueue_or_get_active_workflow_tx, enqueue_workflow_run, enqueue_workflow_run_handle,
-        enqueue_workflow_run_tx, get_job_by_id, get_job_by_id_with_scope,
-        get_job_continuation_metrics, get_job_continuation_metrics_with_scope,
-        get_job_definition_by_type, get_job_enqueue_intent_by_id,
-        get_job_enqueue_intent_by_id_with_scope, get_job_enqueue_intent_metrics,
-        get_job_enqueue_intent_metrics_with_scope, get_job_metrics, get_job_metrics_with_scope,
-        get_job_payload_by_idempotency_key, get_job_payload_by_idempotency_key_with_scope,
-        get_job_runtime_config_by_type, get_job_schedule_by_name, get_job_statuses_with_scope,
-        get_latest_job_payload_for_run, get_latest_job_payload_for_run_with_scope,
-        get_latest_workflow_run_by_type, get_latest_workflow_run_by_type_with_scope,
-        get_required_job_runtime_config_by_type, get_workflow_run_by_id,
-        get_workflow_run_by_id_with_scope, get_workflow_run_by_type_and_idempotency_key,
-        get_workflow_run_id_for_job, heartbeat_job_for_lease, insert_job_definition_if_missing_tx,
-        insert_job_log, insert_job_runtime_config_if_missing, list_job_definitions,
-        list_job_enqueue_intents, list_job_enqueue_intents_with_scope, list_job_events,
-        list_job_events_with_scope, list_job_logs, list_job_logs_with_scope,
-        list_job_runtime_configs, list_job_summaries, list_jobs, list_jobs_with_scope,
-        list_workflow_runs, list_workflow_runs_with_scope, list_workflow_step_dependencies,
-        list_workflow_step_dependencies_page, list_workflow_step_dependencies_page_with_scope,
+        delete_promoted_job_enqueue_intents_for_jobs_tx, enqueue_job,
+        enqueue_job_with_execution_resource, enqueue_job_with_outcome,
+        enqueue_or_get_active_workflow, enqueue_or_get_active_workflow_tx, enqueue_workflow_run,
+        enqueue_workflow_run_handle, enqueue_workflow_run_tx, get_job_by_id,
+        get_job_by_id_with_scope, get_job_continuation_metrics,
+        get_job_continuation_metrics_with_scope, get_job_definition_by_type,
+        get_job_enqueue_intent_by_id, get_job_enqueue_intent_by_id_with_scope,
+        get_job_enqueue_intent_metrics, get_job_enqueue_intent_metrics_with_scope, get_job_metrics,
+        get_job_metrics_with_scope, get_job_payload_by_idempotency_key,
+        get_job_payload_by_idempotency_key_with_scope, get_job_runtime_config_by_type,
+        get_job_schedule_by_name, get_job_statuses_with_scope, get_latest_job_payload_for_run,
+        get_latest_job_payload_for_run_with_scope, get_latest_workflow_run_by_type,
+        get_latest_workflow_run_by_type_with_scope, get_required_job_runtime_config_by_type,
+        get_workflow_run_by_id, get_workflow_run_by_id_with_scope,
+        get_workflow_run_by_type_and_idempotency_key, get_workflow_run_id_for_job,
+        heartbeat_job_for_lease, insert_job_definition_if_missing_tx, insert_job_log,
+        insert_job_runtime_config_if_missing, list_job_definitions, list_job_enqueue_intents,
+        list_job_enqueue_intents_with_scope, list_job_events, list_job_events_with_scope,
+        list_job_logs, list_job_logs_with_scope, list_job_runtime_configs, list_job_summaries,
+        list_jobs, list_jobs_with_scope, list_workflow_runs, list_workflow_runs_with_scope,
+        list_workflow_step_dependencies, list_workflow_step_dependencies_page,
+        list_workflow_step_dependencies_page_with_scope,
         list_workflow_step_dependencies_with_scope, list_workflow_steps, list_workflow_steps_page,
         list_workflow_steps_page_with_scope, list_workflow_steps_with_scope,
         mark_job_running_for_lease, prepare_schedule_exact_sync_critical_section_tx,
         promote_job_enqueue_intents_for_types, reap_expired_leases_with_diagnostics,
-        record_job_enqueue_intent, record_job_enqueue_intent_in_transaction,
-        record_job_enqueue_intent_tx, recover_workflow_run, recover_workflow_run_tx,
+        record_job_enqueue_intent, recover_workflow_run, recover_workflow_run_tx,
         retrieve_workflow_run_handle, set_job_schedule_active, set_job_schedule_active_tx,
         set_job_schedule_next_fire_at, set_job_schedule_next_fire_at_tx,
         sync_catalog_job_schedules_tx, update_job_definition,
@@ -453,13 +445,10 @@ pub mod prelude {
         deactivate_schedules_absent_from_names_tx,
     };
     pub use crate::{
-        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgSessionView, PgTransactionExecutor,
-        PgTransactionView, QueryError, QueryErrorCategory, QueryErrorKind,
-        SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
-        ensure_schema_compatible_after_idempotency_cutover,
-        ensure_schema_compatible_after_idempotency_cutover_with_connection,
-        ensure_schema_compatible_after_idempotency_cutover_with_session,
-        migrate_after_idempotency_cutover,
+        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgAtomicTransaction, QueryError,
+        QueryErrorCategory, QueryErrorKind, SchemaCompatibilityError,
+        WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
+        ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
     };
 }
 
@@ -468,7 +457,13 @@ pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub use error::{CommitUnconfirmed, RollbackFailure};
-pub use transaction_executor::{PgSessionView, PgTransactionExecutor, PgTransactionView};
+pub(crate) use transaction_executor::PgTransactionExecutor;
+mod atomic;
+pub use atomic::{
+    AtomicCommitUnconfirmed, PgAtomicTransaction, PgCommitConfirmed, PgRollbackConfirmed,
+    PgScopeError, PgScopedSql, PgTransactionError,
+};
+pub use migrations::SchemaCompatibilitySnapshot;
 
 #[derive(Debug)]
 pub enum Error {

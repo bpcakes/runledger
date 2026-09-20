@@ -20,6 +20,7 @@ workspace = true
 test-support = []
 
 [dependencies]
+batter-sqlx = { version = "0.1.0", path = "../../batter/crates/batter-sqlx" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 cron = { workspace = true }
 runledger-core = { workspace = true, features = ["sqlx-postgres"] }
