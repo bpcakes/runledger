@@ -124,7 +124,7 @@ async fn schema_snapshot_ignores_shadows_and_rejects_uncommitted_repairs() {
         .fetch_one(&pool)
         .await
         .expect("schema authority fixture operation");
-    assert_eq!(pid, reused, "acknowledged rollback permits pool reuse");
+    assert_ne!(pid, reused, "snapshot completion retires session state");
     let (version, checksum): (i64, Vec<u8>) = sqlx::query_as(
         "SELECT version, checksum FROM public._sqlx_migrations ORDER BY version LIMIT 1",
     )

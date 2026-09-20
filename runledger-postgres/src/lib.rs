@@ -105,9 +105,9 @@
 //! # }
 //! ```
 //!
-//! Use [`PgAtomicTransaction`] for atomic application writes and Runledger
-//! enqueue operations. Its consuming scopes validate transaction continuity and
-//! retire the connection on cancellation or terminal failure.
+//! Use [`run_atomic`] for atomic application writes and Runledger enqueue
+//! operations. The runner withholds outputs until completion is acknowledged,
+//! validates continuity, and retires the session on every completion path.
 //!
 //! # Record A Durable Transactional Handoff
 //!
@@ -129,13 +129,13 @@
 //!     "invoice:invoice_123:capture",
 //! );
 //!
-//! let tx = PgAtomicTransaction::begin(&pool).await?;
-//! // Persist application writes through tx.application(...).
-//! let (tx, outcome) = tx.record_job_enqueue_intent(&intent).await?;
+//! let outcome = run_atomic(&pool, async |mut scope| {
+//!     // Persist application writes through scope.application(...).
+//!     scope.record_job_enqueue_intent(&intent).await
+//! }).await?;
 //! if outcome.status() == JobEnqueueIntentStatus::Conflicted {
 //!     return Err("the existing durable handoff is conflicted".into());
 //! }
-//! tx.commit().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -150,9 +150,10 @@
 //! idempotency_key)` may wait for the transaction that first claimed that unique
 //! key. Include that wait in the caller-owned transaction's lock ordering and
 //! timeout budget.
-//! Call [`PgAtomicTransaction::record_job_enqueue_intent`] before any operation in the same
-//! transaction that can lock a `job_queue` row. A job-first recorder can create
-//! an inverse lock cycle with retention's canonical intent-before-job order.
+//! [`PgIntentScope`] supports intent recording; consuming it with
+//! [`PgIntentScope::queue`] enters [`PgQueueScope`], where recording is unavailable.
+//! This enforces intent-before-queue ordering for named operations. Direct SQL
+//! against internal tables is a low-level escape hatch and can violate that order.
 //!
 //! Intent payloads and idempotency keys cross the same trusted persistence
 //! boundary as ordinary queue inputs. Do not place secrets in them or emit them
@@ -445,10 +446,11 @@ pub mod prelude {
         deactivate_schedules_absent_from_names_tx,
     };
     pub use crate::{
-        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgAtomicTransaction, QueryError,
-        QueryErrorCategory, QueryErrorKind, SchemaCompatibilityError,
+        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgAtomicError, PgIntentScope,
+        PgQueueScope, QueryError, QueryErrorCategory, QueryErrorKind, SchemaCompatibilityError,
         WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
         ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
+        run_atomic,
     };
 }
 
@@ -457,11 +459,11 @@ pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub use error::{CommitUnconfirmed, RollbackFailure};
-pub(crate) use transaction_executor::PgTransactionExecutor;
+pub(crate) use transaction_executor::PgQueryExecutor;
 mod atomic;
 pub use atomic::{
-    AtomicCommitUnconfirmed, PgAtomicTransaction, PgCommitConfirmed, PgRollbackConfirmed,
-    PgScopeError, PgScopedSql, PgTransactionError,
+    PgAtomicError, PgIntentScope, PgQueueScope, PgScopeError, PgScopedSql, PgTransactionError,
+    run_atomic,
 };
 pub use migrations::SchemaCompatibilitySnapshot;
 

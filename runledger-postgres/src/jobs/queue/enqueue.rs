@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::types::Uuid;
 
-use crate::{DbPool, DbTx, Error, PgTransactionExecutor, QueryError, QueryErrorCategory, Result};
+use crate::{DbPool, DbTx, Error, PgQueryExecutor, QueryError, QueryErrorCategory, Result};
 
 use super::super::row_decode::parse_job_status;
 use super::super::transaction_isolation::{ReadCommittedTx, require_read_committed};
@@ -145,13 +145,13 @@ pub async fn enqueue_job_with_outcome_tx(
 /// application writes and Runledger enqueueing atomically without exposing a
 /// replaceable SQLx connection or transaction. The executor capability must
 /// represent one live explicit transaction for the complete call; see
-/// [`PgTransactionExecutor`].
+/// [`PgQueryExecutor`].
 pub(crate) async fn enqueue_job_with_outcome_in_transaction<T>(
     tx: &mut T,
     payload: &JobEnqueue<'_>,
 ) -> Result<JobEnqueueOutcome>
 where
-    T: PgTransactionExecutor + ?Sized,
+    T: PgQueryExecutor + ?Sized,
 {
     enqueue_job_with_existing_lock_tx(
         tx,
@@ -195,7 +195,7 @@ pub(crate) async fn enqueue_job_with_execution_resource_in_transaction<T>(
     execution_resource_key: &str,
 ) -> Result<JobEnqueueOutcome>
 where
-    T: PgTransactionExecutor + ?Sized,
+    T: PgQueryExecutor + ?Sized,
 {
     enqueue_job_with_existing_lock_tx(
         tx,
@@ -275,7 +275,7 @@ async fn enqueue_job_with_existing_lock_tx<T>(
     event_payload: EnqueuedEventPayload<'_>,
 ) -> Result<JobEnqueueOutcome>
 where
-    T: PgTransactionExecutor + ?Sized,
+    T: PgQueryExecutor + ?Sized,
 {
     let stage = payload
         .stage
@@ -351,7 +351,7 @@ async fn enqueue_job_with_existing_lock_tx_inner<T>(
     stage: &'static str,
 ) -> Result<JobEnqueueOutcome>
 where
-    T: PgTransactionExecutor + ?Sized,
+    T: PgQueryExecutor + ?Sized,
 {
     // The conflict clause is selected from static literals only; all request
     // data remains bound below. This dynamic SQL is not SQLx macro-checked, so
@@ -464,7 +464,7 @@ pub(crate) async fn enqueue_job_in_transaction<T>(
     payload: &JobEnqueue<'_>,
 ) -> Result<Uuid>
 where
-    T: PgTransactionExecutor + ?Sized,
+    T: PgQueryExecutor + ?Sized,
 {
     enqueue_job_with_existing_lock_tx(
         tx,
@@ -489,7 +489,7 @@ async fn resolve_existing_idempotent_job_tx<T>(
     existing_job_lock: ExistingJobLock,
 ) -> Result<JobEnqueueOutcome>
 where
-    T: PgTransactionExecutor + ?Sized,
+    T: PgQueryExecutor + ?Sized,
 {
     let Some(existing) = load_existing_idempotent_job_tx(
         tx,
@@ -528,7 +528,7 @@ fn job_definition_unavailable_error() -> Error {
 
 async fn job_definition_available_tx<T>(tx: &mut T, job_type: &str) -> Result<bool>
 where
-    T: PgTransactionExecutor + ?Sized,
+    T: PgQueryExecutor + ?Sized,
 {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
@@ -554,7 +554,7 @@ async fn load_existing_idempotent_job_tx<T>(
     existing_job_lock: ExistingJobLock,
 ) -> Result<Option<ExistingIdempotentJobRow>>
 where
-    T: PgTransactionExecutor + ?Sized,
+    T: PgQueryExecutor + ?Sized,
 {
     // The outcome API gives callers a mutation-ready lock. The legacy UUID-only
     // API uses KEY SHARE so identical keyed enqueues remain concurrent while a

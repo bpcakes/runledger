@@ -1084,11 +1084,10 @@ for compile-checked inserted, idempotent, stale, exact-scope, transactional, and
 workflow-rejection cases.
 
 When a transactional keyed enqueue needs to branch on durable job state, use
-`PgAtomicTransaction::enqueue_job`. It returns a fresh owner and a
-`JobEnqueueOutcome` under the enqueue transaction's mutation-ready row lock.
-Run application SQL through consuming `application` or recoverable `operation`
-scopes; do not construct borrowed transaction views or public executor capabilities.
-Commit consumes the owner and reports explicit confirmation or uncertainty.
+`run_atomic` with `scope.queue().enqueue_job`. Its `JobEnqueueOutcome` is
+provisional inside the callback under the transaction's mutation-ready row lock.
+Use `application` for savepoint-protected SQL; the runner releases its output only
+after acknowledged commit. Uncertainty retains the domain result/error.
 
 Use `update_job_payload_uuid_array_field` only for direct pending jobs whose
 payload can be safely mutated. Inspect `JobPayloadUuidArrayFieldUpdate`; rejected
@@ -1418,10 +1417,13 @@ Other compile-checked examples and integration references:
 
 ### Owned durable-intent and schema scopes
 
-Use `PgAtomicTransaction::begin(&pool)` and consuming `application`,
-`record_job_enqueue_intent`, and `enqueue_job` methods. Cancellation and lost
-continuity retire the transaction; commit returns confirmation or uncertainty.
-There is no borrowed view compatibility bridge. Record intents before job locks.
+Use `run_atomic(&pool, async |mut scope| ...)`. The initial intent phase supports
+`record_job_enqueue_intent`; consume it with `scope.queue()` before enqueueing.
+The queue phase has no recording method. Both phases support application SQL,
+with direct SQL against internal tables designated a low-level escape hatch.
+The runner releases results only after acknowledged disposition, retaining domain
+outputs/errors on uncertainty. All sessions retire; acquisition resets inherited
+state. There is no borrowed view or consuming-owner compatibility bridge.
 
 Schema verification takes a pool, acquires and owns one qualified read-only
 repeatable-read snapshot, and returns `SchemaCompatibilitySnapshot` only after

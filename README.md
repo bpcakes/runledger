@@ -242,7 +242,7 @@ Producer (`src/bin/producer.rs`):
 ```rust
 pub mod shared;
 
-use runledger_postgres::PgAtomicTransaction;
+use runledger_postgres::run_atomic;
 use shared::{Greeting, request};
 use sqlx::postgres::PgPoolOptions;
 
@@ -258,10 +258,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
 
     let payload = serde_json::to_value(Greeting { name })?;
-    let tx = PgAtomicTransaction::begin(&pool).await?;
-    // Persist application changes through tx.application(...) when needed.
-    let (tx, outcome) = tx.enqueue_job(&request(&payload, &key)).await?;
-    let _confirmed = tx.commit().await?;
+    let outcome = run_atomic(&pool, async |scope| {
+        // Persist application changes through queue.application(...) when needed.
+        scope.queue().enqueue_job(&request(&payload, &key)).await
+    })
+    .await?;
     println!("enqueued {}", outcome.job_id);
     pool.close().await;
     Ok(())
@@ -1676,9 +1677,9 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   derived from the claimed row and worker ID so lifecycle lease fences cannot
   be mixed across jobs. The older stage-bearing
   `update_job_progress_for_lease` remains a deprecated compatibility wrapper.
-- **Transactional enqueue state.** Use `PgAtomicTransaction::enqueue_job`.
-  It returns a fresh owner and the locked job status, run number and
-  inserted/existing disposition.
+- **Transactional enqueue state.** Use `run_atomic` and `scope.queue().enqueue_job`.
+  Inside the callback, the locked job status, run number and inserted/existing
+  disposition are provisional. The runner returns output only after acknowledged commit.
   `enqueue_job_tx` remains the UUID-only native compatibility API and retains
   key-share concurrency between identical keyed enqueues while composing safely
   with same-transaction compare-and-requeue.
@@ -1946,16 +1947,20 @@ The crates are published under the **MIT** license, as declared in each crate's
 ### Owned transaction and schema scopes
 
 This coordinated feature branch requires a sibling `../batter` checkout at
-`34bdd640256a1b502bf19420d8b8aa7ad1cac859` or the matching owned-scope branch.
+`a41ec84a9056728fe8af037a234ddd44182f9170` or the matching owned-scope branch.
 CI pins that foundation revision. The foundation crates are not published yet;
 packaged-crate smoke tests explicitly patch them to the same sibling sources.
 Publishing Runledger with this dependency requires publishing the foundation first.
 
-Use `PgAtomicTransaction::begin(&pool)`, then consuming `application`,
-`enqueue_job` or `record_job_enqueue_intent` methods. Each returned owner has
-revalidated transaction continuity; cancellation and boundary loss retire it.
-Commit returns explicit acknowledgement or an unconfirmed outcome, never a
-reusable transaction. Record intents before operations that lock job rows.
+Use `run_atomic(&pool, async |mut scope| ...)`. Record intents on the initial
+`PgIntentScope`, then consume it with `scope.queue()` for enqueue operations.
+`PgQueueScope` has no intent-recording method: the inverse lock order does not compile.
+Both phases support savepoint-protected `application` SQL. Direct SQL against
+Runledger tables remains a low-level escape hatch, not a named lock-order guarantee.
+The runner releases outputs only after acknowledged commit, and rejections only
+after acknowledged rollback. `PgAtomicError` retains provisional results/errors
+when disposition is uncertain. Cancellation returns no output and proves no rollback.
+All atomic/snapshot sessions are reset on acquisition and retired on completion.
 
 `ensure_schema_compatible_after_idempotency_cutover(&pool)` owns a read-only
 repeatable-read transaction and returns `SchemaCompatibilitySnapshot` with the

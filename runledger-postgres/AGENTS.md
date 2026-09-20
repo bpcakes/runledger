@@ -36,9 +36,11 @@ PostgreSQL persistence for durable execution: queue lifecycle, workflow DAG stat
   an unknown outcome, and SQLSTATE classification must not absorb it. `operation`
   is fixed text with no request data.
 
-- The canonical transaction API is `PgAtomicTransaction`, backed by Batter's
-  dependency-free SQLx foundation. Consuming scopes own savepoint cleanup,
-  transaction identity, cancellation disposition and explicit completion evidence.
+- The canonical transaction API is `run_atomic`, backed by Batter's SQLx
+  foundation (which does not depend on Runledger). Outputs are released only after
+  acknowledged disposition. PgIntentScope consumes into PgQueueScope: never expose
+  intent recording after queue operations. Scopes own savepoint cleanup,
+  transaction identity, cancellation disposition and exhaustive uncertainty.
   Never recreate public executor capabilities or borrowed resource views.
 - Domain operations share internal SQL implementations with native persistence
   paths; executor traits are private dispatch, never evidence of transaction state.

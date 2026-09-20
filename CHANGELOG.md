@@ -4,10 +4,12 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
-- Breaking: replace borrowed transaction/session capabilities with
-  `PgAtomicTransaction` backed by Batter's SQLx foundation. Application and
-  enqueue scopes consume ownership, validate XID continuity, and retire unfinished
-  connections. Commit/rollback return explicit acknowledgement evidence.
+- Breaking: replace borrowed transaction/session capabilities with `run_atomic`
+  backed by Batter's SQLx foundation. Results leave the runner only after
+  acknowledged disposition; uncertainty retains domain output/error. Consume
+  `PgIntentScope` into `PgQueueScope` before enqueueing; intent recording after
+  queue operations is unavailable. All atomic/snapshot sessions retire and
+  acquisition resets inherited session state.
 - Schema checks own one qualified REPEATABLE READ READ ONLY snapshot and return
   `SchemaCompatibilitySnapshot` using the existing migration-bundle identity.
   Remove caller-session verifier entry points; no view compatibility bridge remains.

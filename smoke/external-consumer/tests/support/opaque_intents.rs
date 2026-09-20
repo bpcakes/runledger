@@ -1,10 +1,9 @@
 //! External consumer coverage for consuming transaction and schema owners.
 use runledger_core::jobs::JobType;
 use runledger_postgres::jobs::{
-    JobEnqueueIntent, JobEnqueueIntentDisposition, get_job_enqueue_intent_by_id,
-    record_job_enqueue_intent_tx,
+    JobEnqueueIntent, JobEnqueueIntentDisposition, record_job_enqueue_intent_tx,
 };
-use runledger_postgres::{DbPool, PgAtomicTransaction, PgScopeError};
+use runledger_postgres::{DbPool, PgAtomicError, PgScopeError, run_atomic};
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
 
@@ -55,41 +54,47 @@ async fn assert_atomic_handoff(pool: &DbPool, scope: Option<Uuid>, id: i32, comm
     let payload = json!({"audit_id": id});
     let key = format!("opaque-intent-{id}");
     let intent = request(scope, &payload, &key);
-    let tx = PgAtomicTransaction::begin(pool)
-        .await
-        .expect("begin owned intent");
-    let (tx, ()) = tx
-        .application(async |sql| {
-            sqlx::query("INSERT INTO opaque_intent_audit VALUES ($1)")
-                .bind(id)
-                .execute(sql.executor())
-                .await?;
-            Ok::<_, sqlx::Error>(())
-        })
-        .await
-        .expect("write application state");
-    let (tx, outcome) = tx
-        .record_job_enqueue_intent(&intent)
-        .await
-        .expect("record owned durable intent");
-    assert_eq!(outcome.disposition, JobEnqueueIntentDisposition::Inserted);
-    if commit {
-        let _confirmed = tx.commit().await.expect("commit atomic handoff");
+    let result = run_atomic(pool, async |mut scope| {
+        scope
+            .application(async |sql| {
+                sqlx::query("INSERT INTO opaque_intent_audit VALUES ($1)")
+                    .bind(id)
+                    .execute(sql.executor())
+                    .await?;
+                Ok::<_, sqlx::Error>(())
+            })
+            .await
+            .expect("write application state");
+        let outcome = scope
+            .record_job_enqueue_intent(&intent)
+            .await
+            .expect("record intent");
+        assert_eq!(outcome.disposition, JobEnqueueIntentDisposition::Inserted);
+        if commit { Ok(outcome) } else { Err("rejected") }
+    })
+    .await;
+    let outcome = if commit {
+        Some(result.expect("acknowledged commit"))
     } else {
-        let _confirmed = tx.rollback().await.expect("rollback atomic handoff");
-    }
-    let retained = get_job_enqueue_intent_by_id(pool, scope, outcome.intent_id)
-        .await
-        .expect("read authoritative intent");
+        assert!(matches!(result, Err(PgAtomicError::Rejected("rejected"))));
+        None
+    };
+    let retained: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM job_enqueue_intents WHERE idempotency_key=$1)",
+    )
+    .bind(&key)
+    .fetch_one(pool)
+    .await
+    .expect("read authoritative intent");
     let audit: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM opaque_intent_audit WHERE id=$1)")
             .bind(id)
             .fetch_one(pool)
             .await
             .expect("read application audit");
-    assert_eq!(retained.is_some(), commit);
+    assert_eq!(retained, commit);
     assert_eq!(audit, commit);
-    if commit {
+    if let Some(outcome) = outcome {
         assert_replay(pool, scope, &intent, &key, outcome.intent_id).await;
     }
 }
@@ -108,23 +113,21 @@ async fn assert_replay(
     assert_eq!(replay.intent_id, expected);
     assert_eq!(replay.disposition, JobEnqueueIntentDisposition::Existing);
     native.commit().await.expect("commit native replay");
-    let tx = PgAtomicTransaction::begin(pool)
-        .await
-        .expect("begin owned replay");
-    let (tx, replay) = tx
-        .record_job_enqueue_intent(intent)
-        .await
-        .expect("opaque replay");
-    assert_eq!(replay.intent_id, expected);
-    assert_eq!(replay.disposition, JobEnqueueIntentDisposition::Existing);
     let payload = json!({"changed": true});
     let changed = request(scope, &payload, key);
-    let error = tx
-        .record_job_enqueue_intent(&changed)
-        .await
-        .expect_err("changed opaque replay conflicts");
+    let error = run_atomic(pool, async |mut scope| {
+        let replay = scope
+            .record_job_enqueue_intent(intent)
+            .await
+            .expect("opaque replay");
+        assert_eq!(replay.intent_id, expected);
+        assert_eq!(replay.disposition, JobEnqueueIntentDisposition::Existing);
+        scope.record_job_enqueue_intent(&changed).await
+    })
+    .await
+    .expect_err("changed opaque replay conflicts");
     assert!(
-        matches!(error, PgScopeError::Application(runledger_postgres::Error::QueryError(ref e)) if e.code() == "job.intent_idempotency_conflict")
+        matches!(error, PgAtomicError::Rejected(PgScopeError::Application(runledger_postgres::Error::QueryError(ref e))) if e.code() == "job.intent_idempotency_conflict")
     );
     assert_native_conflict(pool, &changed).await;
 }
@@ -158,14 +161,15 @@ async fn assert_isolation_rejection(pool: &DbPool, scope: Option<Uuid>) {
         .commit()
         .await
         .expect("validation did not abort native transaction");
-    let tx = PgAtomicTransaction::begin(pool)
-        .await
-        .expect("owned transaction");
-    tx.application(async |sql| {
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            .execute(sql.executor())
-            .await?;
-        Ok::<_, sqlx::Error>(())
+    run_atomic(pool, async |mut scope| {
+        scope
+            .application(async |sql| {
+                sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    .execute(sql.executor())
+                    .await?;
+                Ok::<_, sqlx::Error>(())
+            })
+            .await
     })
     .await
     .expect_err("birth identity prevents changing transaction isolation");

@@ -1,7 +1,7 @@
 use super::*;
 use runledger_core::jobs::JobStatus;
-use runledger_postgres::PgAtomicTransaction;
 use runledger_postgres::jobs::{JobReadScope, get_job_by_id_with_scope};
+use runledger_postgres::{PgAtomicError, run_atomic};
 use runledger_runtime::config::JobsConfig;
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use shared::request;
@@ -18,38 +18,40 @@ async fn shared_contract_transaction_and_worker_round_trip() {
     catalog.sync_definitions(&pool).await.expect("definitions");
     let payload = serde_json::to_value(Greeting { name: "Ada".into() }).expect("payload");
 
-    let tx = PgAtomicTransaction::begin(&pool)
-        .await
-        .expect("transaction");
-    let (tx, rolled_back) = tx
-        .enqueue_job(&request(&payload, "rolled-back"))
-        .await
-        .expect("enqueue before rollback");
-    let _confirmed = tx.rollback().await.expect("rollback");
-    assert!(
-        get_job_by_id_with_scope(&pool, JobReadScope::Global, rolled_back.job_id)
+    let rejected = run_atomic(&pool, async |scope| {
+        scope
+            .queue()
+            .enqueue_job(&request(&payload, "rolled-back"))
             .await
-            .expect("read rolled back job")
-            .is_none()
-    );
+            .expect("enqueue before rejection");
+        Err::<(), _>("reject")
+    })
+    .await;
+    assert!(matches!(rejected, Err(PgAtomicError::Rejected("reject"))));
+    let rolled_back: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM job_queue WHERE idempotency_key='rolled-back'")
+            .fetch_one(&pool)
+            .await
+            .expect("read rolled back job");
+    assert_eq!(rolled_back, 0);
 
-    let tx = PgAtomicTransaction::begin(&pool)
-        .await
-        .expect("transaction");
-    let (tx, outcome) = tx
-        .enqueue_job(&request(&payload, "greeting:1"))
-        .await
-        .expect("enqueue");
-    let _confirmed = tx.commit().await.expect("commit");
+    let outcome = run_atomic(&pool, async |scope| {
+        scope
+            .queue()
+            .enqueue_job(&request(&payload, "greeting:1"))
+            .await
+    })
+    .await
+    .expect("committed enqueue");
     let job_id = outcome.job_id;
-    let tx = PgAtomicTransaction::begin(&pool)
-        .await
-        .expect("retry transaction");
-    let (tx, retry) = tx
-        .enqueue_job(&request(&payload, "greeting:1"))
-        .await
-        .expect("idempotent retry");
-    let _confirmed = tx.commit().await.expect("retry commit");
+    let retry = run_atomic(&pool, async |scope| {
+        scope
+            .queue()
+            .enqueue_job(&request(&payload, "greeting:1"))
+            .await
+    })
+    .await
+    .expect("committed retry");
     assert_eq!(retry.job_id, job_id);
 
     let config = JobsConfig {

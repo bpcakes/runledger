@@ -3,7 +3,7 @@ use std::fmt;
 
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migrator};
 
-use crate::{DbPool, PgTransactionExecutor};
+use crate::{DbPool, PgQueryExecutor};
 
 /// Raw SQLx migrator for inspecting the migrations bundled with this crate
 /// version.
@@ -419,7 +419,7 @@ impl SchemaCompatibilitySnapshot {
 }
 
 async fn inspect_schema(
-    conn: &mut impl PgTransactionExecutor,
+    conn: &mut impl PgQueryExecutor,
     missing_relation: Option<sqlx::Error>,
     missing_fence: Option<sqlx::Error>,
 ) -> Result<(), SchemaCompatibilityError> {
@@ -512,7 +512,7 @@ pub async fn ensure_schema_compatible(pool: &DbPool) -> Result<(), SchemaCompati
         .map(|_| ())
 }
 
-async fn has_migrations_table(conn: &mut impl PgTransactionExecutor) -> Result<bool, sqlx::Error> {
+async fn has_migrations_table(conn: &mut impl PgQueryExecutor) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar::<_, bool>(
         "SELECT pg_catalog.to_regclass('public._sqlx_migrations') IS NOT NULL",
     )
@@ -521,7 +521,7 @@ async fn has_migrations_table(conn: &mut impl PgTransactionExecutor) -> Result<b
 }
 
 async fn has_runledger_migration_history_table(
-    conn: &mut impl PgTransactionExecutor,
+    conn: &mut impl PgQueryExecutor,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar::<_, bool>(
         "SELECT pg_catalog.to_regclass('public.runledger_migration_history') IS NOT NULL",
@@ -531,7 +531,7 @@ async fn has_runledger_migration_history_table(
 }
 
 async fn list_migration_history(
-    conn: &mut impl PgTransactionExecutor,
+    conn: &mut impl PgQueryExecutor,
 ) -> Result<Vec<MigrationHistoryRow>, sqlx::Error> {
     sqlx::query_as::<_, MigrationHistoryRow>(
         "SELECT version, checksum, success
@@ -543,7 +543,7 @@ async fn list_migration_history(
 }
 
 async fn list_recorded_runledger_migrations(
-    conn: &mut impl PgTransactionExecutor,
+    conn: &mut impl PgQueryExecutor,
 ) -> Result<Vec<i64>, sqlx::Error> {
     sqlx::query_scalar::<_, i64>(
         "SELECT version
@@ -555,7 +555,7 @@ async fn list_recorded_runledger_migrations(
 }
 
 async fn reject_legacy_idempotency_rows(
-    conn: &mut impl PgTransactionExecutor,
+    conn: &mut impl PgQueryExecutor,
 ) -> Result<(), SchemaCompatibilityError> {
     if idempotency_cutover_constraints_valid(conn).await? {
         return Ok(());
@@ -592,7 +592,7 @@ async fn reject_legacy_idempotency_rows(
 }
 
 async fn validate_workflow_job_link_expand_schema(
-    conn: &mut impl PgTransactionExecutor,
+    conn: &mut impl PgQueryExecutor,
 ) -> Result<(), SchemaCompatibilityError> {
     let deprecated_column_exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
@@ -680,7 +680,7 @@ struct WorkflowJobLinkTriggerCatalogRow {
 }
 
 async fn workflow_job_link_trigger_catalog(
-    conn: &mut impl PgTransactionExecutor,
+    conn: &mut impl PgQueryExecutor,
 ) -> Result<Vec<WorkflowJobLinkTriggerCatalogRow>, sqlx::Error> {
     sqlx::query_as(
         "SELECT
@@ -817,7 +817,7 @@ fn workflow_job_link_trigger_problems(
 }
 
 async fn validate_idempotency_cutover_constraints(
-    conn: &mut impl PgTransactionExecutor,
+    conn: &mut impl PgQueryExecutor,
 ) -> Result<(), SchemaCompatibilityError> {
     if idempotency_cutover_constraints_valid(conn).await? {
         return Ok(());
@@ -858,7 +858,7 @@ async fn validate_idempotency_cutover_constraints(
 }
 
 async fn idempotency_cutover_constraints_valid(
-    conn: &mut impl PgTransactionExecutor,
+    conn: &mut impl PgQueryExecutor,
 ) -> Result<bool, sqlx::Error> {
     // A validated cutover constraint is the durable proof that legacy keyed rows
     // without enqueue_request snapshots cannot exist for that table. If future
