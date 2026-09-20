@@ -23,9 +23,10 @@ use crate::shutdown::ShutdownSignal;
 mod report;
 pub(crate) use report::RuntimeShutdownObservations;
 pub use report::{
-    RuntimeCallbackFailure, RuntimeLoopRecord, RuntimeShutdownBudget, RuntimeShutdownCause,
-    RuntimeShutdownCleanupDecision, RuntimeShutdownCleanupPermit, RuntimeShutdownFailure,
-    RuntimeShutdownReport, RuntimeShutdownSettlement, UnjoinedRuntimeTasks,
+    RuntimeCallbackFailure, RuntimeCleanSettlement, RuntimeLoopRecord, RuntimeSettlement,
+    RuntimeShutdownBudget, RuntimeShutdownCause, RuntimeShutdownCleanupPermit,
+    RuntimeShutdownFailure, RuntimeShutdownReport, RuntimeShutdownSettlement,
+    RuntimeStoppedWithFailures, RuntimeUnsettled, UnjoinedRuntimeTasks,
 };
 
 /// One observed native task exit. Error contents are available only by explicit access.

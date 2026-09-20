@@ -894,10 +894,6 @@ async fn losing_application_signal_retires_within_nonzero_grace_on_multithread_r
         report.settlement(),
         RuntimeShutdownSettlement::Settled
     ));
-    assert!(matches!(
-        report.cleanup_decision(),
-        crate::RuntimeShutdownCleanupDecision::Allowed(_)
-    ));
     assert!(report.is_success());
     assert!(report.is_cooperatively_stopped());
     let signal = report
@@ -907,6 +903,10 @@ async fn losing_application_signal_retires_within_nonzero_grace_on_multithread_r
         .expect("retain the losing signal join");
     assert!(!signal.abort_requested);
     assert!(signal.error.is_none());
+    assert!(matches!(
+        report.classify(),
+        crate::RuntimeSettlement::Clean(_)
+    ));
 }
 
 async fn wait_for_queued_report(driver: &RuntimeShutdownDriver) {

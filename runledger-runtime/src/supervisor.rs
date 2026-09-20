@@ -169,8 +169,8 @@ impl Supervisor {
     ///     .expect("representable budget");
     /// let report = supervisor.shutdown_report(budget).await;
     /// assert!(matches!(
-    ///     report.cleanup_decision(),
-    ///     runledger_runtime::RuntimeShutdownCleanupDecision::Allowed(_)
+    ///     report.classify(),
+    ///     runledger_runtime::RuntimeSettlement::Clean(_)
     /// ));
     /// # }
     /// ```
@@ -206,11 +206,11 @@ impl Supervisor {
     /// supervisor, and both hand back a report rather than a bare success,
     /// because only a report can answer the question every caller actually has:
     /// did everything this runtime owned finish, and may its dependencies now be
-    /// released? Match [`RuntimeShutdownReport::cleanup_decision`] before
-    /// releasing a pool, a connection or any other shared dependency, and
-    /// [`RuntimeShutdownReport::is_success`] for whether shutdown itself
-    /// succeeded. The two differ: a joined configuration failure permits cleanup
-    /// but fails the shutdown.
+    /// released? Consume [`RuntimeShutdownReport::classify`] and match its three
+    /// outcomes. `Clean` permits cleanup and successful process exit;
+    /// `StoppedWithFailures` permits cleanup but carries a process failure;
+    /// `Unsettled` cannot authorize dependency cleanup. Historical callback
+    /// interruptions remain `Unsettled` even after all tracked tasks have joined.
     ///
     /// Stopping begins at whichever comes first: `shutdown` resolving, a
     /// [`SupervisorShutdown`] handle requesting it, a supervised loop failing, or
@@ -252,8 +252,8 @@ impl Supervisor {
     /// I/O the signal awaits alive, and make custom signals cancellation-safe.
     ///
     /// ```rust,no_run
-    /// # async fn example(supervisor: runledger_runtime::Supervisor) -> Result<(), runledger_runtime::RuntimeError> {
-    /// use runledger_runtime::{RuntimeShutdownBudget, RuntimeShutdownSignal};
+    /// # async fn example(supervisor: runledger_runtime::Supervisor) -> Result<(), Box<dyn std::error::Error>> {
+    /// use runledger_runtime::{RuntimeSettlement, RuntimeShutdownBudget, RuntimeShutdownSignal};
     /// use std::time::Duration;
     /// async fn release_dependencies(
     ///     _permit: runledger_runtime::RuntimeShutdownCleanupPermit,
@@ -265,19 +265,23 @@ impl Supervisor {
     /// let report = supervisor
     ///     .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
     ///     .await;
-    /// if let runledger_runtime::RuntimeShutdownCleanupDecision::Allowed(permit) =
-    ///     report.cleanup_decision()
-    /// {
-    ///     release_dependencies(permit).await;
-    /// }
-    /// if let Some(failure) = report.failure() {
-    ///     tracing::error!(%failure, "jobs runtime shutdown did not succeed");
+    /// match report.classify() {
+    ///     RuntimeSettlement::Clean(clean) => {
+    ///         release_dependencies(clean.into_cleanup_permit()).await;
+    ///     }
+    ///     RuntimeSettlement::StoppedWithFailures(stopped) => {
+    ///         let (permit, failure) = stopped.into_parts();
+    ///         release_dependencies(permit).await;
+    ///         return Err(failure.into());
+    ///     }
+    ///     RuntimeSettlement::Unsettled(unsettled) => {
+    ///         return Err(unsettled.into_failure().into());
+    ///     }
     /// }
     /// # Ok(()) }
     /// ```
     ///
-    /// [`RuntimeShutdownReport::cleanup_decision`]: crate::RuntimeShutdownReport::cleanup_decision
-    /// [`RuntimeShutdownReport::is_success`]: crate::RuntimeShutdownReport::is_success
+    /// [`RuntimeShutdownReport::classify`]: crate::RuntimeShutdownReport::classify
     pub fn run_until_shutdown_report(
         self,
         shutdown: crate::RuntimeShutdownSignal,
@@ -292,16 +296,16 @@ impl Supervisor {
     /// This is [`Self::run_until_shutdown_report`] for callers that already know
     /// it is time to stop and have no external signal to wait on. It carries the
     /// identical report contract, including that
-    /// [`RuntimeShutdownReport::cleanup_decision`] — not the absence of a failure
-    /// — is what authorizes releasing dependencies.
+    /// [`RuntimeShutdownReport::classify`] supplies the only payloads that can
+    /// authorize releasing dependencies.
     ///
     /// A loop or descendant that had already failed still sets the shutdown
     /// cause and is retained in the report. The stop clock starts before this
     /// method returns, so scheduling delay consumes the same graceful allowance.
     ///
     /// ```rust,no_run
-    /// # async fn example(supervisor: runledger_runtime::Supervisor) -> Result<(), runledger_runtime::RuntimeError> {
-    /// use runledger_runtime::RuntimeShutdownBudget;
+    /// # async fn example(supervisor: runledger_runtime::Supervisor) -> Result<(), Box<dyn std::error::Error>> {
+    /// use runledger_runtime::{RuntimeSettlement, RuntimeShutdownBudget};
     /// use std::time::Duration;
     /// async fn release_dependencies(
     ///     _permit: runledger_runtime::RuntimeShutdownCleanupPermit,
@@ -311,16 +315,23 @@ impl Supervisor {
     ///
     /// let budget = RuntimeShutdownBudget::new(Duration::from_secs(5), Duration::from_secs(1))?;
     /// let report = supervisor.shutdown_report(budget).await;
-    /// if let runledger_runtime::RuntimeShutdownCleanupDecision::Allowed(permit) =
-    ///     report.cleanup_decision()
-    /// {
-    ///     release_dependencies(permit).await;
+    /// match report.classify() {
+    ///     RuntimeSettlement::Clean(clean) => {
+    ///         release_dependencies(clean.into_cleanup_permit()).await;
+    ///     }
+    ///     RuntimeSettlement::StoppedWithFailures(stopped) => {
+    ///         let (permit, failure) = stopped.into_parts();
+    ///         release_dependencies(permit).await;
+    ///         return Err(failure.into());
+    ///     }
+    ///     RuntimeSettlement::Unsettled(unsettled) => {
+    ///         return Err(unsettled.into_failure().into());
+    ///     }
     /// }
-    /// assert!(report.is_success()); // a separate process-health decision
     /// # Ok(()) }
     /// ```
     ///
-    /// [`RuntimeShutdownReport::cleanup_decision`]: crate::RuntimeShutdownReport::cleanup_decision
+    /// [`RuntimeShutdownReport::classify`]: crate::RuntimeShutdownReport::classify
     pub fn shutdown_report(
         mut self,
         budget: crate::RuntimeShutdownBudget,

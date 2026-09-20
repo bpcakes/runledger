@@ -168,8 +168,8 @@ use std::time::Duration;
 use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobType};
 use runledger_core::prelude::async_trait;
 use runledger_runtime::{
-    RuntimeShutdownBudget, RuntimeShutdownCleanupDecision, RuntimeShutdownCleanupPermit,
-    RuntimeShutdownSignal, Supervisor, catalog::JobCatalog, registry::JobHandler,
+    RuntimeSettlement, RuntimeShutdownBudget, RuntimeShutdownCleanupPermit, RuntimeShutdownSignal,
+    Supervisor, catalog::JobCatalog, registry::JobHandler,
 };
 use serde_json::Value;
 use shared::{GREETING_JOB, Greeting};
@@ -219,12 +219,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = supervisor
         .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
         .await;
-    // The adapter cannot release the pool without the report-derived permit.
-    if let RuntimeShutdownCleanupDecision::Allowed(permit) = report.cleanup_decision() {
-        close_accounted_pool(permit, &pool).await;
-    }
-    if let Some(failure) = report.failure() {
-        return Err(failure.into());
+    match report.classify() {
+        RuntimeSettlement::Clean(clean) => {
+            close_accounted_pool(clean.into_cleanup_permit(), &pool).await;
+        }
+        RuntimeSettlement::StoppedWithFailures(stopped) => {
+            let (permit, failure) = stopped.into_parts();
+            close_accounted_pool(permit, &pool).await;
+            return Err(failure.into());
+        }
+        RuntimeSettlement::Unsettled(unsettled) => {
+            return Err(unsettled.into_failure().into());
+        }
     }
     Ok(())
 }
@@ -344,18 +350,21 @@ Notes on the worker lifecycle:
   Recovery requires unwinding to reach the library; aborting hooks,
   `panic = "abort"`, internal double panics and non-yielding code cannot be
   contained. See the downstream guide for panic-payload handling.
-- **Match `report.cleanup_decision()` before releasing the pool** or any other
-  dependency the loops were using. Only its `Allowed(permit)` branch says the
-  runtime accounted for what it owned. A timed-out abort, an unjoined task, or an
-  interrupted handler yields `Denied`, because none establishes that work created
-  by application callbacks has stopped. `is_cooperatively_stopped()` remains a
-  source-compatible boolean projection, not the canonical new cleanup boundary.
-- `report.is_success()` is a separate question: whether shutdown itself
-  succeeded. Success always implies cooperative settlement, but the converse is
-  false: a joined configuration failure permits cleanup but fails the shutdown.
+- **Consume `report.classify()` and match all three outcomes before releasing
+  dependencies.** `RuntimeSettlement::Clean` permits cleanup and successful exit;
+  `StoppedWithFailures` permits cleanup but carries a process failure;
+  `Unsettled` cannot authorize cleanup. Only the first two opaque payloads can
+  yield one owned `RuntimeShutdownCleanupPermit` for a cleanup adapter.
+  Earlier callback interruptions remain `Unsettled` even after all tracked tasks
+  have joined, because application-created children may still be running.
 - `report.failure()` classifies the primary retained reason as a
   `RuntimeShutdownFailure` for logs, alerts and exit codes. It is `None` exactly
-  when `is_success()` is true, and it never authorizes cleanup on its own.
+  when classification would yield `Clean`, and it never authorizes cleanup on its own.
+  Classified payloads expose borrowed reports for diagnostics; they cannot be
+  relabeled, cloned, or converted back into reports for additional permits.
+  A permit proves only its originating runtime's settlement. Applications must
+  require it in their cleanup adapter and account for any other dependency users;
+  it cannot prevent direct calls to externally owned pools.
 - `RuntimeShutdownBudget::new(graceful, abort)` splits the allowance: cooperative
   drain time, then time to abort and join whatever did not stop. Both share one
   clock that starts at the first stop request, whether that came from the signal,

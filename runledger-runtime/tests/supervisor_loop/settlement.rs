@@ -190,23 +190,27 @@ fn assert_report(report: RuntimeShutdownReport, exit: Exit, during: bool, child_
             .all(|record| record.error.is_none())
     );
     if matches!(exit, Exit::Business) {
-        assert!(report.is_cooperatively_stopped());
-        assert!(report.is_success());
+        assert!(matches!(
+            report.classify(),
+            runledger_runtime::RuntimeSettlement::Clean(_)
+        ));
     } else {
         assert!(
             child_alive,
             "the native joins did not settle the application child"
         );
-        assert!(
-            !report.is_cooperatively_stopped(),
-            "interrupted handler approved cleanup"
-        );
-        assert!(!report.is_success());
         if during {
             assert!(!report.callback_failures().is_empty());
         } else {
             assert!(report.prior_callback_interruptions() > 0);
         }
+        assert!(
+            matches!(
+                report.classify(),
+                runledger_runtime::RuntimeSettlement::Unsettled(_)
+            ),
+            "interrupted handler approved cleanup"
+        );
     }
 }
 
@@ -284,11 +288,6 @@ async fn an_escaped_worker_destructor_panic_fails_the_shutdown_report() {
     .expect("worker panic initiates native stop");
     teardown_ephemeral_pool(pool, database).await;
 
-    assert!(!report.is_success());
-    assert!(
-        !report.is_cooperatively_stopped(),
-        "an escaped worker panic cannot authorize dependency cleanup"
-    );
     let Some(runledger_runtime::RuntimeShutdownFailure::DescendantJoin { task, source }) =
         report.failure()
     else {
@@ -296,4 +295,11 @@ async fn an_escaped_worker_destructor_panic_fails_the_shutdown_report() {
     };
     assert_eq!(task, "worker_job");
     assert!(source.is_panic());
+    assert!(
+        matches!(
+            report.classify(),
+            runledger_runtime::RuntimeSettlement::Unsettled(_)
+        ),
+        "an escaped worker panic cannot authorize dependency cleanup"
+    );
 }

@@ -166,7 +166,7 @@ impl RuntimeLoopRecord {
 /// The primary retained reason a [`RuntimeShutdownReport`] is not a success.
 ///
 /// This is classification for logs, alerts and process exit codes. It is not an
-/// authorization: [`RuntimeShutdownReport::cleanup_decision`] can allow cleanup
+/// authorization: [`RuntimeShutdownReport::classify`] can allow cleanup
 /// while this is present, and only that typed decision decides whether dependency
 /// cleanup may run. The originating report retains every other
 /// observed reason; this names one. Automatic debug formatting retains the
@@ -357,33 +357,165 @@ impl RuntimeShutdownSettlement {
     }
 }
 
-/// The report-derived authority to release dependencies after shutdown.
+/// The consuming, report-derived classification of shutdown and cleanup authority.
 ///
-/// A successful shutdown is not required: for example, a joined signal error
-/// can fail the process while all native work was still observed and settled.
-/// Conversely, a missing failure classification cannot authorize cleanup.
-/// Match this value at the cleanup boundary instead of inferring authority from
-/// [`RuntimeShutdownReport::is_success`] or [`RuntimeShutdownReport::failure`].
+/// Match all three outcomes at the application shutdown boundary. The distinct,
+/// opaque payloads cannot be constructed, relabeled, or separated from their
+/// evidence by downstream code. Only the two cleanup-safe payloads can yield a
+/// permit, and doing so consumes the payload. Neither reports nor payloads clone.
+///
+/// ```compile_fail
+/// use runledger_runtime::{RuntimeSettlement, RuntimeStoppedWithFailures};
+/// fn relabel(failed: RuntimeStoppedWithFailures) -> RuntimeSettlement {
+///     RuntimeSettlement::Clean(failed)
+/// }
+/// ```
 #[derive(Debug)]
-#[must_use = "match the cleanup decision before releasing dependencies"]
-pub enum RuntimeShutdownCleanupDecision {
-    /// Every condition required for dependency cleanup was observed.
-    Allowed(RuntimeShutdownCleanupPermit),
-    /// Cleanup is not authorized because native settlement evidence is incomplete
-    /// or contains an interruption that can leave application children unaccounted for.
-    Denied,
+#[must_use = "match the settlement before releasing dependencies or choosing process status"]
+pub enum RuntimeSettlement {
+    /// Shutdown succeeded and dependency cleanup is permitted.
+    Clean(RuntimeCleanSettlement),
+    /// Shutdown failed, but dependency cleanup is permitted.
+    StoppedWithFailures(RuntimeStoppedWithFailures),
+    /// Cleanup cannot be proven safe. Tracked tasks may all have joined, but an
+    /// earlier interrupted callback can have left untracked application children.
+    Unsettled(RuntimeUnsettled),
+}
+
+impl RuntimeSettlement {
+    /// Retained evidence for diagnostics. Borrowing cannot reclassify the report
+    /// or issue additional permits.
+    pub fn report(&self) -> &RuntimeShutdownReport {
+        match self {
+            Self::Clean(outcome) => outcome.report(),
+            Self::StoppedWithFailures(outcome) => outcome.report(),
+            Self::Unsettled(outcome) => outcome.report(),
+        }
+    }
+}
+
+/// Proof of successful shutdown, with one owned cleanup capability.
+///
+/// ```compile_fail
+/// use runledger_runtime::RuntimeCleanSettlement;
+/// fn extract_twice(clean: RuntimeCleanSettlement) {
+///     let first = clean.into_cleanup_permit();
+///     let second = clean.into_cleanup_permit();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use runledger_runtime::{RuntimeCleanSettlement, RuntimeShutdownReport, RuntimeShutdownCleanupPermit};
+/// fn forge(report: RuntimeShutdownReport, cleanup: RuntimeShutdownCleanupPermit) -> RuntimeCleanSettlement {
+///     RuntimeCleanSettlement { report, cleanup }
+/// }
+/// ```
+#[derive(Debug)]
+#[must_use = "consume the clean settlement at the dependency cleanup boundary"]
+pub struct RuntimeCleanSettlement {
+    report: RuntimeShutdownReport,
+    cleanup: RuntimeShutdownCleanupPermit,
+}
+
+impl RuntimeCleanSettlement {
+    pub fn report(&self) -> &RuntimeShutdownReport {
+        &self.report
+    }
+
+    /// Transfer the sole cleanup capability for this report to an application
+    /// adapter. Inspect or log the borrowed evidence before consuming this value.
+    pub fn into_cleanup_permit(self) -> RuntimeShutdownCleanupPermit {
+        self.cleanup
+    }
+}
+
+/// A failed shutdown whose dependency cleanup has nevertheless been proven safe.
+///
+/// ```compile_fail
+/// use runledger_runtime::RuntimeStoppedWithFailures;
+/// fn duplicate(stopped: RuntimeStoppedWithFailures) {
+///     let copy = stopped.clone();
+/// }
+/// ```
+#[derive(Debug)]
+#[must_use = "retain the failure and consume the cleanup capability"]
+pub struct RuntimeStoppedWithFailures {
+    report: RuntimeShutdownReport,
+    failure: RuntimeShutdownFailure,
+    cleanup: RuntimeShutdownCleanupPermit,
+}
+
+impl RuntimeStoppedWithFailures {
+    pub fn report(&self) -> &RuntimeShutdownReport {
+        &self.report
+    }
+
+    /// The primary process failure; inspect the report for all retained evidence.
+    #[must_use]
+    pub fn failure(&self) -> &RuntimeShutdownFailure {
+        &self.failure
+    }
+
+    /// Consume this outcome into its cleanup authority and process failure.
+    /// The required failure cannot be lost through a success-shaped return value.
+    pub fn into_parts(self) -> (RuntimeShutdownCleanupPermit, RuntimeShutdownFailure) {
+        (self.cleanup, self.failure)
+    }
+}
+
+/// Evidence insufficient to authorize dependency cleanup. No operation on this
+/// payload yields a cleanup permit or an owned report that could be reclassified.
+///
+/// ```compile_fail
+/// use runledger_runtime::RuntimeUnsettled;
+/// fn release(outcome: RuntimeUnsettled) {
+///     let permit = outcome.into_cleanup_permit();
+/// }
+/// ```
+#[derive(Debug)]
+#[must_use = "inspect the unsettled evidence and retain dependencies"]
+pub struct RuntimeUnsettled {
+    report: RuntimeShutdownReport,
+    failure: RuntimeShutdownFailure,
+}
+
+impl RuntimeUnsettled {
+    pub fn report(&self) -> &RuntimeShutdownReport {
+        &self.report
+    }
+
+    #[must_use]
+    pub fn failure(&self) -> &RuntimeShutdownFailure {
+        &self.failure
+    }
+
+    /// Consume the evidence into its primary process failure, without authorizing
+    /// dependency cleanup.
+    #[must_use]
+    pub fn into_failure(self) -> RuntimeShutdownFailure {
+        self.failure
+    }
 }
 
 /// An externally unforgeable capability to release dependencies after shutdown.
 ///
-/// Values are issued only by [`RuntimeShutdownReport::cleanup_decision`]. It is
-/// intentionally neither `Clone` nor `Copy`, so a consumer cleanup adapter can
-/// require one fresh permit at its authority boundary.
+/// Values originate only from consuming [`RuntimeShutdownReport::classify`]
+/// and extracting a cleanup-safe outcome. This type is neither `Clone` nor
+/// `Copy`. An application cleanup adapter must require and consume the permit.
+/// The permit proves this runtime's settlement; it does not identify a pool,
+/// prove other runtimes stopped, or prevent direct calls to external resources.
 ///
 /// ```compile_fail
 /// use runledger_runtime::RuntimeShutdownCleanupPermit;
 ///
 /// let _ = RuntimeShutdownCleanupPermit { _private: () };
+/// ```
+///
+/// ```compile_fail
+/// use runledger_runtime::RuntimeShutdownCleanupPermit;
+/// fn duplicate(permit: RuntimeShutdownCleanupPermit) {
+///     let copy = permit.clone();
+/// }
 /// ```
 #[derive(Debug)]
 #[must_use = "pass the cleanup permit to the dependency-release boundary"]
@@ -552,27 +684,59 @@ impl RuntimeShutdownReport {
         self.prior_callback_interruptions
     }
 
-    /// Return the capability required to release dependencies after shutdown.
+    /// Consume this report into the single authoritative shutdown outcome.
+    /// Historical callback interruptions remain `Unsettled`, even if every
+    /// tracked task subsequently joins: untracked children cannot be accounted for.
     ///
-    /// This is the canonical cleanup boundary. Its allowed branch exists if and
-    /// only if [`Self::is_cooperatively_stopped`] is true, while preserving that
-    /// predicate as a source-compatible projection for existing consumers.
-    pub fn cleanup_decision(&self) -> RuntimeShutdownCleanupDecision {
-        if self.permits_dependency_cleanup() {
-            RuntimeShutdownCleanupDecision::Allowed(RuntimeShutdownCleanupPermit { _private: () })
-        } else {
-            RuntimeShutdownCleanupDecision::Denied
+    /// ```compile_fail
+    /// use runledger_runtime::RuntimeShutdownReport;
+    /// fn classify_twice(report: RuntimeShutdownReport) {
+    ///     let first = report.classify();
+    ///     let second = report.classify();
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use runledger_runtime::RuntimeShutdownReport;
+    /// fn duplicate_report(report: RuntimeShutdownReport) {
+    ///     let copy = report.clone();
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use runledger_runtime::RuntimeSettlement;
+    /// fn reclassify(outcome: RuntimeSettlement) {
+    ///     let duplicate = outcome.report().classify();
+    /// }
+    /// ```
+    pub fn classify(self) -> RuntimeSettlement {
+        match (self.permits_dependency_cleanup(), self.failure()) {
+            (true, None) => RuntimeSettlement::Clean(RuntimeCleanSettlement {
+                report: self,
+                cleanup: RuntimeShutdownCleanupPermit { _private: () },
+            }),
+            (true, Some(failure)) => {
+                RuntimeSettlement::StoppedWithFailures(RuntimeStoppedWithFailures {
+                    report: self,
+                    failure,
+                    cleanup: RuntimeShutdownCleanupPermit { _private: () },
+                })
+            }
+            (false, failure) => RuntimeSettlement::Unsettled(RuntimeUnsettled {
+                failure: failure.expect("denied cleanup retains a shutdown failure"),
+                report: self,
+            }),
         }
     }
 
     /// Whether shutdown succeeded.
     ///
     /// Success implies dependency cleanup eligibility, but the typed
-    /// [`Self::cleanup_decision`] remains the authority to use at that boundary.
+    /// [`Self::classify`] remains the authority to use at that boundary.
     /// This is not durable job health: even a historical callback interruption
     /// disqualifies success because its detached descendants cannot be accounted for.
     /// Conversely, a joined configuration failure can permit cleanup but fail here.
-    pub fn is_success(&self) -> bool {
+    pub(crate) fn is_success(&self) -> bool {
         self.permits_dependency_cleanup()
             && matches!(&self.settlement, RuntimeShutdownSettlement::Settled)
             && self.deadline_error().is_none()
@@ -583,11 +747,11 @@ impl RuntimeShutdownReport {
 
     /// The primary retained reason this report is not a success, classified for
     /// logs, alerts and process exit codes. This is `None` exactly when
-    /// [`Self::is_success`] is true.
+    /// classification would produce [`RuntimeSettlement::Clean`].
     ///
     /// A failure here does not by itself forbid dependency cleanup, and its
     /// absence is not what authorizes cleanup: match
-    /// [`Self::cleanup_decision`] for that decision. Precedence follows
+    /// [`Self::classify`] for that decision. Precedence follows
     /// the recorded first cause:
     ///
     /// - `SignalFailed` reports the returned signal error before settlement or
@@ -719,13 +883,9 @@ impl RuntimeShutdownReport {
             .map(|source| RuntimeShutdownFailure::Signal { source })
     }
 
-    /// Source-compatible projection of [`Self::cleanup_decision`].
-    ///
-    /// Prefer matching the typed decision at a new cleanup boundary so a caller
-    /// cannot accidentally substitute shutdown success or failure classification
-    /// for cleanup authority.
+    /// Internal diagnostic projection; public callers consume `classify`.
     #[must_use]
-    pub fn is_cooperatively_stopped(&self) -> bool {
+    pub(crate) fn is_cooperatively_stopped(&self) -> bool {
         self.permits_dependency_cleanup()
     }
 

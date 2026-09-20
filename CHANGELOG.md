@@ -10,12 +10,17 @@ All notable changes to this workspace are documented here.
   adapters can compose application writes and Runledger enqueueing in one
   caller-owned transaction without exposing a replaceable SQLx connection or
   transaction. Existing `DbTx` entry points remain compatibility wrappers.
-- Add `RuntimeShutdownReport::cleanup_decision()` with
-  `RuntimeShutdownCleanupDecision::{Allowed(RuntimeShutdownCleanupPermit), Denied}`.
-  The permit is report-derived and externally non-constructible, making the
-  cleanup authority explicit at consumer boundaries. Keep
-  `is_cooperatively_stopped()` as its source-compatible boolean projection;
-  neither shutdown success nor `failure()` authorizes cleanup.
+- Breaking: consume `RuntimeShutdownReport::classify(self)` into
+  `RuntimeSettlement::{Clean, StoppedWithFailures, Unsettled}` with distinct opaque
+  payloads. Remove the public `is_success()`, `is_cooperatively_stopped()`, and
+  repeatable `cleanup_decision()` APIs and `RuntimeShutdownCleanupDecision`.
+  Only cleanup-safe payloads can yield one externally non-constructible
+  `RuntimeShutdownCleanupPermit`; reports and payloads cannot be cloned or
+  recovered for reclassification. Failed-but-stopped payloads return cleanup
+  authority together with the process failure. Keep earlier callback interruption
+  evidence sticky, explicitly classifying it as `Unsettled` even after later joins.
+  The permit governs application adapters that require it; it does not identify
+  an external pool or prevent callers from directly closing one.
 - Add `RuntimeError::ShutdownBudgetOverflow` with both graceful and abort
   allowances when their sum cannot fit in a duration. Representable totals that
   cannot form a deadline still use `ShutdownTimeoutTooLarge` with the total.
@@ -50,9 +55,8 @@ All notable changes to this workspace are documented here.
   even with no known unjoined tasks. Update exhaustive matches for these states.
 - Add `RuntimeShutdownReport::failure` returning a classified
   `RuntimeShutdownFailure` for logs, alerts and process exit codes. It is `None`
-  exactly when `is_success()` is true and never authorizes dependency cleanup on
-  its own; `cleanup_decision()` is the canonical authority boundary and
-  `is_cooperatively_stopped()` remains its compatible predicate projection. A
+  exactly when classification would produce `Clean` and never authorizes
+  dependency cleanup on its own; consuming `classify()` is the authority boundary. A
   triggering loop or descendant failure is reported ahead of anything observed
   while draining, and a cancellation caused by an abort the supervisor itself
   issued never outranks the failure that provoked it. `RuntimeLoopRecord` and
@@ -285,15 +289,16 @@ All notable changes to this workspace are documented here.
   matches. Exhaustive matches must also cover
   `RuntimeShutdownSignalPanic::{Poll, Destruction, PollAndDestruction}` and
   `RuntimeCallbackFailure::{TimedOut, Panicked, LeaseMaintenance}`.
-- Replace `result?` after a terminal method with report inspection, and move any
-  dependency cleanup behind `report.cleanup_decision()`'s `Allowed(permit)` branch.
-  Code that closed
-  a pool before checking a shutdown `Result` was releasing a dependency the loops
-  might still have been using; that is the failure mode this change removes. Use
-  `report.is_success()` for whether shutdown succeeded and `report.failure()` for
-  something to log or exit on. Success implies cooperative settlement, but the
-  converse is false; `failure().is_none()` is exactly `is_success()`. Neither
-  success answer substitutes for the cleanup decision.
+- Replace `result?` or boolean checks after a terminal method with
+  `match report.classify()`. `Clean(clean)` supplies `clean.into_cleanup_permit()`;
+  `StoppedWithFailures(stopped)` supplies `(permit, failure)` through
+  `stopped.into_parts()`; `Unsettled(unsettled)` supplies only a process failure
+  through `unsettled.into_failure()`. Require and consume the permit in the
+  dependency cleanup adapter and propagate failures after any permitted cleanup.
+  Inspect a payload's borrowed `report()` before consuming it for full diagnostics.
+  A historical observer timeout remains `Unsettled`; remove unconditional shutdown
+  success assertions from production integrations. Update downstream callers in
+  the same upgrade; no database or persisted-job migration is required.
 
 - Use Rust 1.94 or later and SQLx 0.9 in applications that share pools,
   transactions, or SQLx types with Runledger. SQLx 0.8 types are incompatible.

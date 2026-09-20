@@ -26,7 +26,7 @@ use tokio::runtime::Handle;
 /// let native = prepared.start();
 /// let budget = RuntimeShutdownBudget::new(Duration::from_secs(5), Duration::from_secs(1))?;
 /// let report = native.shutdown_report(budget).await;
-/// assert!(report.is_success());
+/// assert!(matches!(report.classify(), runledger_runtime::RuntimeSettlement::Clean(_)));
 /// # Ok(()) }
 /// ```
 #[must_use = "preparation starts no work; transfer it to its owner or explicitly start it"]

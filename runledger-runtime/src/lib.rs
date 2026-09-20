@@ -24,12 +24,12 @@
 //! external signal) or [`Supervisor::shutdown_report`] (stop now), both taking a
 //! [`RuntimeShutdownBudget`] and returning an independently owned
 //! [`RuntimeShutdownDriver`] that awaits to a [`RuntimeShutdownReport`].
-//! There is no third option, and no terminal method whose success value can be
-//! mistaken for proof that everything settled: match
-//! [`RuntimeShutdownReport::cleanup_decision`] before releasing a pool or any
-//! other shared dependency, [`RuntimeShutdownReport::is_success`] for whether
-//! shutdown itself succeeded, and [`RuntimeShutdownReport::failure`] for a
-//! classified [`RuntimeShutdownFailure`] to log or exit on. An adapter transfers
+//! Consume the report with [`RuntimeShutdownReport::classify`] and match
+//! [`RuntimeSettlement`]: `Clean` permits cleanup and successful process exit;
+//! `StoppedWithFailures` permits cleanup but retains a process failure;
+//! `Unsettled` cannot authorize cleanup. Only the first two payloads yield a
+//! [`RuntimeShutdownCleanupPermit`] for your dependency-release adapter.
+//! An adapter transfers
 //! [`SupervisorBuilder::prepare`]'s inert value before launch.
 //! Dropping the driver requests stop without cancelling its independent owner.
 //! Keep the captured Tokio runtime alive and driven; owner destruction yields
@@ -104,12 +104,18 @@
 //!     .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
 //!     .await;
 //!
-//! // The adapter cannot release the pool without the report-derived permit.
-//! if let RuntimeShutdownCleanupDecision::Allowed(permit) = report.cleanup_decision() {
-//!     close_accounted_pool(permit, &pool).await;
-//! }
-//! if let Some(failure) = report.failure() {
-//!     return Err(failure.into());
+//! match report.classify() {
+//!     RuntimeSettlement::Clean(clean) => {
+//!         close_accounted_pool(clean.into_cleanup_permit(), &pool).await;
+//!     }
+//!     RuntimeSettlement::StoppedWithFailures(stopped) => {
+//!         let (permit, failure) = stopped.into_parts();
+//!         close_accounted_pool(permit, &pool).await;
+//!         return Err(failure.into());
+//!     }
+//!     RuntimeSettlement::Unsettled(unsettled) => {
+//!         return Err(unsettled.into_failure().into());
+//!     }
 //! }
 //! # Ok(())
 //! # }
@@ -147,9 +153,10 @@ pub use observer::{
     JobSucceededEvent, ObservedJob,
 };
 pub use settlement::{
-    RuntimeCallbackFailure, RuntimeLoopRecord, RuntimeShutdownBudget, RuntimeShutdownCause,
-    RuntimeShutdownCleanupDecision, RuntimeShutdownCleanupPermit, RuntimeShutdownFailure,
-    RuntimeShutdownReport, RuntimeShutdownSettlement, RuntimeTaskRecord, UnjoinedRuntimeTasks,
+    RuntimeCallbackFailure, RuntimeCleanSettlement, RuntimeLoopRecord, RuntimeSettlement,
+    RuntimeShutdownBudget, RuntimeShutdownCause, RuntimeShutdownCleanupPermit,
+    RuntimeShutdownFailure, RuntimeShutdownReport, RuntimeShutdownSettlement,
+    RuntimeStoppedWithFailures, RuntimeTaskRecord, RuntimeUnsettled, UnjoinedRuntimeTasks,
     UnsettledRuntimeTask,
 };
 pub use shutdown_signal::{
@@ -186,10 +193,10 @@ pub mod prelude {
         SupervisorShutdown,
     };
     pub use crate::{
-        RuntimeShutdownBudget, RuntimeShutdownCause, RuntimeShutdownCleanupDecision,
+        RuntimeCleanSettlement, RuntimeSettlement, RuntimeShutdownBudget, RuntimeShutdownCause,
         RuntimeShutdownCleanupPermit, RuntimeShutdownFailure, RuntimeShutdownReport,
         RuntimeShutdownSettlement, RuntimeShutdownSignal, RuntimeShutdownSignalError,
-        RuntimeShutdownSignalPanic,
+        RuntimeShutdownSignalPanic, RuntimeStoppedWithFailures, RuntimeUnsettled,
     };
 }
 

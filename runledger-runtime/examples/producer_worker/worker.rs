@@ -5,8 +5,8 @@ use std::time::Duration;
 use runledger_core::jobs::{JobCompletion, JobContext, JobFailure, JobType};
 use runledger_core::prelude::async_trait;
 use runledger_runtime::{
-    RuntimeShutdownBudget, RuntimeShutdownCleanupDecision, RuntimeShutdownCleanupPermit,
-    RuntimeShutdownSignal, Supervisor, catalog::JobCatalog, registry::JobHandler,
+    RuntimeSettlement, RuntimeShutdownBudget, RuntimeShutdownCleanupPermit, RuntimeShutdownSignal,
+    Supervisor, catalog::JobCatalog, registry::JobHandler,
 };
 use serde_json::Value;
 use shared::{GREETING_JOB, Greeting};
@@ -56,12 +56,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = supervisor
         .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
         .await;
-    // The adapter cannot release the pool without the report-derived permit.
-    if let RuntimeShutdownCleanupDecision::Allowed(permit) = report.cleanup_decision() {
-        close_accounted_pool(permit, &pool).await;
-    }
-    if let Some(failure) = report.failure() {
-        return Err(failure.into());
+    match report.classify() {
+        RuntimeSettlement::Clean(clean) => {
+            close_accounted_pool(clean.into_cleanup_permit(), &pool).await;
+        }
+        RuntimeSettlement::StoppedWithFailures(stopped) => {
+            let (permit, failure) = stopped.into_parts();
+            close_accounted_pool(permit, &pool).await;
+            return Err(failure.into());
+        }
+        RuntimeSettlement::Unsettled(unsettled) => {
+            return Err(unsettled.into_failure().into());
+        }
     }
     Ok(())
 }

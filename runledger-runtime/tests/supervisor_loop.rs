@@ -125,7 +125,10 @@ async fn supervisor_processes_job_and_shuts_down() {
     )
     .expect("valid shutdown budget");
     assert!(
-        supervisor.shutdown_report(budget).await.is_success(),
+        matches!(
+            supervisor.shutdown_report(budget).await.classify(),
+            runledger_runtime::RuntimeSettlement::Clean(_)
+        ),
         "supervisor should shut down cleanly"
     );
 

@@ -400,6 +400,65 @@ async fn final_harvest_classifies_a_late_success_from_its_final_evidence() {
 
 struct PanickingObserver;
 
+struct TimedOutOnceObserver(std::sync::atomic::AtomicBool);
+
+#[async_trait::async_trait]
+impl crate::JobLifecycleObserver for TimedOutOnceObserver {
+    async fn on_job_running(&self, _: crate::JobRunningEvent) {
+        if !self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            pending::<()>().await;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn earlier_observer_timeout_remains_unsettled_after_later_success_and_all_joins() {
+    let (shutdown, _) = ShutdownSignal::channel();
+    let descendants = TaskRegistry::supervised(shutdown.clone());
+    let observers = crate::JobLifecycleObservers::from_observer(TimedOutOnceObserver(
+        std::sync::atomic::AtomicBool::new(false),
+    ))
+    .with_settlement(descendants.clone());
+    let event = crate::JobRunningEvent::new(crate::ObservedJob::new(
+        uuid::Uuid::nil(),
+        "jobs.callback".try_into().expect("valid job type"),
+        None,
+        1,
+        1,
+        1,
+        "worker",
+    ));
+    observers.job_running(event.clone()).await;
+    assert!(
+        !shutdown.is_requested(),
+        "best-effort timeout preserves processing"
+    );
+    observers.job_running(event).await;
+    let task = descendants.track("later_success", tokio::spawn(async {}));
+    task.await.expect("later native work succeeds");
+    descendants.wait().await;
+
+    let report = TaskGroup::new()
+        .run_report_with_signal(async {}, budget(), &shutdown, &descendants)
+        .await;
+    assert_eq!(report.prior_callback_interruptions(), 1);
+    assert!(report.callback_failures().is_empty());
+    assert!(report.unjoined().is_empty());
+    assert!(
+        report
+            .descendants()
+            .iter()
+            .all(|record| record.error.is_none())
+    );
+    let crate::RuntimeSettlement::Unsettled(unsettled) = report.classify() else {
+        panic!("later success must not erase interruption evidence");
+    };
+    assert!(matches!(
+        unsettled.failure(),
+        RuntimeShutdownFailure::EarlierCallbackInterruptions { count: 1 }
+    ));
+}
+
 #[async_trait::async_trait]
 impl crate::JobLifecycleObserver for PanickingObserver {
     async fn on_job_running(&self, _: crate::JobRunningEvent) {

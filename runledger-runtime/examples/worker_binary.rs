@@ -70,20 +70,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
         .await;
 
-    // The permit makes cleanup authority explicit at the pool-release boundary.
-    // A shutdown failure can still permit cleanup, while a missing failure does
-    // not prove every native task was observed.
-    match report.cleanup_decision() {
-        RuntimeShutdownCleanupDecision::Allowed(permit) => {
+    match report.classify() {
+        RuntimeSettlement::Clean(clean) => {
+            close_accounted_pool(clean.into_cleanup_permit(), &pool).await;
+        }
+        RuntimeSettlement::StoppedWithFailures(stopped) => {
+            let (permit, failure) = stopped.into_parts();
             close_accounted_pool(permit, &pool).await;
+            return Err(failure.into());
         }
-        RuntimeShutdownCleanupDecision::Denied => {
+        RuntimeSettlement::Unsettled(unsettled) => {
             eprintln!("jobs runtime did not settle cooperatively; leaving the pool open");
+            return Err(unsettled.into_failure().into());
         }
-    }
-
-    if let Some(failure) = report.failure() {
-        return Err(failure.into());
     }
     Ok(())
 }

@@ -30,9 +30,9 @@ use runledger_runtime::catalog::JobCatalog;
 use runledger_runtime::config::JobsConfig;
 use runledger_runtime::registry::JobHandler;
 use runledger_runtime::{
-    RuntimeCallbackFailure, RuntimeShutdownBudget, RuntimeShutdownCause,
-    RuntimeShutdownCleanupDecision, RuntimeShutdownFailure, RuntimeShutdownReport,
-    RuntimeShutdownSettlement, RuntimeShutdownSignal, Supervisor,
+    RuntimeCallbackFailure, RuntimeSettlement, RuntimeShutdownBudget, RuntimeShutdownCause,
+    RuntimeShutdownFailure, RuntimeShutdownReport, RuntimeShutdownSettlement,
+    RuntimeShutdownSignal, Supervisor,
 };
 use runledger_test_support::{setup_unmigrated_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::{Value, json};
@@ -112,8 +112,7 @@ fn inspect_shutdown_invariants(report: &RuntimeShutdownReport) {
         }
         RuntimeShutdownSettlement::Interrupted { unjoined } => {
             assert!(std::ptr::eq(unjoined.as_slice(), report.unjoined()));
-            assert!(!report.is_success());
-            assert!(!report.is_cooperatively_stopped());
+            assert!(report.failure().is_some());
         }
     }
     match report.failure() {
@@ -140,13 +139,6 @@ fn inspect_shutdown_invariants(report: &RuntimeShutdownReport) {
             | RuntimeCallbackFailure::LeaseMaintenance { .. } => {}
         }
     }
-    assert_eq!(
-        matches!(
-            report.cleanup_decision(),
-            RuntimeShutdownCleanupDecision::Allowed(_)
-        ),
-        report.is_cooperatively_stopped()
-    );
 }
 
 struct AbortBlocker {
@@ -847,13 +839,10 @@ async fn assert_reaping_and_shutdown(pool: &DbPool, runtime: SmokeRuntime) {
         .expect("supervisor monitor task should stop before outer timeout")
         .expect("supervisor monitor task should join");
     inspect_shutdown_invariants(&report);
+    let outcome = report.classify();
     assert!(
-        report.is_success(),
-        "supervisor tasks should stop and join cleanly: {report:?}"
-    );
-    assert!(
-        report.is_cooperatively_stopped(),
-        "a clean smoke run must authorize dependency cleanup: {report:?}"
+        matches!(outcome, RuntimeSettlement::Clean(_)),
+        "a clean smoke run must authorize dependency cleanup: {outcome:?}"
     );
 }
 
@@ -906,7 +895,7 @@ async fn assert_external_abort_timeout(pool: &DbPool) {
         report.failure(),
         Some(RuntimeShutdownFailure::AbortTimeout { unjoined }) if unjoined.get() > 0
     ));
-    assert!(!report.is_cooperatively_stopped());
+    assert!(matches!(report.classify(), RuntimeSettlement::Unsettled(_)));
 
     blocker.release();
     timeout(Duration::from_secs(2), blocker.wait_for_exit())
