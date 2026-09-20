@@ -57,11 +57,13 @@ async fn shared_contract_transaction_and_worker_round_trip() {
         .build()
         .expect("supervisor");
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(supervisor.run_until_shutdown(
-        async {
+    let budget = RuntimeShutdownBudget::new(Duration::from_secs(10), Duration::from_secs(1))
+        .expect("valid shutdown budget");
+    let task = tokio::spawn(supervisor.run_until_shutdown_report(
+        RuntimeShutdownSignal::infallible(async move {
             let _ = stop_rx.await;
-        },
-        Duration::from_secs(10),
+        }),
+        budget,
     ));
     let completed = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -77,9 +79,8 @@ async fn shared_contract_transaction_and_worker_round_trip() {
     })
     .await;
     stop_tx.send(()).expect("request shutdown");
-    task.await
-        .expect("supervisor task")
-        .expect("graceful shutdown");
+    let report = task.await.expect("supervisor task");
+    assert!(report.is_success(), "graceful shutdown");
     let job = completed.expect("job completes");
     assert_eq!(job.payload, payload);
     assert_eq!(job.progress_done, Some(1));

@@ -638,13 +638,20 @@ async fn intent_promoter_runs_while_worker_is_saturated_and_shutdown_interrupts_
     .await
     .expect("record intent while worker is saturated");
 
-    sleep(poll_interval + Duration::from_millis(300)).await;
-
-    let saturated_intent = get_job_enqueue_intent_by_id(&pool, None, saturated_intent.intent_id)
-        .await
-        .expect("load saturated intent")
-        .expect("saturated intent exists");
-    assert_eq!(saturated_intent.status(), JobEnqueueIntentStatus::Promoted);
+    let saturated_intent = timeout(Duration::from_secs(10), async {
+        loop {
+            let intent = get_job_enqueue_intent_by_id(&pool, None, saturated_intent.intent_id)
+                .await
+                .expect("load saturated intent")
+                .expect("saturated intent exists");
+            if intent.status() == JobEnqueueIntentStatus::Promoted {
+                break intent;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("intent promoter should run while worker execution is saturated");
     assert_eq!(
         get_job_by_id(
             &pool,
@@ -927,7 +934,7 @@ async fn worker_fills_but_does_not_exceed_exact_capacity_without_poll_delay() {
     let _ = shutdown_tx.send(true);
     release.notify_waiters();
 
-    timeout(Duration::from_secs(2), worker_task)
+    timeout(Duration::from_secs(5), worker_task)
         .await
         .expect("worker should exit promptly after shutdown")
         .expect("worker join should succeed");

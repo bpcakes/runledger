@@ -465,7 +465,7 @@ mod tests {
             }
             registry.wait().await;
             let report = crate::task_group::TaskGroup::new()
-                .run_report(
+                .run_report_with_signal(
                     async {},
                     crate::RuntimeShutdownBudget::new(
                         Duration::from_secs(1),
@@ -477,23 +477,23 @@ mod tests {
                 )
                 .await;
             tasks.drain_finished();
-            assert!(report.unjoined.is_empty());
-            assert!(report.descendants.iter().all(|task| task.error.is_none()));
+            assert!(report.unjoined().is_empty());
+            assert!(report.descendants().iter().all(|task| task.error.is_none()));
             assert!(
                 !report.is_cooperatively_stopped(),
                 "caught destructor panic authorized cleanup"
             );
             assert!(!report.is_success());
             if stopping {
-                assert!(report.callback_failures.iter().any(|failure| matches!(
+                assert!(report.callback_failures().iter().any(|failure| matches!(
                     failure,
                     crate::RuntimeCallbackFailure::TimedOut { .. }
                 )));
-                assert!(report.callback_failures.iter().any(|failure| matches!(failure,
+                assert!(report.callback_failures().iter().any(|failure| matches!(failure,
                 crate::RuntimeCallbackFailure::Panicked { message, .. } if message == "reaped callback destruction failure")));
             } else {
                 // Both the timeout and its callback-destruction panic are retained.
-                assert_eq!(report.prior_callback_interruptions, 2);
+                assert_eq!(report.prior_callback_interruptions(), 2);
             }
             assert!(!format!("{report:?}").contains("reaped callback destruction failure"));
         }

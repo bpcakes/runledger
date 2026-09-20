@@ -1500,10 +1500,15 @@ async fn supervisor_with_catalog_processes_enqueued_job_after_sync() {
     }
 
     assert_eq!(runs.load(Ordering::SeqCst), 1);
-    supervisor
-        .shutdown_with_timeout(Duration::from_secs(10))
-        .await
-        .expect("supervisor shutdown");
+    let budget = runledger_runtime::RuntimeShutdownBudget::new(
+        Duration::from_secs(10),
+        Duration::from_secs(1),
+    )
+    .expect("valid shutdown budget");
+    assert!(
+        supervisor.shutdown_report(budget).await.is_success(),
+        "supervisor shutdown"
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }

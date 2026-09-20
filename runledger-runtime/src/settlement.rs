@@ -21,9 +21,11 @@ use tokio::task::{AbortHandle, Id, JoinError, JoinHandle};
 use crate::shutdown::ShutdownSignal;
 
 mod report;
+pub(crate) use report::RuntimeShutdownObservations;
 pub use report::{
     RuntimeCallbackFailure, RuntimeLoopRecord, RuntimeShutdownBudget, RuntimeShutdownCause,
-    RuntimeShutdownReport,
+    RuntimeShutdownCleanupDecision, RuntimeShutdownCleanupPermit, RuntimeShutdownFailure,
+    RuntimeShutdownReport, RuntimeShutdownSettlement, UnjoinedRuntimeTasks,
 };
 
 /// One observed native task exit. Error contents are available only by explicit access.
@@ -33,7 +35,49 @@ pub struct RuntimeTaskRecord {
     pub id: Id,
     /// A request was issued; a successful join means completion won the race.
     pub abort_requested: bool,
+    /// A cleanup-denying join failure, if one occurred. A runtime-authored
+    /// signal listener whose owner cancelled it after shutdown began is
+    /// accounted separately once its cancellation join completes.
     pub error: Option<Arc<JoinError>>,
+    disposition: RuntimeTaskDisposition,
+}
+
+impl RuntimeTaskRecord {
+    /// Whether this descendant ended through cancellation requested by the
+    /// supervisor. An owner-accounted signal has no retained [`Self::error`]
+    /// after guarded destruction completes; other observed cancellation remains
+    /// a join failure. In either case cancellation is a consequence of stopping,
+    /// not a reason for it.
+    #[must_use]
+    pub fn cancelled_by_abort(&self) -> bool {
+        self.cancelled_by_owner()
+            || (self.abort_requested
+                && self
+                    .error
+                    .as_ref()
+                    .is_some_and(|source| source.is_cancelled()))
+    }
+
+    /// Whether this task's owner requested cancellation and observed the
+    /// resulting cancellation join. Guarded destruction is therefore complete
+    /// and the cancellation is accounted rather than a descendant failure.
+    #[must_use]
+    pub fn cancelled_by_owner(&self) -> bool {
+        self.disposition == RuntimeTaskDisposition::OwnerCancelled
+    }
+
+    /// This descendant's join as a classified failure, or `None` when it joined
+    /// successfully. An abort that lost the race to normal completion joins
+    /// successfully and is not a failure.
+    #[must_use]
+    pub fn failure(&self) -> Option<report::RuntimeShutdownFailure> {
+        self.error
+            .as_ref()
+            .map(|source| report::RuntimeShutdownFailure::DescendantJoin {
+                task: self.task,
+                source: Arc::clone(source),
+            })
+    }
 }
 
 impl std::fmt::Debug for RuntimeTaskRecord {
@@ -42,9 +86,16 @@ impl std::fmt::Debug for RuntimeTaskRecord {
             .field("task", &self.task)
             .field("id", &self.id)
             .field("abort_requested", &self.abort_requested)
+            .field("cancelled_by_owner", &self.cancelled_by_owner())
             .field("failed", &self.error.is_some())
             .finish()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeTaskDisposition {
+    Observed,
+    OwnerCancelled,
 }
 
 /// A native descendant whose join has not completed at the report boundary.
@@ -62,7 +113,96 @@ struct Entry {
     wake: Arc<EntryWake>,
     abort: AbortHandle,
     aborted: bool,
+    kind: EntryKind,
     result: BoxFuture<'static, Result<(), Arc<JoinError>>>,
+}
+
+enum EntryKind {
+    Task,
+    // A runtime-authored signal has no independent abort owner. A cancellation
+    // explicitly requested by this registry is accounted after its join proves
+    // guarded destruction completed. Application-supplied signals use
+    // `Unexpected` so their forced cancellation remains cleanup-denying evidence.
+    // A built-in cancellation without an owner request can only accompany
+    // captured-runtime loss: it remains failure evidence while owner interruption
+    // supplies the terminal cause. A panic remains fatal.
+    RuntimeAuthoredSignal(Arc<crate::shutdown_signal::ShutdownSignalTaskState>),
+    ApplicationSuppliedSignal(Arc<crate::shutdown_signal::ShutdownSignalTaskState>),
+}
+
+#[derive(Clone, Copy)]
+struct CompletionClassification {
+    disposition: RuntimeTaskDisposition,
+    requests_shutdown: bool,
+}
+
+impl EntryKind {
+    fn cancellation(&self) -> CancellationPolicy {
+        match self {
+            Self::RuntimeAuthoredSignal(_) => CancellationPolicy::WithOwner,
+            Self::Task | Self::ApplicationSuppliedSignal(_) => CancellationPolicy::Unexpected,
+        }
+    }
+
+    fn should_abort(&self, mode: AbortMode) -> bool {
+        match mode {
+            AbortMode::None => false,
+            AbortMode::All => true,
+            AbortMode::AfterGracefulTimeout => !matches!(
+                self,
+                Self::RuntimeAuthoredSignal(state) | Self::ApplicationSuppliedSignal(state)
+                    if state.is_initiating()
+            ),
+        }
+    }
+
+    fn classify(
+        &self,
+        abort_requested: bool,
+        result: &Result<(), Arc<JoinError>>,
+    ) -> CompletionClassification {
+        self.cancellation().classify(abort_requested, result)
+    }
+}
+
+impl CancellationPolicy {
+    fn classify(
+        self,
+        abort_requested: bool,
+        result: &Result<(), Arc<JoinError>>,
+    ) -> CompletionClassification {
+        let owner_cancelled = self == CancellationPolicy::WithOwner
+            && abort_requested
+            && result.as_ref().is_err_and(|error| error.is_cancelled());
+        CompletionClassification {
+            disposition: if owner_cancelled {
+                RuntimeTaskDisposition::OwnerCancelled
+            } else {
+                RuntimeTaskDisposition::Observed
+            },
+            // A panic is never an expected consequence of cancellation. Any
+            // ordinary descendant failure requests shutdown unless this
+            // registry issued its abort. The private signal's non-owner
+            // cancellation instead accompanies captured-runtime loss.
+            requests_shutdown: result.as_ref().is_err_and(|error| {
+                error.is_panic() || (!abort_requested && self == CancellationPolicy::Unexpected)
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
+enum AbortMode {
+    #[default]
+    None,
+    AfterGracefulTimeout,
+    All,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CancellationPolicy {
+    Unexpected,
+    WithOwner,
 }
 
 #[derive(Default)]
@@ -70,7 +210,7 @@ struct State {
     entries: HashMap<Id, Entry>,
     records: Vec<RuntimeTaskRecord>,
     shutdown: Option<ShutdownSignal>,
-    aborting: bool,
+    abort_mode: AbortMode,
     callback_failures: Vec<RuntimeCallbackFailure>,
     prior_callback_interruptions: u64,
 }
@@ -171,6 +311,18 @@ impl TaskRegistry {
     where
         T: Clone + Send + Sync + 'static,
     {
+        self.track_with_kind(task, handle, EntryKind::Task)
+    }
+
+    fn track_with_kind<T>(
+        &self,
+        task: &'static str,
+        handle: JoinHandle<T>,
+        kind: EntryKind,
+    ) -> SharedJoin<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
         let abort = handle.abort_handle();
         let id = abort.id();
         let wake = Arc::new(EntryWake {
@@ -194,6 +346,7 @@ impl TaskRegistry {
                     wake: wake.clone(),
                     abort: abort.clone(),
                     aborted: false,
+                    kind,
                     result: async move { observed.await.map(|_| ()) }.boxed(),
                 },
             );
@@ -210,22 +363,91 @@ impl TaskRegistry {
         T: Clone + Send + Sync + 'static,
         F: Future<Output = T> + Send + 'static,
     {
-        let (start, started) = tokio::sync::oneshot::channel();
-        let join = self.track(
+        self.spawn_on(
+            &tokio::runtime::Handle::current(),
             task,
-            tokio::spawn(async move {
+            future,
+            EntryKind::Task,
+        )
+    }
+
+    /// The prepared task couples provenance and live initiating state. The
+    /// registry derives both cancellation classification and phase-specific
+    /// abort behavior from that single private type.
+    pub(crate) fn spawn_shutdown_signal_on(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        task: crate::shutdown_signal::ShutdownSignalTask,
+    ) {
+        use crate::shutdown_signal::ShutdownSignalTask;
+
+        match task {
+            ShutdownSignalTask::RuntimeAuthored { future, state } => {
+                drop(self.spawn_on(
+                    runtime,
+                    crate::shutdown_signal::TASK_NAME,
+                    future,
+                    EntryKind::RuntimeAuthoredSignal(state),
+                ));
+            }
+            ShutdownSignalTask::ApplicationSupplied { future, state } => {
+                drop(self.spawn_on(
+                    runtime,
+                    crate::shutdown_signal::TASK_NAME,
+                    future,
+                    EntryKind::ApplicationSuppliedSignal(state),
+                ));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_initiating_shutdown_signal_on_for_tests<F>(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        future: F,
+    ) where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let state =
+            Arc::new(crate::shutdown_signal::ShutdownSignalTaskState::initiating_for_tests());
+        drop(self.spawn_on(
+            runtime,
+            crate::shutdown_signal::TASK_NAME,
+            future,
+            EntryKind::ApplicationSuppliedSignal(state),
+        ));
+    }
+
+    fn spawn_on<T, F>(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        task: &'static str,
+        future: F,
+        kind: EntryKind,
+    ) -> SharedJoin<T>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: Future<Output = T> + Send + 'static,
+    {
+        let (start, started) = tokio::sync::oneshot::channel();
+        let join = self.track_with_kind(
+            task,
+            runtime.spawn(async move {
                 // Registration owns the task before any application future is polled.
                 if started.await.is_err() {
                     std::future::pending::<()>().await;
                 }
                 future.await
             }),
+            kind,
         );
         let mut state = self.0.state.lock().expect("task registry is not poisoned");
-        if state.aborting {
-            if let Some(entry) = state.entries.get_mut(&join.abort.id()) {
-                entry.aborted = true;
-            }
+        let abort_mode = state.abort_mode;
+        if let Some(entry) = state.entries.get_mut(&join.abort.id())
+            && entry.kind.should_abort(abort_mode)
+        {
+            entry.aborted = true;
             join.abort.abort();
         } else {
             let _ = start.send(());
@@ -235,6 +457,10 @@ impl TaskRegistry {
 
     pub(crate) fn collect_ready(&self) {
         self.collect(false);
+    }
+
+    pub(crate) fn collect_finished(&self) {
+        self.collect(true);
     }
 
     fn collect(&self, include_finished: bool) {
@@ -304,11 +530,14 @@ impl TaskRegistry {
                 .entries
                 .remove(&id)
                 .expect("completed task is registered");
-            let unexpected_failure = result
-                .as_ref()
-                .is_err_and(|error| error.is_panic() || !entry.aborted);
-            if unexpected_failure && let Some(shutdown) = &state.shutdown {
-                shutdown.request_with(crate::RuntimeShutdownCause::DescendantFailure);
+            let classification = entry.kind.classify(entry.aborted, &result);
+            if classification.requests_shutdown
+                && let Some(shutdown) = &state.shutdown
+            {
+                shutdown.request_with(crate::RuntimeShutdownCause::DescendantFailure {
+                    task: entry.task,
+                    id,
+                });
             }
             let stopping = state
                 .shutdown
@@ -325,7 +554,11 @@ impl TaskRegistry {
                     task: entry.task,
                     id,
                     abort_requested: entry.aborted,
-                    error: result.err(),
+                    error: match classification.disposition {
+                        RuntimeTaskDisposition::OwnerCancelled => None,
+                        RuntimeTaskDisposition::Observed => result.err(),
+                    },
+                    disposition: classification.disposition,
                 });
             }
         }
@@ -356,15 +589,6 @@ impl TaskRegistry {
                 return;
             }
             notified.await;
-        }
-    }
-
-    pub(crate) async fn observe_while<F: Future>(&self, future: F) -> F::Output {
-        tokio::pin!(future);
-        tokio::select! {
-            biased;
-            result = &mut future => result,
-            () = self.observe_until_stop() => future.await,
         }
     }
 
@@ -399,16 +623,35 @@ impl TaskRegistry {
         }
     }
 
-    pub(crate) fn abort_all(&self) {
+    fn abort(&self, mode: AbortMode) {
         self.collect(true);
         let mut state = self.0.state.lock().expect("task registry is not poisoned");
-        state.aborting = true;
+        state.abort_mode = state.abort_mode.max(mode);
+        let abort_mode = state.abort_mode;
         for entry in state.entries.values_mut() {
-            if !entry.abort.is_finished() {
+            if !entry.abort.is_finished() && entry.kind.should_abort(abort_mode) {
                 entry.aborted = true;
                 entry.abort.abort();
             }
         }
+    }
+
+    pub(crate) fn abort_after_graceful_timeout(&self) {
+        self.abort(AbortMode::AfterGracefulTimeout);
+    }
+
+    pub(crate) fn abort_all(&self) {
+        self.abort(AbortMode::All);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn graceful_abort_started_for_tests(&self) -> bool {
+        self.0
+            .state
+            .lock()
+            .expect("task registry is not poisoned")
+            .abort_mode
+            >= AbortMode::AfterGracefulTimeout
     }
 
     pub(crate) fn snapshot(&self) -> (Vec<RuntimeTaskRecord>, Vec<UnsettledRuntimeTask>) {
@@ -424,19 +667,6 @@ impl TaskRegistry {
             })
             .collect();
         (state.records.clone(), pending)
-    }
-
-    pub(crate) fn first_unexpected_failure(&self) -> Option<crate::RuntimeError> {
-        self.snapshot().0.into_iter().find_map(|record| {
-            record.error.and_then(|source| {
-                (source.is_panic() || !record.abort_requested).then_some(
-                    crate::RuntimeError::DescendantJoin {
-                        task: record.task,
-                        source,
-                    },
-                )
-            })
-        })
     }
 }
 

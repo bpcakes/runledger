@@ -25,7 +25,7 @@ use tokio::runtime::Handle;
 /// // No loops have started. Ownership can be transferred here.
 /// let native = prepared.start();
 /// let budget = RuntimeShutdownBudget::new(Duration::from_secs(5), Duration::from_secs(1))?;
-/// let report = native.run_until_shutdown_report(async {}, budget).await;
+/// let report = native.shutdown_report(budget).await;
 /// assert!(report.is_success());
 /// # Ok(()) }
 /// ```
@@ -161,6 +161,7 @@ impl PreparedSupervisor {
         }
 
         Supervisor {
+            runtime,
             shutdown,
             tasks,
             initialization,

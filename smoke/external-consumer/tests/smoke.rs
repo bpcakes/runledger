@@ -1,6 +1,10 @@
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex as StdMutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,18 +26,25 @@ use runledger_postgres::prelude::{
     DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord,
     PgTransactionExecutor, enqueue_job_with_outcome, list_job_events,
 };
-use runledger_runtime::Supervisor;
 use runledger_runtime::catalog::JobCatalog;
 use runledger_runtime::config::JobsConfig;
 use runledger_runtime::registry::JobHandler;
+use runledger_runtime::{
+    RuntimeCallbackFailure, RuntimeShutdownBudget, RuntimeShutdownCause,
+    RuntimeShutdownCleanupDecision, RuntimeShutdownFailure, RuntimeShutdownReport,
+    RuntimeShutdownSettlement, RuntimeShutdownSignal, Supervisor,
+};
 use runledger_test_support::{setup_unmigrated_ephemeral_pool, teardown_ephemeral_pool};
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::{Instant, sleep, timeout};
 
 #[path = "support/migration_identity.rs"]
 mod migration_identity;
+
+#[path = "support/shutdown_signal.rs"]
+mod shutdown_signal;
 
 const SMOKE_JOB_TYPE: &str = "jobs.external.smoke";
 const SMOKE_POOL_MAX_CONNECTIONS: u32 = 12;
@@ -54,7 +65,7 @@ struct SmokeRuntime {
     execution_count: Arc<AtomicUsize>,
     completed_continuation_slices: Arc<Mutex<HashSet<(Uuid, i64)>>>,
     stop_supervisor_tx: tokio::sync::oneshot::Sender<()>,
-    supervisor_task: tokio::task::JoinHandle<runledger_runtime::Result<()>>,
+    supervisor_task: tokio::task::JoinHandle<RuntimeShutdownReport>,
 }
 
 struct RecoveryJobs {
@@ -83,6 +94,141 @@ impl<'a> OpaqueConsumerTransaction<'a> {
 impl PgTransactionExecutor for OpaqueConsumerTransaction<'_> {
     fn executor(&mut self) -> impl sqlx::Executor<'_, Database = sqlx::Postgres> {
         &mut *self.inner
+    }
+}
+
+fn inspect_shutdown_invariants(report: &RuntimeShutdownReport) {
+    match report.cause() {
+        RuntimeShutdownCause::Requested
+        | RuntimeShutdownCause::SignalFailed
+        | RuntimeShutdownCause::LoopFailure(_)
+        | RuntimeShutdownCause::DescendantFailure { .. } => {}
+    }
+    match report.settlement() {
+        RuntimeShutdownSettlement::Settled | RuntimeShutdownSettlement::GracefulTimeout => {}
+        RuntimeShutdownSettlement::AbortTimeout { unjoined } => {
+            assert!(std::ptr::eq(unjoined.as_slice(), report.unjoined()));
+            assert_eq!(unjoined.len().get(), report.unjoined().len());
+        }
+        RuntimeShutdownSettlement::Interrupted { unjoined } => {
+            assert!(std::ptr::eq(unjoined.as_slice(), report.unjoined()));
+            assert!(!report.is_success());
+            assert!(!report.is_cooperatively_stopped());
+        }
+    }
+    match report.failure() {
+        None
+        | Some(RuntimeShutdownFailure::Signal { .. })
+        | Some(RuntimeShutdownFailure::SignalPanicked)
+        | Some(RuntimeShutdownFailure::LoopExitedUnexpectedly { .. })
+        | Some(RuntimeShutdownFailure::LoopInvalidConfig { .. })
+        | Some(RuntimeShutdownFailure::LoopJoin { .. })
+        | Some(RuntimeShutdownFailure::DescendantJoin { .. })
+        | Some(RuntimeShutdownFailure::CallbackInterrupted { .. })
+        | Some(RuntimeShutdownFailure::EarlierCallbackInterruptions { .. })
+        | Some(RuntimeShutdownFailure::GracefulTimeout)
+        | Some(RuntimeShutdownFailure::UnrepresentableDeadline)
+        | Some(RuntimeShutdownFailure::SettlementInterrupted) => {}
+        Some(RuntimeShutdownFailure::AbortTimeout { unjoined }) => {
+            assert!(unjoined.get() > 0);
+        }
+    }
+    for failure in report.callback_failures() {
+        match failure {
+            RuntimeCallbackFailure::TimedOut { .. }
+            | RuntimeCallbackFailure::Panicked { .. }
+            | RuntimeCallbackFailure::LeaseMaintenance { .. } => {}
+        }
+    }
+    assert_eq!(
+        matches!(
+            report.cleanup_decision(),
+            RuntimeShutdownCleanupDecision::Allowed(_)
+        ),
+        report.is_cooperatively_stopped()
+    );
+}
+
+struct AbortBlocker {
+    entered: AtomicBool,
+    released: StdMutex<bool>,
+    release: Condvar,
+    exited: watch::Sender<bool>,
+}
+
+impl Default for AbortBlocker {
+    fn default() -> Self {
+        let (exited, _) = watch::channel(false);
+        Self {
+            entered: AtomicBool::new(false),
+            released: StdMutex::new(false),
+            release: Condvar::new(),
+            exited,
+        }
+    }
+}
+
+impl AbortBlocker {
+    fn release(&self) {
+        *self.released.lock().expect("lock abort blocker") = true;
+        self.release.notify_all();
+    }
+
+    async fn wait_for_exit(&self) {
+        let mut exited = self.exited.subscribe();
+        while !*exited.borrow_and_update() {
+            exited
+                .changed()
+                .await
+                .expect("abort blocker owns the exit sender");
+        }
+    }
+}
+
+struct BlockOnDrop(Arc<AbortBlocker>);
+
+struct ReleaseOnDrop(Arc<AbortBlocker>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+impl Future for BlockOnDrop {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.0.entered.store(true, Ordering::SeqCst);
+        Poll::Pending
+    }
+}
+
+impl Drop for BlockOnDrop {
+    fn drop(&mut self) {
+        let mut released = self.0.released.lock().expect("lock abort blocker");
+        while !*released {
+            released = self.0.release.wait(released).expect("wait for release");
+        }
+        self.0.exited.send_replace(true);
+    }
+}
+
+struct AbortTimeoutHandler(Arc<AbortBlocker>);
+
+#[async_trait]
+impl JobHandler for AbortTimeoutHandler {
+    fn job_type(&self) -> JobType<'static> {
+        JobType::new(SMOKE_JOB_TYPE)
+    }
+
+    async fn execute(
+        &self,
+        _context: JobContext,
+        _payload: Value,
+    ) -> Result<JobCompletion, JobFailure> {
+        BlockOnDrop(Arc::clone(&self.0)).await;
+        Ok(JobCompletion::success())
     }
 }
 
@@ -206,11 +352,13 @@ async fn start_smoke_runtime(pool: &DbPool) -> SmokeRuntime {
         .build()
         .expect("supervisor should build");
     let (stop_supervisor_tx, stop_supervisor_rx) = tokio::sync::oneshot::channel();
-    let supervisor_task = tokio::spawn(supervisor.run_until_shutdown(
-        async move {
+    let budget = RuntimeShutdownBudget::new(Duration::from_secs(10), Duration::from_secs(2))
+        .expect("valid shutdown budget");
+    let supervisor_task = tokio::spawn(supervisor.run_until_shutdown_report(
+        RuntimeShutdownSignal::infallible(async move {
             let _ = stop_supervisor_rx.await;
-        },
-        Duration::from_secs(10),
+        }),
+        budget,
     ));
 
     SmokeRuntime {
@@ -694,14 +842,108 @@ async fn assert_reaping_and_shutdown(pool: &DbPool, runtime: SmokeRuntime) {
 
     runtime.hang_release.notify_waiters();
     let _ = runtime.stop_supervisor_tx.send(());
-    let shutdown_result = timeout(Duration::from_secs(12), runtime.supervisor_task)
+    let report = timeout(Duration::from_secs(12), runtime.supervisor_task)
         .await
         .expect("supervisor monitor task should stop before outer timeout")
         .expect("supervisor monitor task should join");
-    shutdown_result.expect("supervisor tasks should stop and join cleanly");
+    inspect_shutdown_invariants(&report);
+    assert!(
+        report.is_success(),
+        "supervisor tasks should stop and join cleanly: {report:?}"
+    );
+    assert!(
+        report.is_cooperatively_stopped(),
+        "a clean smoke run must authorize dependency cleanup: {report:?}"
+    );
+}
+
+async fn assert_external_abort_timeout(pool: &DbPool) {
+    let blocker = Arc::new(AbortBlocker::default());
+    let _release = ReleaseOnDrop(Arc::clone(&blocker));
+    let config = JobsConfig {
+        worker_id: "external-abort-timeout-worker".to_string(),
+        poll_interval: Duration::from_millis(10),
+        claim_batch_size: 1,
+        lease_ttl_seconds: 10,
+        max_global_concurrency: 1,
+        reaper_interval: Duration::from_secs(60),
+        schedule_poll_interval: Duration::from_secs(60),
+        reaper_retry_delay_ms: 1_000,
+    };
+    let supervisor = Supervisor::builder(pool, config)
+        .expect("build abort-timeout supervisor")
+        .with_registry(
+            JobCatalog::new()
+                .handler(AbortTimeoutHandler(Arc::clone(&blocker)))
+                .to_registry(),
+        )
+        .disable_intent_promoter()
+        .disable_scheduler()
+        .disable_reaper()
+        .build()
+        .expect("start abort-timeout supervisor");
+    let job_id = enqueue_kind(pool, "abort-timeout").await;
+    wait_for_running(pool, job_id).await;
+    timeout(Duration::from_secs(2), async {
+        while !blocker.entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("handler reaches non-yielding destruction fixture");
+
+    let budget = RuntimeShutdownBudget::new(Duration::ZERO, Duration::from_millis(25))
+        .expect("valid abort-timeout budget");
+    let report = timeout(Duration::from_secs(2), supervisor.shutdown_report(budget))
+        .await
+        .expect("abort-timeout supervisor produces a bounded terminal report");
+    inspect_shutdown_invariants(&report);
+    let RuntimeShutdownSettlement::AbortTimeout { unjoined } = report.settlement() else {
+        panic!("external fixture must produce AbortTimeout: {report:?}");
+    };
+    assert!(!unjoined.as_slice().is_empty());
+    assert!(matches!(
+        report.failure(),
+        Some(RuntimeShutdownFailure::AbortTimeout { unjoined }) if unjoined.get() > 0
+    ));
+    assert!(!report.is_cooperatively_stopped());
+
+    blocker.release();
+    timeout(Duration::from_secs(2), blocker.wait_for_exit())
+        .await
+        .expect("blocked handler destruction exits after release");
 }
 
 #[tokio::test]
+async fn abort_fixture_exit_state_is_durable_before_waiter_subscription() {
+    let blocker = AbortBlocker::default();
+    blocker.exited.send_replace(true);
+
+    timeout(Duration::from_millis(100), blocker.wait_for_exit())
+        .await
+        .expect("an already-recorded exit remains observable");
+}
+
+#[test]
+fn abort_fixture_releases_a_blocked_destructor_when_assertions_unwind() {
+    let blocker = Arc::new(AbortBlocker::default());
+    let blocked = BlockOnDrop(Arc::clone(&blocker));
+    let (exited, exit) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        drop(blocked);
+        exited.send(()).expect("test observes destructor exit");
+    });
+    let unwind = std::panic::catch_unwind(|| {
+        let _release = ReleaseOnDrop(Arc::clone(&blocker));
+        panic!("simulated smoke assertion");
+    });
+    assert!(unwind.is_err());
+    exit.recv_timeout(Duration::from_secs(2))
+        .expect("fixture release must survive a failed assertion");
+    thread.join().expect("destructor thread exits");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn packaged_crates_support_external_consumer_embedding() {
     let (pool, database) =
         setup_unmigrated_ephemeral_pool("external_consumer_smoke", SMOKE_POOL_MAX_CONNECTIONS)
@@ -715,6 +957,7 @@ async fn packaged_crates_support_external_consumer_embedding() {
     assert_successful_replay(&pool, jobs.success).await;
     assert_completed_smoke_jobs(&pool, &jobs, &recovery_jobs, &runtime).await;
     assert_reaping_and_shutdown(&pool, runtime).await;
+    assert_external_abort_timeout(&pool).await;
     teardown_ephemeral_pool(pool, database).await;
 }
 

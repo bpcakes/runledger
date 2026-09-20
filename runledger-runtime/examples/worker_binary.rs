@@ -8,6 +8,10 @@ use sqlx::postgres::PgPoolOptions;
 
 struct SendEmail;
 
+async fn close_accounted_pool(_permit: RuntimeShutdownCleanupPermit, pool: &sqlx::PgPool) {
+    pool.close().await;
+}
+
 #[async_trait]
 impl JobHandler for SendEmail {
     fn job_type(&self) -> JobType<'static> {
@@ -58,18 +62,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Supervisor::builder_from_env(&pool)?
         .with_catalog(&catalog)
         .build()?;
-    let shutdown_result = supervisor
-        .run_until_shutdown(
-            async {
-                if let Err(error) = tokio::signal::ctrl_c().await {
-                    eprintln!("failed to listen for shutdown signal: {error}");
-                }
-            },
-            Duration::from_secs(30),
-        )
+    // Graceful time for the loops to stop on their own, then a shorter allowance
+    // to abort and join whatever did not. Both share one clock that starts at the
+    // first stop request, whichever source raised it.
+    let budget = RuntimeShutdownBudget::new(Duration::from_secs(30), Duration::from_secs(5))?;
+    let report = supervisor
+        .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
         .await;
 
-    pool.close().await;
-    shutdown_result?;
+    // The permit makes cleanup authority explicit at the pool-release boundary.
+    // A shutdown failure can still permit cleanup, while a missing failure does
+    // not prove every native task was observed.
+    match report.cleanup_decision() {
+        RuntimeShutdownCleanupDecision::Allowed(permit) => {
+            close_accounted_pool(permit, &pool).await;
+        }
+        RuntimeShutdownCleanupDecision::Denied => {
+            eprintln!("jobs runtime did not settle cooperatively; leaving the pool open");
+        }
+    }
+
+    if let Some(failure) = report.failure() {
+        return Err(failure.into());
+    }
     Ok(())
 }

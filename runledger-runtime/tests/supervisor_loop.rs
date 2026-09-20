@@ -119,10 +119,15 @@ async fn supervisor_processes_job_and_shuts_down() {
 
     assert_eq!(runs.load(Ordering::SeqCst), 1);
 
-    supervisor
-        .shutdown_with_timeout(Duration::from_secs(10))
-        .await
-        .expect("supervisor should shut down cleanly");
+    let budget = runledger_runtime::RuntimeShutdownBudget::new(
+        Duration::from_secs(10),
+        Duration::from_secs(1),
+    )
+    .expect("valid shutdown budget");
+    assert!(
+        supervisor.shutdown_report(budget).await.is_success(),
+        "supervisor should shut down cleanly"
+    );
 
     teardown_ephemeral_pool(pool, database).await;
 }

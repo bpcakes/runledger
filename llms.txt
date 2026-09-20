@@ -39,7 +39,7 @@ can be imported together.
 | Recover a canceled or dead-lettered direct job | `compare_and_requeue_job` |
 | Repeat a successful direct job | `compare_and_replay_succeeded_job` |
 | Recover a terminal workflow | `recover_workflow_run` |
-| Worker process lifecycle | `Supervisor::run_until_shutdown` |
+| Worker process lifecycle | `Supervisor::run_until_shutdown_report` |
 | Custom worker lifecycle persistence | `JobLeaseIdentity` with `_for_lease` lifecycle APIs introduced in 0.9.0 |
 | Admin/status views | `get_*` / `list_*` APIs and `count_workflow_runs` in `runledger_postgres::jobs` |
 
@@ -339,17 +339,99 @@ at most one stale fire, then advances the cursor to the first future fire.
 
 ## Worker Runtime Rule
 
-Use `Supervisor::run_until_shutdown` for ordinary worker binaries:
+A `Supervisor` has exactly two terminal methods. Both synchronously return an
+independently owned `RuntimeShutdownDriver`:
+`run_until_shutdown_report(signal, budget)` waits for an external signal, and
+`shutdown_report(budget)` stops immediately. Await the driver directly to obtain
+a `RuntimeShutdownReport`. Dropping the driver requests stop without cancelling
+its independent owner. Bounded settlement continues, and every unobserved report
+emits one redacted diagnostic, including a queued report dropped before polling.
+Pass `RuntimeShutdownSignal::ctrl_c()`, `fallible(future)` for `Result<(), E>`,
+`infallible(future)` for `()`, or `pending()` for handle-only shutdown.
+Custom futures require `Send + 'static` and cancellation safety: dropping them
+must not leave detached application children. The signal runs as the tracked
+`shutdown_signal` descendant on the runtime captured during preparation and
+its join participates in settlement. Use owned captures and keep that runtime
+alive and driven. On Unix, custom Tokio runtimes used with `ctrl_c()` must call
+`enable_io()` or `enable_all()`; missing signal-driver support is retained as
+signal-panic and descendant-join evidence. Awaiting elsewhere does not drive a
+suspended current-thread owner runtime. Owner loss
+produces `RuntimeShutdownSettlement::Interrupted`, which always denies cleanup,
+even with an empty retained task list. There is no terminal method returning a bare success, because a bare
+success cannot say whether everything the runtime owned actually settled.
+
+A signal publishes stop when its output or a caught polling panic is observed,
+before guarded destruction. Both use the same first-cause arbitration, so
+destruction cannot delay the stop request or budget clock; an earlier cause and
+clock remain unchanged. A winning polling panic has cause
+`RuntimeShutdownCause::DescendantFailure { task: "shutdown_signal", .. }`.
+Destruction and join remain tracked settlement obligations.
+Every observed signal error remains available through `report.signal_error()`
+and its typed `Error::source()`, and denies success. First-cause arbitration
+separately controls the primary summary: a winning error has cause
+`RuntimeShutdownCause::SignalFailed` and failure
+`RuntimeShutdownFailure::Signal { source }`; when another source won first, its
+cause and failure keep priority while the later error remains inspectable.
+Native settlement continues, and a normally joined error permits cleanup when
+all other owned work settled. If another cause starts shutdown and the budget
+cancels the
+library-authored Ctrl-C or pending listener, its completed cancellation join is
+accounted because it proves guarded destruction completed. A force-aborted custom
+listener retains its cancelled join and denies cleanup, as does a signal polling
+or destruction panic or an unjoined signal. A non-triggering listener must retire
+within the graceful allowance; zero grace immediately escalates it. The exact
+initiating signal is not aborted by its own request and may use the remaining
+total allowance; if still unjoined it denies cleanup without an abort request.
+Signal error Debug and Display redact source details. Exhaustive matches must
+include the new variants.
+Inspect `report.signal_panic()` for `RuntimeShutdownSignalPanic::Poll`,
+`Destruction`, or `PollAndDestruction`; explicit message fields retain details,
+while Debug redacts them. The raw future is guarded from construction, and its
+poll unwind ends before separate destruction. Dropping an unsubmitted signal
+contains destruction panic and emits a redacted diagnostic (there is no report).
+This requires unwinding to reach the boundary: aborting hooks, panic=abort,
+internal double panics and blocking code cannot be recovered. Non-string panic
+payloads are normalized and their opaque allocations retained to avoid invoking
+possibly panicking payload destructors.
 
 ```rust
 let supervisor = Supervisor::builder_from_env(&pool)?
     .with_registry(registry)
     .build()?;
 
-supervisor
-    .run_until_shutdown(shutdown_signal, std::time::Duration::from_secs(30))
-    .await?;
+async fn close_accounted_pool(
+    _permit: RuntimeShutdownCleanupPermit,
+    pool: &sqlx::PgPool,
+) {
+    pool.close().await;
+}
+
+// Cooperative drain time, then time to abort and join whatever did not stop.
+let budget = RuntimeShutdownBudget::new(
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(5),
+)?;
+let report = supervisor
+    .run_until_shutdown_report(RuntimeShutdownSignal::ctrl_c(), budget)
+    .await;
+
+// The adapter cannot release the pool without the report-derived permit.
+if let RuntimeShutdownCleanupDecision::Allowed(permit) = report.cleanup_decision() {
+    close_accounted_pool(permit, &pool).await;
+}
+if let Some(failure) = report.failure() {
+    return Err(failure.into());
+}
 ```
+
+`cleanup_decision()` decides dependency cleanup; its `Allowed(permit)` branch is
+the canonical authority boundary. `is_cooperatively_stopped()` is its compatible
+boolean projection. `is_success()` decides whether shutdown itself succeeded and
+always implies cooperative settlement, but not conversely. `failure()` classifies
+the primary retained reason and is `None` exactly when `is_success()` is true. Do
+not use either success answer in place of the cleanup decision. Both budget phases share one
+clock that starts at the first stop request, from any source. Dropping a
+supervisor requests shutdown but yields no report and detaches the handles.
 
 Use `worker::run_worker_loop`, `scheduler::run_scheduler_loop`, and
 `reaper::run_reaper_loop` only for custom runtime orchestration.

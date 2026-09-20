@@ -176,37 +176,12 @@ pub enum RuntimeError {
         #[source]
         source: tokio::runtime::TryCurrentError,
     },
-    /// A supervised runtime task exited cleanly before shutdown was requested.
-    /// This is treated as an error because long-running loops should only exit
-    /// in response to a shutdown signal. Investigate logs for the specific task
-    /// that exited unexpectedly.
-    #[error("jobs runtime task `{task}` exited unexpectedly before shutdown")]
-    TaskExitedUnexpectedly { task: &'static str },
-    /// A supervised task panicked or failed to join cleanly. Examine logs and
-    /// process panic output for more details about the underlying task failure.
-    #[error("failed joining jobs runtime task `{task}`")]
-    TaskJoin {
-        task: &'static str,
-        #[source]
-        source: tokio::task::JoinError,
-    },
-    /// A native-owned descendant escaped with a panic or unexpected cancellation.
-    /// The join source is shared with native settlement observation. Best-effort
-    /// observer aborts do not produce this error.
-    #[error("failed joining jobs runtime descendant `{task}`")]
-    DescendantJoin {
-        task: &'static str,
-        #[source]
-        source: std::sync::Arc<tokio::task::JoinError>,
-    },
-    /// The supervisor did not complete shutdown within the requested timeout.
-    /// Some tasks may not have received or responded to the shutdown signal.
-    /// Consider increasing the timeout or investigating why tasks are shutting
-    /// down slowly.
-    #[error("jobs runtime shutdown exceeded timeout {timeout:?}")]
-    ShutdownTimeout { timeout: std::time::Duration },
-    /// The requested shutdown timeout is too large to represent as a deadline.
-    /// Use a smaller timeout value.
+    /// The requested shutdown allowance is too large to represent as a deadline.
+    /// Use a smaller [`RuntimeShutdownBudget`]. Per-task and per-loop outcomes
+    /// are reported by [`RuntimeShutdownFailure`], not by this type.
+    ///
+    /// [`RuntimeShutdownBudget`]: crate::RuntimeShutdownBudget
+    /// [`RuntimeShutdownFailure`]: crate::RuntimeShutdownFailure
     #[error("jobs runtime shutdown timeout {timeout:?} is too large to represent")]
     ShutdownTimeoutTooLarge { timeout: std::time::Duration },
     /// The graceful and abort allowances cannot be added as a Duration.
@@ -215,17 +190,6 @@ pub enum RuntimeError {
     ShutdownBudgetOverflow {
         graceful: std::time::Duration,
         abort: std::time::Duration,
-    },
-    /// A supervised task failed (panicked or exited unexpectedly) and the
-    /// remaining tasks could not be shut down within the timeout. The original
-    /// task failure is available through the source error.
-    #[error(
-        "jobs runtime shutdown exceeded timeout {timeout:?} while draining after earlier task failure"
-    )]
-    ShutdownTimeoutAfterTaskError {
-        timeout: std::time::Duration,
-        #[source]
-        source: Box<RuntimeError>,
     },
 }
 
