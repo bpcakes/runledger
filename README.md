@@ -90,23 +90,30 @@ orchestration in `runtime`, and SQL/state-machine logic in `postgres`.
 
 ## Installation
 
-Add the libraries to your service:
+This branch is **unpublished coordinated development**. Its Batter dependency
+is not a registry release. A sibling checkout is mandatory; from a fresh clone
+run `bash scripts/bootstrap-batter.sh`. The pinned revision lives in
+`runledger-postgres/batter-revision`; ordinary Cargo builds check the foundation
+sources against that pin locally as well as in CI. Do not use the old registry
+installation instructions for this branch.
+
+For a service next to the paired `runledger` and `batter` checkouts:
 
 ```toml
 [dependencies]
-runledger-core = "0.12.0"
-runledger-postgres = "0.12.0"
-runledger-runtime = "0.12.0"
+runledger-core = { path = "../runledger/runledger-core" }
+runledger-postgres = { path = "../runledger/runledger-postgres" }
+runledger-runtime = { path = "../runledger/runledger-runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 
 [dev-dependencies]
-runledger-test-support = "0.12.0"
+runledger-test-support = { path = "../runledger/runledger-test-support" }
 ```
 
-The published crates require **Rust 1.94+** and **PostgreSQL 18+**. Older
+These sources require **Rust 1.94+** and **PostgreSQL 18+**. Older
 PostgreSQL releases are not supported, even when an extension supplies an
 equivalent `uuidv7()` function. See [PostgreSQL requirements](#postgresql-requirements).
 
@@ -125,6 +132,31 @@ database. This example prints a greeting, using one shared job identity and type
 payload. It needs only the dependencies above. For a new service, create the
 following files under `src/bin/`, with the shared module at
 `src/bin/shared/mod.rs` (so Cargo does not treat it as another binary).
+
+Database policy (`src/support/database.rs`):
+
+<!-- quick-start-source: runledger-runtime/examples/support/database.rs -->
+```rust
+use runledger_postgres::{PgSessionProfile, RunledgerDatabase};
+use sqlx::postgres::PgConnectOptions;
+use std::time::Duration;
+
+/// Example policy: direct authentication unless an explicit serving role is set.
+pub async fn connect(url: &str) -> Result<RunledgerDatabase, Box<dyn std::error::Error>> {
+    let options: PgConnectOptions = url.parse()?;
+    let login = options.get_username().to_owned();
+    let role = std::env::var("RUNLEDGER_DB_ROLE").unwrap_or_else(|_| login.clone());
+    let schema = std::env::var("RUNLEDGER_DB_SCHEMA").unwrap_or_else(|_| "public".into());
+    let profile = PgSessionProfile::new(
+        login,
+        role,
+        vec![schema],
+        Duration::from_secs(30),
+        Duration::from_secs(5),
+    )?;
+    Ok(RunledgerDatabase::connect(options, profile, 5).await?)
+}
+```
 
 Shared contract (`src/bin/shared/mod.rs`):
 
@@ -161,6 +193,9 @@ Worker (`src/bin/worker.rs`):
 
 <!-- quick-start-source: runledger-runtime/examples/producer_worker/worker.rs -->
 ```rust
+#[path = "../support/database.rs"]
+mod database;
+
 pub mod shared;
 
 use std::time::Duration;
@@ -173,7 +208,6 @@ use runledger_runtime::{
 };
 use serde_json::Value;
 use shared::{GREETING_JOB, Greeting};
-use sqlx::postgres::PgPoolOptions;
 
 struct PrintGreeting;
 
@@ -203,11 +237,10 @@ impl JobHandler for PrintGreeting {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = PgPoolOptions::new()
-        .connect(&std::env::var("DATABASE_URL")?)
-        .await?;
+    let database = database::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = database.pool().clone();
     // For a fresh database. Existing deployments must follow the migration runbook.
-    runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
+    runledger_postgres::migrate_after_idempotency_cutover(&database).await?;
     let catalog = JobCatalog::new().handler(PrintGreeting);
     catalog.sync_definitions(&pool).await?;
     println!("worker ready; producers can now enqueue greetings");
@@ -240,11 +273,13 @@ Producer (`src/bin/producer.rs`):
 
 <!-- quick-start-source: runledger-runtime/examples/producer_worker/producer.rs -->
 ```rust
+#[path = "../support/database.rs"]
+mod database;
+
 pub mod shared;
 
 use runledger_postgres::run_atomic;
 use shared::{Greeting, request};
-use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -252,13 +287,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: producer <name> <request-key>")?;
     let key = std::env::args().nth(2).ok_or("missing request-key")?;
-    let pool = PgPoolOptions::new()
-        .connect(&std::env::var("DATABASE_URL")?)
-        .await?;
-    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
+    let database = database::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = database.pool().clone();
+    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database).await?;
 
     let payload = serde_json::to_value(Greeting { name })?;
-    let outcome = run_atomic(&pool, async |scope| {
+    let outcome = run_atomic(&database, async |scope| {
         // Persist application changes through queue.application(...) when needed.
         scope.queue().enqueue_job(&request(&payload, &key)).await
     })
@@ -386,9 +420,9 @@ Notes on the worker lifecycle:
 
 A typical host application:
 
-1. Either call `migrate_after_idempotency_cutover(&pool)` to apply the bundled
+1. Either call `migrate_after_idempotency_cutover(&database)` to apply the bundled
    schema, or apply migrations with your own tooling and then call
-   `ensure_schema_compatible_after_idempotency_cutover(&pool)` to validate it.
+   `ensure_schema_compatible_after_idempotency_cutover(&database)` to validate it.
 2. Create a shared `sqlx::PgPool`.
 3. Register handlers in a `JobCatalog` (or directly in a `JobRegistry` for
    advanced setups).
@@ -1549,9 +1583,9 @@ application, and use the startup helpers below to apply or validate live state.
 
 Two supported startup modes:
 
-- `migrate_after_idempotency_cutover(&pool)` — applies the bundled schema and
+- `migrate_after_idempotency_cutover(&database)` — applies the bundled schema and
   rejects keyed legacy rows without enqueue snapshots.
-- `ensure_schema_compatible_after_idempotency_cutover(&pool)` — read-only
+- `ensure_schema_compatible_after_idempotency_cutover(&database)` — read-only
   validation that an existing `_sqlx_migrations` history matches the bundled
   migrations, with explicit errors for missing history, incompatible history,
   legacy idempotency rows, invalid expand-window triggers, or PostgreSQL
@@ -1865,7 +1899,13 @@ crate from its packaged tarball. If the cache and schema drift apart,
 
 ## Releasing
 
-Prepare a release:
+Release is disabled on this coordinated-development branch. All packages have
+`publish = false`; both release entrypoints refuse it before making changes.
+The commands below describe the future release workflow, after Batter foundation
+packages are published, registry dependencies replace sibling paths, and
+unpatched package verification and an external consumer succeed.
+
+Future preparation command:
 
 ```bash
 ./scripts/prepare-release.sh 0.12.0
@@ -1946,13 +1986,25 @@ The crates are published under the **MIT** license, as declared in each crate's
 
 ### Owned transaction and schema scopes
 
-This coordinated feature branch requires a sibling `../batter` checkout at
-`77d639c71f07762f2d94635ae609173894285831` or the matching owned-scope branch.
-CI pins that foundation revision. The foundation crates are not published yet;
-packaged-crate smoke tests explicitly patch them to the same sibling sources.
-Publishing Runledger with this dependency requires publishing the foundation first.
+All workspace packages have `publish = false`. Patched archive-consumer smoke
+tests prove only the coordinated source pair, not publication or registry
+resolution. Publishing requires a separate foundation release and an unpatched
+package/consumer verification; release scripts refuse this development graph.
 
-Use `run_atomic(&pool, async |mut scope| ...)`. Record intents on the initial
+Use `run_atomic(&database, async |mut scope| ...)`. The `RunledgerDatabase` owns
+mandatory acquisition hooks and an immutable `PgSessionProfile`. It declares
+the authenticated and effective roles, one authoritative Runledger schema, server
+statement/lock timeouts and optional custom settings. The trusted path is that
+schema, with PostgreSQL's implicit catalog first and temporary objects last.
+Fallback schemas are rejected so missing Runledger tables cannot silently resolve
+elsewhere; application objects in other schemas must be explicitly qualified.
+Roles and schemas must already exist. Ordinary APIs and workers receive
+`database.pool()`. Migrations and schema verification receive `&database`.
+After reset, atomic/snapshot owners reapply and verify this policy before work,
+and validate it again at scope boundaries. Arbitrary SQL can still cause effects
+before validation; this is not a SQL sandbox. Native pool hooks are not policy.
+
+Record required intents with `record_required_job_enqueue_intent` on the initial
 `PgIntentScope`, then consume it with `scope.queue()` for enqueue operations.
 `PgQueueScope` has no intent-recording method: the inverse lock order does not compile.
 Both phases support savepoint-protected `application` SQL. Direct SQL against
@@ -1964,8 +2016,12 @@ failure cannot erase the runner's original poison cause; an abandoned operation
 is classified separately. `PgScopeFailure` excludes ordinary application rejection.
 Cancellation returns no output and proves no rollback.
 All atomic/snapshot sessions are reset on acquisition and retired on completion.
+Known conflicted handoffs are typed rejections inside the callback; accepted
+outcomes contain only pending/promoted observations. Monitoring later promotion
+is still required. `observe_job_enqueue_intent` is a deliberate low-level escape
+for applications that choose to commit despite an existing conflict.
 
-`ensure_schema_compatible_after_idempotency_cutover(&pool)` owns a read-only
+`ensure_schema_compatible_after_idempotency_cutover(&database)` owns a read-only
 repeatable-read transaction and returns `SchemaCompatibilitySnapshot` with the
 existing migration bundle identity. It ignores caller transactions, temporary
 shadows and search paths. The snapshot is evidence of one observation, not a

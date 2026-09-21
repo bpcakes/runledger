@@ -8,10 +8,8 @@ use runledger_core::jobs::{
     JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowType,
 };
 use runledger_postgres::jobs::{enqueue_workflow_run, list_workflow_steps};
-use runledger_postgres::{
-    MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerProblem,
-    ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
-};
+use runledger_postgres::{MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerProblem};
+mod support;
 use runledger_test_support::{
     EphemeralDatabase, acquire_test_db_connection_budget, setup_unmigrated_ephemeral_pool,
     teardown_ephemeral_pool,
@@ -20,6 +18,10 @@ use serde_json::{Value, json};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::types::Uuid;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use support::{
+    migrate_profiled as migrate_after_idempotency_cutover,
+    verify_profiled as ensure_schema_compatible_after_idempotency_cutover,
+};
 
 const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
 const V0_6_LATEST_MIGRATION_VERSION: i64 = 202606030001;
@@ -106,18 +108,15 @@ async fn schema_snapshot_ignores_shadows_and_rejects_uncommitted_repairs() {
     migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect("schema authority fixture operation");
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with((*harness.pool.connect_options()).clone())
-        .await
-        .expect("schema authority fixture operation");
+    let database = support::profiled_database(&harness.pool).await;
+    let pool = database.pool().clone();
     sqlx::raw_sql("CREATE TEMP TABLE _sqlx_migrations AS SELECT * FROM public._sqlx_migrations; SET search_path = pg_temp")
         .execute(&pool).await.expect("schema authority fixture operation");
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&pool)
         .await
         .expect("schema authority fixture operation");
-    ensure_schema_compatible_after_idempotency_cutover(&pool)
+    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database)
         .await
         .expect("qualified authority ignores temp shadows and search path");
     let reused: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -149,7 +148,7 @@ async fn schema_snapshot_ignores_shadows_and_rejects_uncommitted_repairs() {
         .execute(&mut *repair)
         .await
         .expect("schema authority fixture operation");
-    let error = ensure_schema_compatible_after_idempotency_cutover(&pool)
+    let error = runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database)
         .await
         .expect_err("neither a valid temporary history nor an uncommitted repair is authoritative");
     assert!(
@@ -191,18 +190,14 @@ async fn schema_snapshot_starts_after_authoritative_locks_settle() {
         .execute(&mut *swap)
         .await
         .expect("second incompatible state");
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with((*harness.pool.connect_options()).clone())
-        .await
-        .expect("verifier pool");
+    let database = support::profiled_database(&harness.pool).await;
+    let pool = database.pool().clone();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&pool)
         .await
         .expect("verifier identity");
-    let verifier_pool = pool.clone();
     let verifier = tokio::spawn(async move {
-        ensure_schema_compatible_after_idempotency_cutover(&verifier_pool).await
+        runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database).await
     });
     let blocked = tokio::time::timeout(Duration::from_secs(10), async {
         loop {

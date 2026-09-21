@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use runledger_core::jobs::{JobType, WorkflowDagBuilder};
 use runledger_postgres::DbPool;
 use runledger_postgres::jobs::{JobDefinitionUpsert, WorkflowRunDbRecord};
@@ -10,8 +13,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .unwrap_or_else(|| "p_123".to_owned());
 
-    let pool = DbPool::connect(&database_url).await?;
-    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
+    let database = database::connect(&database_url).await?;
+    let pool = database.pool().clone();
+    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database).await?;
     ensure_job_definitions(&pool).await?;
 
     let workflow_run = enqueue_profile_research_workflow(&pool, &profile_id).await?;

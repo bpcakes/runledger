@@ -27,7 +27,7 @@ together.
 | Need | Use |
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
-| Commit application state and a future job request before its definition exists | `run_atomic` and `PgIntentScope::record_job_enqueue_intent` |
+| Commit application state and a future job request before its definition exists | `run_atomic` and `PgIntentScope::record_required_job_enqueue_intent` |
 | Multi-step work with dependencies | Workflow DAG APIs |
 | Multi-step work with a durable JSON result | Workflow result-step and handle APIs |
 | Fan-out, fan-in, or ordered stages | Workflow DAG APIs |
@@ -57,7 +57,7 @@ trusted all-tenant surface.
 
 ## Durable Transactional Handoff
 
-Use `run_atomic` with `scope.record_job_enqueue_intent` when application-owned state and a request
+Use `run_atomic` with `scope.record_required_job_enqueue_intent` when application-owned state and a request
 for background work must commit atomically before Runledger has an enabled job
 definition. The runner owns transaction completion; the application owns its business payload;
 `runledger-postgres` owns durable intent storage, strict idempotency, metrics,
@@ -73,14 +73,9 @@ let intent = JobEnqueueIntent::new(
     "invoice:invoice_123:capture",
 );
 
-let outcome = run_atomic(&pool, async |mut scope| {
+let outcome = run_atomic(&database, async |mut scope| {
     // Write the application business/audit row with scope.application(...).
-    let outcome = scope.record_job_enqueue_intent(&intent)
-        .await.map_err(std::io::Error::other)?;
-    if outcome.status() == JobEnqueueIntentStatus::Conflicted {
-        return Err(std::io::Error::other("the existing durable handoff is conflicted"));
-    }
-    Ok(outcome)
+    scope.record_required_job_enqueue_intent(&intent).await
 }).await?;
 // Reaching here confirms commit; uncertain outcomes retain their result/cause.
 ```
@@ -1420,14 +1415,22 @@ Other compile-checked examples and integration references:
 
 ### Owned durable-intent and schema scopes
 
-Use `run_atomic(&pool, async |mut scope| ...)`. The initial intent phase supports
-`record_job_enqueue_intent`; consume it with `scope.queue()` before enqueueing.
+Use `run_atomic(&database, async |mut scope| ...)`. The initial intent phase supports
+`record_required_job_enqueue_intent`; consume it with `scope.queue()` before enqueueing.
 The queue phase has no recording method. Both phases support application SQL,
 with direct SQL against internal tables designated a low-level escape hatch.
 The runner releases results only after acknowledged disposition, retaining domain
 outputs/errors on uncertainty. All sessions retire; acquisition resets inherited
 state. There is no borrowed view or consuming-owner compatibility bridge.
 
-Schema verification takes a pool, acquires and owns one qualified read-only
+The runner, migrations and schema verification require `RunledgerDatabase`, not
+an arbitrary SQLx pool. Declare login/effective roles, one authoritative schema,
+timeouts and optional tenant settings with `PgSessionProfile`; use the owned
+database's `pool()` for ordinary APIs and runtime construction. Acquisition hooks
+and atomic/snapshot reset re-establish that same policy. Runledger rejects
+fallback schemas; qualify application objects outside its authoritative schema.
+Never reconstruct authority from an `after_connect` convention.
+
+Schema verification takes that database, acquires and owns one qualified read-only
 repeatable-read snapshot, and returns `SchemaCompatibilitySnapshot` only after
 rollback acknowledgement. This is evidence of an observation, not future validity.

@@ -3,7 +3,7 @@ use std::fmt;
 
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migrator};
 
-use crate::{DbPool, PgQueryExecutor};
+use crate::{PgQueryExecutor, RunledgerDatabase};
 
 /// Raw SQLx migrator for inspecting the migrations bundled with this crate
 /// version.
@@ -102,9 +102,9 @@ pub enum WorkflowJobLinkTriggerProblem {
 impl fmt::Display for WorkflowJobLinkTriggerProblem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Missing => "missing from the expected public table",
+            Self::Missing => "missing from the expected schema table",
             Self::WrongFunction => {
-                "does not call the expected public zero-argument trigger function"
+                "does not call the expected schema zero-argument trigger function"
             }
             Self::NotEnabledForOriginWrites => "does not fire for origin/local writes",
             Self::InternallyGenerated => "is internally generated instead of user-defined",
@@ -145,7 +145,7 @@ impl WorkflowJobLinkTriggerDiagnostic {
 
 impl fmt::Display for WorkflowJobLinkTriggerDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "public.{}.{}: ", self.table_name, self.trigger_name)?;
+        write!(f, "{}.{}: ", self.table_name, self.trigger_name)?;
         for (index, problem) in self.problems.iter().enumerate() {
             if index != 0 {
                 f.write_str(", ")?;
@@ -281,9 +281,9 @@ impl From<sqlx::Error> for SchemaCompatibilityError {
 /// Runledger's migration compatibility fence so declared additive migrations
 /// can coexist with older compatible startup code.
 pub async fn migrate_after_idempotency_cutover(
-    pool: &DbPool,
+    database: &RunledgerDatabase,
 ) -> Result<(), SchemaCompatibilityError> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = database.pool().acquire().await?;
 
     if MIGRATOR.locking {
         // PostgreSQL advisory migration locks are session-scoped; never return
@@ -295,7 +295,7 @@ pub async fn migrate_after_idempotency_cutover(
             .map_err(SchemaCompatibilityError::Incompatible)?;
     }
 
-    let result = run_migrations_with_filtered_history(&mut conn).await;
+    let result = run_migrations_with_filtered_history(&mut conn, database).await;
     let unlock_result = if MIGRATOR.locking {
         (*conn).unlock().await
     } else {
@@ -316,8 +316,8 @@ pub async fn migrate_after_idempotency_cutover(
             // The DDL migration lock is no longer needed here: the NOT VALID
             // cutover constraints already block new violating rows, and
             // validation is idempotent if another startup validates first.
-            reject_legacy_idempotency_rows(&mut *conn).await?;
-            validate_idempotency_cutover_constraints(&mut *conn).await
+            reject_legacy_idempotency_rows(&mut *conn, database).await?;
+            validate_idempotency_cutover_constraints(&mut *conn, database).await
         }
     }
 }
@@ -331,8 +331,8 @@ pub async fn migrate_after_idempotency_cutover(
     since = "0.1.2",
     note = "use migrate_after_idempotency_cutover to make the enqueue request snapshot cutover explicit"
 )]
-pub async fn migrate(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
-    migrate_after_idempotency_cutover(pool).await
+pub async fn migrate(database: &RunledgerDatabase) -> Result<(), SchemaCompatibilityError> {
+    migrate_after_idempotency_cutover(database).await
 }
 
 /// Validate that the target database's SQLx migration history matches the
@@ -361,12 +361,12 @@ pub async fn migrate(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
 /// Own one read-only repeatable-read snapshot and return evidence only after
 /// acknowledged rollback. All authoritative objects are schema qualified.
 pub async fn ensure_schema_compatible_after_idempotency_cutover(
-    pool: &DbPool,
+    database: &RunledgerDatabase,
 ) -> Result<SchemaCompatibilitySnapshot, SchemaCompatibilityError> {
-    batter_sqlx::PgReadOnlySnapshot::inspect(pool, async |conn| {
+    batter_sqlx::PgReadOnlySnapshot::inspect_profiled(database.pool(), database.profile(), async |conn| {
         // Lock names before the first snapshot-bearing query. A concurrent DDL
         // change must settle before inspection; later changes wait for rollback.
-        sqlx::raw_sql("LOCK TABLE public._sqlx_migrations IN ACCESS SHARE MODE")
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("LOCK TABLE {} IN ACCESS SHARE MODE", database.relation("_sqlx_migrations"))))
             .execute(conn.executor()).await.map_err(|error| {
                 if error.as_database_error().is_some_and(|error| error.code().as_deref() == Some("42P01")) {
                     SchemaCompatibilityError::MissingMigrationHistory {
@@ -376,25 +376,25 @@ pub async fn ensure_schema_compatible_after_idempotency_cutover(
             })?;
         let mut missing_relation = None;
         let mut missing_fence = None;
-        for relation in ["public.job_queue", "public.workflow_runs", "public.workflow_steps", "public.runledger_migration_history"] {
+        for relation in ["job_queue", "workflow_runs", "workflow_steps", "runledger_migration_history"] {
             sqlx::raw_sql("SAVEPOINT schema_lock").execute(conn.executor()).await?;
-            let statement = format!("LOCK TABLE ONLY {relation} IN ACCESS SHARE MODE");
+            let statement = format!("LOCK TABLE ONLY {} IN ACCESS SHARE MODE", database.relation(relation));
             match sqlx::raw_sql(sqlx::AssertSqlSafe(statement)).execute(conn.executor()).await {
                 Ok(_) => {},
                 Err(error) if error.as_database_error().is_some_and(|error| error.code().as_deref() == Some("42P01")) => {
                     sqlx::raw_sql("ROLLBACK TO SAVEPOINT schema_lock").execute(conn.executor()).await?;
-                    if relation == "public.runledger_migration_history" { missing_fence = Some(error); }
+                    if relation == "runledger_migration_history" { missing_fence = Some(error); }
                     else { missing_relation = Some(error); }
                 },
                 Err(error) => return Err(error.into()),
             }
             sqlx::raw_sql("RELEASE SAVEPOINT schema_lock").execute(conn.executor()).await?;
         }
-        inspect_schema(conn, missing_relation, missing_fence).await?;
+        inspect_schema(conn, database, missing_relation, missing_fence).await?;
         let database_oid: i64 = sqlx::query_scalar(
             "SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()"
         ).fetch_one(conn.executor()).await?;
-        Ok(SchemaCompatibilitySnapshot { database_oid, bundle: crate::migration_bundle().bundle_fingerprint() })
+        Ok(SchemaCompatibilitySnapshot { database_oid, schema: database.schema().into(), bundle: crate::migration_bundle().bundle_fingerprint() })
     }).await.map_err(|error| match error {
         batter_sqlx::PgSnapshotError::Inspection(error) => error,
         error => SchemaCompatibilityError::Snapshot(Box::new(error)),
@@ -405,9 +405,14 @@ pub async fn ensure_schema_compatible_after_idempotency_cutover(
 #[derive(Debug)]
 pub struct SchemaCompatibilitySnapshot {
     database_oid: i64,
+    schema: String,
     bundle: [u8; 32],
 }
 impl SchemaCompatibilitySnapshot {
+    /// Authoritative schema observed in this snapshot.
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
     /// Database OID within the inspected PostgreSQL cluster.
     pub const fn database_oid(&self) -> i64 {
         self.database_oid
@@ -420,17 +425,18 @@ impl SchemaCompatibilitySnapshot {
 
 async fn inspect_schema(
     conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
     missing_relation: Option<sqlx::Error>,
     missing_fence: Option<sqlx::Error>,
 ) -> Result<(), SchemaCompatibilityError> {
-    if !has_migrations_table(conn).await? {
+    if !has_migrations_table(conn, database).await? {
         return Err(SchemaCompatibilityError::MissingMigrationHistory {
             required_first_migration_version: first_up_migration_version(),
         });
     }
 
     let expected_migrations = expected_runledger_migrations();
-    let history = list_migration_history(conn).await?;
+    let history = list_migration_history(conn, database).await?;
 
     if let Some(version) = first_conflicting_runledger_version(&history, &expected_migrations) {
         return Err(SchemaCompatibilityError::Incompatible(
@@ -444,11 +450,11 @@ async fn inspect_schema(
         )));
     }
 
-    if has_runledger_migration_history_table(conn).await? {
+    if has_runledger_migration_history_table(conn, database).await? {
         if let Some(error) = missing_fence {
             return Err(error.into());
         }
-        let recorded_versions = list_recorded_runledger_migrations(conn).await?;
+        let recorded_versions = list_recorded_runledger_migrations(conn, database).await?;
         if let Some(version) =
             first_missing_runledger_version(&recorded_versions, &expected_migrations)
         {
@@ -491,8 +497,8 @@ async fn inspect_schema(
     if let Some(error) = missing_relation {
         return Err(error.into());
     }
-    validate_workflow_job_link_expand_schema(conn).await?;
-    reject_legacy_idempotency_rows(conn).await
+    validate_workflow_job_link_expand_schema(conn, database).await?;
+    reject_legacy_idempotency_rows(conn, database).await
 }
 
 /// Validate that the target database's SQLx migration history matches the
@@ -506,76 +512,86 @@ async fn inspect_schema(
     since = "0.1.2",
     note = "use ensure_schema_compatible_after_idempotency_cutover to make the enqueue request snapshot cutover explicit"
 )]
-pub async fn ensure_schema_compatible(pool: &DbPool) -> Result<(), SchemaCompatibilityError> {
-    ensure_schema_compatible_after_idempotency_cutover(pool)
+pub async fn ensure_schema_compatible(
+    database: &RunledgerDatabase,
+) -> Result<(), SchemaCompatibilityError> {
+    ensure_schema_compatible_after_idempotency_cutover(database)
         .await
         .map(|_| ())
 }
 
-async fn has_migrations_table(conn: &mut impl PgQueryExecutor) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT pg_catalog.to_regclass('public._sqlx_migrations') IS NOT NULL",
-    )
-    .fetch_one(conn.executor())
-    .await
+async fn has_migrations_table(
+    conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
+        .bind(database.relation("_sqlx_migrations"))
+        .fetch_one(conn.executor())
+        .await
 }
 
 async fn has_runledger_migration_history_table(
     conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT pg_catalog.to_regclass('public.runledger_migration_history') IS NOT NULL",
-    )
-    .fetch_one(conn.executor())
-    .await
+    sqlx::query_scalar::<_, bool>("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
+        .bind(database.relation("runledger_migration_history"))
+        .fetch_one(conn.executor())
+        .await
 }
 
 async fn list_migration_history(
     conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
 ) -> Result<Vec<MigrationHistoryRow>, sqlx::Error> {
-    sqlx::query_as::<_, MigrationHistoryRow>(
+    sqlx::query_as::<_, MigrationHistoryRow>(sqlx::AssertSqlSafe(format!(
         "SELECT version, checksum, success
-         FROM public._sqlx_migrations
+         FROM {schema}._sqlx_migrations
          ORDER BY version",
-    )
+        schema = database.schema_identifier()
+    )))
     .fetch_all(conn.executor())
     .await
 }
 
 async fn list_recorded_runledger_migrations(
     conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
 ) -> Result<Vec<i64>, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>(
+    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
         "SELECT version
-         FROM public.runledger_migration_history
+         FROM {schema}.runledger_migration_history
          ORDER BY version",
-    )
+        schema = database.schema_identifier()
+    )))
     .fetch_all(conn.executor())
     .await
 }
 
 async fn reject_legacy_idempotency_rows(
     conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
 ) -> Result<(), SchemaCompatibilityError> {
-    if idempotency_cutover_constraints_valid(conn).await? {
+    if idempotency_cutover_constraints_valid(conn, database).await? {
         return Ok(());
     }
 
-    let (job_count, workflow_count): (i64, i64) = sqlx::query_as(
+    let (job_count, workflow_count): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"SELECT
             (
                 SELECT COUNT(*)::bigint
-                FROM public.job_queue
+                FROM {schema}.job_queue
                 WHERE idempotency_key IS NOT NULL
                   AND enqueue_request IS NULL
             ) AS job_count,
             (
                 SELECT COUNT(*)::bigint
-                FROM public.workflow_runs
+                FROM {schema}.workflow_runs
                 WHERE idempotency_key IS NOT NULL
                   AND enqueue_request IS NULL
             ) AS workflow_count"#,
-    )
+        schema = database.schema_identifier()
+    )))
     .fetch_one(conn.executor())
     .await?;
 
@@ -593,33 +609,36 @@ async fn reject_legacy_idempotency_rows(
 
 async fn validate_workflow_job_link_expand_schema(
     conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
 ) -> Result<(), SchemaCompatibilityError> {
     let deprecated_column_exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
             FROM information_schema.columns
-            WHERE table_schema = 'public'
+            WHERE table_schema = $1
               AND table_name = 'job_queue'
               AND column_name = 'workflow_step_id'
          )",
     )
+    .bind(database.schema())
     .fetch_one(conn.executor())
     .await?;
     if !deprecated_column_exists {
         return Ok(());
     }
 
-    let trigger_catalog = workflow_job_link_trigger_catalog(conn).await?;
-    let trigger_diagnostics = workflow_job_link_trigger_diagnostics(&trigger_catalog);
-    let inconsistent_link_count = sqlx::query_scalar::<_, i64>(
+    let trigger_catalog = workflow_job_link_trigger_catalog(conn, database).await?;
+    let trigger_diagnostics =
+        workflow_job_link_trigger_diagnostics(&trigger_catalog, database.schema());
+    let inconsistent_link_count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
         "SELECT count(*)
          FROM (
             SELECT jq.id
-            FROM public.job_queue jq
+            FROM {schema}.job_queue jq
             WHERE jq.workflow_step_id IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1
-                  FROM public.workflow_steps ws
+                  FROM {schema}.workflow_steps ws
                   WHERE ws.id = jq.workflow_step_id
                     AND ws.job_id = jq.id
               )
@@ -627,16 +646,17 @@ async fn validate_workflow_job_link_expand_schema(
             UNION ALL
 
             SELECT ws.id
-            FROM public.workflow_steps ws
+            FROM {schema}.workflow_steps ws
             WHERE ws.job_id IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1
-                  FROM public.job_queue jq
+                  FROM {schema}.job_queue jq
                   WHERE jq.id = ws.job_id
                     AND jq.workflow_step_id = ws.id
               )
          ) inconsistencies",
-    )
+        schema = database.schema_identifier()
+    )))
     .fetch_one(conn.executor())
     .await?;
 
@@ -681,6 +701,7 @@ struct WorkflowJobLinkTriggerCatalogRow {
 
 async fn workflow_job_link_trigger_catalog(
     conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
 ) -> Result<Vec<WorkflowJobLinkTriggerCatalogRow>, sqlx::Error> {
     sqlx::query_as(
         "SELECT
@@ -718,7 +739,7 @@ async fn workflow_job_link_trigger_catalog(
            ON function_row.oid = trigger_row.tgfoid
          JOIN pg_catalog.pg_namespace AS function_namespace
            ON function_namespace.oid = function_row.pronamespace
-         WHERE table_namespace.nspname = 'public'
+         WHERE table_namespace.nspname = $1
            AND (
                 (relation.relname, trigger_row.tgname) = (
                     'job_queue',
@@ -734,12 +755,14 @@ async fn workflow_job_link_trigger_catalog(
                 )
            )",
     )
+    .bind(database.schema())
     .fetch_all(conn.executor())
     .await
 }
 
 fn workflow_job_link_trigger_diagnostics(
     catalog: &[WorkflowJobLinkTriggerCatalogRow],
+    schema: &str,
 ) -> Vec<WorkflowJobLinkTriggerDiagnostic> {
     WORKFLOW_JOB_LINK_EXPAND_TRIGGER_SPECS
         .iter()
@@ -754,7 +777,7 @@ fn workflow_job_link_trigger_diagnostics(
                 });
             };
 
-            let problems = workflow_job_link_trigger_problems(spec, trigger);
+            let problems = workflow_job_link_trigger_problems(spec, trigger, schema);
             (!problems.is_empty()).then_some(WorkflowJobLinkTriggerDiagnostic {
                 table_name: spec.table_name,
                 trigger_name: spec.trigger_name,
@@ -767,10 +790,11 @@ fn workflow_job_link_trigger_diagnostics(
 fn workflow_job_link_trigger_problems(
     spec: &WorkflowJobLinkTriggerSpec,
     trigger: &WorkflowJobLinkTriggerCatalogRow,
+    schema: &str,
 ) -> Vec<WorkflowJobLinkTriggerProblem> {
     let mut problems = Vec::new();
 
-    if trigger.function_schema != "public"
+    if trigger.function_schema != schema
         || trigger.function_name != spec.function_name
         || trigger.function_argument_count != 0
         || !trigger.returns_trigger
@@ -818,18 +842,20 @@ fn workflow_job_link_trigger_problems(
 
 async fn validate_idempotency_cutover_constraints(
     conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
 ) -> Result<(), SchemaCompatibilityError> {
-    if idempotency_cutover_constraints_valid(conn).await? {
+    if idempotency_cutover_constraints_valid(conn, database).await? {
         return Ok(());
     }
 
     // PostgreSQL validates each table constraint independently. If one
     // validation succeeds and the other fails, the next startup skips the valid
     // constraint and retries the remaining one.
-    sqlx::query(
-        "ALTER TABLE public.job_queue
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.job_queue
          VALIDATE CONSTRAINT ck_job_queue_idempotency_enqueue_request",
-    )
+        schema = database.schema_identifier()
+    )))
     .execute(conn.executor())
     .await
     .map_err(|error| {
@@ -840,10 +866,11 @@ async fn validate_idempotency_cutover_constraints(
         SchemaCompatibilityError::Query(error)
     })?;
 
-    sqlx::query(
-        "ALTER TABLE public.workflow_runs
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.workflow_runs
          VALIDATE CONSTRAINT ck_workflow_runs_idempotency_enqueue_request",
-    )
+        schema = database.schema_identifier()
+    )))
     .execute(conn.executor())
     .await
     .map_err(|error| {
@@ -859,6 +886,7 @@ async fn validate_idempotency_cutover_constraints(
 
 async fn idempotency_cutover_constraints_valid(
     conn: &mut impl PgQueryExecutor,
+    database: &RunledgerDatabase,
 ) -> Result<bool, sqlx::Error> {
     // A validated cutover constraint is the durable proof that legacy keyed rows
     // without enqueue_request snapshots cannot exist for that table. If future
@@ -868,11 +896,12 @@ async fn idempotency_cutover_constraints_valid(
         "SELECT COUNT(*) FILTER (WHERE c.convalidated) = 2
          FROM pg_catalog.pg_constraint c
          JOIN pg_catalog.pg_class t ON t.oid = c.conrelid
-         WHERE t.relnamespace = 'public'::pg_catalog.regnamespace AND (t.relname, c.conname) IN (
+         WHERE t.relnamespace = pg_catalog.to_regnamespace($1) AND (t.relname, c.conname) IN (
              ('job_queue', 'ck_job_queue_idempotency_enqueue_request'),
              ('workflow_runs', 'ck_workflow_runs_idempotency_enqueue_request')
          )",
     )
+    .bind(database.schema_identifier())
     .fetch_one(conn.executor())
     .await
 }
@@ -948,11 +977,12 @@ fn applied_runledger_migrations(
 
 async fn run_migrations_with_filtered_history(
     conn: &mut sqlx::PgConnection,
+    database: &RunledgerDatabase,
 ) -> Result<(), MigrateError> {
     conn.ensure_migrations_table("_sqlx_migrations").await?;
 
     let expected_migrations = expected_runledger_migrations();
-    let history = list_migration_history(conn).await?;
+    let history = list_migration_history(conn, database).await?;
 
     if let Some(version) = first_conflicting_runledger_version(&history, &expected_migrations) {
         return Err(MigrateError::VersionMismatch(version));
@@ -962,8 +992,8 @@ async fn run_migrations_with_filtered_history(
         return Err(MigrateError::Dirty(version));
     }
 
-    if has_runledger_migration_history_table(conn).await? {
-        let recorded_versions = list_recorded_runledger_migrations(conn).await?;
+    if has_runledger_migration_history_table(conn, database).await? {
+        let recorded_versions = list_recorded_runledger_migrations(conn, database).await?;
         if let Some(version) =
             first_missing_runledger_version(&recorded_versions, &expected_migrations)
         {
@@ -1024,12 +1054,12 @@ mod workflow_job_link_trigger_validation_tests {
             .map(valid_catalog_row)
             .collect::<Vec<_>>();
 
-        assert!(workflow_job_link_trigger_diagnostics(&catalog).is_empty());
+        assert!(workflow_job_link_trigger_diagnostics(&catalog, "public").is_empty());
     }
 
     #[test]
     fn missing_triggers_are_reported_individually() {
-        let diagnostics = workflow_job_link_trigger_diagnostics(&[]);
+        let diagnostics = workflow_job_link_trigger_diagnostics(&[], "public");
 
         assert_eq!(
             diagnostics.len(),
@@ -1121,14 +1151,14 @@ mod workflow_job_link_trigger_validation_tests {
 
         let mut all_updates = valid_catalog_row(spec);
         all_updates.update_column_names.clear();
-        assert!(workflow_job_link_trigger_problems(spec, &all_updates).is_empty());
+        assert!(workflow_job_link_trigger_problems(spec, &all_updates, "public").is_empty());
 
         let mut additional_columns = valid_catalog_row(spec);
         additional_columns
             .update_column_names
             .push("stage".to_owned());
         additional_columns.enabled_mode = "A".to_owned();
-        assert!(workflow_job_link_trigger_problems(spec, &additional_columns).is_empty());
+        assert!(workflow_job_link_trigger_problems(spec, &additional_columns, "public").is_empty());
     }
 
     fn valid_catalog_row(spec: &WorkflowJobLinkTriggerSpec) -> WorkflowJobLinkTriggerCatalogRow {
@@ -1162,7 +1192,7 @@ mod workflow_job_link_trigger_validation_tests {
         expected: WorkflowJobLinkTriggerProblem,
     ) {
         assert_eq!(
-            workflow_job_link_trigger_problems(spec, trigger),
+            workflow_job_link_trigger_problems(spec, trigger, "public"),
             vec![expected]
         );
     }

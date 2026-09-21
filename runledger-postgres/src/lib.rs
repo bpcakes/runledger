@@ -10,7 +10,8 @@
 //!   workflow runs and steps
 //! - applying or validating the bundled Runledger schema migrations
 //!
-//! Typical consumers share a [`DbPool`] with `runledger-runtime`, then call the
+//! Typical consumers construct a [`RunledgerDatabase`] and share its profiled
+//! [`DbPool`] with `runledger-runtime`, then call the
 //! exported [`jobs`] functions from application setup, admin APIs, or tests.
 //!
 //! # Security Boundary
@@ -41,8 +42,14 @@
 //!
 //! ```rust,no_run
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-//! let pool = sqlx::PgPool::connect("postgres://localhost/runledger").await?;
-//! runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
+//! use runledger_postgres::{PgSessionProfile, RunledgerDatabase};
+//! use std::time::Duration;
+//! let options = "postgres://login@localhost/runledger".parse()?;
+//! let profile = PgSessionProfile::new("login", "serving", vec!["application".into()],
+//!     Duration::from_secs(30), Duration::from_secs(5))?;
+//! let database = RunledgerDatabase::connect(options, profile, 8).await?;
+//! runledger_postgres::migrate_after_idempotency_cutover(&database).await?;
+//! let pool = database.pool(); // ordinary APIs and runtime use the same policy
 //! # Ok(())
 //! # }
 //! ```
@@ -83,7 +90,8 @@
 //! Use direct job enqueue for one independent retried unit of work.
 //!
 //! ```rust,no_run
-//! # async fn demo(pool: runledger_postgres::DbPool) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn demo(database: runledger_postgres::RunledgerDatabase) -> Result<(), Box<dyn std::error::Error>> {
+//! let pool = database.pool();
 //! use runledger_core::prelude::*;
 //! use runledger_postgres::prelude::*;
 //!
@@ -118,7 +126,7 @@
 //! path.
 //!
 //! ```rust,no_run
-//! # async fn demo(pool: runledger_postgres::DbPool) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn demo(database: runledger_postgres::RunledgerDatabase) -> Result<(), Box<dyn std::error::Error>> {
 //! use runledger_core::prelude::*;
 //! use runledger_postgres::prelude::*;
 //!
@@ -129,13 +137,12 @@
 //!     "invoice:invoice_123:capture",
 //! );
 //!
-//! let outcome = run_atomic(&pool, async |mut scope| {
+//! let outcome = run_atomic(&database, async |mut scope| {
 //!     // Persist application writes through scope.application(...).
-//!     scope.record_job_enqueue_intent(&intent).await
+//!     scope.record_required_job_enqueue_intent(&intent).await
 //! }).await?;
-//! if outcome.status() == JobEnqueueIntentStatus::Conflicted {
-//!     return Err("the existing durable handoff is conflicted".into());
-//! }
+//! // Known conflicts reject inside the transaction; only accepted observations escape.
+//! # let _ = outcome;
 //! # Ok(())
 //! # }
 //! ```
@@ -446,24 +453,29 @@ pub mod prelude {
         deactivate_schedules_absent_from_names_tx,
     };
     pub use crate::{
-        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgAtomicError, PgAtomicUncertainty,
-        PgIntentScope, PgQueueScope, PgScopeFailure, PgScopeLoss, QueryError, QueryErrorCategory,
-        QueryErrorKind, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
-        WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
-        migrate_after_idempotency_cutover, run_atomic,
+        AcceptedIntentOutcome, AcceptedIntentState, DbPool, DbTx, FrameworkConstraintSpec,
+        MIGRATOR, PgAtomicError, PgAtomicUncertainty, PgIntentScope, PgQueueScope, PgScopeFailure,
+        PgScopeLoss, PgSessionProfile, QueryError, QueryErrorCategory, QueryErrorKind,
+        RequiredIntentError, RunledgerDatabase, SchemaCompatibilityError,
+        WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
+        ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
+        run_atomic,
     };
 }
 
 pub type DbPool = sqlx::PgPool;
+mod database;
+pub use database::{PgProfileError, PgSessionProfile, RunledgerDatabase};
 pub type DbTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub use error::{CommitUnconfirmed, RollbackFailure};
-pub(crate) use transaction_executor::PgQueryExecutor;
+pub(crate) use transaction_executor::{PgQueryExecutor, PgTransactionalExecutor};
 mod atomic;
 pub use atomic::{
-    PgAtomicError, PgAtomicUncertainty, PgIntentScope, PgQueueScope, PgScopeError, PgScopeFailure,
-    PgScopeLoss, PgScopedSql, PgTransactionError, run_atomic,
+    AcceptedIntentOutcome, AcceptedIntentState, IntentConflict, PgAtomicError, PgAtomicUncertainty,
+    PgIntentScope, PgQueueScope, PgScopeError, PgScopeFailure, PgScopeLoss, PgScopedSql,
+    PgTransactionError, RequiredIntentError, run_atomic,
 };
 pub use migrations::SchemaCompatibilitySnapshot;
 

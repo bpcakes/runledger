@@ -6,7 +6,7 @@ use serde_json::Value;
 use sqlx::types::Uuid;
 
 use crate::error::SanitizedQueryErrorDiagnostics;
-use crate::{DbPool, DbTx, Error, PgQueryExecutor, QueryError, QueryErrorCategory, Result};
+use crate::{DbPool, DbTx, Error, PgTransactionalExecutor, QueryError, QueryErrorCategory, Result};
 
 use super::super::errors::{validate_page_limit, validate_pagination};
 use super::super::row_decode::{parse_job_stage, parse_job_type_name};
@@ -254,7 +254,9 @@ pub async fn record_job_enqueue_intent_tx(
 /// transaction. This has the same idempotency and lock-order contract as
 /// [`record_job_enqueue_intent_tx`], and validates READ COMMITTED before writing.
 /// The caller retains commit/rollback ownership; no native transaction escapes.
-pub(crate) async fn record_job_enqueue_intent_in_transaction<T: PgQueryExecutor + ?Sized>(
+pub(crate) async fn record_job_enqueue_intent_in_transaction<
+    T: PgTransactionalExecutor + ?Sized,
+>(
     tx: &mut T,
     intent: &JobEnqueueIntent<'_>,
 ) -> Result<JobEnqueueIntentOutcome> {
@@ -292,7 +294,7 @@ pub async fn record_job_enqueue_intent(
     .await
 }
 
-async fn record_job_enqueue_intent_read_committed_tx<T: PgQueryExecutor + ?Sized>(
+async fn record_job_enqueue_intent_read_committed_tx<T: PgTransactionalExecutor + ?Sized>(
     tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
 ) -> Result<JobEnqueueIntentOutcome> {
@@ -318,7 +320,7 @@ async fn record_job_enqueue_intent_read_committed_tx<T: PgQueryExecutor + ?Sized
     ))
 }
 
-async fn insert_intent_if_absent<T: PgQueryExecutor + ?Sized>(
+async fn insert_intent_if_absent<T: PgTransactionalExecutor + ?Sized>(
     tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
     idempotency_key: &str,
@@ -331,7 +333,7 @@ async fn insert_intent_if_absent<T: PgQueryExecutor + ?Sized>(
     }
 }
 
-async fn insert_org_scoped_intent<T: PgQueryExecutor + ?Sized>(
+async fn insert_org_scoped_intent<T: PgTransactionalExecutor + ?Sized>(
     tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
     organization_id: Uuid,
@@ -381,7 +383,7 @@ async fn insert_org_scoped_intent<T: PgQueryExecutor + ?Sized>(
     .map_err(|error| Error::from_query_sqlx_with_context(RECORD_OPERATION, error))
 }
 
-async fn insert_unscoped_intent<T: PgQueryExecutor + ?Sized>(
+async fn insert_unscoped_intent<T: PgTransactionalExecutor + ?Sized>(
     tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
     idempotency_key: &str,
@@ -429,7 +431,7 @@ async fn insert_unscoped_intent<T: PgQueryExecutor + ?Sized>(
     .map_err(|error| Error::from_query_sqlx_with_context(RECORD_OPERATION, error))
 }
 
-async fn load_conflicting_intent_outcome<T: PgQueryExecutor + ?Sized>(
+async fn load_conflicting_intent_outcome<T: PgTransactionalExecutor + ?Sized>(
     tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
     resolution_attempt: i32,
@@ -452,7 +454,7 @@ async fn load_conflicting_intent_outcome<T: PgQueryExecutor + ?Sized>(
     intent_outcome(&existing, JobEnqueueIntentDisposition::Existing).map(Some)
 }
 
-async fn load_existing_intent_with_key_share<T: PgQueryExecutor + ?Sized>(
+async fn load_existing_intent_with_key_share<T: PgTransactionalExecutor + ?Sized>(
     tx: &mut ReadCommittedExecutor<'_, T>,
     prepared: &PreparedIntent<'_>,
 ) -> Result<Option<JobEnqueueIntentOutcomeRow>> {

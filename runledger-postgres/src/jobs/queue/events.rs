@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use runledger_core::jobs::JobType;
 use sqlx::types::Uuid;
 
-use crate::{DbTx, Error, PgQueryExecutor, Result};
+use crate::{DbTx, Error, PgTransactionalExecutor, Result};
 
 pub(crate) use super::super::types::HANDLER_CONTINUATION_REASON;
 use super::super::types::{
@@ -32,7 +32,7 @@ pub(crate) async fn insert_enqueued_event_tx<T>(
     event: EnqueuedJobEvent<'_>,
 ) -> Result<()>
 where
-    T: PgQueryExecutor + ?Sized,
+    T: PgTransactionalExecutor + ?Sized,
 {
     let (replayed_from_job_id, replayed_from_run_number, replay_request_key, replay_reason) =
         match event.payload {

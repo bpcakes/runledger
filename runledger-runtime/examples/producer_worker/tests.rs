@@ -9,6 +9,19 @@ use shared::request;
 #[tokio::test]
 async fn shared_contract_transaction_and_worker_round_trip() {
     let (pool, database) = setup_ephemeral_pool("producer_worker_example", 5).await;
+    let options = pool.connect_options();
+    let login = options.get_username();
+    let profile = runledger_postgres::PgSessionProfile::new(
+        login,
+        login,
+        vec!["public".into()],
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .expect("test policy");
+    let profiled = runledger_postgres::RunledgerDatabase::connect((*options).clone(), profile, 1)
+        .await
+        .expect("test database");
     let version: String = sqlx::query_scalar("SHOW server_version")
         .fetch_one(&pool)
         .await
@@ -18,7 +31,7 @@ async fn shared_contract_transaction_and_worker_round_trip() {
     catalog.sync_definitions(&pool).await.expect("definitions");
     let payload = serde_json::to_value(Greeting { name: "Ada".into() }).expect("payload");
 
-    let rejected = run_atomic(&pool, async |scope| {
+    let rejected = run_atomic(&profiled, async |scope| {
         scope
             .queue()
             .enqueue_job(&request(&payload, "rolled-back"))
@@ -35,7 +48,7 @@ async fn shared_contract_transaction_and_worker_round_trip() {
             .expect("read rolled back job");
     assert_eq!(rolled_back, 0);
 
-    let outcome = run_atomic(&pool, async |scope| {
+    let outcome = run_atomic(&profiled, async |scope| {
         scope
             .queue()
             .enqueue_job(&request(&payload, "greeting:1"))
@@ -44,7 +57,7 @@ async fn shared_contract_transaction_and_worker_round_trip() {
     .await
     .expect("committed enqueue");
     let job_id = outcome.job_id;
-    let retry = run_atomic(&pool, async |scope| {
+    let retry = run_atomic(&profiled, async |scope| {
         scope
             .queue()
             .enqueue_job(&request(&payload, "greeting:1"))
@@ -101,5 +114,6 @@ async fn shared_contract_transaction_and_worker_round_trip() {
     assert_eq!(job.payload, payload);
     assert_eq!(job.progress_done, Some(1));
     assert_eq!(job.progress_total, Some(1));
+    profiled.pool().close().await;
     teardown_ephemeral_pool(pool, database).await;
 }

@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# Source-archive integration only. All packages are unpublished and the patches
+# below are mandatory; this does not verify registry resolution/publication.
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SMOKE_SOURCE_DIR="$ROOT_DIR/smoke/external-consumer"
 WORK_DIR="$ROOT_DIR/target/external-consumer-smoke/work"
@@ -39,6 +42,8 @@ extract_crate() {
 }
 
 cd "$ROOT_DIR"
+export RUNLEDGER_BATTER_SOURCE="$ROOT_DIR/../batter"
+bash scripts/bootstrap-batter.sh
 
 rm -rf "$VENDOR_DIR" "$TARGET_DIR" "$WORK_DIR"
 mkdir -p "$VENDOR_DIR" "$TARGET_DIR"

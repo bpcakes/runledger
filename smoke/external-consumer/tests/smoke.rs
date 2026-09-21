@@ -249,7 +249,7 @@ async fn setup_consumer_schema_and_intent(pool: &DbPool) -> (Uuid, Value) {
         "external consumer smoke PostgreSQL server_version={server_version} server_version_num={server_version_num}"
     );
 
-    runledger_postgres::migrate_after_idempotency_cutover(pool)
+    opaque_intents::migrate(pool)
         .await
         .expect("apply packaged migrations");
     create_consumer_audit_table(pool)
@@ -1543,7 +1543,7 @@ async fn packaged_prelude_exports_explicit_metric_and_payload_scopes() {
         get_latest_job_payload_for_run_with_scope,
     };
     let (pool, database) = setup_unmigrated_ephemeral_pool("consumer_explicit_scopes", 2).await;
-    runledger_postgres::migrate_after_idempotency_cutover(&pool)
+    opaque_intents::migrate(&pool)
         .await
         .expect("packaged explicit scope API succeeds");
     let tenant = Uuid::now_v7();

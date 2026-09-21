@@ -42,8 +42,16 @@ PostgreSQL persistence for durable execution: queue lifecycle, workflow DAG stat
   intent recording after queue operations. Scopes own savepoint cleanup,
   transaction identity, cancellation disposition and exhaustive uncertainty.
   Never recreate public executor capabilities or borrowed resource views.
+- Canonical startup/atomic work takes `RunledgerDatabase`, whose mandatory hooks
+  establish its immutable role/schema/timeout/tenant profile. Workers and ordinary
+  APIs use that database's pool. After DISCARD, establish policy before BEGIN;
+  never recover policy from arbitrary native hooks. Runledger allows one ordinary
+  schema (no fallback); migrations, qualified verification and runtime agree.
+- Required intent recording returns only accepted observations; known durable
+  conflicts are typed rejections. Low-level observation is explicitly separate.
 - Domain operations share internal SQL implementations with native persistence
-  paths; executor traits are private dispatch, never evidence of transaction state.
+  paths. PgQueryExecutor is only dispatch; mutation helpers also require the
+  private PgTransactionalExecutor marker (DbTx/PgScopedSql only).
 - Schema verification acquires its own REPEATABLE READ READ ONLY transaction,
   pins authoritative objects before the snapshot, qualifies names, and returns
   `SchemaCompatibilitySnapshot` after rollback acknowledgement. Caller session

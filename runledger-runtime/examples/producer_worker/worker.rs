@@ -1,3 +1,6 @@
+#[path = "../support/database.rs"]
+mod database;
+
 pub mod shared;
 
 use std::time::Duration;
@@ -10,7 +13,6 @@ use runledger_runtime::{
 };
 use serde_json::Value;
 use shared::{GREETING_JOB, Greeting};
-use sqlx::postgres::PgPoolOptions;
 
 struct PrintGreeting;
 
@@ -40,11 +42,10 @@ impl JobHandler for PrintGreeting {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = PgPoolOptions::new()
-        .connect(&std::env::var("DATABASE_URL")?)
-        .await?;
+    let database = database::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = database.pool().clone();
     // For a fresh database. Existing deployments must follow the migration runbook.
-    runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
+    runledger_postgres::migrate_after_idempotency_cutover(&database).await?;
     let catalog = JobCatalog::new().handler(PrintGreeting);
     catalog.sync_definitions(&pool).await?;
     println!("worker ready; producers can now enqueue greetings");

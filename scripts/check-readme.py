@@ -49,16 +49,25 @@ def check(root: Path, write: bool) -> None:
         for name, value in dependencies.get(section, {}).items()
         if name.startswith("runledger-")
     }
-    require(
-        versions == dict.fromkeys(crates, version),
-        f"installation must recommend {version} for {sorted(crates)}; got {versions}"
-    )
+    require(set(versions) == crates, "installation must include all development packages")
+    for section in ("dependencies", "dev-dependencies"):
+        for name, value in dependencies.get(section, {}).items():
+            if name.startswith("runledger-"):
+                require(value == {"path": f"../runledger/{name}"}, f"{name} must use the explicit coordinated source path")
+                package = tomllib.loads((root / name / "Cargo.toml").read_text())["package"]
+                require(package.get("publish") is False, f"{name} must remain unpublished")
     for command in ("prepare", "publish"):
         versions = re.findall(
             rf"^\./scripts/{command}-release\.sh (\S+)$", readme, re.MULTILINE,
         )
         require(versions == [version], f"{command}-release command must use {version}")
 
+    if write:
+        readme = re.sub(
+            r"(<!-- quick-start-source: ([^\n]+) -->\n```rust\n).*?(\n```)",
+            lambda match: match[1] + (root / match[2]).read_text().split("\n#[cfg(test)]", 1)[0].rstrip() + match[3],
+            readme, flags=re.DOTALL,
+        )
     snippets = re.findall(
         r"<!-- quick-start-source: ([^\n]+) -->\n```rust\n(.*?)\n```",
         readme, re.DOTALL,
@@ -67,6 +76,7 @@ def check(root: Path, write: bool) -> None:
         f"runledger-runtime/examples/producer_worker/{name}.rs"
         for name in ("shared", "producer", "worker")
     }
+    expected.add("runledger-runtime/examples/support/database.rs")
     require(
         len(snippets) == len(expected) and {p for p, _ in snippets} == expected,
         "quick start must include shared, producer, and worker source blocks"

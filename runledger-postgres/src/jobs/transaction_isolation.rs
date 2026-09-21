@@ -1,17 +1,17 @@
-use crate::{DbPool, DbTx, Error, PgQueryExecutor, QueryError, QueryErrorCategory, Result};
+use crate::{DbPool, DbTx, Error, PgTransactionalExecutor, QueryError, QueryErrorCategory, Result};
 
 /// A transaction whose effective isolation was checked as `READ COMMITTED`.
 ///
 /// This is deliberately not dereferenceable: code that needs to execute a
 /// query must opt in through [`Self::as_tx`], while private operation bodies
 /// can require this value in their signature.
-pub(crate) struct ReadCommittedExecutor<'tx, T: PgQueryExecutor + ?Sized> {
+pub(crate) struct ReadCommittedExecutor<'tx, T: PgTransactionalExecutor + ?Sized> {
     tx: &'tx mut T,
 }
 
 pub(crate) type ReadCommittedTx<'tx, 'db> = ReadCommittedExecutor<'tx, DbTx<'db>>;
 
-impl<T: PgQueryExecutor + ?Sized> ReadCommittedExecutor<'_, T> {
+impl<T: PgTransactionalExecutor + ?Sized> ReadCommittedExecutor<'_, T> {
     pub(crate) fn as_tx(&mut self) -> &mut T {
         self.tx
     }
@@ -112,7 +112,7 @@ pub(crate) async fn ensure_read_committed_tx<'tx, 'db>(
     ensure_read_committed_executor(tx, operation, code, client_message).await
 }
 
-pub(crate) async fn ensure_read_committed_executor<'tx, T: PgQueryExecutor + ?Sized>(
+pub(crate) async fn ensure_read_committed_executor<'tx, T: PgTransactionalExecutor + ?Sized>(
     tx: &'tx mut T,
     operation: &'static str,
     code: &'static str,
@@ -129,7 +129,7 @@ pub(crate) async fn require_read_committed<T>(
     client_message: &'static str,
 ) -> Result<()>
 where
-    T: PgQueryExecutor + ?Sized,
+    T: PgTransactionalExecutor + ?Sized,
 {
     // SHOW reports the effective isolation for the current transaction, so a
     // caller's SET TRANSACTION change is visible here. PostgreSQL treats READ
