@@ -222,7 +222,7 @@ VERSION="$1"
 
 cd "$ROOT_DIR"
 
-if rg -q '^publish = false$' runledger-postgres/Cargo.toml; then
+if grep -q '^publish = false$' runledger-postgres/Cargo.toml; then
   die "Coordinated development is unpublished; release the foundation and verify an unpatched registry graph first."
 fi
 

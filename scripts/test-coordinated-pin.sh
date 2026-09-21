@@ -15,5 +15,5 @@ if "$fixture/guard" >"$fixture/rejection.log" 2>&1; then
   echo "Source pin accepted unreviewed foundation input." >&2
   exit 1
 fi
-rg -q 'differs from the coordinated pin' "$fixture/rejection.log"
+grep -Fq 'differs from the coordinated pin' "$fixture/rejection.log"
 echo "Local Cargo source guard accepts companion-only changes and rejects foundation drift. Fixture: $fixture"

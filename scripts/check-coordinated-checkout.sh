@@ -19,7 +19,7 @@ if cargo package -p runledger-postgres --locked >"$package_log" 2>&1; then
   echo "Unexpected unpatched package success: reassess the unpublished graph contract." >&2
   exit 1
 fi
-if ! rg -q 'no matching package named .batter-sqlx.' "$package_log"; then
+if ! grep -Eq 'no matching package named .batter-sqlx.' "$package_log"; then
   cat "$package_log" >&2
   echo "Unpatched packaging failed for an unrelated reason." >&2
   exit 1
