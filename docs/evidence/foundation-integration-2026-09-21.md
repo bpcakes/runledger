@@ -22,3 +22,20 @@ or SQLx implementations. All packages remain unpublished.
 Regression coverage includes clean sources, adapter pin changes, inherited
 settings drift, tracked and ignored-untracked source drift, split core/SQLx roots,
 and independent migration drift. Final executed validation is recorded below.
+
+Executed locally on macOS, Rust 1.94.1, PostgreSQL 18.6 (`postgres:18`):
+
+- Five foundation-pin tests; six live database-profile tests.
+- All 374 PostgreSQL package tests/doctests.
+- Workspace/all-target compilation and PostgreSQL/all-target Clippy.
+- README contract and formatting checks.
+- A fresh Git-only consumer compiled the actual dependency graph without a
+  sibling, with `RUNLEDGER_BATTER_SOURCE` deliberately nonexistent. This used
+  local Git transport and is distinct from hosted GitHub consumer validation.
+- Locked standalone consumer compilation and all nine packaged archive smoke
+  tests. Native review identified its stale independent lockfile; Cargo
+  regenerated that lockfile and both locked checks then passed.
+
+The linked-worktree tracker import reported a pre-existing normalization conflict
+for `runledger-wtb`. This change preserves that record and includes only the new
+owning task's tracker export; no unrelated tracker repair is claimed.
