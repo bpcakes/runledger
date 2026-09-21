@@ -102,10 +102,15 @@ unpublished. Keep persistence migrations unchanged; do not publish or merge.
   hosted results remain a separate delivery check, not implied by local receipts.
 - Batter full verification passed on Rust 1.94.0 and 1.98.1. Its SQLx live suite,
   Runledger adapter probe and all 66 reference cases plus both private library
-  probes passed against PostgreSQL 18.6. Companion HTTP/Jig checks remain pending.
+  probes passed against PostgreSQL 18.6. All five HTTP profiles passed on each
+  toolchain; all five companion Jig targets passed against frozen sources.
 - The exact fresh-agent source and first-pass compile evidence are retained in
   `docs/evidence/profile-consumer-2026-09-21.*`. It used the canonical API and
   exhaustive outcomes; the README's leftover manual-first example was corrected.
+
+Local implementation and delivery preparation are complete. Final exact-head
+hosted CI is tracked in PR 20 and the companion PR checks, not inferred from
+these receipts. No merge/publication has been performed.
 
 API assessment: profiles declare policy, not perpetual remote authority. A pool
 cannot be promoted from arbitrary hooks. Setup happens before consumer access;
