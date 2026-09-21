@@ -47,6 +47,7 @@ handlers, process model, and admin surface.
 
 - [Workspace crates](#workspace-crates)
 - [Installation](#installation)
+- [Owned transaction and schema scopes](#owned-transaction-and-schema-scopes)
 - [Quick start](#quick-start)
 - [Core concepts](#core-concepts)
   - [Choosing the right API](#choosing-the-right-api)
@@ -82,7 +83,7 @@ handlers, process model, and admin surface.
 | [`runledger-postgres`](runledger-postgres) | SQLx-backed PostgreSQL persistence: queue and job lifecycle, schedules, the workflow DAG state machine, runtime configs, logs, and admin reads/mutations. |
 | [`runledger-runtime`](runledger-runtime) | The async runtime: `Supervisor`, worker/intent-promoter/scheduler/reaper loops, the job catalog, the handler registry, and runtime configuration. |
 | [`runledger-tui`](runledger-tui) | Read-only terminal UI for monitoring queue metrics, jobs, workflows, and definitions. |
-| [`runledger-test-support`](runledger-test-support) | Published test utilities for ephemeral PostgreSQL databases and scoped environment overrides. |
+| [`runledger-test-support`](runledger-test-support) | Test utilities for ephemeral PostgreSQL databases and scoped environment overrides. |
 
 `runledger-core`, `runledger-postgres`, and `runledger-runtime` are the
 libraries you depend on. Keep the layering intact: contracts in `core`, runtime
@@ -90,23 +91,30 @@ orchestration in `runtime`, and SQL/state-machine logic in `postgres`.
 
 ## Installation
 
-Add the libraries to your service:
+This branch is **unpublished coordinated development**. Its Batter dependency
+is not a registry release. A sibling checkout is mandatory; from a fresh clone
+run `bash scripts/bootstrap-batter.sh`. The pinned revision lives in
+`runledger-postgres/batter-revision`; ordinary Cargo builds check the foundation
+sources against that pin locally as well as in CI. Do not use the old registry
+installation instructions for this branch.
+
+For a service next to the paired `runledger` and `batter` checkouts:
 
 ```toml
 [dependencies]
-runledger-core = "0.12.0"
-runledger-postgres = "0.12.0"
-runledger-runtime = "0.12.0"
+runledger-core = { path = "../runledger/runledger-core" }
+runledger-postgres = { path = "../runledger/runledger-postgres" }
+runledger-runtime = { path = "../runledger/runledger-runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 
 [dev-dependencies]
-runledger-test-support = "0.12.0"
+runledger-test-support = { path = "../runledger/runledger-test-support" }
 ```
 
-The published crates require **Rust 1.94+** and **PostgreSQL 18+**. Older
+These sources require **Rust 1.94+** and **PostgreSQL 18+**. Older
 PostgreSQL releases are not supported, even when an extension supplies an
 equivalent `uuidv7()` function. See [PostgreSQL requirements](#postgresql-requirements).
 
@@ -118,6 +126,54 @@ use runledger_postgres::prelude::*;
 use runledger_runtime::prelude::*;
 ```
 
+## Owned transaction and schema scopes
+
+All workspace packages have `publish = false`. Patched archive-consumer smoke
+tests prove only the coordinated source pair, not publication or registry
+resolution. Publishing requires a separate foundation release and an unpatched
+package/consumer verification; release scripts refuse this development graph.
+
+Use `run_atomic(&database, async |mut scope| ...)`. The `RunledgerDatabase` owns
+mandatory acquisition/release hooks and an immutable `PgSessionProfile`. It declares
+the authenticated and effective roles, one authoritative Runledger schema, server
+statement/lock timeouts and optional custom settings. The trusted path is that
+schema, with PostgreSQL's implicit catalog first and temporary objects last.
+Fallback schemas are rejected so missing Runledger tables cannot silently resolve
+elsewhere; application objects in other schemas must be explicitly qualified.
+Roles and schemas must already exist. Ordinary APIs and workers receive
+`database.pool()`. Migrations and schema verification receive `&database`.
+Returned connections are reset and verified before entering the idle queue;
+failed restoration discards them. Native `try_acquire`, `try_begin` and
+`try_begin_with` therefore cannot inherit the previous borrower's session policy.
+These fast paths may return `None` while asynchronous release cleanup is running.
+After reset, atomic/snapshot owners reapply and verify this policy before work,
+and validate it again at scope boundaries. Arbitrary SQL can still cause effects
+before validation; this is not a SQL sandbox. Native pool hooks are not policy.
+
+Record required intents with `record_required_job_enqueue_intent` on the initial
+`PgIntentScope`, then consume it with `scope.queue()` for enqueue operations.
+`PgQueueScope` has no intent-recording method: the inverse lock order does not compile.
+Both phases support savepoint-protected `application` SQL. Direct SQL against
+Runledger tables remains a low-level escape hatch, not a named lock-order guarantee.
+The runner releases outputs only after acknowledged commit, and rejections only
+after acknowledged rollback. `PgAtomicError::Uncertain(PgAtomicUncertainty)` retains
+provisional results/errors and the disposition cause. A caught terminal scope
+failure cannot erase the runner's original poison cause; an abandoned operation
+is classified separately. `PgScopeFailure` excludes ordinary application rejection.
+Cancellation returns no output and proves no rollback.
+All atomic/snapshot sessions are reset on acquisition and retired on completion.
+Known conflicted handoffs are typed rejections inside the callback; accepted
+outcomes contain only pending/promoted observations. Monitoring later promotion
+is still required. `observe_job_enqueue_intent` is a deliberate low-level escape
+for applications that choose to commit despite an existing conflict.
+
+`ensure_schema_compatible_after_idempotency_cutover(&database)` owns a read-only
+repeatable-read transaction and returns `SchemaCompatibilitySnapshot` with the
+existing migration bundle identity. It ignores caller transactions, temporary
+shadows and search paths. The snapshot is evidence of one observation, not a
+promise against future migrations. Borrowed transaction/session views have been
+removed; there is no view compatibility bridge.
+
 ## Quick start
 
 Run a producer and a worker as separate processes against the same PostgreSQL 18
@@ -125,6 +181,31 @@ database. This example prints a greeting, using one shared job identity and type
 payload. It needs only the dependencies above. For a new service, create the
 following files under `src/bin/`, with the shared module at
 `src/bin/shared/mod.rs` (so Cargo does not treat it as another binary).
+
+Database policy (`src/support/database.rs`):
+
+<!-- quick-start-source: runledger-runtime/examples/support/database.rs -->
+```rust
+use runledger_postgres::{PgSessionProfile, RunledgerDatabase};
+use sqlx::postgres::PgConnectOptions;
+use std::time::Duration;
+
+/// Example policy: direct authentication unless an explicit serving role is set.
+pub async fn connect(url: &str) -> Result<RunledgerDatabase, Box<dyn std::error::Error>> {
+    let options: PgConnectOptions = url.parse()?;
+    let login = options.get_username().to_owned();
+    let role = std::env::var("RUNLEDGER_DB_ROLE").unwrap_or_else(|_| login.clone());
+    let schema = std::env::var("RUNLEDGER_DB_SCHEMA").unwrap_or_else(|_| "public".into());
+    let profile = PgSessionProfile::new(
+        login,
+        role,
+        vec![schema],
+        Duration::from_secs(30),
+        Duration::from_secs(5),
+    )?;
+    Ok(RunledgerDatabase::connect(options, profile, 5).await?)
+}
+```
 
 Shared contract (`src/bin/shared/mod.rs`):
 
@@ -161,6 +242,9 @@ Worker (`src/bin/worker.rs`):
 
 <!-- quick-start-source: runledger-runtime/examples/producer_worker/worker.rs -->
 ```rust
+#[path = "../support/database.rs"]
+mod database;
+
 pub mod shared;
 
 use std::time::Duration;
@@ -173,7 +257,6 @@ use runledger_runtime::{
 };
 use serde_json::Value;
 use shared::{GREETING_JOB, Greeting};
-use sqlx::postgres::PgPoolOptions;
 
 struct PrintGreeting;
 
@@ -203,11 +286,10 @@ impl JobHandler for PrintGreeting {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = PgPoolOptions::new()
-        .connect(&std::env::var("DATABASE_URL")?)
-        .await?;
+    let database = database::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = database.pool().clone();
     // For a fresh database. Existing deployments must follow the migration runbook.
-    runledger_postgres::migrate_after_idempotency_cutover(&pool).await?;
+    runledger_postgres::migrate_after_idempotency_cutover(&database).await?;
     let catalog = JobCatalog::new().handler(PrintGreeting);
     catalog.sync_definitions(&pool).await?;
     println!("worker ready; producers can now enqueue greetings");
@@ -240,11 +322,13 @@ Producer (`src/bin/producer.rs`):
 
 <!-- quick-start-source: runledger-runtime/examples/producer_worker/producer.rs -->
 ```rust
+#[path = "../support/database.rs"]
+mod database;
+
 pub mod shared;
 
-use runledger_postgres::jobs::enqueue_job_tx;
+use runledger_postgres::run_atomic;
 use shared::{Greeting, request};
-use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -252,17 +336,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: producer <name> <request-key>")?;
     let key = std::env::args().nth(2).ok_or("missing request-key")?;
-    let pool = PgPoolOptions::new()
-        .connect(&std::env::var("DATABASE_URL")?)
-        .await?;
-    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
+    let database = database::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = database.pool().clone();
+    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database).await?;
 
     let payload = serde_json::to_value(Greeting { name })?;
-    let mut tx = pool.begin().await?;
-    // Persist application changes with this same transaction when needed.
-    let job_id = enqueue_job_tx(&mut tx, &request(&payload, &key)).await?;
-    tx.commit().await?;
-    println!("enqueued {job_id}");
+    let outcome = run_atomic(&database, async |scope| {
+        // Persist application changes through queue.application(...) when needed.
+        scope.queue().enqueue_job(&request(&payload, &key)).await
+    })
+    .await?;
+    println!("enqueued {}", outcome.job_id);
     pool.close().await;
     Ok(())
 }
@@ -385,9 +469,9 @@ Notes on the worker lifecycle:
 
 A typical host application:
 
-1. Either call `migrate_after_idempotency_cutover(&pool)` to apply the bundled
+1. Either call `migrate_after_idempotency_cutover(&database)` to apply the bundled
    schema, or apply migrations with your own tooling and then call
-   `ensure_schema_compatible_after_idempotency_cutover(&pool)` to validate it.
+   `ensure_schema_compatible_after_idempotency_cutover(&database)` to validate it.
 2. Create a shared `sqlx::PgPool`.
 3. Register handlers in a `JobCatalog` (or directly in a `JobRegistry` for
    advanced setups).
@@ -416,7 +500,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | Need | Prefer |
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
-| Commit application state and a future job request before its definition exists | `JobEnqueueIntent` and `record_job_enqueue_intent_tx` |
+| Commit application state and a future job request before its definition exists | `run_atomic(&database, ...)` and `scope.record_required_job_enqueue_intent` |
 | Multi-step work with dependencies | `WorkflowDagBuilder` (`.step(...)` for configured steps, `.external(...)` for external work), or the low-level run/step builders, then `enqueue_workflow_run` |
 | Multi-step work with a durable JSON result | Declare a result step, enqueue with `enqueue_workflow_run_handle`, then call `WorkflowRunHandle::get_result` |
 | Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal` (or lower-level `depends_on_success` / `depends_on_terminal`) |
@@ -435,7 +519,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 
 ### Durable transactional handoff
 
-Use `record_job_enqueue_intent_tx` when an application mutation and its request
+Use `run_atomic` with `scope.record_required_job_enqueue_intent` when an application mutation and its request
 for background work must commit in the same PostgreSQL transaction, but the job
 definition may not exist yet. Recording an intent does not read or lock
 `job_definitions` and does not create a `job_queue` row. Every intent requires an
@@ -445,11 +529,11 @@ intent, while changing the payload or another enqueue field returns
 
 Concurrent transactions recording the same `(job_type, organization_id,
 idempotency_key)` may wait for the transaction that first claimed the unique
-key to commit or roll back. Include that wait in the caller-owned transaction's
-lock ordering and timeout budget. Record the intent before any operation in the
-same transaction that can lock a `job_queue` row; do not enqueue, recover, or
-explicitly lock a job first. Queue retention uses the canonical intent-before-
-job order, and a job-first recorder can create an inverse lock cycle with it.
+key to commit or roll back. Include that wait in the declared profile's timeout
+budget. The initial intent phase precedes the consuming `scope.queue()` transition;
+the queue phase has no intent-recording method. This enforces the named API's
+intent-before-queue lock order, matching retention. Raw application SQL remains
+an escape hatch and must not reverse that order against Runledger tables.
 
 ```rust
 let payload = serde_json::json!({"invoice_id": "invoice_123"});
@@ -459,23 +543,21 @@ let intent = runledger_postgres::jobs::JobEnqueueIntent::new(
     "invoice:invoice_123:capture",
 );
 
-let mut tx = pool.begin().await?;
-// Persist the application's business or audit mutation with this same `tx`.
-let outcome = runledger_postgres::jobs::record_job_enqueue_intent_tx(
-    &mut tx,
-    &intent,
-).await?;
-if outcome.status == runledger_postgres::jobs::JobEnqueueIntentStatus::Conflicted {
-    return Err("the existing durable handoff is conflicted".into());
-}
-tx.commit().await?;
+let outcome = runledger_postgres::run_atomic(&database, async |mut scope| {
+    // Persist business/audit mutations through scope.application(...).
+    scope.record_required_job_enqueue_intent(&intent).await
+}).await?;
+// Success confirms commit. A known conflict rejects inside the callback;
+// uncertain disposition retains the provisional output/error and cause.
 ```
 
-The returned status is a point-in-time observation, not a promotion guarantee.
+The accepted state is a point-in-time observation, not a promotion guarantee.
 An existing intent may be promoted or become conflicted concurrently, including
-while a caller-owned record transaction remains open. Treat an observed
-`CONFLICTED` state as terminal, but continue monitoring pending age and
-`conflicted_24h` after accepting a pending handoff.
+while the runner-owned transaction remains open. Known conflicts are typed
+rejections, not accepted outcomes. Continue monitoring pending age and
+`conflicted_24h` after accepting a pending handoff. The native `_tx` helpers and
+`observe_job_enqueue_intent` are low-level alternatives with caller-owned policy;
+they are not the canonical atomic handoff.
 
 A standard Runledger supervisor promotes pending intents only for its
 registered handler types once their definitions are enabled. Promotion uses
@@ -1548,19 +1630,19 @@ application, and use the startup helpers below to apply or validate live state.
 
 Two supported startup modes:
 
-- `migrate_after_idempotency_cutover(&pool)` — applies the bundled schema and
+- `migrate_after_idempotency_cutover(&database)` — applies the bundled schema and
   rejects keyed legacy rows without enqueue snapshots.
-- `ensure_schema_compatible_after_idempotency_cutover(&pool)` — read-only
+- `ensure_schema_compatible_after_idempotency_cutover(&database)` — read-only
   validation that an existing `_sqlx_migrations` history matches the bundled
   migrations, with explicit errors for missing history, incompatible history,
   legacy idempotency rows, invalid expand-window triggers, or PostgreSQL
-  query/connectivity failures. Trigger failures identify the expected public
+  query/connectivity failures. Trigger failures identify the authoritative schema's
   table and trigger plus typed problems such as missing function wiring,
   disabled origin writes, or incorrect constraint deferral.
   Externally managed DDL can validate the `NOT VALID` cutover constraints after
   this check passes.
 
-For consumers of the published crates:
+For consumers of the coordinated source packages (currently unpublished):
 
 - `runledger_postgres::MIGRATOR` embeds the vendored
   `runledger-postgres/migrations/` copy for expert inspection, checksum
@@ -1676,13 +1758,9 @@ Stable behaviors worth knowing when integrating against `runledger-postgres`:
   derived from the claimed row and worker ID so lifecycle lease fences cannot
   be mixed across jobs. The older stage-bearing
   `update_job_progress_for_lease` remains a deprecated compatibility wrapper.
-- **Transactional enqueue state.** Use
-  `enqueue_job_with_outcome_in_transaction` with a `PgTransactionView` when
-  an adapter must keep the underlying SQLx transaction and connection opaque.
-  It returns the job ID together with its locked `status`, `run_number`, and
-  `Inserted`/`Existing` disposition and takes a mutation-ready lock on an
-  existing keyed row. Native SQLx consumers can keep using
-  `enqueue_job_with_outcome_tx`; it delegates to the same capability path.
+- **Transactional enqueue state.** Use `run_atomic` and `scope.queue().enqueue_job`.
+  Inside the callback, the locked job status, run number and inserted/existing
+  disposition are provisional. The runner returns output only after acknowledged commit.
   `enqueue_job_tx` remains the UUID-only native compatibility API and retains
   key-share concurrency between identical keyed enqueues while composing safely
   with same-transaction compare-and-requeue.
@@ -1868,7 +1946,13 @@ crate from its packaged tarball. If the cache and schema drift apart,
 
 ## Releasing
 
-Prepare a release:
+Release is disabled on this coordinated-development branch. All packages have
+`publish = false`; both release entrypoints refuse it before making changes.
+The commands below describe the future release workflow, after Batter foundation
+packages are published, registry dependencies replace sibling paths, and
+unpatched package verification and an external consumer succeed.
+
+Future preparation command:
 
 ```bash
 ./scripts/prepare-release.sh 0.12.0
@@ -1943,28 +2027,5 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
 ## License
 
-The crates are published under the **MIT** license, as declared in each crate's
+The crates use the **MIT** license, as declared in each crate's
 `Cargo.toml`. See [`LICENSE`](LICENSE) for the repository license text.
-
-
-### Opaque durable-intent and schema capabilities
-
-Adapters construct `PgTransactionView::new(&mut native_transaction)` inside
-their private implementation and pass a mutable view to
-`record_job_enqueue_intent_in_transaction` or the direct-enqueue APIs.
-`PgTransactionExecutor` is sealed to native SQLx transactions and this view;
-arbitrary downstream executor implementations are rejected. The operation
-retains an exclusive borrow of the actual transaction through READ COMMITTED
-validation and every write. Native intent idempotency, conflicts, lock ordering
-and commit/rollback behavior are unchanged. Record intents before operations
-that lock job rows. Existing `record_job_enqueue_intent_tx` callers retain the
-same behavior.
-
-Schema verification consumes `PgSessionView::new(&mut native_connection)` through
-`ensure_schema_compatible_after_idempotency_cutover_with_session`. The view holds
-one connection for the complete native check; it cannot be constructed from a
-pool or routing executor. Owners retain cancellation and disposition policy.
-Neither view exposes replaceable identity or transaction completion methods.
-Native SQL execution remains a low-level boundary: arbitrary application SQL can
-issue transaction-control statements, and no local type proves remote effects
-after an unconfirmed commit.

@@ -4,23 +4,18 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
-- Extend opaque transaction capabilities to durable enqueue intents with
-  `record_job_enqueue_intent_in_transaction`. Native transaction entry points
-  delegate to the same READ COMMITTED guard and idempotency implementation.
-- Add concrete `PgSessionView` and
-  `ensure_schema_compatible_after_idempotency_cutover_with_session` so schema
-  verification retains one native connection throughout the operation.
-- Seal `PgTransactionExecutor` to native SQLx transactions and the new
-  `PgTransactionView`; arbitrary executor implementations cannot mint transaction
-  evidence. Adapters construct views from private native resources.
-
+- Breaking: replace borrowed transaction/session capabilities with `run_atomic`
+  backed by Batter's SQLx foundation. Results leave the runner only after
+  acknowledged disposition; uncertainty retains domain output/error. Consume
+  `PgIntentScope` into `PgQueueScope` before enqueueing; intent recording after
+  queue operations is unavailable. All atomic/snapshot sessions retire and
+  acquisition resets inherited session state.
+- Schema checks own one qualified REPEATABLE READ READ ONLY snapshot and return
+  `SchemaCompatibilitySnapshot` using the existing migration-bundle identity.
+  Remove caller-session verifier entry points; no view compatibility bridge remains.
 
 ### Added
 
-- Add sealed `PgTransactionExecutor` and capability-based direct-enqueue functions so
-  adapters can compose application writes and Runledger enqueueing in one
-  caller-owned transaction without exposing a replaceable SQLx connection or
-  transaction. Existing `DbTx` entry points remain compatibility wrappers.
 - Breaking: consume `RuntimeShutdownReport::classify(self)` into
   `RuntimeSettlement::{Clean, StoppedWithFailures, Unsettled}` with distinct opaque
   payloads. Remove the public `is_success()`, `is_cooperatively_stopped()`, and

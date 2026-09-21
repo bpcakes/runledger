@@ -21,12 +21,24 @@ env:
   RUNLEDGER_TEST_PG_IMAGE: postgres:18
 
 jobs:
+  clean-coordinated-checkout:
+    name: Clean paired checkout and unpublished package contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal
+      - name: Build from no sibling and check unpatched package disposition
+        run: bash scripts/check-coordinated-checkout.sh
+
   lint:
     name: Lint and compile
     runs-on: ubuntu-latest
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Bootstrap and verify coordinated Batter foundation
+        run: bash scripts/bootstrap-batter.sh
       - name: Install Rust toolchain
         run: |
           rustup toolchain install --profile minimal --component rustfmt --component clippy
@@ -44,6 +56,8 @@ jobs:
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Bootstrap and verify coordinated Batter foundation
+        run: bash scripts/bootstrap-batter.sh
       - name: Install Rust toolchain
         run: |
           rustup toolchain install --profile minimal --component rustfmt --component clippy
@@ -93,7 +107,7 @@ jobs:
           --nocapture --test-threads=1
       - name: Test runledger-tui
         run: cargo test -p runledger-tui
-      - name: Run packaged-crate smoke test
+      - name: Run coordinated source-archive smoke test
         run: ./scripts/run-external-consumer-smoke.sh
 
   deny:
@@ -102,6 +116,8 @@ jobs:
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Bootstrap and verify coordinated Batter foundation
+        run: bash scripts/bootstrap-batter.sh
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal
       - name: Install cargo-deny
@@ -114,6 +130,8 @@ jobs:
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Bootstrap and verify coordinated Batter foundation
+        run: bash scripts/bootstrap-batter.sh
       # obi1kenobi/cargo-semver-checks-action v2
       - name: Check public APIs against 0.11.0
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239

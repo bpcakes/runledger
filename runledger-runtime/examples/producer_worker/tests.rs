@@ -1,6 +1,7 @@
 use super::*;
 use runledger_core::jobs::JobStatus;
-use runledger_postgres::jobs::{JobReadScope, enqueue_job_tx, get_job_by_id_with_scope};
+use runledger_postgres::jobs::{JobReadScope, get_job_by_id_with_scope};
+use runledger_postgres::{PgAtomicError, run_atomic};
 use runledger_runtime::config::JobsConfig;
 use runledger_test_support::{setup_ephemeral_pool, teardown_ephemeral_pool};
 use shared::request;
@@ -8,6 +9,19 @@ use shared::request;
 #[tokio::test]
 async fn shared_contract_transaction_and_worker_round_trip() {
     let (pool, database) = setup_ephemeral_pool("producer_worker_example", 5).await;
+    let options = pool.connect_options();
+    let login = options.get_username();
+    let profile = runledger_postgres::PgSessionProfile::new(
+        login,
+        login,
+        vec!["public".into()],
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .expect("test policy");
+    let profiled = runledger_postgres::RunledgerDatabase::connect((*options).clone(), profile, 1)
+        .await
+        .expect("test database");
     let version: String = sqlx::query_scalar("SHOW server_version")
         .fetch_one(&pool)
         .await
@@ -17,29 +31,41 @@ async fn shared_contract_transaction_and_worker_round_trip() {
     catalog.sync_definitions(&pool).await.expect("definitions");
     let payload = serde_json::to_value(Greeting { name: "Ada".into() }).expect("payload");
 
-    let mut tx = pool.begin().await.expect("transaction");
-    let rolled_back = enqueue_job_tx(&mut tx, &request(&payload, "rolled-back"))
-        .await
-        .expect("enqueue before rollback");
-    tx.rollback().await.expect("rollback");
-    assert!(
-        get_job_by_id_with_scope(&pool, JobReadScope::Global, rolled_back)
+    let rejected = run_atomic(&profiled, async |scope| {
+        scope
+            .queue()
+            .enqueue_job(&request(&payload, "rolled-back"))
             .await
-            .expect("read rolled back job")
-            .is_none()
-    );
+            .expect("enqueue before rejection");
+        Err::<(), _>("reject")
+    })
+    .await;
+    assert!(matches!(rejected, Err(PgAtomicError::Rejected("reject"))));
+    let rolled_back: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM job_queue WHERE idempotency_key='rolled-back'")
+            .fetch_one(&pool)
+            .await
+            .expect("read rolled back job");
+    assert_eq!(rolled_back, 0);
 
-    let mut tx = pool.begin().await.expect("transaction");
-    let job_id = enqueue_job_tx(&mut tx, &request(&payload, "greeting:1"))
-        .await
-        .expect("enqueue");
-    tx.commit().await.expect("commit");
-    let mut tx = pool.begin().await.expect("retry transaction");
-    let retry_id = enqueue_job_tx(&mut tx, &request(&payload, "greeting:1"))
-        .await
-        .expect("idempotent retry");
-    tx.commit().await.expect("retry commit");
-    assert_eq!(retry_id, job_id);
+    let outcome = run_atomic(&profiled, async |scope| {
+        scope
+            .queue()
+            .enqueue_job(&request(&payload, "greeting:1"))
+            .await
+    })
+    .await
+    .expect("committed enqueue");
+    let job_id = outcome.job_id;
+    let retry = run_atomic(&profiled, async |scope| {
+        scope
+            .queue()
+            .enqueue_job(&request(&payload, "greeting:1"))
+            .await
+    })
+    .await
+    .expect("committed retry");
+    assert_eq!(retry.job_id, job_id);
 
     let config = JobsConfig {
         worker_id: "example-test-worker".into(),
@@ -88,5 +114,6 @@ async fn shared_contract_transaction_and_worker_round_trip() {
     assert_eq!(job.payload, payload);
     assert_eq!(job.progress_done, Some(1));
     assert_eq!(job.progress_total, Some(1));
+    profiled.pool().close().await;
     teardown_ephemeral_pool(pool, database).await;
 }

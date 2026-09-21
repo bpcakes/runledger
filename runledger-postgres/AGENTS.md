@@ -36,16 +36,26 @@ PostgreSQL persistence for durable execution: queue lifecycle, workflow DAG stat
   an unknown outcome, and SQLSTATE classification must not absorb it. `operation`
   is fixed text with no request data.
 
-- Opaque durable-intent recording and native transaction callers share the same
-  READ COMMITTED witness and SQL implementation. Do not add a second intent
-  implementation or expose raw SQLx identity through the capability path.
-- `PgTransactionExecutor` is sealed to native SQLx transactions and
-  `PgTransactionView`. Never accept downstream executor providers as transaction
-  evidence. Views must borrow actual native resources with private fields;
-  READ COMMITTED validation stays tied to that retained transaction.
-- `PgSessionView` consumes one connection borrow for the complete native schema
-  check. Do not restore routing executors or per-query provider selection.
-  Ownership and cancellation disposition stay with the caller's adapter.
+- The canonical transaction API is `run_atomic`, backed by Batter's SQLx
+  foundation (which does not depend on Runledger). Outputs are released only after
+  acknowledged disposition. PgIntentScope consumes into PgQueueScope: never expose
+  intent recording after queue operations. Scopes own savepoint cleanup,
+  transaction identity, cancellation disposition and exhaustive uncertainty.
+  Never recreate public executor capabilities or borrowed resource views.
+- Canonical startup/atomic work takes `RunledgerDatabase`, whose mandatory hooks
+  establish its immutable role/schema/timeout/tenant profile. Workers and ordinary
+  APIs use that database's pool. After DISCARD, establish policy before BEGIN;
+  never recover policy from arbitrary native hooks. Runledger allows one ordinary
+  schema (no fallback); migrations, qualified verification and runtime agree.
+- Required intent recording returns only accepted observations; known durable
+  conflicts are typed rejections. Low-level observation is explicitly separate.
+- Domain operations share internal SQL implementations with native persistence
+  paths. PgQueryExecutor is only dispatch; mutation helpers also require the
+  private PgTransactionalExecutor marker (DbTx/PgScopedSql only).
+- Schema verification acquires its own REPEATABLE READ READ ONLY transaction,
+  pins authoritative objects before the snapshot, qualifies names, and returns
+  `SchemaCompatibilitySnapshot` after rollback acknowledgement. Caller session
+  state cannot influence compatibility. The witness says nothing about later DDL.
 
 ## Common commands
 - `cargo check -p runledger-postgres`

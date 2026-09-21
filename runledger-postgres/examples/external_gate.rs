@@ -1,3 +1,6 @@
+#[path = "support/database.rs"]
+mod database;
+
 use runledger_core::prelude::*;
 use runledger_postgres::prelude::*;
 use serde_json::json;
@@ -11,8 +14,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .unwrap_or_else(|| "p_123".to_owned());
 
-    let pool = DbPool::connect(&database_url).await?;
-    ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
+    let database = database::connect(&database_url).await?;
+    let pool = database.pool().clone();
+    ensure_schema_compatible_after_idempotency_cutover(&database).await?;
     ensure_job_definition(&pool, PERSIST_JOB).await?;
 
     let workflow_run = enqueue_approval_workflow(&pool, &profile_id).await?;

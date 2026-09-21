@@ -19,12 +19,12 @@ use runledger_postgres::jobs::{
     JobEnqueueDisposition, JobEnqueueIntent, JobEnqueueIntentStatus, JobListFilter, JobQueueRecord,
     JobRequeueStatePolicy, JobScope, cancel_job_with_scope, compare_and_replay_succeeded_job,
     compare_and_replay_succeeded_job_tx, compare_and_requeue_job, compare_and_requeue_job_tx,
-    enqueue_job_with_outcome_in_transaction, get_job_by_id, get_job_continuation_metrics,
+    enqueue_job_with_outcome_tx, get_job_by_id, get_job_continuation_metrics,
     get_job_enqueue_intent_by_id, record_job_enqueue_intent_tx, upsert_job_definition_tx,
 };
 use runledger_postgres::prelude::{
     DbPool, DecodedJobEventPayload, DecodedRequeuedEventPayload, JobEventRecord,
-    PgTransactionExecutor, enqueue_job_with_outcome, list_job_events,
+    enqueue_job_with_outcome, list_job_events,
 };
 use runledger_runtime::catalog::JobCatalog;
 use runledger_runtime::config::JobsConfig;
@@ -95,12 +95,8 @@ impl<'a> OpaqueConsumerTransaction<'a> {
 }
 
 impl<'a> OpaqueConsumerTransaction<'a> {
-    fn view(&mut self) -> runledger_postgres::PgTransactionView<'_, 'a> {
-        runledger_postgres::PgTransactionView::new(&mut self.inner)
-    }
-
-    fn executor(&mut self) -> impl sqlx::Executor<'_, Database = sqlx::Postgres> {
-        &mut *self.inner
+    fn view(&mut self) -> &mut sqlx::Transaction<'a, sqlx::Postgres> {
+        &mut self.inner
     }
 }
 
@@ -253,7 +249,7 @@ async fn setup_consumer_schema_and_intent(pool: &DbPool) -> (Uuid, Value) {
         "external consumer smoke PostgreSQL server_version={server_version} server_version_num={server_version_num}"
     );
 
-    runledger_postgres::migrate_after_idempotency_cutover(pool)
+    opaque_intents::migrate(pool)
         .await
         .expect("apply packaged migrations");
     create_consumer_audit_table(pool)
@@ -402,7 +398,7 @@ async fn assert_keyed_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid 
     let existing_enqueue_tx = pool.begin().await.expect("begin existing enqueue");
     let mut existing_enqueue_tx = OpaqueConsumerTransaction::new(existing_enqueue_tx);
     let existing_recovery =
-        enqueue_job_with_outcome_in_transaction(&mut existing_enqueue_tx.view(), &recovery_request)
+        enqueue_job_with_outcome_tx(existing_enqueue_tx.view(), &recovery_request)
             .await
             .expect("resolve existing recovery job through opaque transaction");
     assert_eq!(existing_recovery.job_id, inserted_recovery.job_id);
@@ -412,7 +408,7 @@ async fn assert_keyed_recovery(pool: &DbPool, recovery_payload: &Value) -> Uuid 
         JobEnqueueDisposition::Existing
     );
     record_consumer_audit_tx(
-        &mut existing_enqueue_tx.view(),
+        existing_enqueue_tx.view(),
         "opaque-transactional-enqueue",
         inserted_recovery.job_id,
         existing_recovery.job_id,
@@ -474,13 +470,12 @@ async fn assert_opaque_transaction_rollback(pool: &DbPool) {
         .await
         .expect("begin opaque rollback transaction");
     let mut rollback_tx = OpaqueConsumerTransaction::new(rollback_tx);
-    let rolled_back =
-        enqueue_job_with_outcome_in_transaction(&mut rollback_tx.view(), &rollback_request)
-            .await
-            .expect("enqueue through opaque rollback transaction");
+    let rolled_back = enqueue_job_with_outcome_tx(rollback_tx.view(), &rollback_request)
+        .await
+        .expect("enqueue through opaque rollback transaction");
     assert_eq!(rolled_back.disposition, JobEnqueueDisposition::Inserted);
     record_consumer_audit_tx(
-        &mut rollback_tx.view(),
+        rollback_tx.view(),
         "opaque-transactional-enqueue-rollback",
         rolled_back.job_id,
         rolled_back.job_id,
@@ -524,12 +519,12 @@ async fn assert_opaque_transaction_commit(pool: &DbPool) {
     };
     let commit_tx = pool.begin().await.expect("begin opaque commit transaction");
     let mut commit_tx = OpaqueConsumerTransaction::new(commit_tx);
-    let committed = enqueue_job_with_outcome_in_transaction(&mut commit_tx.view(), &commit_request)
+    let committed = enqueue_job_with_outcome_tx(commit_tx.view(), &commit_request)
         .await
         .expect("enqueue through opaque commit transaction");
     assert_eq!(committed.disposition, JobEnqueueDisposition::Inserted);
     record_consumer_audit_tx(
-        &mut commit_tx.view(),
+        commit_tx.view(),
         "opaque-transactional-enqueue-commit",
         committed.job_id,
         committed.job_id,
@@ -1217,15 +1212,12 @@ async fn create_consumer_audit_table(pool: &DbPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn record_consumer_audit_tx<T>(
-    tx: &mut T,
+async fn record_consumer_audit_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     operation_key: &str,
     source_job_id: sqlx::types::Uuid,
     result_job_id: sqlx::types::Uuid,
-) -> Result<(), sqlx::Error>
-where
-    T: PgTransactionExecutor + ?Sized,
-{
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO external_consumer_operation_audit (
             operation_key,
@@ -1237,7 +1229,7 @@ where
     .bind(operation_key)
     .bind(source_job_id)
     .bind(result_job_id)
-    .execute(tx.executor())
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
@@ -1551,7 +1543,7 @@ async fn packaged_prelude_exports_explicit_metric_and_payload_scopes() {
         get_latest_job_payload_for_run_with_scope,
     };
     let (pool, database) = setup_unmigrated_ephemeral_pool("consumer_explicit_scopes", 2).await;
-    runledger_postgres::migrate_after_idempotency_cutover(&pool)
+    opaque_intents::migrate(&pool)
         .await
         .expect("packaged explicit scope API succeeds");
     let tenant = Uuid::now_v7();

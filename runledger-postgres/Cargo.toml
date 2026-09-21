@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "runledger-postgres"
 version.workspace = true
 edition = "2024"
@@ -20,6 +21,7 @@ workspace = true
 test-support = []
 
 [dependencies]
+batter-sqlx = { version = "0.1.0", path = "../../batter/crates/batter-sqlx" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 cron = { workspace = true }
 runledger-core = { workspace = true, features = ["sqlx-postgres"] }
@@ -31,5 +33,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+static_assertions = "1.1.0"
 runledger-test-support = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net"] }

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PUBLISHABLE_CRATES=(
+ARCHIVE_CRATES=(
   "runledger-core"
   "runledger-test-support"
   "runledger-postgres"
@@ -20,7 +20,7 @@ command -v cargo >/dev/null 2>&1 || die "cargo is required"
 
 cd "$ROOT_DIR"
 
-for crate in "${PUBLISHABLE_CRATES[@]}"; do
+for crate in "${ARCHIVE_CRATES[@]}"; do
   cmp -s "$ROOT_DIR/LICENSE" "$ROOT_DIR/${crate}/LICENSE" \
     || die "${crate}/LICENSE differs from the repository LICENSE"
 
@@ -29,6 +29,8 @@ for crate in "${PUBLISHABLE_CRATES[@]}"; do
       --allow-dirty \
       --list \
       -p "$crate" \
+      --config "patch.crates-io.batter-core.path=\"${ROOT_DIR}/../batter/crates/batter-core\"" \
+      --config "patch.crates-io.batter-sqlx.path=\"${ROOT_DIR}/../batter/crates/batter-sqlx\"" \
       --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
       --config "patch.crates-io.runledger-test-support.path=\"${ROOT_DIR}/runledger-test-support\"" \
       --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
@@ -37,5 +39,5 @@ for crate in "${PUBLISHABLE_CRATES[@]}"; do
 
   grep -Fxq "LICENSE" <<<"$package_files" \
     || die "${crate} package does not contain LICENSE"
-  echo "Verified packaged license: ${crate}"
+  echo "Verified coordinated source-archive license (not publication): ${crate}"
 done

@@ -161,6 +161,10 @@ TAG="v${VERSION}"
 
 cd "$ROOT_DIR"
 
+if grep -q '^publish = false$' runledger-postgres/Cargo.toml; then
+  die "Coordinated development is unpublished; release the foundation and verify an unpatched registry graph first."
+fi
+
 require_command cargo
 require_command curl
 require_command gh

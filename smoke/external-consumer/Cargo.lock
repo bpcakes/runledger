@@ -158,6 +158,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "batter-core"
+version = "0.1.0"
+dependencies = [
+ "pin-project-lite",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "batter-sqlx"
+version = "0.1.0"
+dependencies = [
+ "batter-core",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1919,6 +1939,7 @@ dependencies = [
 name = "runledger-postgres"
 version = "0.12.0"
 dependencies = [
+ "batter-sqlx",
  "chrono",
  "cron",
  "runledger-core",
@@ -2746,6 +2767,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

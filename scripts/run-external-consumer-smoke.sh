@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# Source-archive integration only. All packages are unpublished and the patches
+# below are mandatory; this does not verify registry resolution/publication.
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SMOKE_SOURCE_DIR="$ROOT_DIR/smoke/external-consumer"
 WORK_DIR="$ROOT_DIR/target/external-consumer-smoke/work"
@@ -22,6 +25,8 @@ package_crate() {
     --allow-dirty \
     --no-verify \
     -p "$crate" \
+    --config "patch.crates-io.batter-core.path=\"${ROOT_DIR}/../batter/crates/batter-core\"" \
+    --config "patch.crates-io.batter-sqlx.path=\"${ROOT_DIR}/../batter/crates/batter-sqlx\"" \
     --config "patch.crates-io.runledger-core.path=\"${ROOT_DIR}/runledger-core\"" \
     --config "patch.crates-io.runledger-postgres.path=\"${ROOT_DIR}/runledger-postgres\"" \
     --config "patch.crates-io.runledger-runtime.path=\"${ROOT_DIR}/runledger-runtime\"" \
@@ -37,6 +42,8 @@ extract_crate() {
 }
 
 cd "$ROOT_DIR"
+export RUNLEDGER_BATTER_SOURCE="$ROOT_DIR/../batter"
+bash scripts/bootstrap-batter.sh
 
 rm -rf "$VENDOR_DIR" "$TARGET_DIR" "$WORK_DIR"
 mkdir -p "$VENDOR_DIR" "$TARGET_DIR"
@@ -73,6 +80,10 @@ perl -0pi -e '
 
 {
   printf '[patch.crates-io]\n'
+  # The coordinated foundation is unpublished; verify packaged Runledger against
+  # its actual sibling sources, not an unrelated crates.io name/version.
+  printf 'batter-core = { path = "%s/../batter/crates/batter-core" }\n' "$ROOT_DIR"
+  printf 'batter-sqlx = { path = "%s/../batter/crates/batter-sqlx" }\n' "$ROOT_DIR"
   printf 'runledger-core = { path = "%s/runledger-core-%s" }\n' "$VENDOR_DIR" "$CORE_VERSION"
   printf 'runledger-test-support = { path = "%s/runledger-test-support-%s" }\n' "$VENDOR_DIR" "$TEST_SUPPORT_VERSION"
   printf 'runledger-postgres = { path = "%s/runledger-postgres-%s" }\n' "$VENDOR_DIR" "$POSTGRES_VERSION"

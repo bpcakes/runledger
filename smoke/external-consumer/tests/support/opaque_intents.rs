@@ -1,61 +1,53 @@
-//! External consumer parity for retained native-resource views.
-use super::OpaqueConsumerTransaction;
+//! External consumer coverage for consuming transaction and schema owners.
 use runledger_core::jobs::JobType;
 use runledger_postgres::jobs::{
-    JobEnqueueIntent, JobEnqueueIntentDisposition, get_job_enqueue_intent_by_id,
-    record_job_enqueue_intent_in_transaction, record_job_enqueue_intent_tx,
+    JobEnqueueIntent, JobEnqueueIntentDisposition, record_job_enqueue_intent_tx,
 };
-use runledger_postgres::{DbPool, PgSessionView, SchemaCompatibilityError};
+use runledger_postgres::{DbPool, PgAtomicError, PgScopeError, run_atomic};
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
 
-struct OpaqueSession(sqlx::pool::PoolConnection<sqlx::Postgres>);
-impl OpaqueSession {
-    fn view(&mut self) -> PgSessionView<'_> {
-        PgSessionView::new(&mut self.0)
-    }
-}
-
 pub async fn verify_schema(pool: &DbPool) {
-    let mut session = OpaqueSession(pool.acquire().await.expect("acquire schema session"));
-    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover_with_session(
-        session.view(),
-    )
-    .await
-    .expect("schema checks accept a retained session");
-    drop(session);
-    assert_schema_rejection_parity(pool).await;
-}
-
-async fn assert_schema_rejection_parity(pool: &DbPool) {
-    let mut tx = pool.begin().await.expect("begin schema corruption fixture");
-    let version: i64 = sqlx::query_scalar("SELECT min(version) FROM _sqlx_migrations")
-        .fetch_one(&mut *tx)
-        .await
-        .expect("oldest native migration");
-    sqlx::query("UPDATE _sqlx_migrations SET checksum = decode('00', 'hex') WHERE version=$1")
-        .bind(version)
+    let database = profiled_database(pool).await;
+    let snapshot =
+        runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database)
+            .await
+            .expect("owned schema snapshot");
+    assert!(snapshot.database_oid() > 0);
+    let mut tx = pool.begin().await.expect("begin uncommitted corruption");
+    sqlx::query("UPDATE public._sqlx_migrations SET checksum = decode('00', 'hex')")
         .execute(&mut *tx)
         .await
-        .expect("corrupt one history checksum");
-    let native =
-        runledger_postgres::ensure_schema_compatible_after_idempotency_cutover_with_connection(
-            &mut tx,
-        )
+        .expect("corrupt caller history");
+    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database)
         .await
-        .expect_err("native check rejects corrupt history");
-    let opaque =
-        runledger_postgres::ensure_schema_compatible_after_idempotency_cutover_with_session(
-            PgSessionView::new(&mut tx),
-        )
-        .await
-        .expect_err("view check rejects the same corrupt history");
-    for error in [native, opaque] {
-        assert!(
-            matches!(error, SchemaCompatibilityError::Incompatible(sqlx::migrate::MigrateError::VersionMismatch(observed)) if observed == version)
-        );
-    }
+        .expect("uncommitted caller state cannot influence verification");
     tx.rollback().await.expect("restore history");
+    database.pool().close().await;
+}
+
+async fn profiled_database(pool: &DbPool) -> runledger_postgres::RunledgerDatabase {
+    use runledger_postgres::{PgSessionProfile, RunledgerDatabase};
+    let options = pool.connect_options();
+    let login = options.get_username();
+    let profile = PgSessionProfile::new(
+        login,
+        login,
+        vec!["public".into()],
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+    )
+    .expect("explicit test policy");
+    RunledgerDatabase::connect((*options).clone(), profile, 1)
+        .await
+        .expect("profiled database")
+}
+
+pub async fn migrate(pool: &DbPool) -> Result<(), runledger_postgres::SchemaCompatibilityError> {
+    let database = profiled_database(pool).await;
+    let result = runledger_postgres::migrate_after_idempotency_cutover(&database).await;
+    database.pool().close().await;
+    result
 }
 
 fn request<'a>(scope: Option<Uuid>, payload: &'a Value, key: &'a str) -> JobEnqueueIntent<'a> {
@@ -86,37 +78,53 @@ pub async fn atomicity_and_replay(pool: &DbPool) {
 }
 
 async fn assert_atomic_handoff(pool: &DbPool, scope: Option<Uuid>, id: i32, commit: bool) {
+    let database = profiled_database(pool).await;
     let payload = json!({"audit_id": id});
     let key = format!("opaque-intent-{id}");
     let intent = request(scope, &payload, &key);
-    let mut tx = OpaqueConsumerTransaction::new(pool.begin().await.expect("begin opaque intent"));
-    sqlx::query("INSERT INTO opaque_intent_audit VALUES ($1)")
-        .bind(id)
-        .execute(tx.executor())
-        .await
-        .expect("write application state");
-    let outcome = record_job_enqueue_intent_in_transaction(&mut tx.view(), &intent)
-        .await
-        .expect("record opaque durable intent");
-    assert_eq!(outcome.disposition, JobEnqueueIntentDisposition::Inserted);
-    if commit {
-        tx.commit().await.expect("commit atomic handoff");
+    let result = run_atomic(&database, async |mut scope| {
+        scope
+            .application(async |sql| {
+                sqlx::query("INSERT INTO opaque_intent_audit VALUES ($1)")
+                    .bind(id)
+                    .execute(sql.executor())
+                    .await?;
+                Ok::<_, sqlx::Error>(())
+            })
+            .await
+            .expect("write application state");
+        let outcome = scope
+            .record_required_job_enqueue_intent(&intent)
+            .await
+            .expect("record intent");
+        assert_eq!(outcome.disposition(), JobEnqueueIntentDisposition::Inserted);
+        if commit { Ok(outcome) } else { Err("rejected") }
+    })
+    .await;
+    database.pool().close().await;
+    let outcome = if commit {
+        Some(result.expect("acknowledged commit"))
     } else {
-        tx.rollback().await.expect("rollback atomic handoff");
-    }
-    let retained = get_job_enqueue_intent_by_id(pool, scope, outcome.intent_id)
-        .await
-        .expect("read authoritative intent");
+        assert!(matches!(result, Err(PgAtomicError::Rejected("rejected"))));
+        None
+    };
+    let retained: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM job_enqueue_intents WHERE idempotency_key=$1)",
+    )
+    .bind(&key)
+    .fetch_one(pool)
+    .await
+    .expect("read authoritative intent");
     let audit: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM opaque_intent_audit WHERE id=$1)")
             .bind(id)
             .fetch_one(pool)
             .await
             .expect("read application audit");
-    assert_eq!(retained.is_some(), commit);
+    assert_eq!(retained, commit);
     assert_eq!(audit, commit);
-    if commit {
-        assert_replay(pool, scope, &intent, &key, outcome.intent_id).await;
+    if let Some(outcome) = outcome {
+        assert_replay(pool, scope, &intent, &key, outcome.intent_id()).await;
     }
 }
 
@@ -134,21 +142,24 @@ async fn assert_replay(
     assert_eq!(replay.intent_id, expected);
     assert_eq!(replay.disposition, JobEnqueueIntentDisposition::Existing);
     native.commit().await.expect("commit native replay");
-    let mut tx = OpaqueConsumerTransaction::new(pool.begin().await.expect("begin opaque replay"));
-    let replay = record_job_enqueue_intent_in_transaction(&mut tx.view(), intent)
-        .await
-        .expect("opaque replay");
-    assert_eq!(replay.intent_id, expected);
-    assert_eq!(replay.disposition, JobEnqueueIntentDisposition::Existing);
     let payload = json!({"changed": true});
     let changed = request(scope, &payload, key);
-    let error = record_job_enqueue_intent_in_transaction(&mut tx.view(), &changed)
-        .await
-        .expect_err("changed opaque replay conflicts");
+    let database = profiled_database(pool).await;
+    let error = run_atomic(&database, async |mut scope| {
+        let replay = scope
+            .record_required_job_enqueue_intent(intent)
+            .await
+            .expect("opaque replay");
+        assert_eq!(replay.intent_id(), expected);
+        assert_eq!(replay.disposition(), JobEnqueueIntentDisposition::Existing);
+        scope.record_required_job_enqueue_intent(&changed).await
+    })
+    .await
+    .expect_err("changed opaque replay conflicts");
+    database.pool().close().await;
     assert!(
-        matches!(error, runledger_postgres::Error::QueryError(ref e) if e.code() == "job.intent_idempotency_conflict")
+        matches!(error, PgAtomicError::Rejected(PgScopeError::Application(runledger_postgres::RequiredIntentError::Storage(runledger_postgres::Error::QueryError(ref e)))) if e.code() == "job.intent_idempotency_conflict")
     );
-    tx.rollback().await.expect("rollback rejected replay");
     assert_native_conflict(pool, &changed).await;
 }
 
@@ -177,16 +188,24 @@ async fn assert_isolation_rejection(pool: &DbPool, scope: Option<Uuid>) {
     assert!(
         matches!(error, runledger_postgres::Error::QueryError(ref e) if e.code() == "job.intent_idempotency_unsupported_isolation")
     );
-    let mut tx = OpaqueConsumerTransaction::new(native);
-    let error = record_job_enqueue_intent_in_transaction(&mut tx.view(), &intent)
+    native
+        .commit()
         .await
-        .expect_err("opaque isolation rejected");
-    assert!(
-        matches!(error, runledger_postgres::Error::QueryError(ref e) if e.code() == "job.intent_idempotency_unsupported_isolation")
-    );
-    tx.commit()
-        .await
-        .expect("validation did not abort transaction");
+        .expect("validation did not abort native transaction");
+    let database = profiled_database(pool).await;
+    run_atomic(&database, async |mut scope| {
+        scope
+            .application(async |sql| {
+                sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    .execute(sql.executor())
+                    .await?;
+                Ok::<_, sqlx::Error>(())
+            })
+            .await
+    })
+    .await
+    .expect_err("birth identity prevents changing transaction isolation");
+    database.pool().close().await;
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM job_enqueue_intents WHERE idempotency_key='opaque-intent-isolation'",
     )

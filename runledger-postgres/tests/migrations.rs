@@ -8,12 +8,8 @@ use runledger_core::jobs::{
     JobType, StepKey, WorkflowRunEnqueueBuilder, WorkflowStepEnqueueBuilder, WorkflowType,
 };
 use runledger_postgres::jobs::{enqueue_workflow_run, list_workflow_steps};
-use runledger_postgres::{
-    MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerProblem,
-    ensure_schema_compatible_after_idempotency_cutover,
-    ensure_schema_compatible_after_idempotency_cutover_with_connection,
-    migrate_after_idempotency_cutover,
-};
+use runledger_postgres::{MIGRATOR, SchemaCompatibilityError, WorkflowJobLinkTriggerProblem};
+mod support;
 use runledger_test_support::{
     EphemeralDatabase, acquire_test_db_connection_budget, setup_unmigrated_ephemeral_pool,
     teardown_ephemeral_pool,
@@ -22,6 +18,10 @@ use serde_json::{Value, json};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::types::Uuid;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use support::{
+    migrate_profiled as migrate_after_idempotency_cutover,
+    verify_profiled as ensure_schema_compatible_after_idempotency_cutover,
+};
 
 const ENQUEUE_REQUEST_CUTOVER_VERSION: i64 = 202605220001;
 const V0_6_LATEST_MIGRATION_VERSION: i64 = 202606030001;
@@ -68,21 +68,157 @@ const COMPATIBILITY_FENCE_EXEMPT_MIGRATION_VERSIONS: &[i64] = &[
 const TEST_HARNESS_POOL_CONNECTIONS: u32 = 4;
 
 #[tokio::test]
-async fn caller_owned_connection_verifier_matches_pool_verifier() {
+async fn schema_snapshot_is_independent_of_uncommitted_caller_state() {
     let harness = TestHarness::fresh("caller_owned_schema_verifier").await;
     migrate_after_idempotency_cutover(&harness.pool)
         .await
         .expect("apply migrations");
 
-    let mut connection = harness.pool.acquire().await.expect("acquire connection");
-    ensure_schema_compatible_after_idempotency_cutover_with_connection(&mut connection)
+    let mut transaction = harness.pool.begin().await.expect("caller transaction");
+    sqlx::query("UPDATE public._sqlx_migrations SET checksum = decode('00', 'hex')")
+        .execute(&mut *transaction)
         .await
-        .expect("verify through caller-owned connection");
-    drop(connection);
-    ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
+        .expect("uncommitted corruption");
+    let snapshot = ensure_schema_compatible_after_idempotency_cutover(&harness.pool)
         .await
-        .expect("verify through pool convenience API");
+        .expect("only committed state is visible");
+    let database_oid: i64 = sqlx::query_scalar(
+        "SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname = current_database()",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("schema authority fixture operation");
+    assert_eq!(snapshot.database_oid(), database_oid);
+    assert_eq!(
+        *snapshot.bundle_fingerprint(),
+        runledger_postgres::migration_bundle().bundle_fingerprint()
+    );
+    transaction
+        .rollback()
+        .await
+        .expect("schema authority fixture operation");
 
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn schema_snapshot_ignores_shadows_and_rejects_uncommitted_repairs() {
+    let harness = TestHarness::fresh("schema_authority").await;
+    record_postgres_18_server_version(&harness.pool, "owned schema authority").await;
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("schema authority fixture operation");
+    let database = support::profiled_database(&harness.pool).await;
+    let pool = database.pool().clone();
+    sqlx::raw_sql("CREATE TEMP TABLE _sqlx_migrations AS SELECT * FROM public._sqlx_migrations; SET search_path = pg_temp")
+        .execute(&pool).await.expect("schema authority fixture operation");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .expect("schema authority fixture operation");
+    runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database)
+        .await
+        .expect("qualified authority ignores temp shadows and search path");
+    let reused: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .expect("schema authority fixture operation");
+    assert_ne!(pid, reused, "snapshot completion retires session state");
+    let (version, checksum): (i64, Vec<u8>) = sqlx::query_as(
+        "SELECT version, checksum FROM public._sqlx_migrations ORDER BY version LIMIT 1",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("schema authority fixture operation");
+    sqlx::query(
+        "UPDATE public._sqlx_migrations SET checksum = decode('00','hex') WHERE version=$1",
+    )
+    .bind(version)
+    .execute(&harness.pool)
+    .await
+    .expect("schema authority fixture operation");
+    let mut repair = harness
+        .pool
+        .begin()
+        .await
+        .expect("schema authority fixture operation");
+    sqlx::query("UPDATE public._sqlx_migrations SET checksum=$1 WHERE version=$2")
+        .bind(checksum)
+        .bind(version)
+        .execute(&mut *repair)
+        .await
+        .expect("schema authority fixture operation");
+    let error = runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database)
+        .await
+        .expect_err("neither a valid temporary history nor an uncommitted repair is authoritative");
+    assert!(
+        matches!(error, SchemaCompatibilityError::Incompatible(MigrateError::VersionMismatch(observed)) if observed == version)
+    );
+    repair
+        .rollback()
+        .await
+        .expect("schema authority fixture operation");
+    pool.close().await;
+    harness.teardown().await;
+}
+
+#[tokio::test]
+async fn schema_snapshot_starts_after_authoritative_locks_settle() {
+    let harness = TestHarness::fresh("schema_lock_snapshot").await;
+    migrate_after_idempotency_cutover(&harness.pool)
+        .await
+        .expect("migrate");
+    let (version, checksum): (i64, Vec<u8>) = sqlx::query_as(
+        "SELECT version, checksum FROM public._sqlx_migrations ORDER BY version LIMIT 1",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .expect("original history");
+    sqlx::query("UPDATE public._sqlx_migrations SET checksum=decode('00','hex') WHERE version=$1")
+        .bind(version)
+        .execute(&harness.pool)
+        .await
+        .expect("first incompatible state");
+    let mut swap = harness.pool.begin().await.expect("state swap");
+    sqlx::raw_sql("LOCK TABLE public.job_queue IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *swap)
+        .await
+        .expect("hold authoritative relation");
+    sqlx::query("UPDATE public._sqlx_migrations SET checksum=$1, success=false WHERE version=$2")
+        .bind(checksum)
+        .bind(version)
+        .execute(&mut *swap)
+        .await
+        .expect("second incompatible state");
+    let database = support::profiled_database(&harness.pool).await;
+    let pool = database.pool().clone();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .expect("verifier identity");
+    let verifier = tokio::spawn(async move {
+        runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database).await
+    });
+    let blocked = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')")
+                .bind(pid).fetch_one(&harness.pool).await.expect("observe schema lock");
+            if waiting { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await;
+    // Release even when the observation fails, so the fixture never strands a task.
+    swap.commit().await.expect("atomic incompatible-state swap");
+    let result = tokio::time::timeout(Duration::from_secs(10), verifier)
+        .await
+        .expect("verifier settled")
+        .expect("verifier joined");
+    blocked.expect("verification waited on the authoritative table");
+    assert!(
+        matches!(result, Err(SchemaCompatibilityError::Incompatible(MigrateError::Dirty(observed))) if observed == version),
+        "snapshot must see the post-lock dirty state, not the old checksum or fractured success: {result:?}"
+    );
+    pool.close().await;
     harness.teardown().await;
 }
 

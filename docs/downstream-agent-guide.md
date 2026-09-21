@@ -27,7 +27,7 @@ together.
 | Need | Use |
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
-| Commit application state and a future job request before its definition exists | `JobEnqueueIntent` and `record_job_enqueue_intent_tx` |
+| Commit application state and a future job request before its definition exists | `run_atomic` and `PgIntentScope::record_required_job_enqueue_intent` |
 | Multi-step work with dependencies | Workflow DAG APIs |
 | Multi-step work with a durable JSON result | Workflow result-step and handle APIs |
 | Fan-out, fan-in, or ordered stages | Workflow DAG APIs |
@@ -57,9 +57,9 @@ trusted all-tenant surface.
 
 ## Durable Transactional Handoff
 
-Use `record_job_enqueue_intent_tx` when application-owned state and a request
+Use `run_atomic` with `scope.record_required_job_enqueue_intent` when application-owned state and a request
 for background work must commit atomically before Runledger has an enabled job
-definition. The application owns the caller transaction and business payload;
+definition. The runner owns transaction completion; the application owns its business payload;
 `runledger-postgres` owns durable intent storage, strict idempotency, metrics,
 promotion, and cleanup. The standard `runledger-runtime` worker owns the
 promotion loop and only promotes types for which that process registered a
@@ -73,18 +73,16 @@ let intent = JobEnqueueIntent::new(
     "invoice:invoice_123:capture",
 );
 
-let mut tx = pool.begin().await?;
-// Write the application business/audit row with the same transaction.
-let outcome = record_job_enqueue_intent_tx(&mut tx, &intent).await?;
-if outcome.status == JobEnqueueIntentStatus::Conflicted {
-    return Err("the existing durable handoff is conflicted".into());
-}
-tx.commit().await?;
+let outcome = run_atomic(&database, async |mut scope| {
+    // Write the application business/audit row with scope.application(...).
+    scope.record_required_job_enqueue_intent(&intent).await
+}).await?;
+// Reaching here confirms commit; uncertain outcomes retain their result/cause.
 ```
 
 The returned status is a point-in-time observation rather than a promotion
 guarantee. An existing intent can be promoted or become conflicted concurrently,
-including while the caller-owned record transaction remains open. Treat an
+including while the runner-owned record transaction remains open. Treat an
 observed conflict as terminal, and continue monitoring pending age and
 `conflicted_24h` after accepting a pending handoff.
 
@@ -146,7 +144,7 @@ Deploy this capability in order:
 2. Deploy compatible workers and every queue-retention caller while intent
    writers remain disabled. Retention must remove exact promoted-intent links
    before deleting the selected queue rows in the same transaction.
-3. Switch application writers to `record_job_enqueue_intent_tx` only after the
+3. Switch application writers to `run_atomic` intent recording only after the
    retention prerequisite is complete.
 4. Alert on oldest pending age and `conflicted_24h` from
    `get_job_enqueue_intent_metrics_with_scope` for the authorized read scope.
@@ -1083,14 +1081,11 @@ See the PostgreSQL 18
 for compile-checked inserted, idempotent, stale, exact-scope, transactional, and
 workflow-rejection cases.
 
-When a transactional keyed enqueue needs to branch on the durable job state,
-use `enqueue_job_with_outcome_in_transaction` when a hosting adapter keeps its
-transaction opaque, or `enqueue_job_with_outcome_tx` for a native SQLx
-transaction. Construct `PgTransactionView` from the adapter's private native
-transaction. Its sealed execution trait excludes arbitrary executor providers
-and the view retains the transaction borrow without exposing replaceable identity. Both functions return a `JobEnqueueOutcome` containing the job ID,
-status, run number, and `Inserted`/`Existing` disposition under the enqueue
-transaction's mutation-ready row lock; do not query `job_queue` directly.
+When a transactional keyed enqueue needs to branch on durable job state, use
+`run_atomic` with `scope.queue().enqueue_job`. Its `JobEnqueueOutcome` is
+provisional inside the callback under the transaction's mutation-ready row lock.
+Use `application` for savepoint-protected SQL; the runner releases its output only
+after acknowledged commit. Uncertainty retains the domain result/error.
 
 Use `update_job_payload_uuid_array_field` only for direct pending jobs whose
 payload can be safely mutated. Inspect `JobPayloadUuidArrayFieldUpdate`; rejected
@@ -1418,24 +1413,29 @@ Other compile-checked examples and integration references:
 - [`runledger-postgres/tests/workflow_recovery.rs`](../runledger-postgres/tests/workflow_recovery.rs)
 
 
-### Opaque durable-intent and schema capabilities
+### Owned durable-intent and schema scopes
 
-Adapters construct `PgTransactionView::new(&mut native_transaction)` inside
-their private implementation and pass a mutable view to
-`record_job_enqueue_intent_in_transaction` or the direct-enqueue APIs.
-`PgTransactionExecutor` is sealed to native SQLx transactions and this view;
-arbitrary downstream executor implementations are rejected. The operation
-retains an exclusive borrow of the actual transaction through READ COMMITTED
-validation and every write. Native intent idempotency, conflicts, lock ordering
-and commit/rollback behavior are unchanged. Record intents before operations
-that lock job rows. Existing `record_job_enqueue_intent_tx` callers retain the
-same behavior.
+Use `run_atomic(&database, async |mut scope| ...)`. The initial intent phase supports
+`record_required_job_enqueue_intent`; consume it with `scope.queue()` before enqueueing.
+The queue phase has no recording method. Both phases support application SQL,
+with direct SQL against internal tables designated a low-level escape hatch.
+The runner releases results only after acknowledged disposition, retaining domain
+outputs/errors on uncertainty. All sessions retire; acquisition resets inherited
+state. There is no borrowed view or consuming-owner compatibility bridge.
 
-Schema verification consumes `PgSessionView::new(&mut native_connection)` through
-`ensure_schema_compatible_after_idempotency_cutover_with_session`. The view holds
-one connection for the complete native check; it cannot be constructed from a
-pool or routing executor. Owners retain cancellation and disposition policy.
-Neither view exposes replaceable identity or transaction completion methods.
-Native SQL execution remains a low-level boundary: arbitrary application SQL can
-issue transaction-control statements, and no local type proves remote effects
-after an unconfirmed commit.
+The runner, migrations and schema verification require `RunledgerDatabase`, not
+an arbitrary SQLx pool. Declare login/effective roles, one authoritative schema,
+timeouts and optional tenant settings with `PgSessionProfile`; use the owned
+database's `pool()` for ordinary APIs and runtime construction. Acquisition hooks,
+release normalization and atomic/snapshot reset re-establish that same policy.
+Only successfully restored sessions can enter the idle queue; failed release
+restoration discards the connection. Native fast acquisition (`try_acquire`,
+`try_begin`, `try_begin_with`) therefore sees restored sessions even though SQLx
+skips acquisition hooks on those paths. `None` can mean release cleanup is still
+running. Runledger rejects fallback schemas; qualify application objects outside
+its authoritative schema.
+Never reconstruct authority from an `after_connect` convention.
+
+Schema verification takes that database, acquires and owns one qualified read-only
+repeatable-read snapshot, and returns `SchemaCompatibilitySnapshot` only after
+rollback acknowledgement. This is evidence of an observation, not future validity.

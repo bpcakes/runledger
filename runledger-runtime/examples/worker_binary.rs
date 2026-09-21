@@ -1,10 +1,12 @@
+#[path = "support/database.rs"]
+mod database;
+
 use std::time::Duration;
 
 use runledger_core::prelude::*;
 use runledger_postgres::prelude::*;
 use runledger_runtime::prelude::*;
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
 
 struct SendEmail;
 
@@ -33,9 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let database_url = std::env::var("DATABASE_URL")?;
-    let pool = PgPoolOptions::new().connect(&database_url).await?;
+    let database = database::connect(&database_url).await?;
+    let pool = database.pool().clone();
 
-    ensure_schema_compatible_after_idempotency_cutover(&pool).await?;
+    ensure_schema_compatible_after_idempotency_cutover(&database).await?;
 
     let catalog = JobCatalog::new().handler(SendEmail);
     // Optional catalog-owned schedules. Register schedules on the builder

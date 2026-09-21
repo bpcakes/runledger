@@ -12,6 +12,47 @@ use runledger_postgres::jobs::{
 use serde_json::Value;
 use sqlx::types::Uuid;
 
+pub async fn profiled_database(pool: &DbPool) -> runledger_postgres::RunledgerDatabase {
+    use runledger_postgres::{PgSessionProfile, RunledgerDatabase};
+    let options = pool.connect_options();
+    let login = options.get_username();
+    let profile = PgSessionProfile::new(
+        login,
+        login,
+        vec!["public".into()],
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+    )
+    .expect("valid test profile");
+    RunledgerDatabase::connect((*options).clone(), profile, 1)
+        .await
+        .expect("profiled test database")
+}
+
+/// Explicit public/direct-login policy for legacy migration fixtures. This is
+/// test setup, not an API that infers production policy from a pool.
+pub async fn migrate_profiled(
+    pool: &DbPool,
+) -> Result<(), runledger_postgres::SchemaCompatibilityError> {
+    let database = profiled_database(pool).await;
+    let result = runledger_postgres::migrate_after_idempotency_cutover(&database).await;
+    database.pool().close().await;
+    result
+}
+
+pub async fn verify_profiled(
+    pool: &DbPool,
+) -> Result<
+    runledger_postgres::SchemaCompatibilitySnapshot,
+    runledger_postgres::SchemaCompatibilityError,
+> {
+    let database = profiled_database(pool).await;
+    let result =
+        runledger_postgres::ensure_schema_compatible_after_idempotency_cutover(&database).await;
+    database.pool().close().await;
+    result
+}
+
 pub async fn register_test_job_definition(pool: &DbPool, job_type: &str) {
     let mut tx = pool.begin().await.expect("begin definition transaction");
     upsert_job_definition_tx(
