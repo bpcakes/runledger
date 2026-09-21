@@ -1632,13 +1632,13 @@ Two supported startup modes:
   validation that an existing `_sqlx_migrations` history matches the bundled
   migrations, with explicit errors for missing history, incompatible history,
   legacy idempotency rows, invalid expand-window triggers, or PostgreSQL
-  query/connectivity failures. Trigger failures identify the expected public
+  query/connectivity failures. Trigger failures identify the authoritative schema's
   table and trigger plus typed problems such as missing function wiring,
   disabled origin writes, or incorrect constraint deferral.
   Externally managed DDL can validate the `NOT VALID` cutover constraints after
   this check passes.
 
-For consumers of the published crates:
+For consumers of the coordinated source packages (currently unpublished):
 
 - `runledger_postgres::MIGRATOR` embeds the vendored
   `runledger-postgres/migrations/` copy for expert inspection, checksum

@@ -98,6 +98,10 @@ unpublished. Keep persistence migrations unchanged; do not publish or merge.
   and rustdoc passed. Nine patched archive consumer tests and license archives
   passed. A clean checkout with no sibling bootstrapped the pinned foundation,
   built all targets and observed the required unpatched-package rejection.
+- Final build-contract inspection restored the pre-existing migration-copy guard
+  alongside the new foundation-pin guard. The isolated negative control now
+  rejects both foundation drift and an added unsynchronized migration file;
+  workspace clippy and README/source checks passed after that repair.
 - Hosted clean-checkout, cargo-deny and semver jobs passed at `039badd`; final-head
   hosted results remain a separate delivery check, not implied by local receipts.
 - Batter full verification passed on Rust 1.94.0 and 1.98.1. Its SQLx live suite,
