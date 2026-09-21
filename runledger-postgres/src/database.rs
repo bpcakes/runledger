@@ -1,11 +1,8 @@
 //! Declared Runledger database authority shared by ordinary and atomic access.
 use crate::DbPool;
+use batter_sqlx::PgProfiledPool;
 pub use batter_sqlx::{PgProfileError, PgSessionProfile};
-use sqlx::{
-    ConnectOptions,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
-use std::sync::Arc;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 /// A pool whose acquisitions establish the declared database profile. There is
 /// deliberately no constructor from an arbitrary pool or arbitrary hook. Existing
@@ -23,8 +20,7 @@ use std::sync::Arc;
 /// ```
 #[derive(Clone)]
 pub struct RunledgerDatabase {
-    pool: DbPool,
-    profile: Arc<PgSessionProfile>,
+    database: PgProfiledPool,
 }
 
 impl std::fmt::Debug for RunledgerDatabase {
@@ -51,17 +47,9 @@ impl RunledgerDatabase {
         max_connections: u32,
     ) -> Result<Self, sqlx::Error> {
         Self::validate(&profile, max_connections)?;
-        // The probe is never returned to a pool, even on cancellation.
-        let mut probe = options.connect().await?;
-        profile.reset_and_apply(&mut probe).await?;
-        drop(probe);
-        let database = Self::connect_lazy(
-            options,
-            profile,
-            PgPoolOptions::new().max_connections(max_connections),
-        )?;
-        drop(database.pool.acquire().await?);
-        Ok(database)
+        Ok(Self {
+            database: PgProfiledPool::connect(options, profile, max_connections).await?,
+        })
     }
 
     /// Construct a lazy, profiled pool for an application-owned startup and
@@ -83,28 +71,9 @@ impl RunledgerDatabase {
         pool_options: PgPoolOptions,
     ) -> Result<Self, sqlx::Error> {
         Self::validate(&profile, pool_options.get_max_connections())?;
-        let profile = Arc::new(profile);
-        let on_connect = Arc::clone(&profile);
-        let on_acquire = Arc::clone(&profile);
-        let on_release = Arc::clone(&profile);
-        let pool = pool_options
-            .after_connect(move |connection, _| {
-                let profile = Arc::clone(&on_connect);
-                Box::pin(async move { profile.reset_and_apply(connection).await })
-            })
-            .before_acquire(move |connection, _| {
-                let profile = Arc::clone(&on_acquire);
-                Box::pin(async move { profile.reset_and_apply(connection).await.map(|()| true) })
-            })
-            .after_release(move |connection, _| {
-                let profile = Arc::clone(&on_release);
-                // Native try_acquire/try_begin paths skip before_acquire. Never
-                // publish a returned session until its profile is restored.
-                // SQLx hard-closes the connection when this hook returns Err.
-                Box::pin(async move { profile.reset_and_apply(connection).await.map(|()| true) })
-            })
-            .connect_lazy_with(options);
-        Ok(Self { pool, profile })
+        Ok(Self {
+            database: PgProfiledPool::connect_lazy(options, profile, pool_options)?,
+        })
     }
 
     fn validate(profile: &PgSessionProfile, max_connections: u32) -> Result<(), sqlx::Error> {
@@ -129,17 +98,17 @@ impl RunledgerDatabase {
     /// Even native `try_acquire`/`try_begin`/`try_begin_with` receive sessions
     /// restored before idle admission, without running acquisition hooks.
     pub fn pool(&self) -> &DbPool {
-        &self.pool
+        self.database.pool()
     }
 
     /// Declared policy, immutable for the lifetime of this pool.
     pub fn profile(&self) -> &PgSessionProfile {
-        &self.profile
+        self.database.profile()
     }
 
     /// Authoritative schema; all migration/verification relation names use it.
     pub fn schema(&self) -> &str {
-        self.profile.schema()
+        self.profile().schema()
     }
 
     pub(crate) fn relation(&self, name: &str) -> String {

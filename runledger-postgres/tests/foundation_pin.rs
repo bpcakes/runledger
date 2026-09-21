@@ -64,11 +64,14 @@ impl Fixture {
 fn companion_pin_and_formatting_changes_do_not_change_foundation() {
     let fixture = Fixture::new();
     fixture.check().expect("source-pin fixture operation");
-    fixture.change(
-        "Cargo.toml",
-        "bfc949bbc32fb2cc5731fb743632b2e432d1f5ae",
-        &"f".repeat(40),
-    );
+    let manifest: toml::Value = toml::from_str(
+        &fs::read_to_string(fixture.root.join("Cargo.toml")).expect("fixture manifest"),
+    )
+    .expect("valid manifest");
+    let revision = manifest["workspace"]["dependencies"]["runledger-runtime"]["rev"]
+        .as_str()
+        .expect("pinned adapter dependency");
+    fixture.change("Cargo.toml", revision, &"f".repeat(40));
     fixture.change(
         "Cargo.toml",
         "[workspace]",
