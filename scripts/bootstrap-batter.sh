@@ -9,12 +9,12 @@ if [[ ! -e "$foundation" ]]; then
   git -C "$foundation" checkout --detach "$revision"
 fi
 # Never switch, overwrite or clean an existing sibling worktree.
-if ! git -C "$foundation" diff --quiet "$revision" -- Cargo.toml crates/batter-core crates/batter-sqlx; then
+if ! git -C "$foundation" diff --quiet "$revision" -- crates/batter-core crates/batter-sqlx; then
   echo "Existing Batter foundation differs from the reviewed pin; no files were changed." >&2
   exit 1
 fi
-if [[ -n "$(git -C "$foundation" ls-files --others --exclude-standard -- crates/batter-core crates/batter-sqlx)" ]]; then
+if [[ -n "$(git -C "$foundation" ls-files --others -- crates/batter-core crates/batter-sqlx)" ]]; then
   echo "Untracked foundation sources: commit/update the coordinated pin before building." >&2
   exit 1
 fi
-echo "Coordinated Batter foundation matches $revision"
+echo "Foundation files match $revision; Cargo builds also verify actual sources and inherited manifest inputs."

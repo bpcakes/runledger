@@ -92,11 +92,25 @@ orchestration in `runtime`, and SQL/state-machine logic in `postgres`.
 ## Installation
 
 This branch is **unpublished coordinated development**. Its Batter dependency
-is not a registry release. A sibling checkout is mandatory; from a fresh clone
-run `bash scripts/bootstrap-batter.sh`. The pinned revision lives in
-`runledger-postgres/batter-revision`; ordinary Cargo builds check the foundation
-sources against that pin locally as well as in CI. Do not use the old registry
-installation instructions for this branch.
+is not a registry release. For workspace development, from a fresh clone run
+`bash scripts/bootstrap-batter.sh` to create the paired sibling. The reviewed
+revision lives in `runledger-postgres/batter-revision`. Ordinary Cargo builds
+verify the actual core and SQLx sources reported by Cargo dependency metadata,
+including their inherited workspace manifest settings, against that revision.
+Unrelated adapter pins and manifest formatting can change independently. The
+bootstrap's `RUNLEDGER_BATTER_SOURCE` selects a clone/check target only; it cannot
+override Cargo dependency selection or make a different compiled source pass.
+Do not use the old registry installation instructions for this branch.
+
+Git consumers need no sibling: select an immutable Runledger Git revision and
+add the following **consumer workspace-root** patch. `BATTER_REV` must contain
+the reviewed foundation (or a descendant with identical foundation inputs).
+If the consumer also uses Batter directly, select that same Batter revision.
+Cargo does not inherit patches from dependencies.
+
+The check requires the reviewed ancestor in the actual source checkout's Git
+history; shallow development clones must fetch it. It is a source-consistency
+guard, not protection against a deliberately modified Cargo build/configuration.
 
 For a service next to the paired `runledger` and `batter` checkouts:
 
@@ -112,6 +126,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 
 [dev-dependencies]
 runledger-test-support = { path = "../runledger/runledger-test-support" }
+```
+
+For Git consumption instead of the paired paths above, add this root patch:
+
+```toml
+[patch."https://github.com/bpcakes/runledger"]
+batter-sqlx = { git = "https://github.com/bpcakes/batter", rev = "BATTER_REV" }
 ```
 
 These sources require **Rust 1.94+** and **PostgreSQL 18+**. Older
