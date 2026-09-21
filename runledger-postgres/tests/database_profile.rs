@@ -11,6 +11,61 @@ const OBSERVE: &str = "SELECT session_user::text, current_user::text, pg_catalog
 type Observation = (String, String, String, String, String, String);
 
 #[tokio::test]
+async fn profile_setup_failure_is_redacted_but_native_cause_is_inspectable() {
+    let (admin, fixture) = setup_unmigrated_ephemeral_pool("profile_redaction", 2).await;
+    let options = admin.connect_options();
+    let login = options.get_username();
+    let profile = PgSessionProfile::new(
+        login,
+        login,
+        vec!["public".into()],
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .expect("valid profile declaration");
+    let marker = "runledger-profile-secret-invalid-timezone";
+    let error = RunledgerDatabase::connect(
+        (*options).clone(),
+        profile
+            .clone()
+            .with_setting("TimeZone", marker)
+            .expect("valid setting name"),
+        1,
+    )
+    .await
+    .expect_err("invalid timezone must fail before database access");
+    assert!(!format!("{error} {error:?}").contains(marker));
+    let sqlx::Error::Configuration(cause) = error else {
+        panic!("profile error must retain safe-display boundary");
+    };
+    let retained = cause
+        .downcast_ref::<batter_sqlx::SqlxFailure>()
+        .expect("native cause wrapper");
+    let native = retained
+        .native()
+        .as_database_error()
+        .expect("original database error");
+    assert_eq!(native.code().as_deref(), Some("22023"));
+    assert!(native.message().contains(marker));
+    let database = RunledgerDatabase::connect(
+        (*options).clone(),
+        profile
+            .with_setting("TimeZone", "UTC")
+            .expect("valid timezone"),
+        1,
+    )
+    .await
+    .expect("valid profile still connects");
+    let timezone: String = sqlx::query_scalar("SELECT current_setting('timezone')")
+        .fetch_one(database.pool())
+        .await
+        .expect("ordinary pool access");
+    assert_eq!(timezone, "UTC");
+    database.pool().close().await;
+    teardown_ephemeral_pool(admin, fixture).await;
+}
+
+#[tokio::test]
 async fn authority_schema_and_timeouts_agree_across_all_paths() {
     let (admin, fixture) = setup_unmigrated_ephemeral_pool("database_profile", 5).await;
     let version: String = sqlx::query_scalar("SHOW server_version")

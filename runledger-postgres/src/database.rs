@@ -40,6 +40,10 @@ impl RunledgerDatabase {
     /// uses the implicit catalog first and pg_temp last. Qualify application
     /// objects located elsewhere. Use a separate declared migration role when
     /// serving credentials intentionally lack DDL privileges.
+    /// Profile reset/setup failures have redacted default Debug/Display, with
+    /// the original error retained inside a `batter_sqlx::SqlxFailure` payload
+    /// of `sqlx::Error::Configuration`. Connection-establishment errors remain
+    /// native SQLx errors; this is not a blanket log-redaction guarantee.
     pub async fn connect(
         options: PgConnectOptions,
         profile: PgSessionProfile,
@@ -66,6 +70,9 @@ impl RunledgerDatabase {
     /// cleanup before construction and register close before yielding control.
     /// Native capacity/lifetime settings are preserved, but all three session
     /// hooks are replaced: authority must be declared in the profile, not hooks.
+    /// Setup errors reach SQLx's hook logging with redacted default formatting.
+    /// Deliberate source inspection, independent query/notice logging and server
+    /// logs remain application/operator responsibilities.
     pub fn connect_lazy(
         options: PgConnectOptions,
         profile: PgSessionProfile,
