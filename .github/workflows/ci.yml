@@ -30,7 +30,7 @@ jobs:
       - name: Check out coordinated Batter foundation
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/bpcakes/batter.git ../batter
-git -C ../batter checkout --detach 77d639c71f07762f2d94635ae609173894285831
+          git -C ../batter checkout --detach 77d639c71f07762f2d94635ae609173894285831
       - name: Install Rust toolchain
         run: |
           rustup toolchain install --profile minimal --component rustfmt --component clippy
