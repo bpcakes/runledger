@@ -1426,9 +1426,14 @@ state. There is no borrowed view or consuming-owner compatibility bridge.
 The runner, migrations and schema verification require `RunledgerDatabase`, not
 an arbitrary SQLx pool. Declare login/effective roles, one authoritative schema,
 timeouts and optional tenant settings with `PgSessionProfile`; use the owned
-database's `pool()` for ordinary APIs and runtime construction. Acquisition hooks
-and atomic/snapshot reset re-establish that same policy. Runledger rejects
-fallback schemas; qualify application objects outside its authoritative schema.
+database's `pool()` for ordinary APIs and runtime construction. Acquisition hooks,
+release normalization and atomic/snapshot reset re-establish that same policy.
+Only successfully restored sessions can enter the idle queue; failed release
+restoration discards the connection. Native fast acquisition (`try_acquire`,
+`try_begin`, `try_begin_with`) therefore sees restored sessions even though SQLx
+skips acquisition hooks on those paths. `None` can mean release cleanup is still
+running. Runledger rejects fallback schemas; qualify application objects outside
+its authoritative schema.
 Never reconstruct authority from an `after_connect` convention.
 
 Schema verification takes that database, acquires and owns one qualified read-only

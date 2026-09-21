@@ -5,6 +5,8 @@ use runledger_postgres::{
 use runledger_test_support::{setup_unmigrated_ephemeral_pool, teardown_ephemeral_pool};
 use std::time::Duration;
 
+#[path = "database_profile/fast_paths.rs"]
+mod fast_paths;
 mod support;
 
 const OBSERVE: &str = "SELECT session_user::text, current_user::text, pg_catalog.current_schema()::text, pg_catalog.current_setting('statement_timeout'), pg_catalog.current_setting('lock_timeout'), pg_catalog.current_setting('app.tenant')";

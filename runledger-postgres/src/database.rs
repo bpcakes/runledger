@@ -13,7 +13,8 @@ use std::sync::Arc;
 ///
 /// `pool()` serves ordinary SQLx/native Runledger APIs with exactly the same
 /// profile used by `run_atomic`, migrations and schema verification. Connections
-/// are normalized before reuse; callers cannot replace the pool hooks.
+/// are normalized before entering the idle queue, including for native fast
+/// acquisition paths; callers cannot replace the pool hooks.
 ///
 /// ```compile_fail,E0308
 /// async fn unprofiled(pool: &sqlx::PgPool) {
@@ -70,6 +71,9 @@ impl RunledgerDatabase {
     /// cleanup before construction and register close before yielding control.
     /// Native capacity/lifetime settings are preserved, but all three session
     /// hooks are replaced: authority must be declared in the profile, not hooks.
+    /// Returned sessions are reset and verified before becoming idle. Failed
+    /// restoration discards the connection; `try_*` calls can return `None`
+    /// while asynchronous release cleanup is still running.
     /// Setup errors reach SQLx's hook logging with redacted default formatting.
     /// Deliberate source inspection, independent query/notice logging and server
     /// logs remain application/operator responsibilities.
@@ -82,6 +86,7 @@ impl RunledgerDatabase {
         let profile = Arc::new(profile);
         let on_connect = Arc::clone(&profile);
         let on_acquire = Arc::clone(&profile);
+        let on_release = Arc::clone(&profile);
         let pool = pool_options
             .after_connect(move |connection, _| {
                 let profile = Arc::clone(&on_connect);
@@ -91,7 +96,13 @@ impl RunledgerDatabase {
                 let profile = Arc::clone(&on_acquire);
                 Box::pin(async move { profile.reset_and_apply(connection).await.map(|()| true) })
             })
-            .after_release(|_, _| Box::pin(async { Ok(true) }))
+            .after_release(move |connection, _| {
+                let profile = Arc::clone(&on_release);
+                // Native try_acquire/try_begin paths skip before_acquire. Never
+                // publish a returned session until its profile is restored.
+                // SQLx hard-closes the connection when this hook returns Err.
+                Box::pin(async move { profile.reset_and_apply(connection).await.map(|()| true) })
+            })
             .connect_lazy_with(options);
         Ok(Self { pool, profile })
     }
@@ -115,6 +126,8 @@ impl RunledgerDatabase {
 
     /// Native access for ordinary APIs. Acquisitions enforce this database's
     /// profile. Raw SQL remains an escape hatch, not an atomic result guarantee.
+    /// Even native `try_acquire`/`try_begin`/`try_begin_with` receive sessions
+    /// restored before idle admission, without running acquisition hooks.
     pub fn pool(&self) -> &DbPool {
         &self.pool
     }

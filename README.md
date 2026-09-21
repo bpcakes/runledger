@@ -134,7 +134,7 @@ resolution. Publishing requires a separate foundation release and an unpatched
 package/consumer verification; release scripts refuse this development graph.
 
 Use `run_atomic(&database, async |mut scope| ...)`. The `RunledgerDatabase` owns
-mandatory acquisition hooks and an immutable `PgSessionProfile`. It declares
+mandatory acquisition/release hooks and an immutable `PgSessionProfile`. It declares
 the authenticated and effective roles, one authoritative Runledger schema, server
 statement/lock timeouts and optional custom settings. The trusted path is that
 schema, with PostgreSQL's implicit catalog first and temporary objects last.
@@ -142,6 +142,10 @@ Fallback schemas are rejected so missing Runledger tables cannot silently resolv
 elsewhere; application objects in other schemas must be explicitly qualified.
 Roles and schemas must already exist. Ordinary APIs and workers receive
 `database.pool()`. Migrations and schema verification receive `&database`.
+Returned connections are reset and verified before entering the idle queue;
+failed restoration discards them. Native `try_acquire`, `try_begin` and
+`try_begin_with` therefore cannot inherit the previous borrower's session policy.
+These fast paths may return `None` while asynchronous release cleanup is running.
 After reset, atomic/snapshot owners reapply and verify this policy before work,
 and validate it again at scope boundaries. Arbitrary SQL can still cause effects
 before validation; this is not a SQL sandbox. Native pool hooks are not policy.
