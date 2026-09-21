@@ -95,7 +95,17 @@ unpublished. Keep persistence migrations unchanged; do not publish or merge.
 - PostgreSQL 18.6: full workspace suite passed; custom quoted schema, SET ROLE,
   tenant settings, timeout equality, pool contamination, authority tampering,
   required-conflict rollback and all 25 migration regressions passed. Full lint
-  and rustdoc passed. Final pinned-head hosted CI and companion gates are pending.
+  and rustdoc passed. Nine patched archive consumer tests and license archives
+  passed. A clean checkout with no sibling bootstrapped the pinned foundation,
+  built all targets and observed the required unpatched-package rejection.
+- Hosted clean-checkout, cargo-deny and semver jobs passed at `039badd`; final-head
+  hosted results remain a separate delivery check, not implied by local receipts.
+- Batter full verification passed on Rust 1.94.0 and 1.98.1. Its SQLx live suite,
+  Runledger adapter probe and all 66 reference cases plus both private library
+  probes passed against PostgreSQL 18.6. Companion HTTP/Jig checks remain pending.
+- The exact fresh-agent source and first-pass compile evidence are retained in
+  `docs/evidence/profile-consumer-2026-09-21.*`. It used the canonical API and
+  exhaustive outcomes; the README's leftover manual-first example was corrected.
 
 API assessment: profiles declare policy, not perpetual remote authority. A pool
 cannot be promoted from arbitrary hooks. Setup happens before consumer access;

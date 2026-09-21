@@ -47,6 +47,7 @@ handlers, process model, and admin surface.
 
 - [Workspace crates](#workspace-crates)
 - [Installation](#installation)
+- [Owned transaction and schema scopes](#owned-transaction-and-schema-scopes)
 - [Quick start](#quick-start)
 - [Core concepts](#core-concepts)
   - [Choosing the right API](#choosing-the-right-api)
@@ -82,7 +83,7 @@ handlers, process model, and admin surface.
 | [`runledger-postgres`](runledger-postgres) | SQLx-backed PostgreSQL persistence: queue and job lifecycle, schedules, the workflow DAG state machine, runtime configs, logs, and admin reads/mutations. |
 | [`runledger-runtime`](runledger-runtime) | The async runtime: `Supervisor`, worker/intent-promoter/scheduler/reaper loops, the job catalog, the handler registry, and runtime configuration. |
 | [`runledger-tui`](runledger-tui) | Read-only terminal UI for monitoring queue metrics, jobs, workflows, and definitions. |
-| [`runledger-test-support`](runledger-test-support) | Published test utilities for ephemeral PostgreSQL databases and scoped environment overrides. |
+| [`runledger-test-support`](runledger-test-support) | Test utilities for ephemeral PostgreSQL databases and scoped environment overrides. |
 
 `runledger-core`, `runledger-postgres`, and `runledger-runtime` are the
 libraries you depend on. Keep the layering intact: contracts in `core`, runtime
@@ -124,6 +125,50 @@ use runledger_core::prelude::*;
 use runledger_postgres::prelude::*;
 use runledger_runtime::prelude::*;
 ```
+
+## Owned transaction and schema scopes
+
+All workspace packages have `publish = false`. Patched archive-consumer smoke
+tests prove only the coordinated source pair, not publication or registry
+resolution. Publishing requires a separate foundation release and an unpatched
+package/consumer verification; release scripts refuse this development graph.
+
+Use `run_atomic(&database, async |mut scope| ...)`. The `RunledgerDatabase` owns
+mandatory acquisition hooks and an immutable `PgSessionProfile`. It declares
+the authenticated and effective roles, one authoritative Runledger schema, server
+statement/lock timeouts and optional custom settings. The trusted path is that
+schema, with PostgreSQL's implicit catalog first and temporary objects last.
+Fallback schemas are rejected so missing Runledger tables cannot silently resolve
+elsewhere; application objects in other schemas must be explicitly qualified.
+Roles and schemas must already exist. Ordinary APIs and workers receive
+`database.pool()`. Migrations and schema verification receive `&database`.
+After reset, atomic/snapshot owners reapply and verify this policy before work,
+and validate it again at scope boundaries. Arbitrary SQL can still cause effects
+before validation; this is not a SQL sandbox. Native pool hooks are not policy.
+
+Record required intents with `record_required_job_enqueue_intent` on the initial
+`PgIntentScope`, then consume it with `scope.queue()` for enqueue operations.
+`PgQueueScope` has no intent-recording method: the inverse lock order does not compile.
+Both phases support savepoint-protected `application` SQL. Direct SQL against
+Runledger tables remains a low-level escape hatch, not a named lock-order guarantee.
+The runner releases outputs only after acknowledged commit, and rejections only
+after acknowledged rollback. `PgAtomicError::Uncertain(PgAtomicUncertainty)` retains
+provisional results/errors and the disposition cause. A caught terminal scope
+failure cannot erase the runner's original poison cause; an abandoned operation
+is classified separately. `PgScopeFailure` excludes ordinary application rejection.
+Cancellation returns no output and proves no rollback.
+All atomic/snapshot sessions are reset on acquisition and retired on completion.
+Known conflicted handoffs are typed rejections inside the callback; accepted
+outcomes contain only pending/promoted observations. Monitoring later promotion
+is still required. `observe_job_enqueue_intent` is a deliberate low-level escape
+for applications that choose to commit despite an existing conflict.
+
+`ensure_schema_compatible_after_idempotency_cutover(&database)` owns a read-only
+repeatable-read transaction and returns `SchemaCompatibilitySnapshot` with the
+existing migration bundle identity. It ignores caller transactions, temporary
+shadows and search paths. The snapshot is evidence of one observation, not a
+promise against future migrations. Borrowed transaction/session views have been
+removed; there is no view compatibility bridge.
 
 ## Quick start
 
@@ -451,7 +496,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 | Need | Prefer |
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
-| Commit application state and a future job request before its definition exists | `JobEnqueueIntent` and `record_job_enqueue_intent_tx` |
+| Commit application state and a future job request before its definition exists | `run_atomic(&database, ...)` and `scope.record_required_job_enqueue_intent` |
 | Multi-step work with dependencies | `WorkflowDagBuilder` (`.step(...)` for configured steps, `.external(...)` for external work), or the low-level run/step builders, then `enqueue_workflow_run` |
 | Multi-step work with a durable JSON result | Declare a result step, enqueue with `enqueue_workflow_run_handle`, then call `WorkflowRunHandle::get_result` |
 | Fan-out, fan-in, or ordered stages | `WorkflowDagBuilder::after_success` / `after_terminal` (or lower-level `depends_on_success` / `depends_on_terminal`) |
@@ -470,7 +515,7 @@ feature, not something to recreate by polling jobs or chaining handlers by hand.
 
 ### Durable transactional handoff
 
-Use `record_job_enqueue_intent_tx` when an application mutation and its request
+Use `run_atomic` with `scope.record_required_job_enqueue_intent` when an application mutation and its request
 for background work must commit in the same PostgreSQL transaction, but the job
 definition may not exist yet. Recording an intent does not read or lock
 `job_definitions` and does not create a `job_queue` row. Every intent requires an
@@ -480,11 +525,11 @@ intent, while changing the payload or another enqueue field returns
 
 Concurrent transactions recording the same `(job_type, organization_id,
 idempotency_key)` may wait for the transaction that first claimed the unique
-key to commit or roll back. Include that wait in the caller-owned transaction's
-lock ordering and timeout budget. Record the intent before any operation in the
-same transaction that can lock a `job_queue` row; do not enqueue, recover, or
-explicitly lock a job first. Queue retention uses the canonical intent-before-
-job order, and a job-first recorder can create an inverse lock cycle with it.
+key to commit or roll back. Include that wait in the declared profile's timeout
+budget. The initial intent phase precedes the consuming `scope.queue()` transition;
+the queue phase has no intent-recording method. This enforces the named API's
+intent-before-queue lock order, matching retention. Raw application SQL remains
+an escape hatch and must not reverse that order against Runledger tables.
 
 ```rust
 let payload = serde_json::json!({"invoice_id": "invoice_123"});
@@ -494,23 +539,21 @@ let intent = runledger_postgres::jobs::JobEnqueueIntent::new(
     "invoice:invoice_123:capture",
 );
 
-let mut tx = pool.begin().await?;
-// Persist the application's business or audit mutation with this same `tx`.
-let outcome = runledger_postgres::jobs::record_job_enqueue_intent_tx(
-    &mut tx,
-    &intent,
-).await?;
-if outcome.status == runledger_postgres::jobs::JobEnqueueIntentStatus::Conflicted {
-    return Err("the existing durable handoff is conflicted".into());
-}
-tx.commit().await?;
+let outcome = runledger_postgres::run_atomic(&database, async |mut scope| {
+    // Persist business/audit mutations through scope.application(...).
+    scope.record_required_job_enqueue_intent(&intent).await
+}).await?;
+// Success confirms commit. A known conflict rejects inside the callback;
+// uncertain disposition retains the provisional output/error and cause.
 ```
 
-The returned status is a point-in-time observation, not a promotion guarantee.
+The accepted state is a point-in-time observation, not a promotion guarantee.
 An existing intent may be promoted or become conflicted concurrently, including
-while a caller-owned record transaction remains open. Treat an observed
-`CONFLICTED` state as terminal, but continue monitoring pending age and
-`conflicted_24h` after accepting a pending handoff.
+while the runner-owned transaction remains open. Known conflicts are typed
+rejections, not accepted outcomes. Continue monitoring pending age and
+`conflicted_24h` after accepting a pending handoff. The native `_tx` helpers and
+`observe_job_enqueue_intent` are low-level alternatives with caller-owned policy;
+they are not the canonical atomic handoff.
 
 A standard Runledger supervisor promotes pending intents only for its
 registered handler types once their definitions are enabled. Promotion uses
@@ -1980,50 +2023,5 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
 ## License
 
-The crates are published under the **MIT** license, as declared in each crate's
+The crates use the **MIT** license, as declared in each crate's
 `Cargo.toml`. See [`LICENSE`](LICENSE) for the repository license text.
-
-
-### Owned transaction and schema scopes
-
-All workspace packages have `publish = false`. Patched archive-consumer smoke
-tests prove only the coordinated source pair, not publication or registry
-resolution. Publishing requires a separate foundation release and an unpatched
-package/consumer verification; release scripts refuse this development graph.
-
-Use `run_atomic(&database, async |mut scope| ...)`. The `RunledgerDatabase` owns
-mandatory acquisition hooks and an immutable `PgSessionProfile`. It declares
-the authenticated and effective roles, one authoritative Runledger schema, server
-statement/lock timeouts and optional custom settings. The trusted path is that
-schema, with PostgreSQL's implicit catalog first and temporary objects last.
-Fallback schemas are rejected so missing Runledger tables cannot silently resolve
-elsewhere; application objects in other schemas must be explicitly qualified.
-Roles and schemas must already exist. Ordinary APIs and workers receive
-`database.pool()`. Migrations and schema verification receive `&database`.
-After reset, atomic/snapshot owners reapply and verify this policy before work,
-and validate it again at scope boundaries. Arbitrary SQL can still cause effects
-before validation; this is not a SQL sandbox. Native pool hooks are not policy.
-
-Record required intents with `record_required_job_enqueue_intent` on the initial
-`PgIntentScope`, then consume it with `scope.queue()` for enqueue operations.
-`PgQueueScope` has no intent-recording method: the inverse lock order does not compile.
-Both phases support savepoint-protected `application` SQL. Direct SQL against
-Runledger tables remains a low-level escape hatch, not a named lock-order guarantee.
-The runner releases outputs only after acknowledged commit, and rejections only
-after acknowledged rollback. `PgAtomicError::Uncertain(PgAtomicUncertainty)` retains
-provisional results/errors and the disposition cause. A caught terminal scope
-failure cannot erase the runner's original poison cause; an abandoned operation
-is classified separately. `PgScopeFailure` excludes ordinary application rejection.
-Cancellation returns no output and proves no rollback.
-All atomic/snapshot sessions are reset on acquisition and retired on completion.
-Known conflicted handoffs are typed rejections inside the callback; accepted
-outcomes contain only pending/promoted observations. Monitoring later promotion
-is still required. `observe_job_enqueue_intent` is a deliberate low-level escape
-for applications that choose to commit despite an existing conflict.
-
-`ensure_schema_compatible_after_idempotency_cutover(&database)` owns a read-only
-repeatable-read transaction and returns `SchemaCompatibilitySnapshot` with the
-existing migration bundle identity. It ignores caller transactions, temporary
-shadows and search paths. The snapshot is evidence of one observation, not a
-promise against future migrations. Borrowed transaction/session views have been
-removed; there is no view compatibility bridge.

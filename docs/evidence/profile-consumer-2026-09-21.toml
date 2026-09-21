@@ -1,0 +1,11 @@
+[package]
+name = "runledger-profile-consumer-exercise"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+runledger-core = { path = "/home/aa/Documents/runledger/runledger-core" }
+runledger-postgres = { path = "/home/aa/Documents/runledger/runledger-postgres" }
+serde_json = "1"
+sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "uuid"] }
