@@ -43,6 +43,8 @@ PostgreSQL persistence for durable execution: queue lifecycle, workflow DAG stat
   transaction identity, cancellation disposition and exhaustive uncertainty.
   Never recreate public executor capabilities or borrowed resource views.
 - Canonical startup/atomic work takes `RunledgerDatabase`, whose mandatory hooks
+  are shared through the SQLx foundation's `PgProfiledPool`. Do not duplicate
+  acquisition/release normalization in native adapters. Those hooks
   establish its immutable role/schema/timeout/tenant profile. Workers and ordinary
   APIs use that database's pool. After DISCARD, establish policy before BEGIN;
   never recover policy from arbitrary native hooks. Runledger allows one ordinary
