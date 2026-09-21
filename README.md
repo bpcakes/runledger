@@ -1947,7 +1947,7 @@ The crates are published under the **MIT** license, as declared in each crate's
 ### Owned transaction and schema scopes
 
 This coordinated feature branch requires a sibling `../batter` checkout at
-`a41ec84a9056728fe8af037a234ddd44182f9170` or the matching owned-scope branch.
+`77d639c71f07762f2d94635ae609173894285831` or the matching owned-scope branch.
 CI pins that foundation revision. The foundation crates are not published yet;
 packaged-crate smoke tests explicitly patch them to the same sibling sources.
 Publishing Runledger with this dependency requires publishing the foundation first.
@@ -1958,8 +1958,11 @@ Use `run_atomic(&pool, async |mut scope| ...)`. Record intents on the initial
 Both phases support savepoint-protected `application` SQL. Direct SQL against
 Runledger tables remains a low-level escape hatch, not a named lock-order guarantee.
 The runner releases outputs only after acknowledged commit, and rejections only
-after acknowledged rollback. `PgAtomicError` retains provisional results/errors
-when disposition is uncertain. Cancellation returns no output and proves no rollback.
+after acknowledged rollback. `PgAtomicError::Uncertain(PgAtomicUncertainty)` retains
+provisional results/errors and the disposition cause. A caught terminal scope
+failure cannot erase the runner's original poison cause; an abandoned operation
+is classified separately. `PgScopeFailure` excludes ordinary application rejection.
+Cancellation returns no output and proves no rollback.
 All atomic/snapshot sessions are reset on acquisition and retired on completion.
 
 `ensure_schema_compatible_after_idempotency_cutover(&pool)` owns a read-only

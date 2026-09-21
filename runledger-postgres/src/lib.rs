@@ -446,11 +446,11 @@ pub mod prelude {
         deactivate_schedules_absent_from_names_tx,
     };
     pub use crate::{
-        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgAtomicError, PgIntentScope,
-        PgQueueScope, QueryError, QueryErrorCategory, QueryErrorKind, SchemaCompatibilityError,
-        WorkflowJobLinkTriggerDiagnostic, WorkflowJobLinkTriggerProblem,
-        ensure_schema_compatible_after_idempotency_cutover, migrate_after_idempotency_cutover,
-        run_atomic,
+        DbPool, DbTx, FrameworkConstraintSpec, MIGRATOR, PgAtomicError, PgAtomicUncertainty,
+        PgIntentScope, PgQueueScope, PgScopeFailure, PgScopeLoss, QueryError, QueryErrorCategory,
+        QueryErrorKind, SchemaCompatibilityError, WorkflowJobLinkTriggerDiagnostic,
+        WorkflowJobLinkTriggerProblem, ensure_schema_compatible_after_idempotency_cutover,
+        migrate_after_idempotency_cutover, run_atomic,
     };
 }
 
@@ -462,8 +462,8 @@ pub use error::{CommitUnconfirmed, RollbackFailure};
 pub(crate) use transaction_executor::PgQueryExecutor;
 mod atomic;
 pub use atomic::{
-    PgAtomicError, PgIntentScope, PgQueueScope, PgScopeError, PgScopedSql, PgTransactionError,
-    run_atomic,
+    PgAtomicError, PgAtomicUncertainty, PgIntentScope, PgQueueScope, PgScopeError, PgScopeFailure,
+    PgScopeLoss, PgScopedSql, PgTransactionError, run_atomic,
 };
 pub use migrations::SchemaCompatibilitySnapshot;
 

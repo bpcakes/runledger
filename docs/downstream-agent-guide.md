@@ -27,7 +27,7 @@ together.
 | Need | Use |
 | --- | --- |
 | One independent retried unit of work | `runledger_postgres::jobs::enqueue_job` |
-| Commit application state and a future job request before its definition exists | `JobEnqueueIntent` and `record_job_enqueue_intent_tx` |
+| Commit application state and a future job request before its definition exists | `run_atomic` and `PgIntentScope::record_job_enqueue_intent` |
 | Multi-step work with dependencies | Workflow DAG APIs |
 | Multi-step work with a durable JSON result | Workflow result-step and handle APIs |
 | Fan-out, fan-in, or ordered stages | Workflow DAG APIs |
@@ -57,9 +57,9 @@ trusted all-tenant surface.
 
 ## Durable Transactional Handoff
 
-Use `record_job_enqueue_intent_tx` when application-owned state and a request
+Use `run_atomic` with `scope.record_job_enqueue_intent` when application-owned state and a request
 for background work must commit atomically before Runledger has an enabled job
-definition. The application owns the caller transaction and business payload;
+definition. The runner owns transaction completion; the application owns its business payload;
 `runledger-postgres` owns durable intent storage, strict idempotency, metrics,
 promotion, and cleanup. The standard `runledger-runtime` worker owns the
 promotion loop and only promotes types for which that process registered a
@@ -73,18 +73,21 @@ let intent = JobEnqueueIntent::new(
     "invoice:invoice_123:capture",
 );
 
-let mut tx = pool.begin().await?;
-// Write the application business/audit row with the same transaction.
-let outcome = record_job_enqueue_intent_tx(&mut tx, &intent).await?;
-if outcome.status == JobEnqueueIntentStatus::Conflicted {
-    return Err("the existing durable handoff is conflicted".into());
-}
-tx.commit().await?;
+let outcome = run_atomic(&pool, async |mut scope| {
+    // Write the application business/audit row with scope.application(...).
+    let outcome = scope.record_job_enqueue_intent(&intent)
+        .await.map_err(std::io::Error::other)?;
+    if outcome.status() == JobEnqueueIntentStatus::Conflicted {
+        return Err(std::io::Error::other("the existing durable handoff is conflicted"));
+    }
+    Ok(outcome)
+}).await?;
+// Reaching here confirms commit; uncertain outcomes retain their result/cause.
 ```
 
 The returned status is a point-in-time observation rather than a promotion
 guarantee. An existing intent can be promoted or become conflicted concurrently,
-including while the caller-owned record transaction remains open. Treat an
+including while the runner-owned record transaction remains open. Treat an
 observed conflict as terminal, and continue monitoring pending age and
 `conflicted_24h` after accepting a pending handoff.
 
@@ -146,7 +149,7 @@ Deploy this capability in order:
 2. Deploy compatible workers and every queue-retention caller while intent
    writers remain disabled. Retention must remove exact promoted-intent links
    before deleting the selected queue rows in the same transaction.
-3. Switch application writers to `record_job_enqueue_intent_tx` only after the
+3. Switch application writers to `run_atomic` intent recording only after the
    retention prerequisite is complete.
 4. Alert on oldest pending age and `conflicted_24h` from
    `get_job_enqueue_intent_metrics_with_scope` for the authorized read scope.

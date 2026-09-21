@@ -4,7 +4,10 @@ use crate::{
     jobs::{JobEnqueue, JobEnqueueIntent, JobEnqueueIntentOutcome, JobEnqueueOutcome},
 };
 use batter_sqlx::PgAtomicScope;
-pub use batter_sqlx::{PgAtomicError, PgScopeError, PgScopedSql, PgTransactionError};
+pub use batter_sqlx::{
+    PgAtomicError, PgAtomicUncertainty, PgScopeError, PgScopeFailure, PgScopeLoss, PgScopedSql,
+    PgTransactionError,
+};
 
 /// Run application writes and Runledger operations in one owned transaction.
 /// Outputs leave this runner only after acknowledged commit; rejections only

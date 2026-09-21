@@ -30,7 +30,7 @@ jobs:
       - name: Check out coordinated Batter foundation
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/bpcakes/batter.git ../batter
-          git -C ../batter checkout --detach a41ec84a9056728fe8af037a234ddd44182f9170
+git -C ../batter checkout --detach 77d639c71f07762f2d94635ae609173894285831
       - name: Install Rust toolchain
         run: |
           rustup toolchain install --profile minimal --component rustfmt --component clippy
@@ -51,7 +51,7 @@ jobs:
       - name: Check out coordinated Batter foundation
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/bpcakes/batter.git ../batter
-          git -C ../batter checkout --detach a41ec84a9056728fe8af037a234ddd44182f9170
+          git -C ../batter checkout --detach 77d639c71f07762f2d94635ae609173894285831
       - name: Install Rust toolchain
         run: |
           rustup toolchain install --profile minimal --component rustfmt --component clippy
@@ -113,7 +113,7 @@ jobs:
       - name: Check out coordinated Batter foundation
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/bpcakes/batter.git ../batter
-          git -C ../batter checkout --detach a41ec84a9056728fe8af037a234ddd44182f9170
+          git -C ../batter checkout --detach 77d639c71f07762f2d94635ae609173894285831
       - name: Install Rust toolchain
         run: rustup toolchain install --profile minimal
       - name: Install cargo-deny
@@ -129,7 +129,7 @@ jobs:
       - name: Check out coordinated Batter foundation
         run: |
           git clone --filter=blob:none --no-checkout https://github.com/bpcakes/batter.git ../batter
-          git -C ../batter checkout --detach a41ec84a9056728fe8af037a234ddd44182f9170
+          git -C ../batter checkout --detach 77d639c71f07762f2d94635ae609173894285831
       # obi1kenobi/cargo-semver-checks-action v2
       - name: Check public APIs against 0.11.0
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239
