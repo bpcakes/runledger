@@ -16,6 +16,13 @@ source-guard regression now reads its adapter pin from the fixture manifest,
 instead of assuming a historical hash. It still mutates that pin and proves
 adapter-only changes do not change the foundation contract.
 
-Focused validation: six live database-profile tests passed on PostgreSQL 18.6,
-including native fast acquisition and failed-release retirement. Full package,
-consumer smoke and native review results are pending.
+Validation on macOS/Rust 1.94.1 and PostgreSQL 18.6: six live database-profile
+tests passed, including native fast acquisition and failed-release retirement;
+all five source-guard regressions passed. Full PostgreSQL and runtime package
+tests/doctests, PostgreSQL all-target Clippy, formatting and nine packaged
+consumer smoke tests passed. Native review `a8f6283..b057233` reported no findings.
+Hosted checks are recorded on PR #22, not inferred from local results.
+
+The pre-existing `runledger-wtb` normalization conflict still prevents tracker
+import/update in this delivery worktree. No unrelated tracker records were
+rewritten. The coordinated implementation scope remains Batter `batter-979`.
