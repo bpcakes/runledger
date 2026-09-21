@@ -1,5 +1,11 @@
 # Runledger
 
+> **Development has moved to [Batter](https://github.com/bpcakes/batter/tree/master/runledger).**
+> Runledger is now maintained as native crates inside the Batter workspace.
+> See [Moving to Batter](MOVED_TO_BATTER.md) for consumer guidance. The standalone
+> installation, development and release instructions below are historical; use
+> [the current Runledger documentation](https://github.com/bpcakes/batter/blob/master/runledger/README.md) for new work.
+
 Runledger is a durable job queue and workflow engine for Rust, backed by PostgreSQL.
 
 You bring concrete job handlers and a Postgres database; Runledger gives you a
