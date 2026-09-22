@@ -1,5 +1,11 @@
 # Runledger repository agent guide
 
+Ongoing Runledger development, issues and pull requests belong in
+[Batter](https://github.com/bpcakes/batter/tree/master/runledger). Read its root
+and native Runledger agent guides before making changes there. This guide remains
+applicable when inspecting or maintaining this historical standalone checkout.
+See [the relocation notice](MOVED_TO_BATTER.md).
+
 ## PostgreSQL baseline
 
 - PostgreSQL 18 is the minimum supported and authoritative database baseline for

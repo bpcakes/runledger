@@ -4,6 +4,13 @@ All notable changes to this workspace are documented here.
 
 ## [Unreleased]
 
+### Repository location
+
+- Ongoing development has moved to the native `runledger/` packages in
+  [Batter](https://github.com/bpcakes/batter/tree/master/runledger). See
+  [Moving to Batter](MOVED_TO_BATTER.md) for dependency and contribution guidance.
+  This is a source-repository move, not a new crates.io release.
+
 - Breaking: replace borrowed transaction/session capabilities with `run_atomic`
   backed by Batter's SQLx foundation. Results leave the runner only after
   acknowledged disposition; uncertainty retains domain output/error. Consume
