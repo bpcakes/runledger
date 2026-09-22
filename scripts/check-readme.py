@@ -43,19 +43,32 @@ def check(root: Path, write: bool) -> None:
     block = re.search(r"```toml\n(.*?)\n```", installation, re.DOTALL)
     require(block is not None, "missing installation manifest")
     dependencies = tomllib.loads(block[1])
-    versions = {
-        name: value if isinstance(value, str) else value.get("version")
+    native = {
+        name: value
         for section in ("dependencies", "dev-dependencies")
         for name, value in dependencies.get(section, {}).items()
         if name.startswith("runledger-")
     }
-    require(set(versions) == crates, "installation must include all development packages")
-    for section in ("dependencies", "dev-dependencies"):
-        for name, value in dependencies.get(section, {}).items():
-            if name.startswith("runledger-"):
-                require(value == {"path": f"../runledger/{name}"}, f"{name} must use the explicit coordinated source path")
-                package = tomllib.loads((root / name / "Cargo.toml").read_text())["package"]
-                require(package.get("publish") is False, f"{name} must remain unpublished")
+    require(set(native) == crates, "installation must include all development packages")
+    revisions = set()
+    for name, value in native.items():
+        require(
+            isinstance(value, dict) and set(value) == {"git", "rev"},
+            f"{name} must use an explicit Git URL and immutable revision",
+        )
+        require(
+            value["git"] == "https://github.com/bpcakes/batter.git",
+            f"{name} must come from the Batter repository",
+        )
+        revision = value["rev"]
+        require(
+            isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40}", revision),
+            f"{name} must pin a full commit SHA",
+        )
+        revisions.add(revision)
+        package = tomllib.loads((root / name / "Cargo.toml").read_text())["package"]
+        require(package.get("publish") is False, f"{name} must remain unpublished")
+    require(len(revisions) == 1, "Runledger packages must use the same Batter revision")
     for command in ("prepare", "publish"):
         versions = re.findall(
             rf"^\./scripts/{command}-release\.sh (\S+)$", readme, re.MULTILINE,

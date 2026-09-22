@@ -2,8 +2,8 @@
 
 > **Development has moved to [Batter](https://github.com/bpcakes/batter/tree/master/runledger).**
 > Runledger is now maintained as native crates inside the Batter workspace.
-> See [Moving to Batter](MOVED_TO_BATTER.md) for consumer guidance. The standalone
-> installation, development and release instructions below are historical; use
+> See [Moving to Batter](MOVED_TO_BATTER.md) for consumer guidance. Installation below
+> uses Batter; standalone development and release instructions are historical. See
 > [the current Runledger documentation](https://github.com/bpcakes/batter/blob/master/runledger/README.md) for new work.
 
 Runledger is a durable job queue and workflow engine for Rust, backed by PostgreSQL.
@@ -97,49 +97,28 @@ orchestration in `runtime`, and SQL/state-machine logic in `postgres`.
 
 ## Installation
 
-This branch is **unpublished coordinated development**. Its Batter dependency
-is not a registry release. For workspace development, from a fresh clone run
-`bash scripts/bootstrap-batter.sh` to create the paired sibling. The reviewed
-revision lives in `runledger-postgres/batter-revision`. Ordinary Cargo builds
-verify the actual core and SQLx sources reported by Cargo dependency metadata,
-including their inherited workspace manifest settings, against that revision.
-Unrelated adapter pins and manifest formatting can change independently. The
-bootstrap's `RUNLEDGER_BATTER_SOURCE` selects a clone/check target only; it cannot
-override Cargo dependency selection or make a different compiled source pass.
-Do not use the old registry installation instructions for this branch.
-
-Git consumers need no sibling: select an immutable Runledger Git revision and
-add the following **consumer workspace-root** patch. `BATTER_REV` must contain
-the reviewed foundation (or a descendant with identical foundation inputs).
-If the consumer also uses Batter directly, select that same Batter revision.
-Cargo does not inherit patches from dependencies.
-
-The check requires the reviewed ancestor in the actual source checkout's Git
-history; shallow development clones must fetch it. It is a source-consistency
-guard, not protection against a deliberately modified Cargo build/configuration.
-
-For a service next to the paired `runledger` and `batter` checkouts:
+For current development, depend on the native Runledger packages in Batter
+using a full Git revision:
 
 ```toml
 [dependencies]
-runledger-core = { path = "../runledger/runledger-core" }
-runledger-postgres = { path = "../runledger/runledger-postgres" }
-runledger-runtime = { path = "../runledger/runledger-runtime" }
+runledger-core = { git = "https://github.com/bpcakes/batter.git", rev = "70cc6a05be6857aca6ea2f5f127258e75e673d8c" }
+runledger-postgres = { git = "https://github.com/bpcakes/batter.git", rev = "70cc6a05be6857aca6ea2f5f127258e75e673d8c" }
+runledger-runtime = { git = "https://github.com/bpcakes/batter.git", rev = "70cc6a05be6857aca6ea2f5f127258e75e673d8c" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 
 [dev-dependencies]
-runledger-test-support = { path = "../runledger/runledger-test-support" }
+runledger-test-support = { git = "https://github.com/bpcakes/batter.git", rev = "70cc6a05be6857aca6ea2f5f127258e75e673d8c" }
 ```
 
-For Git consumption instead of the paired paths above, add this root patch:
-
-```toml
-[patch."https://github.com/bpcakes/runledger"]
-batter-sqlx = { git = "https://github.com/bpcakes/batter", rev = "BATTER_REV" }
-```
+The pin selects a merged Batter commit containing Runledger and Runlimit. Cargo resolves its workspace
+dependencies from the same Git checkout; no sibling checkout or consumer
+`[patch]` is needed. Keep all native Runledger packages and any direct Batter
+dependencies on the same URL and revision. See [Moving to Batter](MOVED_TO_BATTER.md)
+for upgrade guidance, including applications that also consume Runlimit.
 
 These sources require **Rust 1.94+** and **PostgreSQL 18+**. Older
 PostgreSQL releases are not supported, even when an extension supplies an
